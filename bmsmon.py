@@ -24,7 +24,7 @@ KNOWN_PREFIXES = ("R-12", "R-24", "RO-12", "RO-24",  # Redodo
                   "P-12", "P-24", "PQ-12", "PQ-24",   # PowerQueen
                   "S-", "SS-")                          # Starry Sea
 
-BATTERY_STATES = {0x0000: "Idle", 0x0001: "Charging", 0x0004: "Disabled"}
+BATTERY_STATES = {0x0000: "Idle", 0x0001: "Charging", 0x0002: "Discharging", 0x0004: "Disabled"}
 
 PROTECTION_FLAGS = {
     0x00000004: "Over Charge",

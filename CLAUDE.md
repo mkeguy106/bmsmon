@@ -75,7 +75,7 @@ All multi-byte values are **little-endian**.
 | MOSFET temperature | 54 | 2 bytes | int16 | direct → °C |
 | Remaining capacity | 62 | 2 bytes | uint16 | / 100 → Ah |
 | Full charge capacity | 64 | 4 bytes | uint32 | / 100 → Ah |
-| Battery state | 88 | 2 bytes | uint16 | 0x0000=Idle, 0x0001=Charging, 0x0004=Disabled |
+| Battery state | 88 | 2 bytes | uint16 | 0x0000=Idle, 0x0001=Charging, 0x0002=Discharging, 0x0004=Disabled |
 | SOC | 90 | 2 bytes | uint16 | direct → % |
 | SOH | 92 | 4 bytes | uint32 | direct → % |
 | Cycle count | 96 | 4 bytes | uint32 | direct |
@@ -115,6 +115,17 @@ Tested with 6x Redodo 12V 100Ah LiFePO4 batteries:
 
 OUI `C8:47:80` = Beken Corporation. All batteries share the same firmware (BK-BLE-1.0, FW 6.1.2, SW 6.3.0).
 
+## Architecture
+
+Single-file script (`bmsmon.py`) with no packaging. Only external dependency is `bleak`.
+
+Key flow: `main()` → `scan_batteries()` or `query_battery(address)` → `parse_telemetry(data)` → `print_telemetry(dict)` or JSON output.
+
+- `query_battery()`: Finds device via BleakScanner, connects with BleakClient, subscribes to FFE1 notifications, writes QUERY_STATUS to FFE2, collects response fragments until ≥80 bytes
+- `parse_telemetry()`: Decodes raw bytes into a dict using struct unpacking at fixed offsets (little-endian)
+- `is_compatible()`: Filters BLE scan results by `KNOWN_PREFIXES` tuple
+- No tests, no linting, no packaging — run directly with `python3 bmsmon.py`
+
 ## Development
 
 ```bash
@@ -129,6 +140,12 @@ python3 bmsmon.py --address C8:47:80:15:25:01
 
 # Query all known batteries
 python3 bmsmon.py --all
+
+# Live monitoring (poll every 5 seconds)
+python3 bmsmon.py -a C8:47:80:15:25:01 --watch 5
+
+# JSON output
+python3 bmsmon.py -a C8:47:80:15:25:01 --json
 ```
 
 ## Related Projects
