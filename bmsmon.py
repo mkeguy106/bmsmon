@@ -200,42 +200,52 @@ async def watch_batteries(addresses: list[str], interval: float, scan_timeout: i
     """Persistent-connection polling loop. Reconnects automatically on drop."""
     import json as json_mod
 
+    clients: dict[str, BleakClient] = {}
+
     async def watch_one(address: str):
         """Maintain a persistent connection to one battery and poll it."""
         while True:
             device = await find_device(address, scan_timeout)
             if not device:
-                print(f"  {address}: not found, retrying in {interval}s...", file=sys.stderr)
                 await asyncio.sleep(interval)
                 continue
 
+            client = BleakClient(device, timeout=30)
             try:
-                async with BleakClient(device, timeout=30) as client:
-                    name = device.name
-                    while client.is_connected:
-                        raw = await poll_once(client)
-                        if raw:
-                            t = parse_telemetry(raw, name)
-                            if t:
-                                results[address] = t
-                        await asyncio.sleep(interval)
+                await client.connect()
+                clients[address] = client
+                name = device.name
+                while client.is_connected:
+                    raw = await poll_once(client)
+                    if raw:
+                        t = parse_telemetry(raw, name)
+                        if t:
+                            results[address] = t
+                            updated.set()
+                    await asyncio.sleep(interval)
             except Exception as e:
                 print(f"  {address}: connection lost ({e}), reconnecting...", file=sys.stderr)
-                await asyncio.sleep(1)
+            finally:
+                clients.pop(address, None)
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+            await asyncio.sleep(1)
 
     results: dict[str, dict] = {}
+    updated = asyncio.Event()
 
     # Start a persistent connection task per battery
     tasks = [asyncio.create_task(watch_one(addr)) for addr in addresses]
 
-    # Display loop
+    # Display loop — waits for data, then refreshes on interval
     try:
+        print("Connecting...")
         while True:
-            await asyncio.sleep(interval)
+            await updated.wait()
+            updated.clear()
             print("\033[2J\033[H", end="")  # clear screen
-            if not results:
-                print("Connecting...")
-                continue
             for addr in addresses:
                 t = results.get(addr)
                 if t:
@@ -244,9 +254,15 @@ async def watch_batteries(addresses: list[str], interval: float, scan_timeout: i
                     else:
                         print_telemetry(t)
     except KeyboardInterrupt:
-        print("\nStopped.")
+        print("\nDisconnecting...")
         for task in tasks:
             task.cancel()
+        for client in clients.values():
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        print("Stopped.")
 
 
 async def main():
@@ -295,4 +311,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
