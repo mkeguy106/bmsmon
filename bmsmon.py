@@ -59,38 +59,50 @@ async def scan_batteries(timeout: int = 15) -> list:
     return batteries
 
 
-async def query_battery(address: str, scan_timeout: int = 15) -> dict | None:
-    """Connect to a battery and read telemetry."""
-    device = None
+async def find_device(address: str, scan_timeout: int = 15):
+    """Find a BLE device by address with retries."""
     for attempt in range(3):
         device = await BleakScanner.find_device_by_address(address, timeout=scan_timeout)
         if device:
-            break
+            return device
+    return None
 
+
+async def poll_once(client: BleakClient) -> bytes | None:
+    """Send a status query and collect the response on an open connection."""
+    buf = bytearray()
+    done = asyncio.Event()
+
+    def on_notify(_sender, data):
+        buf.extend(data)
+        if len(buf) >= 80:
+            done.set()
+
+    await client.start_notify(FFE1_UUID, on_notify)
+    await client.write_gatt_char(FFE2_UUID, QUERY_STATUS, response=False)
+
+    try:
+        await asyncio.wait_for(done.wait(), timeout=5)
+    except asyncio.TimeoutError:
+        pass
+
+    await client.stop_notify(FFE1_UUID)
+    return bytes(buf) if len(buf) >= 50 else None
+
+
+async def query_battery(address: str, scan_timeout: int = 15) -> dict | None:
+    """Connect to a battery, read one telemetry sample, and disconnect."""
+    device = await find_device(address, scan_timeout)
     if not device:
         print(f"  Device {address} not found after scanning.", file=sys.stderr)
         return None
 
     async with BleakClient(device, timeout=30) as client:
-        all_data = bytearray()
-        done = asyncio.Event()
+        raw = await poll_once(client)
 
-        def on_notify(_sender, data):
-            all_data.extend(data)
-            if len(all_data) >= 80:
-                done.set()
-
-        await client.start_notify(FFE1_UUID, on_notify)
-        await client.write_gatt_char(FFE2_UUID, QUERY_STATUS, response=False)
-
-        try:
-            await asyncio.wait_for(done.wait(), timeout=10)
-        except asyncio.TimeoutError:
-            pass
-
-        await client.stop_notify(FFE1_UUID)
-
-    return parse_telemetry(bytes(all_data), device.name)
+    if not raw:
+        return None
+    return parse_telemetry(raw, device.name)
 
 
 def parse_telemetry(data: bytes, name: str | None = None) -> dict | None:
@@ -183,6 +195,60 @@ def print_telemetry(t: dict):
         print(f"  ⚠ Protections:      {', '.join(t['protections'])}")
 
 
+async def watch_batteries(addresses: list[str], interval: float, scan_timeout: int,
+                          output_json: bool):
+    """Persistent-connection polling loop. Reconnects automatically on drop."""
+    import json as json_mod
+
+    async def watch_one(address: str):
+        """Maintain a persistent connection to one battery and poll it."""
+        while True:
+            device = await find_device(address, scan_timeout)
+            if not device:
+                print(f"  {address}: not found, retrying in {interval}s...", file=sys.stderr)
+                await asyncio.sleep(interval)
+                continue
+
+            try:
+                async with BleakClient(device, timeout=30) as client:
+                    name = device.name
+                    while client.is_connected:
+                        raw = await poll_once(client)
+                        if raw:
+                            t = parse_telemetry(raw, name)
+                            if t:
+                                results[address] = t
+                        await asyncio.sleep(interval)
+            except Exception as e:
+                print(f"  {address}: connection lost ({e}), reconnecting...", file=sys.stderr)
+                await asyncio.sleep(1)
+
+    results: dict[str, dict] = {}
+
+    # Start a persistent connection task per battery
+    tasks = [asyncio.create_task(watch_one(addr)) for addr in addresses]
+
+    # Display loop
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            print("\033[2J\033[H", end="")  # clear screen
+            if not results:
+                print("Connecting...")
+                continue
+            for addr in addresses:
+                t = results.get(addr)
+                if t:
+                    if output_json:
+                        print(json_mod.dumps(t, indent=2))
+                    else:
+                        print_telemetry(t)
+    except KeyboardInterrupt:
+        print("\nStopped.")
+        for task in tasks:
+            task.cancel()
+
+
 async def main():
     parser = argparse.ArgumentParser(description="BLE Battery Monitor for Redodo/LiTime/PowerQueen LiFePO4")
     parser.add_argument("--scan", action="store_true", help="Scan for compatible batteries")
@@ -210,20 +276,7 @@ async def main():
         return
 
     if args.watch:
-        try:
-            while True:
-                print(f"\033[2J\033[H", end="")  # clear screen
-                for addr in addresses:
-                    t = await query_battery(addr, scan_timeout=args.timeout)
-                    if t:
-                        if args.json:
-                            import json
-                            print(json.dumps(t, indent=2))
-                        else:
-                            print_telemetry(t)
-                await asyncio.sleep(args.watch)
-        except KeyboardInterrupt:
-            print("\nStopped.")
+        await watch_batteries(addresses, args.watch, args.timeout, args.json)
     else:
         results = []
         for addr in addresses:
