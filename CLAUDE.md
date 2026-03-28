@@ -23,6 +23,45 @@ All use the same Beken BK-BLE-1.0 UART-to-BLE bridge module with identical proto
 | **PowerQueen** | `P-12*`, `P-24*`, `PQ-12*`, `PQ-24*` | |
 | **Starry Sea** | `S-*`, `SS-*` | |
 
+## DANGER: Safe vs Destructive Commands
+
+**NEVER send unknown/undocumented command bytes to a live battery.** Scanning command ranges (e.g. iterating 0x00-0xFF) caused a real battery to enter an unrecoverable software shutdown during development. The battery was installed in a power wheelchair and could not be physically accessed to recover it. The only recovery method is applying a 12V LiFePO4 charger directly to the battery terminals, which required disassembling the wheelchair.
+
+### Safe commands (read-only, confirmed safe):
+
+| CMD  | Description |
+|------|-------------|
+| 0x13 | Query battery status (main telemetry) |
+| 0x15 | Read BMS configuration/parameters |
+| 0x16 | Get firmware version |
+| 0x41 | Get SOH and SOC |
+| 0x43 | Get nominal capacity |
+
+### Destructive commands (NEVER send without explicit user consent):
+
+| CMD  | Description | Consequence |
+|------|-------------|-------------|
+| 0x0A | Turn on charging MOSFET | Alters BMS state |
+| 0x0B | Turn off charging MOSFET | Disables charging |
+| 0x0C | Turn on discharge MOSFET | Alters BMS state |
+| 0x0D | Turn off discharge MOSFET | **Disconnects load from battery** |
+| 0x60 | **Shutdown** | **Puts BMS into deep sleep. BLE module powers off. Battery appears dead. Only recoverable by applying a charger directly to physical terminals.** |
+
+### Commands with unknown effects (NEVER send):
+
+Any command byte not listed above as "safe" is **unknown and potentially destructive**. This includes 0x01, 0x02, 0x04, 0x06, 0x07, 0x10, 0x30, 0x44, 0x49, 0x65, and everything in 0x80-0xFF. Do not probe, scan, or iterate command bytes on a live battery.
+
+### Recovery from BMS shutdown
+
+If the BMS enters shutdown (0x60 or unknown command side effect):
+1. The BLE module loses power — no wireless recovery is possible
+2. Connect a **12V LiFePO4 charger (14.4-14.6V)** directly to the battery's physical terminals
+3. The BMS wake circuit detects charging voltage and exits sleep mode
+4. If the battery is in a series configuration (e.g. 24V wheelchair), the series circuit is broken by the shutdown — a 24V charger will NOT work. The dead battery must be individually charged with a 12V charger.
+5. If a charger does not wake it: briefly connect another charged 12V battery in parallel to provide wake voltage
+6. Last resort: open the battery case and disconnect/reconnect the BMS balance wire connector to hard-reset the BMS controller
+7. Contact Redodo support: service@redodopower.com (5-year warranty)
+
 ## Protocol Details
 
 ### BLE GATT Structure
