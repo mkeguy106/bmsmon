@@ -159,6 +159,7 @@ Example payload decodes to: model `T12100`, HW `V1.2`, FW `V1.4`, built `2024-03
 - `bluetoothctl connect` is unreliable for these devices — use `bleak` (Python) instead.
 - Only one BLE client can connect to a battery at a time. If the Redodo phone app is connected, the PC cannot connect and vice versa.
 - The BLE module AT command set (on FFE3) only supports `AT+NAME?` and `AT+BAUD?`. All other AT commands return `+ER`.
+- **Query batteries one at a time, not rapidly back-to-back or in parallel.** Each query runs its own BLE scan; firing several in quick succession (e.g. a shell loop over all batteries) causes scan-cache contention and most queries return "not found" even though the devices are present and healthy. Querying the same device individually then succeeds. This is worse on cheap/flaky USB BT adapters. To status multiple batteries, query them sequentially in separate invocations and let the adapter settle between each.
 
 ## Hardware Context
 
