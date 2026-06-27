@@ -1,63 +1,204 @@
 package dev.joely.bmsmon.ble
 
 import android.content.Context
+import android.util.Log
+import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.BmsTarget
+import dev.joely.bmsmon.model.SLOW_POLL_MS
+import dev.joely.bmsmon.model.STAGE_POLL_MS
 import dev.joely.bmsmon.model.Telemetry
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Manages BLE connections to the whole fleet — every battery across all bases that the
- * phone can reach. Each connection polls independently; the poll interval per battery is
- * adjusted at runtime (stage batteries fast, the rest slow). Unreachable batteries keep
- * retrying in the background and report `reachable = false`.
+ * Fleet engine that stays within the phone's BLE link budget:
+ *  - the STAGE base's batteries get a persistent connection, polled fast (1.65 s);
+ *  - every other reachable battery is visited by a rotating sampler (connect → read one
+ *    status → disconnect → next), in priority order discharging > charging > idle.
+ * A shared gate caps how many connections are being established at once.
  */
 class BmsRepository(private val context: Context) {
 
-    private val connections = mutableMapOf<String, BmsConnection>()
+    // Cap on simultaneous *connection attempts* (the LE initiator can't pursue many).
+    private val gate = Semaphore(2)
 
-    // At most 2 batteries may be in the "connecting" phase at once (the rest wait their turn).
-    private val connectGate = Semaphore(2)
+    private var scope: CoroutineScope? = null
+    private var allTargets: List<BmsTarget> = emptyList()
+    @Volatile private var running = false
 
-    /**
-     * Start monitoring all [targets].
-     * @param onTelemetry (address, telemetry) as samples arrive.
-     * @param onReachable (address, connected?) as connection state changes.
-     */
+    @Volatile private var stageAddrs: Set<String> = emptySet()
+    @Volatile private var disabledAddrs: Set<String> = emptySet()
+    private val stageJobs = ConcurrentHashMap<String, Job>()
+    private var samplerJob: Job? = null
+
+    private val lastState = ConcurrentHashMap<String, BatteryState>()
+    @Volatile private var wakeSampler: CompletableDeferred<Unit>? = null
+
+    private var onTelemetry: (String, Telemetry) -> Unit = { _, _ -> }
+    private var onReachable: (String, Boolean) -> Unit = { _, _ -> }
+
     fun start(
         scope: CoroutineScope,
         targets: List<BmsTarget>,
-        slowIntervalMs: Long,
         onTelemetry: (String, Telemetry) -> Unit,
         onReachable: (String, Boolean) -> Unit,
-        staggerMs: Long = 250,
     ) {
         stop()
-        targets.forEachIndexed { index, t ->
-            val address = t.address.trim().uppercase()
-            BmsConnection(
-                context = context,
-                address = address,
-                displayName = t.name,
-                initialIntervalMs = slowIntervalMs,
-                startDelayMs = index * staggerMs,  // small fan-out; the gate does the real serialization
-                connectGate = connectGate,
-                onTelemetry = { onTelemetry(address, it) },
-                onStatus = { msg -> onReachable(address, msg == "connected") },
-            ).also {
-                connections[address] = it
-                it.start(scope)
+        this.scope = scope
+        this.allTargets = targets.map { it.copy(address = it.address.trim().uppercase()) }
+        this.onTelemetry = onTelemetry
+        this.onReachable = onReachable
+        running = true
+        samplerJob = scope.launch(Dispatchers.IO) { samplerLoop() }
+    }
+
+    /** Set which batteries are on the stage (persistent, fast poll). The rest get sampled. */
+    fun setStage(addresses: Set<String>) {
+        val s = scope ?: return
+        val want = addresses.map { it.uppercase() }.toSet()
+        stageAddrs = want
+        // Stop workers no longer on stage; their batteries return to the sampler pool.
+        stageJobs.keys.filter { it !in want }.forEach { addr ->
+            stageJobs.remove(addr)?.cancel()
+        }
+        // Start a persistent worker for each newly-staged battery.
+        want.forEach { addr ->
+            if (stageJobs[addr] == null) {
+                val target = allTargets.firstOrNull { it.address == addr } ?: return@forEach
+                stageJobs[addr] = s.launch(Dispatchers.IO) { stageWorker(target) }
+            }
+        }
+        wakeSampler?.complete(Unit)  // pool changed
+    }
+
+    /** Reset/retry everything immediately (e.g. app returned to foreground). */
+    fun kickAll() {
+        wakeSampler?.complete(Unit)
+    }
+
+    fun stop() {
+        running = false
+        stageJobs.values.forEach { it.cancel() }
+        stageJobs.clear()
+        samplerJob?.cancel()
+        samplerJob = null
+        stageAddrs = emptySet()
+        lastState.clear()
+    }
+
+    // --- persistent stage worker: hold the link, poll fast ---
+    private suspend fun stageWorker(target: BmsTarget) {
+        var backoff = 2000L
+        while (running && target.address in stageAddrs) {
+            val session = BleSession(context, target.address)
+            try {
+                val ok = gate.withPermit { session.connect(10_000) }
+                if (!ok) throw IllegalStateException("connect failed")
+                onReachable(target.address, true)
+                backoff = 2000L
+                while (running && target.address in stageAddrs) {
+                    val data = session.poll(4000) ?: break  // a miss → reconnect
+                    BmsProtocol.parseTelemetry(data, target.name)?.let {
+                        lastState[target.address] = it.state
+                        onTelemetry(target.address, it)
+                    }
+                    delay(STAGE_POLL_MS)
+                }
+                session.close()
+            } catch (e: CancellationException) {
+                session.close(); throw e
+            } catch (e: Exception) {
+                Log.d(TAG, "stage ${target.address}: ${e.message}")
+                session.close()
+                onReachable(target.address, false)
+                if (running && target.address in stageAddrs) delay(backoff)
+                backoff = (backoff * 2).coerceAtMost(12_000L)
             }
         }
     }
 
-    /** Set the poll interval for one battery (e.g. promote a stage battery to fast polling). */
-    fun setInterval(address: String, ms: Long) {
-        connections[address.trim().uppercase()]?.setInterval(ms)
+    /** User-disconnected batteries: drop their links and don't sample/stage them. */
+    fun setDisabled(addresses: Set<String>) {
+        disabledAddrs = addresses.map { it.uppercase() }.toSet()
+        stageJobs.keys.filter { it in disabledAddrs }.forEach { addr ->
+            stageJobs.remove(addr)?.cancel()
+            onReachable(addr, false)
+        }
+        wakeSampler?.complete(Unit)
     }
 
-    fun stop() {
-        connections.values.forEach { it.stop() }
-        connections.clear()
+    // --- rotating sampler: connect → read → disconnect, leisurely, priority-ordered ---
+    private suspend fun samplerLoop() {
+        while (running) {
+            val pool = allTargets.filter { it.address !in stageAddrs && it.address !in disabledAddrs }
+            if (pool.isEmpty()) { waitOrWake(1500); continue }
+            // discharging first, then charging, then idle, then unknown
+            val ordered = pool.sortedBy { rank(lastState[it.address]) }
+            for (batch in ordered.chunked(SAMPLER_CONCURRENCY)) {
+                if (!running) break
+                coroutineScope {
+                    batch.map { t -> launch { sampleOne(t) } }.joinAll()
+                }
+                waitOrWake(SAMPLER_GAP_MS)
+            }
+        }
+    }
+
+    private suspend fun sampleOne(t: BmsTarget) {
+        if (t.address in stageAddrs) return
+        val session = BleSession(context, t.address)
+        try {
+            val ok = gate.withPermit { session.connect(8000) }
+            if (!ok) { onReachable(t.address, false); return }
+            val data = session.poll(4000)
+            if (data != null) {
+                BmsProtocol.parseTelemetry(data, t.name)?.let {
+                    lastState[t.address] = it.state
+                    onTelemetry(t.address, it)
+                    onReachable(t.address, true)
+                } ?: onReachable(t.address, false)
+            } else {
+                onReachable(t.address, false)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            onReachable(t.address, false)
+        } finally {
+            session.close()
+        }
+    }
+
+    /** Sleep up to [ms], but wake early on kick()/stage change. */
+    private suspend fun waitOrWake(ms: Long) {
+        val w = CompletableDeferred<Unit>()
+        wakeSampler = w
+        withTimeoutOrNull(ms) { w.await() }
+        wakeSampler = null
+    }
+
+    private fun rank(state: BatteryState?): Int = when (state) {
+        BatteryState.Discharging -> 0
+        BatteryState.Charging -> 1
+        BatteryState.Idle -> 2
+        else -> 3
+    }
+
+    private companion object {
+        const val TAG = "BmsRepository"
+        const val SAMPLER_CONCURRENCY = 2
+        const val SAMPLER_GAP_MS = 3000L  // leisurely pacing between sample batches
     }
 }

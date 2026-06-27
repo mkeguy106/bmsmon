@@ -57,12 +57,17 @@ fun App(vm: BatteryViewModel) {
                         onSetSort = vm::setSort,
                         onToggleFilter = vm::toggleFilter,
                         onSetFilterBase = vm::setFilterBase,
+                        onPinStage = vm::pinStage,
+                        onDisconnect = vm::disconnectBattery,
+                        onReconnect = vm::reconnectBattery,
+                        onDisconnectAll = vm::disconnectAll,
                     )
                     Screen.Settings -> SettingsScreen(
                         state = state,
                         onBack = vm::goHome,
                         onToggleMonitoring = onMonitorToggle,
                         onSetDailyDriver = vm::setDailyDriver,
+                        onSetDynamicStage = vm::setDynamicStage,
                         onSetAccent = vm::setAccent,
                         onSetPower = vm::setPower,
                         onSetMode = vm::setMode,

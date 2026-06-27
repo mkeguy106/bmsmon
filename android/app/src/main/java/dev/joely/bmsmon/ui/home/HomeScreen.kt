@@ -19,14 +19,15 @@ import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.BluetoothDisabled
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -34,9 +35,10 @@ import dev.joely.bmsmon.FilterKey
 import dev.joely.bmsmon.SortKey
 import dev.joely.bmsmon.UiState
 import dev.joely.bmsmon.model.GroupActivity
-import dev.joely.bmsmon.model.groupActivity
+import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.ui.all.AllBatteriesScreen
 import dev.joely.bmsmon.ui.theme.Bm
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -48,18 +50,34 @@ fun HomeScreen(
     onSetSort: (SortKey) -> Unit,
     onToggleFilter: (FilterKey) -> Unit,
     onSetFilterBase: (String) -> Unit,
+    onPinStage: (StageTarget) -> Unit,
+    onDisconnect: (String) -> Unit,
+    onReconnect: (String) -> Unit,
+    onDisconnectAll: () -> Unit,
 ) {
     val c = Bm.colors
-    // Pages: 0 = all batteries (left), 1 = stage (right) — swipe right from stage to reveal all.
     val pager = rememberPagerState(initialPage = 1) { 2 }
+    val scope = rememberCoroutineScope()
 
     Column(Modifier.fillMaxSize().background(c.bg)) {
         TopBar(state, onToggleMode, onSettings, onToggleMonitoring)
         PageDots(current = pager.currentPage)
         HorizontalPager(state = pager, modifier = Modifier.weight(1f)) { page ->
             when (page) {
-                0 -> AllBatteriesScreen(state, onSetSort, onToggleFilter, onSetFilterBase,
-                    modifier = Modifier.padding(top = 6.dp))
+                0 -> AllBatteriesScreen(
+                    state = state,
+                    onSetSort = onSetSort,
+                    onToggleFilter = onToggleFilter,
+                    onSetFilterBase = onSetFilterBase,
+                    onPinBase = { groupId ->
+                        onPinStage(StageTarget.Base(groupId))
+                        scope.launch { pager.animateScrollToPage(1) }
+                    },
+                    onDisconnect = onDisconnect,
+                    onReconnect = onReconnect,
+                    onDisconnectAll = onDisconnectAll,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
                 else -> StageScreen(state.stageBatteries())
             }
         }
@@ -74,31 +92,27 @@ private fun TopBar(
     onToggleMonitoring: () -> Unit,
 ) {
     val c = Bm.colors
-    val activity = groupActivity(state.stageGroup, state.fleet)
-    val (label, labelColor) = when {
-        !state.monitoring -> "DEMO DATA" to c.text3
-        activity == GroupActivity.Discharging -> "${state.stageGroup.label} · DISCHARGING" to Bm.power
-        activity == GroupActivity.Charging -> "${state.stageGroup.label} · CHARGING" to Bm.accent
-        activity == GroupActivity.Idle -> "${state.stageGroup.label} · IDLE" to c.text2
-        else -> "${state.stageGroup.label} · …" to c.text3
+    val (label, labelColor, showPin) = when {
+        !state.monitoring -> Triple("DEMO DATA", c.text3, false)
+        state.pinned -> Triple("${state.stageLabel} · PINNED", Bm.accent, true)
+        !state.dynamicStage -> Triple("${state.stageLabel} · MANUAL", c.text2, false)
+        state.stageActivity == GroupActivity.Discharging -> Triple("${state.stageLabel} · DISCHARGING", Bm.power, false)
+        state.stageActivity == GroupActivity.Charging -> Triple("${state.stageLabel} · CHARGING", Bm.accent, false)
+        state.stageActivity == GroupActivity.Idle -> Triple("${state.stageLabel} · IDLE", c.text2, false)
+        else -> Triple("${state.stageLabel} · …", c.text3, false)
     }
     Row(
-        Modifier
-            .fillMaxWidth()
-            .background(c.bg)
-            .padding(horizontal = 18.dp, vertical = 14.dp),
+        Modifier.fillMaxWidth().background(c.bg).padding(horizontal = 18.dp, vertical = 14.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            Modifier.clickable(onClick = onToggleMonitoring),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
+        Row(Modifier.clickable(onClick = onToggleMonitoring), verticalAlignment = Alignment.CenterVertically) {
             Icon(
                 if (state.monitoring) Icons.Filled.Bluetooth else Icons.Filled.BluetoothDisabled,
                 null, Modifier.size(18.dp),
                 tint = if (state.monitoring) Bm.accent else c.text3,
             )
+            if (showPin) Icon(Icons.Filled.PushPin, null, Modifier.padding(start = 6.dp).size(13.dp), tint = Bm.accent)
             Text(label, color = labelColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
                 letterSpacing = 0.9.sp, modifier = Modifier.padding(start = 7.dp))
         }
@@ -117,17 +131,11 @@ private fun TopBar(
 @Composable
 private fun PageDots(current: Int) {
     val c = Bm.colors
-    Row(
-        Modifier.fillMaxWidth().padding(bottom = 6.dp),
-        horizontalArrangement = Arrangement.Center,
-    ) {
+    Row(Modifier.fillMaxWidth().padding(bottom = 6.dp), horizontalArrangement = Arrangement.Center) {
         for (i in 0..1) {
             Box(
-                Modifier
-                    .padding(horizontal = 4.dp)
-                    .size(if (i == current) 7.dp else 6.dp)
-                    .clip(CircleShape)
-                    .background(if (i == current) Bm.accent else c.border),
+                Modifier.padding(horizontal = 4.dp).size(if (i == current) 7.dp else 6.dp)
+                    .clip(CircleShape).background(if (i == current) Bm.accent else c.border),
             )
         }
     }

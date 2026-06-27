@@ -1,7 +1,6 @@
 package dev.joely.bmsmon
 
 import android.app.Application
-import android.util.Log
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.lifecycle.AndroidViewModel
@@ -12,14 +11,16 @@ import dev.joely.bmsmon.model.ALL_GROUPS
 import dev.joely.bmsmon.model.BatteryGroup
 import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.DEFAULT_GROUP_ID
-import dev.joely.bmsmon.model.SLOW_POLL_MS
-import dev.joely.bmsmon.model.STAGE_POLL_MS
+import dev.joely.bmsmon.model.GroupActivity
+import dev.joely.bmsmon.model.PIN_HOLD_MS
+import dev.joely.bmsmon.model.StageInputs
+import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.Telemetry
-import dev.joely.bmsmon.model.computeStageGroup
+import dev.joely.bmsmon.model.addresses
 import dev.joely.bmsmon.model.demoFor
 import dev.joely.bmsmon.model.groupActivity
 import dev.joely.bmsmon.model.groupById
-import dev.joely.bmsmon.model.isActive
+import dev.joely.bmsmon.model.resolveStage
 import dev.joely.bmsmon.ui.theme.DefaultAccent
 import dev.joely.bmsmon.ui.theme.DefaultPower
 import kotlinx.coroutines.delay
@@ -44,24 +45,45 @@ data class UiState(
     val monitoring: Boolean = false,
     val dailyDriverId: String = DEFAULT_GROUP_ID,
     val fleet: Map<String, BatteryStatus> = emptyMap(),
-    val lastActiveGroupId: String = DEFAULT_GROUP_ID,
-    val stageGroupId: String = DEFAULT_GROUP_ID,
+    val dynamicStage: Boolean = true,
+    val manualStage: StageTarget? = null,
+    val manualPinnedAt: Long = 0,
+    val lastDischargeAt: Map<String, Long> = emptyMap(),
+    val stageTarget: StageTarget = StageTarget.Base(DEFAULT_GROUP_ID),
+    val pinned: Boolean = false,
+    val disabled: Set<String> = emptySet(),
     val demo: List<Telemetry> = demoFor(groupById(DEFAULT_GROUP_ID)),
     val sortKey: SortKey = SortKey.Activity,
     val filters: Set<FilterKey> = emptySet(),
     val filterBaseId: String = DEFAULT_GROUP_ID,
 ) {
     val isDark get() = mode == Mode.Dark
-    val stageGroup: BatteryGroup get() = groupById(stageGroupId)
     val dailyDriver: BatteryGroup get() = groupById(dailyDriverId)
+    val stageGroupId: String? get() = (stageTarget as? StageTarget.Base)?.groupId
 
-    /** The two telemetry samples for the stage (last-known when monitoring, demo otherwise). */
-    fun stageBatteries(): List<Telemetry> =
-        if (!monitoring) demo
-        else stageGroup.targets.map { t ->
-            fleet[t.address]?.telemetry?.copy(name = t.name)
-                ?: Telemetry(t.name, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
+    /** The 1–2 telemetry samples for the stage (last-known when monitoring, demo otherwise). */
+    fun stageBatteries(): List<Telemetry> {
+        if (!monitoring) return demo
+        val targets = when (val t = stageTarget) {
+            is StageTarget.Base -> groupById(t.groupId).targets
+            is StageTarget.Single -> ALL_GROUPS.flatMap { it.targets }.filter { it.address == t.address }
         }
+        return targets.map { tg ->
+            fleet[tg.address]?.telemetry?.copy(name = tg.name)
+                ?: Telemetry(tg.name, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
+        }
+    }
+
+    val stageLabel: String
+        get() = when (val t = stageTarget) {
+            is StageTarget.Base -> groupById(t.groupId).label
+            is StageTarget.Single -> ALL_GROUPS.flatMap { it.targets }
+                .firstOrNull { it.address == t.address }?.name ?: t.address
+        }
+
+    val stageActivity: GroupActivity
+        get() = (stageTarget as? StageTarget.Base)?.let { groupActivity(groupById(it.groupId), fleet) }
+            ?: GroupActivity.Unknown
 }
 
 class BatteryViewModel(app: Application) : AndroidViewModel(app) {
@@ -71,6 +93,8 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
+
+    private fun clockMs() = System.currentTimeMillis()
 
     init {
         viewModelScope.launch {
@@ -83,8 +107,8 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     manualMode = p.manualMode,
                     mode = if (p.manualMode) (if (p.darkMode) Mode.Dark else Mode.Light) else s.mode,
                     dailyDriverId = dd.id,
-                    lastActiveGroupId = dd.id,
-                    stageGroupId = dd.id,
+                    dynamicStage = p.dynamicStage ?: s.dynamicStage,
+                    stageTarget = StageTarget.Base(dd.id),
                     filterBaseId = dd.id,
                     demo = demoFor(dd),
                 )
@@ -95,6 +119,13 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             while (true) {
                 delay(1800)
                 if (!_state.value.monitoring) tickDemo()
+            }
+        }
+        // Periodic re-resolve so sticky/pin holds can expire even with no new samples.
+        viewModelScope.launch {
+            while (true) {
+                delay(30_000)
+                if (_state.value.monitoring) refresh()
             }
         }
     }
@@ -124,11 +155,9 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { store.setMode(mode == Mode.Dark) }
     }
     fun toggleMode() = setMode(if (_state.value.isDark) Mode.Light else Mode.Dark)
-
     fun applySystemMode(dark: Boolean) = _state.update {
         if (it.manualMode) it else it.copy(mode = if (dark) Mode.Dark else Mode.Light)
     }
-
     fun setAccent(c: Color) {
         _state.update { it.copy(accent = c) }
         viewModelScope.launch { store.setAccent(c.toArgb()) }
@@ -140,13 +169,12 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setDailyDriver(id: String) {
         val g = groupById(id)
-        _state.update { st ->
-            val base = st.copy(dailyDriverId = g.id)
-            if (st.monitoring) recompute(base)
-            else base.copy(lastActiveGroupId = g.id, stageGroupId = g.id, demo = demoFor(g), filterBaseId = g.id)
+        _state.update {
+            if (it.monitoring) it.copy(dailyDriverId = g.id)
+            else it.copy(dailyDriverId = g.id, stageTarget = StageTarget.Base(g.id), demo = demoFor(g), filterBaseId = g.id)
         }
         viewModelScope.launch { store.setDailyDriver(g.id) }
-        if (_state.value.monitoring) applyStageIntervals(_state.value.stageGroupId)
+        refresh()
     }
 
     // --- all-batteries page controls ---
@@ -156,59 +184,99 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun setFilterBase(id: String) = _state.update { it.copy(filterBaseId = id) }
 
+    // --- stage control ---
+    fun pinStage(target: StageTarget) {
+        _state.update { it.copy(manualStage = target, manualPinnedAt = clockMs()) }
+        refresh()
+    }
+    fun setDynamicStage(enabled: Boolean) {
+        _state.update { it.copy(dynamicStage = enabled) }
+        viewModelScope.launch { store.setDynamicStage(enabled) }
+        refresh()
+    }
+
+    // --- per-battery / all disconnect ---
+    fun disconnectBattery(address: String) {
+        val a = address.uppercase()
+        _state.update { st ->
+            st.copy(
+                disabled = st.disabled + a,
+                fleet = st.fleet + (a to (st.fleet[a] ?: BatteryStatus()).copy(reachable = false)),
+            )
+        }
+        repository.setDisabled(_state.value.disabled)
+        refresh()
+    }
+    fun reconnectBattery(address: String) {
+        val a = address.uppercase()
+        _state.update { it.copy(disabled = it.disabled - a) }
+        repository.setDisabled(_state.value.disabled)
+        repository.kickAll()
+        refresh()
+    }
+    fun disconnectAll() = stopMonitoring()
+
     // --- fleet monitoring ---
     fun startMonitoring() {
         if (_state.value.monitoring) return
         _state.update { it.copy(monitoring = true, fleet = emptyMap()) }
-        // Connect the daily driver first so it gets a link before the radio fills up.
-        val dd = _state.value.dailyDriverId
-        val orderedTargets = ALL_GROUPS.sortedByDescending { it.id == dd }.flatMap { it.targets }
         repository.start(
             scope = viewModelScope,
-            targets = orderedTargets,
-            slowIntervalMs = SLOW_POLL_MS,
-            onTelemetry = { addr, t -> updateFleet(addr) { it.copy(telemetry = t, reachable = true) } },
-            onReachable = { addr, r ->
-                Log.d("BMS", "$addr reachable=$r")
-                updateFleet(addr) { it.copy(reachable = r) }
-            },
+            targets = ALL_GROUPS.flatMap { it.targets },
+            onTelemetry = { addr, t -> onTelemetry(addr, t) },
+            onReachable = { addr, r -> onReachable(addr, r) },
         )
-        applyStageIntervals(_state.value.stageGroupId)
+        repository.setDisabled(_state.value.disabled)
+        repository.setStage(currentStageAddrs())
     }
 
     fun stopMonitoring() {
         repository.stop()
-        _state.update { it.copy(monitoring = false, fleet = emptyMap(), demo = demoFor(it.stageGroup)) }
+        _state.update { it.copy(monitoring = false, fleet = emptyMap(), demo = demoFor(it.dailyDriver)) }
     }
 
     fun toggleMonitoring() = if (_state.value.monitoring) stopMonitoring() else startMonitoring()
 
-    private fun updateFleet(address: String, transform: (BatteryStatus) -> BatteryStatus) {
-        val before = _state.value.stageGroupId
+    fun onAppForeground() {
+        if (_state.value.monitoring) repository.kickAll()
+    }
+
+    private fun onTelemetry(addr: String, t: Telemetry) {
         _state.update { st ->
-            val cur = st.fleet[address] ?: BatteryStatus()
-            recompute(st.copy(fleet = st.fleet + (address to transform(cur))))
+            st.copy(fleet = st.fleet + (addr to (st.fleet[addr] ?: BatteryStatus()).copy(telemetry = t, reachable = true)))
         }
-        val after = _state.value.stageGroupId
-        if (before != after && _state.value.monitoring) applyStageIntervals(after)
+        refresh()
     }
 
-    /** Recompute the stage base and remember the last active pair. */
-    private fun recompute(st: UiState): UiState {
-        val stage = computeStageGroup(ALL_GROUPS, st.fleet, st.dailyDriverId, st.lastActiveGroupId)
-        val stageActive = groupActivity(groupById(stage), st.fleet).isActive()
-        return st.copy(
-            stageGroupId = stage,
-            lastActiveGroupId = if (stageActive) stage else st.lastActiveGroupId,
-        )
+    private fun onReachable(addr: String, r: Boolean) {
+        _state.update { st ->
+            st.copy(fleet = st.fleet + (addr to (st.fleet[addr] ?: BatteryStatus()).copy(reachable = r)))
+        }
+        refresh()
     }
 
-    private fun applyStageIntervals(stageId: String) {
-        val stageAddrs = groupById(stageId).targets.map { it.address.uppercase() }.toSet()
-        ALL_GROUPS.flatMap { it.targets }.forEach { t ->
-            val fast = t.address.uppercase() in stageAddrs
-            repository.setInterval(t.address, if (fast) STAGE_POLL_MS else SLOW_POLL_MS)
+    private fun currentStageAddrs(): Set<String> =
+        _state.value.stageTarget.addresses() - _state.value.disabled
+
+    /** Re-resolve the stage; if its battery set changed, tell the engine. */
+    private fun refresh() {
+        val now = clockMs()
+        val before = currentStageAddrs()
+        _state.update { st ->
+            val newLast = st.lastDischargeAt.toMutableMap()
+            ALL_GROUPS.forEach { g ->
+                if (groupActivity(g, st.fleet) == GroupActivity.Discharging) newLast[g.id] = now
+            }
+            val resolved = resolveStage(
+                StageInputs(st.fleet, st.dailyDriverId, st.dynamicStage, st.manualStage,
+                    st.manualPinnedAt, newLast, st.stageTarget, now),
+            )
+            val isPinned = st.manualStage != null && resolved == st.manualStage &&
+                (!st.dynamicStage || now - st.manualPinnedAt < PIN_HOLD_MS)
+            st.copy(lastDischargeAt = newLast, stageTarget = resolved, pinned = isPinned)
         }
+        val after = currentStageAddrs()
+        if (after != before && _state.value.monitoring) repository.setStage(after)
     }
 
     override fun onCleared() {

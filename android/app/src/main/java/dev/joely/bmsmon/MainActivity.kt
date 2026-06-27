@@ -17,4 +17,10 @@ class MainActivity : ComponentActivity() {
             App(vm)
         }
     }
+
+    override fun onResume() {
+        super.onResume()
+        // Coming back to the app => immediately retry out-of-range batteries.
+        vm.onAppForeground()
+    }
 }

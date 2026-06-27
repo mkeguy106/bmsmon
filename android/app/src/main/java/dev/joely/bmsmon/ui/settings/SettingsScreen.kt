@@ -24,6 +24,8 @@ import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.Icon
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -53,6 +55,7 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onToggleMonitoring: () -> Unit,
     onSetDailyDriver: (String) -> Unit,
+    onSetDynamicStage: (Boolean) -> Unit,
     onSetAccent: (Color) -> Unit,
     onSetPower: (Color) -> Unit,
     onSetMode: (Mode) -> Unit,
@@ -82,6 +85,7 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             BluetoothCard(state, onToggleMonitoring)
+            MainStageCard(state, onSetDynamicStage)
             GroupsCard(state, onSetDailyDriver)
             ColorCard("Theme Color", null, ThemeSwatches, state.accent, onSetAccent)
             ColorCard("Power Color", "Inner ring — charge / discharge rate", PowerSwatches, state.power, onSetPower)
@@ -129,6 +133,33 @@ private fun BluetoothCard(state: UiState, onToggleMonitoring: () -> Unit) {
         ) {
             Text(if (state.monitoring) "Stop Monitoring" else "Start Monitoring",
                 color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+@Composable
+private fun MainStageCard(state: UiState, onSetDynamicStage: (Boolean) -> Unit) {
+    val c = Bm.colors
+    Card {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                Text("Dynamic main stage", color = c.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Automatically show the base you're using (discharging wins, sticky ~30 min). Off: the stage stays fixed on your pick.",
+                    color = c.text2, fontSize = 12.sp, lineHeight = 17.sp,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+            Switch(
+                checked = state.dynamicStage,
+                onCheckedChange = onSetDynamicStage,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = Bm.accent,
+                    uncheckedTrackColor = c.inputBg,
+                    uncheckedBorderColor = c.inputBorder,
+                ),
+            )
         }
     }
 }

@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -17,6 +16,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -42,11 +43,7 @@ import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
 import kotlin.math.roundToInt
 
-private data class Row(
-    val group: BatteryGroup,
-    val target: BmsTarget,
-    val status: BatteryStatus?,
-) {
+private data class Row(val group: BatteryGroup, val target: BmsTarget, val status: BatteryStatus?) {
     val tele: Telemetry? get() = status?.telemetry
     val reachable: Boolean get() = status?.reachable == true
 }
@@ -64,12 +61,15 @@ fun AllBatteriesScreen(
     onSetSort: (SortKey) -> Unit,
     onToggleFilter: (FilterKey) -> Unit,
     onSetFilterBase: (String) -> Unit,
+    onPinBase: (String) -> Unit,
+    onDisconnect: (String) -> Unit,
+    onReconnect: (String) -> Unit,
+    onDisconnectAll: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val c = Bm.colors
     var rows = ALL_GROUPS.flatMap { g -> g.targets.map { t -> Row(g, t, state.fleet[t.address]) } }
 
-    // filters (AND)
     if (FilterKey.ReachableOnly in state.filters) rows = rows.filter { it.reachable }
     if (FilterKey.ActiveOnly in state.filters) rows = rows.filter { activityRank(it.tele) <= 1 }
     if (FilterKey.ByBase in state.filters) rows = rows.filter { it.group.id == state.filterBaseId }
@@ -78,20 +78,27 @@ fun AllBatteriesScreen(
     rows = when (state.sortKey) {
         SortKey.Activity -> rows.sortedWith(compareBy({ activityRank(it.tele) }, { -(it.tele?.soc ?: -1f) }))
         SortKey.Soc -> rows.sortedByDescending { it.tele?.soc ?: -1f }
-        SortKey.Base -> rows // already in base/year order
+        SortKey.Base -> rows
     }
 
-    Column(modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-        Text("All Batteries", color = c.text, fontSize = 21.sp, fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(top = 4.dp, bottom = 12.dp))
+    Column(modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+        Row(
+            Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            Text("All Batteries", color = c.text, fontSize = 21.sp, fontWeight = FontWeight.Bold)
+            if (state.monitoring) {
+                Text("Disconnect all", color = Bm.power, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.clickable(onClick = onDisconnectAll).padding(4.dp))
+            }
+        }
 
-        // Sort chips
         ChipRow("Sort") {
             Chip("Activity", state.sortKey == SortKey.Activity) { onSetSort(SortKey.Activity) }
             Chip("SOC", state.sortKey == SortKey.Soc) { onSetSort(SortKey.Soc) }
             Chip("Base", state.sortKey == SortKey.Base) { onSetSort(SortKey.Base) }
         }
-        // Filter chips
         ChipRow("Filter") {
             Chip("Reachable", FilterKey.ReachableOnly in state.filters) { onToggleFilter(FilterKey.ReachableOnly) }
             Chip("Active", FilterKey.ActiveOnly in state.filters) { onToggleFilter(FilterKey.ActiveOnly) }
@@ -100,22 +107,21 @@ fun AllBatteriesScreen(
         }
         if (FilterKey.ByBase in state.filters) {
             ChipRow("Base") {
-                ALL_GROUPS.forEach { g ->
-                    Chip(g.label, state.filterBaseId == g.id) { onSetFilterBase(g.id) }
-                }
+                ALL_GROUPS.forEach { g -> Chip(g.label, state.filterBaseId == g.id) { onSetFilterBase(g.id) } }
             }
         }
 
-        LazyColumn(
-            Modifier.fillMaxWidth().padding(top = 6.dp),
-            verticalArrangement = Arrangement.spacedBy(9.dp),
-        ) {
+        LazyColumn(Modifier.fillMaxWidth().padding(top = 6.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
             items(rows, key = { it.target.address }) { row ->
                 BatteryRow(
                     row = row,
                     isStage = row.group.id == state.stageGroupId && state.monitoring,
                     isDailyDriver = row.group.id == state.dailyDriverId,
+                    disabled = row.target.address in state.disabled,
                     monitoring = state.monitoring,
+                    onPin = { onPinBase(row.group.id) },
+                    onDisconnect = { onDisconnect(row.target.address) },
+                    onReconnect = { onReconnect(row.target.address) },
                 )
             }
         }
@@ -141,12 +147,8 @@ private fun Chip(label: String, selected: Boolean, onClick: () -> Unit) {
     val border = if (selected) Bm.accent else c.border
     val bg = if (selected) Bm.accent.copy(alpha = 0.14f) else Color.Transparent
     Box(
-        Modifier
-            .clip(RoundedCornerShape(20.dp))
-            .background(bg)
-            .border(1.dp, border, RoundedCornerShape(20.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 13.dp, vertical = 7.dp),
+        Modifier.clip(RoundedCornerShape(20.dp)).background(bg).border(1.dp, border, RoundedCornerShape(20.dp))
+            .clickable(onClick = onClick).padding(horizontal = 13.dp, vertical = 7.dp),
     ) {
         Text(label, color = if (selected) Bm.accent else c.text2, fontSize = 12.sp,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
@@ -154,14 +156,23 @@ private fun Chip(label: String, selected: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun BatteryRow(row: Row, isStage: Boolean, isDailyDriver: Boolean, monitoring: Boolean) {
+private fun BatteryRow(
+    row: Row,
+    isStage: Boolean,
+    isDailyDriver: Boolean,
+    disabled: Boolean,
+    monitoring: Boolean,
+    onPin: () -> Unit,
+    onDisconnect: () -> Unit,
+    onReconnect: () -> Unit,
+) {
     val c = Bm.colors
     val t = row.tele
-    val reachable = row.reachable || !monitoring  // in demo mode, don't grey everything
-    val dim = monitoring && !row.reachable
+    val dim = disabled || (monitoring && !row.reachable)
 
     val (stateLabel, stateColor) = when {
-        dim -> "Out of range" to c.text3
+        disabled -> "Disconnected" to c.text3
+        monitoring && !row.reachable -> "Out of range" to c.text3
         t?.state == BatteryState.Discharging -> "Discharging" to Bm.power
         t?.state == BatteryState.Charging -> "Charging" to Bm.accent
         t?.state == BatteryState.Idle -> "Idle" to c.text2
@@ -176,11 +187,11 @@ private fun BatteryRow(row: Row, isStage: Boolean, isDailyDriver: Boolean, monit
             .clip(RoundedCornerShape(10.dp))
             .background(if (isStage) Bm.accent.copy(alpha = 0.08f) else c.card2)
             .border(1.dp, borderColor, RoundedCornerShape(10.dp))
-            .padding(horizontal = 13.dp, vertical = 11.dp)
-            .alpha(if (dim) 0.45f else 1f),
+            .clickable(onClick = onPin)
+            .padding(horizontal = 13.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(Modifier.weight(1f)) {
+        Column(Modifier.weight(1f).alpha(if (dim) 0.5f else 1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(row.target.name, color = c.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                 if (isDailyDriver) {
@@ -198,14 +209,26 @@ private fun BatteryRow(row: Row, isStage: Boolean, isDailyDriver: Boolean, monit
                 }
             }
         }
-        Column(horizontalAlignment = Alignment.End) {
-            Text(
-                if (t != null && !dim) "${t.soc.roundToInt()}%" else "—",
-                color = if (dim) c.text3 else Bm.accent,
-                fontFamily = MonoFont, fontSize = 20.sp, fontWeight = FontWeight.SemiBold,
-            )
+        Column(horizontalAlignment = Alignment.End, modifier = Modifier.alpha(if (dim) 0.5f else 1f).padding(end = 6.dp)) {
+            Text(if (t != null && !dim) "${t.soc.roundToInt()}%" else "—",
+                color = if (dim) c.text3 else Bm.accent, fontFamily = MonoFont, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
             if (t != null && !dim) {
                 Text("${t.capacityAh.roundToInt()} Ah", color = c.text2, fontFamily = MonoFont, fontSize = 11.sp)
+            }
+        }
+        // disconnect / reconnect (Bluetooth link)
+        if (monitoring) {
+            Box(
+                Modifier.size(34.dp).clip(RoundedCornerShape(8.dp))
+                    .clickable(onClick = if (disabled) onReconnect else onDisconnect),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    if (disabled) Icons.Filled.Link else Icons.Filled.LinkOff,
+                    if (disabled) "Reconnect" else "Disconnect",
+                    Modifier.size(18.dp),
+                    tint = if (disabled) Bm.accent else c.text3,
+                )
             }
         }
     }
