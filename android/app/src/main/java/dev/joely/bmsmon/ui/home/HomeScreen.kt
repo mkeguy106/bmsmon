@@ -56,31 +56,48 @@ fun HomeScreen(
     onDisconnectAll: () -> Unit,
 ) {
     val c = Bm.colors
-    val pager = rememberPagerState(initialPage = 1) { 2 }
+    // Page 0 = stage (main); page 1 = all batteries — swipe LEFT from the stage to reach it.
+    val pager = rememberPagerState(initialPage = 0) { 2 }
     val scope = rememberCoroutineScope()
 
     Column(Modifier.fillMaxSize().background(c.bg)) {
         TopBar(state, onToggleMode, onSettings, onToggleMonitoring)
+        if (state.logging) LoggingBanner(state)
         PageDots(current = pager.currentPage)
         HorizontalPager(state = pager, modifier = Modifier.weight(1f)) { page ->
             when (page) {
-                0 -> AllBatteriesScreen(
+                0 -> StageScreen(state.stageBatteries())
+                else -> AllBatteriesScreen(
                     state = state,
                     onSetSort = onSetSort,
                     onToggleFilter = onToggleFilter,
                     onSetFilterBase = onSetFilterBase,
                     onPinBase = { groupId ->
                         onPinStage(StageTarget.Base(groupId))
-                        scope.launch { pager.animateScrollToPage(1) }
+                        scope.launch { pager.animateScrollToPage(0) }
                     },
                     onDisconnect = onDisconnect,
                     onReconnect = onReconnect,
                     onDisconnectAll = onDisconnectAll,
                     modifier = Modifier.padding(top = 6.dp),
                 )
-                else -> StageScreen(state.stageBatteries())
             }
         }
+    }
+}
+
+@Composable
+private fun LoggingBanner(state: UiState) {
+    val c = Bm.colors
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 2.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "● LOGGING   peak ${state.peakPowerW.toInt()} W  ·  ${"%.1f".format(state.peakCurrentA)} A",
+            color = Bm.power, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.5.sp,
+        )
     }
 }
 

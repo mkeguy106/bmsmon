@@ -7,6 +7,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.joely.bmsmon.ble.BmsRepository
 import dev.joely.bmsmon.data.SettingsStore
+import dev.joely.bmsmon.data.TelemetryLogger
 import dev.joely.bmsmon.model.ALL_GROUPS
 import dev.joely.bmsmon.model.BatteryGroup
 import dev.joely.bmsmon.model.BatteryStatus
@@ -56,6 +57,10 @@ data class UiState(
     val sortKey: SortKey = SortKey.Activity,
     val filters: Set<FilterKey> = emptySet(),
     val filterBaseId: String = DEFAULT_GROUP_ID,
+    val logging: Boolean = false,
+    val peakPowerW: Float = 0f,
+    val peakCurrentA: Float = 0f,
+    val logPath: String = "",
 ) {
     val isDark get() = mode == Mode.Dark
     val dailyDriver: BatteryGroup get() = groupById(dailyDriverId)
@@ -90,8 +95,9 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
 
     private val repository = BmsRepository(app)
     private val store = SettingsStore(app)
+    private val logger = TelemetryLogger(app)
 
-    private val _state = MutableStateFlow(UiState())
+    private val _state = MutableStateFlow(UiState(logPath = logger.path))
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     private fun clockMs() = System.currentTimeMillis()
@@ -245,7 +251,30 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { st ->
             st.copy(fleet = st.fleet + (addr to (st.fleet[addr] ?: BatteryStatus()).copy(telemetry = t, reachable = true)))
         }
+        if (_state.value.logging) {
+            logger.log(addr, t, clockMs())
+            if (t.current < -0.05f) {  // discharging — track peak draw
+                _state.update {
+                    it.copy(
+                        peakPowerW = maxOf(it.peakPowerW, t.powerW),
+                        peakCurrentA = maxOf(it.peakCurrentA, -t.current),
+                    )
+                }
+            }
+        }
         refresh()
+    }
+
+    // --- usage logging (to calibrate the power ring) ---
+    fun setLogging(enabled: Boolean) {
+        _state.update {
+            if (enabled) it.copy(logging = true, peakPowerW = 0f, peakCurrentA = 0f) else it.copy(logging = false)
+        }
+    }
+
+    fun clearLog() {
+        logger.clear()
+        _state.update { it.copy(peakPowerW = 0f, peakCurrentA = 0f) }
     }
 
     private fun onReachable(addr: String, r: Boolean) {

@@ -56,6 +56,8 @@ fun SettingsScreen(
     onToggleMonitoring: () -> Unit,
     onSetDailyDriver: (String) -> Unit,
     onSetDynamicStage: (Boolean) -> Unit,
+    onSetLogging: (Boolean) -> Unit,
+    onClearLog: () -> Unit,
     onSetAccent: (Color) -> Unit,
     onSetPower: (Color) -> Unit,
     onSetMode: (Mode) -> Unit,
@@ -90,6 +92,7 @@ fun SettingsScreen(
             ColorCard("Theme Color", null, ThemeSwatches, state.accent, onSetAccent)
             ColorCard("Power Color", "Inner ring — charge / discharge rate", PowerSwatches, state.power, onSetPower)
             AppearanceCard(state, onSetMode)
+            UsageLoggingCard(state, onSetLogging, onClearLog)
             AboutCard()
         }
     }
@@ -314,6 +317,44 @@ private fun AppearanceButton(
         Icon(icon, null, Modifier.size(17.dp), tint = c.text)
         Text(label, color = c.text, fontSize = 14.sp, fontWeight = FontWeight.Medium,
             modifier = Modifier.padding(start = 8.dp))
+    }
+}
+
+@Composable
+private fun UsageLoggingCard(state: UiState, onSetLogging: (Boolean) -> Unit, onClearLog: () -> Unit) {
+    val c = Bm.colors
+    Card {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                Text("Usage Logging", color = c.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text("Record telemetry to a CSV to find the chair's peak draw (to calibrate the power ring).",
+                    color = c.text2, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.padding(top = 4.dp))
+            }
+            Switch(
+                checked = state.logging,
+                onCheckedChange = onSetLogging,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = Bm.accent,
+                    uncheckedTrackColor = c.inputBg,
+                    uncheckedBorderColor = c.inputBorder,
+                ),
+            )
+        }
+        Text(
+            "Peak draw:  ${state.peakPowerW.toInt()} W  ·  ${"%.1f".format(state.peakCurrentA)} A",
+            color = Bm.power, fontSize = 14.sp, fontFamily = MonoFont, fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(top = 14.dp),
+        )
+        Text(state.logPath, color = c.text3, fontSize = 10.sp, fontFamily = MonoFont,
+            modifier = Modifier.padding(top = 8.dp))
+        Box(
+            Modifier.padding(top = 14.dp).clip(RoundedCornerShape(8.dp))
+                .border(1.dp, c.border, RoundedCornerShape(8.dp))
+                .clickable(onClick = onClearLog).padding(horizontal = 16.dp, vertical = 9.dp),
+        ) {
+            Text("Clear log", color = c.text2, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+        }
     }
 }
 

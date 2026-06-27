@@ -8,6 +8,12 @@ const val SLOW_POLL_MS = 10_000L
 const val STICKY_HOLD_MS = 30 * 60 * 1000L
 const val PIN_HOLD_MS = 30 * 60 * 1000L
 
+/**
+ * Power (W) at which the inner wattage ring reads "full". Placeholder until we measure
+ * the chair's real peak draw via usage logging — then set this to that peak.
+ */
+const val POWER_RING_FULL_W = 80f
+
 /** What's on the main stage: a whole base (2 packs) or a single battery. */
 sealed interface StageTarget {
     data class Base(val groupId: String) : StageTarget

@@ -204,15 +204,16 @@ private fun BatteryRow(
             }
             Row(Modifier.padding(top = 3.dp)) {
                 Text(stateLabel, color = stateColor, fontSize = 12.sp)
-                if (t != null && !dim) {
+                // last-known voltage stays visible even when out of range / disconnected
+                if (t != null) {
                     Text(" · %.1f V".format(t.voltage), color = c.text3, fontFamily = MonoFont, fontSize = 12.sp)
                 }
             }
         }
         Column(horizontalAlignment = Alignment.End, modifier = Modifier.alpha(if (dim) 0.5f else 1f).padding(end = 6.dp)) {
-            Text(if (t != null && !dim) "${t.soc.roundToInt()}%" else "—",
-                color = if (dim) c.text3 else Bm.accent, fontFamily = MonoFont, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-            if (t != null && !dim) {
+            Text(if (t != null) "${t.soc.roundToInt()}%" else "—",
+                color = Bm.accent, fontFamily = MonoFont, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+            if (t != null) {
                 Text("${t.capacityAh.roundToInt()} Ah", color = c.text2, fontFamily = MonoFont, fontSize = 11.sp)
             }
         }

@@ -8,6 +8,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import dev.joely.bmsmon.model.POWER_RING_FULL_W
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -61,7 +62,7 @@ fun DualRingGauge(
         val innerW = 4f * scale
         val innerTopLeft = Offset(center.x - innerR, center.y - innerR)
         val innerSize = Size(innerR * 2f, innerR * 2f)
-        val frac = (powerW / 80f).coerceIn(0f, 1f)
+        val frac = (powerW / POWER_RING_FULL_W).coerceIn(0f, 1f)
         drawArc(
             color = innerTrack,
             startAngle = 0f,
