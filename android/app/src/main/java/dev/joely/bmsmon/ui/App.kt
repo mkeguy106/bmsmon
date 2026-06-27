@@ -57,9 +57,8 @@ fun App(vm: BatteryViewModel) {
                     Screen.Settings -> SettingsScreen(
                         state = state,
                         onBack = vm::goHome,
-                        onSetBms1 = vm::setBms1,
-                        onSetBms2 = vm::setBms2,
                         onToggleConnect = onConnectToggle,
+                        onSelectGroup = vm::setActiveGroup,
                         onSetAccent = vm::setAccent,
                         onSetPower = vm::setPower,
                         onSetMode = vm::setMode,

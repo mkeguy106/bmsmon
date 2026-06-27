@@ -15,8 +15,7 @@ data class Persisted(
     val powerArgb: Int?,
     val manualMode: Boolean,
     val darkMode: Boolean,
-    val bms1: String?,
-    val bms2: String?,
+    val activeGroupId: String?,
 )
 
 /** Persists user preferences (colors, appearance override, BMS addresses) via DataStore. */
@@ -27,8 +26,7 @@ class SettingsStore(private val context: Context) {
         val POWER = intPreferencesKey("power")
         val MANUAL = booleanPreferencesKey("manual_mode")
         val DARK = booleanPreferencesKey("dark_mode")
-        val BMS1 = stringPreferencesKey("bms1")
-        val BMS2 = stringPreferencesKey("bms2")
+        val GROUP = stringPreferencesKey("active_group")
     }
 
     suspend fun load(): Persisted {
@@ -38,8 +36,7 @@ class SettingsStore(private val context: Context) {
             powerArgb = p[K.POWER],
             manualMode = p[K.MANUAL] ?: false,
             darkMode = p[K.DARK] ?: false,
-            bms1 = p[K.BMS1],
-            bms2 = p[K.BMS2],
+            activeGroupId = p[K.GROUP],
         )
     }
 
@@ -49,6 +46,5 @@ class SettingsStore(private val context: Context) {
         it[K.MANUAL] = true
         it[K.DARK] = dark
     }.let {}
-    suspend fun setBms1(v: String) = context.dataStore.edit { it[K.BMS1] = v }.let {}
-    suspend fun setBms2(v: String) = context.dataStore.edit { it[K.BMS2] = v }.let {}
+    suspend fun setActiveGroup(id: String) = context.dataStore.edit { it[K.GROUP] = id }.let {}
 }

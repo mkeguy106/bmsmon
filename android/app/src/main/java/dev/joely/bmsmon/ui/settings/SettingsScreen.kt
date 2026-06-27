@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -29,36 +28,35 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.joely.bmsmon.Mode
 import dev.joely.bmsmon.UiState
+import dev.joely.bmsmon.model.ALL_GROUPS
+import dev.joely.bmsmon.model.BatteryGroup
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
 import dev.joely.bmsmon.ui.theme.PowerSwatches
 import dev.joely.bmsmon.ui.theme.ThemeSwatches
 
 private fun Color.hex(): String = "#%06X".format(0xFFFFFF and toArgb())
+private fun shortMac(addr: String): String = addr.removePrefix("C8:47:80:")
 
 @Composable
 fun SettingsScreen(
     state: UiState,
     onBack: () -> Unit,
-    onSetBms1: (String) -> Unit,
-    onSetBms2: (String) -> Unit,
     onToggleConnect: () -> Unit,
+    onSelectGroup: (String) -> Unit,
     onSetAccent: (Color) -> Unit,
     onSetPower: (Color) -> Unit,
     onSetMode: (Mode) -> Unit,
 ) {
     val c = Bm.colors
     Column(Modifier.fillMaxSize().background(c.bg)) {
-        // header
         Row(
             Modifier
                 .fillMaxWidth()
@@ -69,15 +67,10 @@ fun SettingsScreen(
             Box(Modifier.size(32.dp).clickable(onClick = onBack), contentAlignment = Alignment.CenterStart) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", Modifier.size(22.dp), tint = c.icon)
             }
-            Text(
-                "Settings",
-                color = c.text,
-                fontSize = 21.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(start = 14.dp),
-            )
+            Text("Settings", color = c.text, fontSize = 21.sp, fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(start = 14.dp))
         }
-        Box(Modifier.fillMaxWidth().padding(bottom = 0.dp).background(c.divider).size(width = 0.dp, height = 1.dp))
+        Box(Modifier.fillMaxWidth().background(c.divider).size(width = 0.dp, height = 1.dp))
 
         Column(
             Modifier
@@ -86,7 +79,8 @@ fun SettingsScreen(
                 .padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            BluetoothCard(state, onSetBms1, onSetBms2, onToggleConnect)
+            BluetoothCard(state, onToggleConnect)
+            GroupsCard(state, onSelectGroup)
             ColorCard("Theme Color", null, ThemeSwatches, state.accent, onSetAccent)
             ColorCard("Power Color", "Inner ring — charge / discharge rate", PowerSwatches, state.power, onSetPower)
             AppearanceCard(state, onSetMode)
@@ -109,30 +103,20 @@ private fun Card(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun BluetoothCard(
-    state: UiState,
-    onSetBms1: (String) -> Unit,
-    onSetBms2: (String) -> Unit,
-    onToggleConnect: () -> Unit,
-) {
+private fun BluetoothCard(state: UiState, onToggleConnect: () -> Unit) {
     val c = Bm.colors
+    val group = state.activeGroup
     Card {
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 14.dp)) {
             Icon(Icons.Filled.Bluetooth, null, Modifier.size(18.dp), tint = Bm.accent)
-            Text(
-                "Bluetooth Connection",
-                color = c.text,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                modifier = Modifier.padding(start = 9.dp),
-            )
+            Text("Bluetooth Connection", color = c.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+                maxLines = 1, modifier = Modifier.padding(start = 9.dp))
         }
-        FieldLabel("BMS 1 Address")
-        AddressField(state.bms1, onSetBms1)
-        Box(Modifier.size(width = 0.dp, height = 14.dp))
-        FieldLabel("BMS 2 Address")
-        AddressField(state.bms2, onSetBms2)
+        Text("Active base: ${group.label}", color = c.text2, fontSize = 12.sp,
+            modifier = Modifier.padding(bottom = 10.dp))
+        ReadonlyAddress(group.a.name, group.a.address)
+        Box(Modifier.size(width = 0.dp, height = 10.dp))
+        ReadonlyAddress(group.b.name, group.b.address)
         Box(Modifier.size(width = 0.dp, height = 16.dp))
         Box(
             Modifier
@@ -143,47 +127,70 @@ private fun BluetoothCard(
                 .padding(vertical = 13.dp),
             contentAlignment = Alignment.Center,
         ) {
-            Text(
-                if (state.connected) "Disconnect" else "Connect to BMS",
-                color = Color.White,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
+            Text(if (state.connected) "Disconnect" else "Connect to Base",
+                color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         }
     }
 }
 
 @Composable
-private fun FieldLabel(text: String) {
-    Text(text, color = Bm.colors.text2, fontSize = 12.sp, modifier = Modifier.padding(bottom = 7.dp))
+private fun ReadonlyAddress(label: String, address: String) {
+    val c = Bm.colors
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(c.inputBg)
+            .border(1.dp, c.inputBorder, RoundedCornerShape(8.dp))
+            .padding(horizontal = 13.dp, vertical = 11.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, color = c.text2, fontSize = 12.sp)
+        Text(address, color = c.text, fontFamily = MonoFont, fontSize = 14.sp)
+    }
 }
 
 @Composable
-private fun AddressField(value: String, onChange: (String) -> Unit) {
+private fun GroupsCard(state: UiState, onSelectGroup: (String) -> Unit) {
     val c = Bm.colors
-    BasicTextField(
-        value = value,
-        onValueChange = onChange,
-        singleLine = true,
-        textStyle = TextStyle(color = c.text, fontFamily = MonoFont, fontSize = 14.sp),
-        cursorBrush = SolidColor(Bm.accent),
-        modifier = Modifier.fillMaxWidth(),
-        decorationBox = { inner ->
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(c.inputBg)
-                    .border(1.dp, c.inputBorder, RoundedCornerShape(8.dp))
-                    .padding(horizontal = 13.dp, vertical = 11.dp),
-            ) {
-                if (value.isEmpty()) {
-                    Text("00:00:00:00:00:00", color = c.text3, fontFamily = MonoFont, fontSize = 14.sp)
-                }
-                inner()
+    Card {
+        Text("Battery Groups", color = c.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Text("Two batteries per base — tap to select active", color = c.text2, fontSize = 12.sp,
+            modifier = Modifier.padding(top = 5.dp))
+        Column(Modifier.padding(top = 14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            ALL_GROUPS.forEach { g ->
+                GroupRow(g, selected = g.id == state.activeGroupId) { onSelectGroup(g.id) }
             }
-        },
-    )
+        }
+    }
+}
+
+@Composable
+private fun GroupRow(group: BatteryGroup, selected: Boolean, onClick: () -> Unit) {
+    val c = Bm.colors
+    val border = if (selected) Bm.accent else c.border
+    val bg = if (selected) Bm.accent.copy(alpha = 0.14f) else Color.Transparent
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(bg)
+            .border(1.dp, border, RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 13.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text("${group.label} base", color = c.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                "${shortMac(group.a.address)}  ·  ${shortMac(group.b.address)}",
+                color = c.text3, fontFamily = MonoFont, fontSize = 11.sp,
+                modifier = Modifier.padding(top = 3.dp),
+            )
+        }
+        if (selected) Icon(Icons.Filled.Check, "Selected", Modifier.size(22.dp), tint = Bm.accent)
+    }
 }
 
 @Composable
@@ -255,12 +262,8 @@ private fun AppearanceCard(state: UiState, onSetMode: (Mode) -> Unit) {
             AppearanceButton("Dark", Icons.Filled.DarkMode, state.isDark, Modifier.weight(1f)) { onSetMode(Mode.Dark) }
             AppearanceButton("Light", Icons.Filled.LightMode, !state.isDark, Modifier.weight(1f)) { onSetMode(Mode.Light) }
         }
-        Text(
-            "Follows your system setting by default.",
-            color = c.text3,
-            fontSize = 11.sp,
-            modifier = Modifier.padding(top = 10.dp),
-        )
+        Text("Follows your system setting by default.", color = c.text3, fontSize = 11.sp,
+            modifier = Modifier.padding(top = 10.dp))
     }
 }
 
@@ -303,9 +306,7 @@ private fun AboutCard() {
             modifier = Modifier.padding(bottom = 14.dp))
         Text(
             "Note: Live telemetry uses the reverse-engineered Beken BMS protocol with read-only commands; destructive commands are never sent.",
-            color = c.text3,
-            fontSize = 11.sp,
-            lineHeight = 16.5.sp,
+            color = c.text3, fontSize = 11.sp, lineHeight = 16.5.sp,
         )
     }
 }

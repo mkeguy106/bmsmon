@@ -8,8 +8,11 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.joely.bmsmon.ble.BmsRepository
 import dev.joely.bmsmon.data.SettingsStore
+import dev.joely.bmsmon.model.BatteryGroup
+import dev.joely.bmsmon.model.DEFAULT_GROUP_ID
 import dev.joely.bmsmon.model.Telemetry
-import dev.joely.bmsmon.model.demoBatteries
+import dev.joely.bmsmon.model.demoFor
+import dev.joely.bmsmon.model.groupById
 import dev.joely.bmsmon.ui.theme.DefaultAccent
 import dev.joely.bmsmon.ui.theme.DefaultPower
 import kotlinx.coroutines.delay
@@ -30,19 +33,13 @@ data class UiState(
     val connected: Boolean = false,
     val accent: Color = DefaultAccent,
     val power: Color = DefaultPower,
-    val bms1: String = DEFAULT_BMS1,
-    val bms2: String = DEFAULT_BMS2,
-    val batteries: List<Telemetry> = demoBatteries,
+    val activeGroupId: String = DEFAULT_GROUP_ID,
+    val batteries: List<Telemetry> = demoFor(groupById(DEFAULT_GROUP_ID)),
     val statuses: List<String> = listOf("", ""),
 ) {
     val isDark get() = mode == Mode.Dark
+    val activeGroup: BatteryGroup get() = groupById(activeGroupId)
 }
-
-// Pre-filled with the 2024 test packs for convenience (read-only target addresses).
-private const val DEFAULT_BMS1 = "C8:47:80:15:07:DE"  // 2024-BATTERY-A (A02285)
-private const val DEFAULT_BMS2 = "C8:47:80:15:25:01"  // 2024-BATTERY-B (A02402)
-private const val NAME1 = "Battery 1"
-private const val NAME2 = "Battery 2"
 
 class BatteryViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -53,17 +50,17 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     init {
-        // Load persisted preferences (colors, appearance override, BMS addresses).
         viewModelScope.launch {
             val p = store.load()
             _state.update { s ->
+                val group = groupById(p.activeGroupId ?: s.activeGroupId)
                 s.copy(
                     accent = p.accentArgb?.let { Color(it) } ?: s.accent,
                     power = p.powerArgb?.let { Color(it) } ?: s.power,
                     manualMode = p.manualMode,
                     mode = if (p.manualMode) (if (p.darkMode) Mode.Dark else Mode.Light) else s.mode,
-                    bms1 = p.bms1 ?: s.bms1,
-                    bms2 = p.bms2 ?: s.bms2,
+                    activeGroupId = group.id,
+                    batteries = demoFor(group),
                 )
             }
         }
@@ -92,7 +89,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // --- navigation / theme / settings intents ---
+    // --- navigation / theme intents ---
     fun goSettings() = _state.update { it.copy(screen = Screen.Settings) }
     fun goHome() = _state.update { it.copy(screen = Screen.Home) }
 
@@ -114,28 +111,37 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(power = c) }
         viewModelScope.launch { store.setPower(c.toArgb()) }
     }
-    fun setBms1(v: String) {
-        _state.update { it.copy(bms1 = v) }
-        viewModelScope.launch { store.setBms1(v) }
-    }
-    fun setBms2(v: String) {
-        _state.update { it.copy(bms2 = v) }
-        viewModelScope.launch { store.setBms2(v) }
+
+    /** Select which base is active. Disconnects first if switching while connected. */
+    fun setActiveGroup(id: String) {
+        if (id == _state.value.activeGroupId) return
+        if (_state.value.connected) repository.disconnect()
+        val group = groupById(id)
+        _state.update {
+            it.copy(
+                activeGroupId = group.id,
+                connected = false,
+                statuses = listOf("", ""),
+                batteries = demoFor(group),
+            )
+        }
+        viewModelScope.launch { store.setActiveGroup(group.id) }
     }
 
-    // --- BLE connect / disconnect ---
+    // --- BLE connect / disconnect (active base) ---
     fun startConnect() {
         val s = _state.value
         if (s.connected) return
+        val group = s.activeGroup
         _state.update { it.copy(connected = true, statuses = listOf("connecting", "connecting")) }
         repository.connect(
             scope = viewModelScope,
-            targets = listOf(s.bms1 to NAME1, s.bms2 to NAME2),
+            targets = group.targets.map { it.address to it.name },
             onTelemetry = { index, t ->
-                val labelled = t.copy(name = if (index == 0) NAME1 else NAME2)
+                val name = group.targets.getOrNull(index)?.name ?: t.name
                 _state.update { st ->
                     st.copy(batteries = st.batteries.toMutableList().also {
-                        if (index < it.size) it[index] = labelled
+                        if (index < it.size) it[index] = t.copy(name = name)
                     })
                 }
             },
@@ -152,7 +158,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
 
     fun stopConnect() {
         repository.disconnect()
-        _state.update { it.copy(connected = false, statuses = listOf("", "")) }
+        _state.update { it.copy(connected = false, statuses = listOf("", ""), batteries = demoFor(it.activeGroup)) }
     }
 
     override fun onCleared() {
