@@ -17,6 +17,7 @@ data class Persisted(
     val darkMode: Boolean,
     val dailyDriverId: String?,
     val dynamicStage: Boolean?,
+    val monitoring: Boolean,
 )
 
 /** Persists user preferences (colors, appearance override, BMS addresses) via DataStore. */
@@ -29,6 +30,7 @@ class SettingsStore(private val context: Context) {
         val DARK = booleanPreferencesKey("dark_mode")
         val DAILY_DRIVER = stringPreferencesKey("daily_driver")
         val DYNAMIC_STAGE = booleanPreferencesKey("dynamic_stage")
+        val MONITORING = booleanPreferencesKey("monitoring")
     }
 
     suspend fun load(): Persisted {
@@ -40,6 +42,7 @@ class SettingsStore(private val context: Context) {
             darkMode = p[K.DARK] ?: false,
             dailyDriverId = p[K.DAILY_DRIVER],
             dynamicStage = p[K.DYNAMIC_STAGE],
+            monitoring = p[K.MONITORING] ?: false,
         )
     }
 
@@ -51,4 +54,5 @@ class SettingsStore(private val context: Context) {
     }.let {}
     suspend fun setDailyDriver(id: String) = context.dataStore.edit { it[K.DAILY_DRIVER] = id }.let {}
     suspend fun setDynamicStage(enabled: Boolean) = context.dataStore.edit { it[K.DYNAMIC_STAGE] = enabled }.let {}
+    suspend fun setMonitoring(on: Boolean) = context.dataStore.edit { it[K.MONITORING] = on }.let {}
 }

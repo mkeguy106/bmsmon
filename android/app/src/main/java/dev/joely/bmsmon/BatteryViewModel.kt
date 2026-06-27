@@ -6,6 +6,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.joely.bmsmon.ble.BmsRepository
+import dev.joely.bmsmon.ble.hasBlePermissions
 import dev.joely.bmsmon.data.SettingsStore
 import dev.joely.bmsmon.data.TelemetryLogger
 import dev.joely.bmsmon.model.ALL_GROUPS
@@ -119,6 +120,8 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     demo = demoFor(dd),
                 )
             }
+            // Resume monitoring if it was on before the app was killed/restarted.
+            if (p.monitoring && hasBlePermissions(getApplication())) startMonitoring()
         }
         // Demo drift while not monitoring.
         viewModelScope.launch {
@@ -234,11 +237,13 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         )
         repository.setDisabled(_state.value.disabled)
         repository.setStage(currentStageAddrs())
+        viewModelScope.launch { store.setMonitoring(true) }
     }
 
     fun stopMonitoring() {
         repository.stop()
         _state.update { it.copy(monitoring = false, fleet = emptyMap(), demo = demoFor(it.dailyDriver)) }
+        viewModelScope.launch { store.setMonitoring(false) }
     }
 
     fun toggleMonitoring() = if (_state.value.monitoring) stopMonitoring() else startMonitoring()
