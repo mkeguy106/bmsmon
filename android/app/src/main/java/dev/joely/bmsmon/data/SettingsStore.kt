@@ -17,6 +17,7 @@ data class Persisted(
     val darkMode: Boolean,
     val dailyDriverId: String?,
     val dynamicStage: Boolean?,
+    val stageHoldMinutes: Int?,
     val monitoring: Boolean,
 )
 
@@ -30,6 +31,7 @@ class SettingsStore(private val context: Context) {
         val DARK = booleanPreferencesKey("dark_mode")
         val DAILY_DRIVER = stringPreferencesKey("daily_driver")
         val DYNAMIC_STAGE = booleanPreferencesKey("dynamic_stage")
+        val STAGE_HOLD = intPreferencesKey("stage_hold_min")
         val MONITORING = booleanPreferencesKey("monitoring")
     }
 
@@ -42,6 +44,7 @@ class SettingsStore(private val context: Context) {
             darkMode = p[K.DARK] ?: false,
             dailyDriverId = p[K.DAILY_DRIVER],
             dynamicStage = p[K.DYNAMIC_STAGE],
+            stageHoldMinutes = p[K.STAGE_HOLD],
             monitoring = p[K.MONITORING] ?: false,
         )
     }
@@ -54,5 +57,6 @@ class SettingsStore(private val context: Context) {
     }.let {}
     suspend fun setDailyDriver(id: String) = context.dataStore.edit { it[K.DAILY_DRIVER] = id }.let {}
     suspend fun setDynamicStage(enabled: Boolean) = context.dataStore.edit { it[K.DYNAMIC_STAGE] = enabled }.let {}
+    suspend fun setStageHold(minutes: Int) = context.dataStore.edit { it[K.STAGE_HOLD] = minutes }.let {}
     suspend fun setMonitoring(on: Boolean) = context.dataStore.edit { it[K.MONITORING] = on }.let {}
 }

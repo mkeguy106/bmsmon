@@ -4,8 +4,11 @@ package dev.joely.bmsmon.model
 const val STAGE_POLL_MS = 1650L
 const val SLOW_POLL_MS = 10_000L
 
-/** How long a base stays on the stage after activity stops / after a manual pin. */
-const val STICKY_HOLD_MS = 30 * 60 * 1000L
+/** Default minutes the active (discharging) base holds the stage after its last discharge. */
+const val DEFAULT_STAGE_HOLD_MIN = 15
+val STAGE_HOLD_OPTIONS_MIN = listOf(5, 10, 15, 30, 60)
+
+/** How long a manual pin holds the stage. */
 const val PIN_HOLD_MS = 30 * 60 * 1000L
 
 /**
@@ -32,6 +35,7 @@ data class StageInputs(
     val manualStage: StageTarget?,
     val manualPinnedAt: Long,
     val lastDischargeAt: Map<String, Long>,
+    val holdMs: Long,
     val current: StageTarget,
     val now: Long,
 )
@@ -39,8 +43,13 @@ data class StageInputs(
 /**
  * Resolve which target owns the stage:
  *  - a manual pin wins (permanently if dynamic is off, else for PIN_HOLD_MS);
- *  - otherwise dynamic: discharging base > sticky recently-in-use base (STICKY_HOLD_MS) >
- *    charging base > keep current/any reachable. Daily driver breaks ties.
+ *  - otherwise dynamic:
+ *      1. a base discharging right now (the active chair),
+ *      2. a base that discharged within [holdMs] keeps the stage even if it's now idle OR
+ *         briefly out of BLE range (you're still using it),
+ *      3. only once that hold expires, switch to a charging base if there is one,
+ *      4. if everything is idle, don't change the stage at all.
+ *  Daily driver breaks ties.
  */
 fun resolveStage(i: StageInputs): StageTarget {
     i.manualStage?.let { pin ->
@@ -54,23 +63,21 @@ fun resolveStage(i: StageInputs): StageTarget {
         if (matches.isEmpty()) return null
         return matches.firstOrNull { it.id == i.dailyDriverId } ?: matches.first()
     }
+
+    // 1. discharging right now = the active chair
     pick(GroupActivity.Discharging)?.let { return StageTarget.Base(it.id) }
 
-    // sticky: the base most recently seen discharging, if still within the hold and reachable
+    // 2. hold: most recent discharge within the window keeps the stage (idle or out of range)
     ALL_GROUPS
         .mapNotNull { g -> i.lastDischargeAt[g.id]?.let { ts -> g to ts } }
-        .filter { i.now - it.second < STICKY_HOLD_MS && hasReachable(it.first, i.fleet) }
+        .filter { i.now - it.second < i.holdMs }
         .maxByOrNull { it.second }
         ?.let { return StageTarget.Base(it.first.id) }
 
+    // 3. hold expired, nothing discharging -> a charging base may take over
     pick(GroupActivity.Charging)?.let { return StageTarget.Base(it.id) }
 
-    val curReachable = when (val cur = i.current) {
-        is StageTarget.Base -> hasReachable(groupById(cur.groupId), i.fleet)
-        is StageTarget.Single -> i.fleet[cur.address]?.reachable == true
-    }
-    if (curReachable) return i.current
-    ALL_GROUPS.firstOrNull { hasReachable(it, i.fleet) }?.let { return StageTarget.Base(it.id) }
+    // 4. everything idle -> leave the stage where it is
     return i.current
 }
 

@@ -13,6 +13,7 @@ import dev.joely.bmsmon.model.ALL_GROUPS
 import dev.joely.bmsmon.model.BatteryGroup
 import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.DEFAULT_GROUP_ID
+import dev.joely.bmsmon.model.DEFAULT_STAGE_HOLD_MIN
 import dev.joely.bmsmon.model.GroupActivity
 import dev.joely.bmsmon.model.PIN_HOLD_MS
 import dev.joely.bmsmon.model.StageInputs
@@ -48,6 +49,7 @@ data class UiState(
     val dailyDriverId: String = DEFAULT_GROUP_ID,
     val fleet: Map<String, BatteryStatus> = emptyMap(),
     val dynamicStage: Boolean = true,
+    val stageHoldMinutes: Int = DEFAULT_STAGE_HOLD_MIN,
     val manualStage: StageTarget? = null,
     val manualPinnedAt: Long = 0,
     val lastDischargeAt: Map<String, Long> = emptyMap(),
@@ -115,6 +117,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     mode = if (p.manualMode) (if (p.darkMode) Mode.Dark else Mode.Light) else s.mode,
                     dailyDriverId = dd.id,
                     dynamicStage = p.dynamicStage ?: s.dynamicStage,
+                    stageHoldMinutes = p.stageHoldMinutes ?: s.stageHoldMinutes,
                     stageTarget = StageTarget.Base(dd.id),
                     filterBaseId = dd.id,
                     demo = demoFor(dd),
@@ -201,6 +204,11 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     fun setDynamicStage(enabled: Boolean) {
         _state.update { it.copy(dynamicStage = enabled) }
         viewModelScope.launch { store.setDynamicStage(enabled) }
+        refresh()
+    }
+    fun setStageHold(minutes: Int) {
+        _state.update { it.copy(stageHoldMinutes = minutes) }
+        viewModelScope.launch { store.setStageHold(minutes) }
         refresh()
     }
 
@@ -303,7 +311,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             }
             val resolved = resolveStage(
                 StageInputs(st.fleet, st.dailyDriverId, st.dynamicStage, st.manualStage,
-                    st.manualPinnedAt, newLast, st.stageTarget, now),
+                    st.manualPinnedAt, newLast, st.stageHoldMinutes * 60_000L, st.stageTarget, now),
             )
             val isPinned = st.manualStage != null && resolved == st.manualStage &&
                 (!st.dynamicStage || now - st.manualPinnedAt < PIN_HOLD_MS)

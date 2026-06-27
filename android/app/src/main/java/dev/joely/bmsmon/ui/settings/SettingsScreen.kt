@@ -41,6 +41,7 @@ import dev.joely.bmsmon.Mode
 import dev.joely.bmsmon.UiState
 import dev.joely.bmsmon.model.ALL_GROUPS
 import dev.joely.bmsmon.model.BatteryGroup
+import dev.joely.bmsmon.model.STAGE_HOLD_OPTIONS_MIN
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
 import dev.joely.bmsmon.ui.theme.PowerSwatches
@@ -56,6 +57,7 @@ fun SettingsScreen(
     onToggleMonitoring: () -> Unit,
     onSetDailyDriver: (String) -> Unit,
     onSetDynamicStage: (Boolean) -> Unit,
+    onSetStageHold: (Int) -> Unit,
     onSetLogging: (Boolean) -> Unit,
     onClearLog: () -> Unit,
     onSetAccent: (Color) -> Unit,
@@ -87,7 +89,7 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             BluetoothCard(state, onToggleMonitoring)
-            MainStageCard(state, onSetDynamicStage)
+            MainStageCard(state, onSetDynamicStage, onSetStageHold)
             GroupsCard(state, onSetDailyDriver)
             ColorCard("Theme Color", null, ThemeSwatches, state.accent, onSetAccent)
             ColorCard("Power Color", "Inner ring — charge / discharge rate", PowerSwatches, state.power, onSetPower)
@@ -141,14 +143,14 @@ private fun BluetoothCard(state: UiState, onToggleMonitoring: () -> Unit) {
 }
 
 @Composable
-private fun MainStageCard(state: UiState, onSetDynamicStage: (Boolean) -> Unit) {
+private fun MainStageCard(state: UiState, onSetDynamicStage: (Boolean) -> Unit, onSetStageHold: (Int) -> Unit) {
     val c = Bm.colors
     Card {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f).padding(end = 12.dp)) {
                 Text("Dynamic main stage", color = c.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 Text(
-                    "Automatically show the base you're using (discharging wins, sticky ~30 min). Off: the stage stays fixed on your pick.",
+                    "Automatically show the base you're using. Off: the stage stays fixed on your pick.",
                     color = c.text2, fontSize = 12.sp, lineHeight = 17.sp,
                     modifier = Modifier.padding(top = 4.dp),
                 )
@@ -164,6 +166,32 @@ private fun MainStageCard(state: UiState, onSetDynamicStage: (Boolean) -> Unit) 
                 ),
             )
         }
+        if (state.dynamicStage) {
+            Text(
+                "Active-chair hold — keep the discharging base on stage this long after it stops:",
+                color = c.text2, fontSize = 12.sp, lineHeight = 17.sp,
+                modifier = Modifier.padding(top = 14.dp, bottom = 10.dp),
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                STAGE_HOLD_OPTIONS_MIN.forEach { m ->
+                    SelectChip("${m}m", state.stageHoldMinutes == m) { onSetStageHold(m) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SelectChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    val c = Bm.colors
+    val border = if (selected) Bm.accent else c.border
+    val bg = if (selected) Bm.accent.copy(alpha = 0.14f) else Color.Transparent
+    Box(
+        Modifier.clip(RoundedCornerShape(20.dp)).background(bg).border(1.dp, border, RoundedCornerShape(20.dp))
+            .clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 7.dp),
+    ) {
+        Text(label, color = if (selected) Bm.accent else c.text2, fontSize = 13.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
     }
 }
 

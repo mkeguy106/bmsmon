@@ -68,6 +68,7 @@ fun App(vm: BatteryViewModel) {
                         onToggleMonitoring = onMonitorToggle,
                         onSetDailyDriver = vm::setDailyDriver,
                         onSetDynamicStage = vm::setDynamicStage,
+                        onSetStageHold = vm::setStageHold,
                         onSetLogging = vm::setLogging,
                         onClearLog = vm::clearLog,
                         onSetAccent = vm::setAccent,
