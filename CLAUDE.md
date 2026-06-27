@@ -31,6 +31,7 @@ All use the same Beken BK-BLE-1.0 UART-to-BLE bridge module with identical proto
 
 | CMD  | Description |
 |------|-------------|
+| 0x10 | Get serial number |
 | 0x13 | Query battery status (main telemetry) |
 | 0x15 | Read BMS configuration/parameters |
 | 0x16 | Get firmware version |
@@ -49,7 +50,7 @@ All use the same Beken BK-BLE-1.0 UART-to-BLE bridge module with identical proto
 
 ### Commands with unknown effects (NEVER send):
 
-Any command byte not listed above as "safe" is **unknown and potentially destructive**. This includes 0x01, 0x02, 0x04, 0x06, 0x07, 0x10, 0x30, 0x44, 0x49, 0x65, and everything in 0x80-0xFF. Do not probe, scan, or iterate command bytes on a live battery.
+Any command byte not listed above as "safe" is **unknown and potentially destructive**. This includes 0x01, 0x02, 0x04, 0x06, 0x07, 0x30, 0x44, 0x49, 0x65, and everything in 0x80-0xFF. Do not probe, scan, or iterate command bytes on a live battery.
 
 ### Recovery from BMS shutdown
 
@@ -119,6 +120,26 @@ All multi-byte values are **little-endian**.
 | SOH | 92 | 4 bytes | uint32 | direct → % |
 | Cycle count | 96 | 4 bytes | uint32 | direct |
 
+### Serial Number Response (cmd 0x10)
+
+Header: `00 00 <payload_len> 01 90 55 AA ...` (response cmd = `0x10 | 0x80 = 0x90`).
+
+The serial occupies the payload as ASCII (offset 8 to checksum). On tested R-12100 units the field is **all `0xFF`** — i.e. no serial is programmed — so the parser returns `None`. The BLE advertised name (e.g. `R-12100BNNA70-A02402`) is not stored here.
+
+### Firmware Version Response (cmd 0x16)
+
+Header: `00 00 <payload_len> 01 96 55 AA ...` (response cmd = `0x16 | 0x80 = 0x96`). Offsets below are relative to the payload (after the 8-byte header).
+
+| Parameter | Offset | Size | Type | Conversion |
+|-----------|--------|------|------|------------|
+| Version triplet | 0 | 2 bytes ×3 | uint16 | `maj.min.patch`, e.g. `1.4.0` |
+| Build year | 6 | 2 bytes | uint16 | direct |
+| Build month | 8 | 1 byte | uint8 | direct |
+| Build day | 9 | 1 byte | uint8 | direct |
+| ASCII strings | 10 | NUL-terminated | ASCII | two `MODEL-Vx.y` strings: 1st = hardware rev, 2nd = firmware rev |
+
+Example payload decodes to: model `T12100`, HW `V1.2`, FW `V1.4`, built `2024-03-31`. Note this BMS-application firmware (`V1.4`) is distinct from the Beken BLE **module** firmware (`BK-BLE-1.0`, FW `6.1.2`).
+
 ### Protection State Flags (offset 76, 8 bytes)
 
 - 0x00000004 — Over Charge Protection
@@ -180,8 +201,8 @@ python3 bmsmon.py --address C8:47:80:15:25:01
 # Query all known batteries
 python3 bmsmon.py --all
 
-# Live monitoring (poll every 5 seconds)
-python3 bmsmon.py -a C8:47:80:15:25:01 --watch 5
+# Live monitoring (default 1s poll interval)
+python3 bmsmon.py -a C8:47:80:15:25:01 --watch
 
 # JSON output
 python3 bmsmon.py -a C8:47:80:15:25:01 --json
