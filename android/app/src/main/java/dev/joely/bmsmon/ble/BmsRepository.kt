@@ -44,6 +44,7 @@ class BmsRepository(private val context: Context) {
     private var samplerJob: Job? = null
 
     private val lastState = ConcurrentHashMap<String, BatteryState>()
+    private val sampleFailures = ConcurrentHashMap<String, Int>()
     @Volatile private var wakeSampler: CompletableDeferred<Unit>? = null
 
     private var onTelemetry: (String, Telemetry) -> Unit = { _, _ -> }
@@ -96,6 +97,7 @@ class BmsRepository(private val context: Context) {
         samplerJob = null
         stageAddrs = emptySet()
         lastState.clear()
+        sampleFailures.clear()
     }
 
     // --- persistent stage worker: hold the link, poll fast ---
@@ -161,24 +163,29 @@ class BmsRepository(private val context: Context) {
         val session = BleSession(context, t.address)
         try {
             val ok = gate.withPermit { session.connect(8000) }
-            if (!ok) { onReachable(t.address, false); return }
-            val data = session.poll(4000)
-            if (data != null) {
-                BmsProtocol.parseTelemetry(data, t.name)?.let {
-                    lastState[t.address] = it.state
-                    onTelemetry(t.address, it)
-                    onReachable(t.address, true)
-                } ?: onReachable(t.address, false)
+            val tel = if (ok) session.poll(4000)?.let { BmsProtocol.parseTelemetry(it, t.name) } else null
+            if (tel != null) {
+                sampleFailures[t.address] = 0
+                lastState[t.address] = tel.state
+                onTelemetry(t.address, tel)
+                onReachable(t.address, true)
             } else {
-                onReachable(t.address, false)
+                markSampleFail(t.address)
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            onReachable(t.address, false)
+            markSampleFail(t.address)
         } finally {
             session.close()
         }
+    }
+
+    /** Only flag a sampled battery out-of-range after it misses 2 polls in a row (avoids flicker). */
+    private fun markSampleFail(address: String) {
+        val f = (sampleFailures[address] ?: 0) + 1
+        sampleFailures[address] = f
+        if (f >= 2) onReachable(address, false)
     }
 
     /** Sleep up to [ms], but wake early on kick()/stage change. */
