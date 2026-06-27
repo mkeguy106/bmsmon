@@ -32,14 +32,14 @@ fun App(vm: BatteryViewModel) {
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { result ->
-        if (result.values.all { it }) vm.startConnect()
+        if (result.values.all { it }) vm.startMonitoring()
     }
 
-    val onConnectToggle: () -> Unit = {
-        if (state.connected) {
-            vm.stopConnect()
+    val onMonitorToggle: () -> Unit = {
+        if (state.monitoring) {
+            vm.stopMonitoring()
         } else if (hasBlePermissions(context)) {
-            vm.startConnect()
+            vm.startMonitoring()
         } else {
             permLauncher.launch(blePermissions())
         }
@@ -53,12 +53,16 @@ fun App(vm: BatteryViewModel) {
                         state = state,
                         onToggleMode = vm::toggleMode,
                         onSettings = vm::goSettings,
+                        onToggleMonitoring = onMonitorToggle,
+                        onSetSort = vm::setSort,
+                        onToggleFilter = vm::toggleFilter,
+                        onSetFilterBase = vm::setFilterBase,
                     )
                     Screen.Settings -> SettingsScreen(
                         state = state,
                         onBack = vm::goHome,
-                        onToggleConnect = onConnectToggle,
-                        onSelectGroup = vm::setActiveGroup,
+                        onToggleMonitoring = onMonitorToggle,
+                        onSetDailyDriver = vm::setDailyDriver,
                         onSetAccent = vm::setAccent,
                         onSetPower = vm::setPower,
                         onSetMode = vm::setMode,

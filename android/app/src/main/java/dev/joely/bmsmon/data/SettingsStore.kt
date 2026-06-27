@@ -15,7 +15,7 @@ data class Persisted(
     val powerArgb: Int?,
     val manualMode: Boolean,
     val darkMode: Boolean,
-    val activeGroupId: String?,
+    val dailyDriverId: String?,
 )
 
 /** Persists user preferences (colors, appearance override, BMS addresses) via DataStore. */
@@ -26,7 +26,7 @@ class SettingsStore(private val context: Context) {
         val POWER = intPreferencesKey("power")
         val MANUAL = booleanPreferencesKey("manual_mode")
         val DARK = booleanPreferencesKey("dark_mode")
-        val GROUP = stringPreferencesKey("active_group")
+        val DAILY_DRIVER = stringPreferencesKey("daily_driver")
     }
 
     suspend fun load(): Persisted {
@@ -36,7 +36,7 @@ class SettingsStore(private val context: Context) {
             powerArgb = p[K.POWER],
             manualMode = p[K.MANUAL] ?: false,
             darkMode = p[K.DARK] ?: false,
-            activeGroupId = p[K.GROUP],
+            dailyDriverId = p[K.DAILY_DRIVER],
         )
     }
 
@@ -46,5 +46,5 @@ class SettingsStore(private val context: Context) {
         it[K.MANUAL] = true
         it[K.DARK] = dark
     }.let {}
-    suspend fun setActiveGroup(id: String) = context.dataStore.edit { it[K.GROUP] = id }.let {}
+    suspend fun setDailyDriver(id: String) = context.dataStore.edit { it[K.DAILY_DRIVER] = id }.let {}
 }

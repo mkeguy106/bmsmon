@@ -19,6 +19,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -33,10 +34,16 @@ class BmsConnection(
     private val context: Context,
     private val address: String,
     private val displayName: String,
-    private val intervalMs: Long,
+    initialIntervalMs: Long,
+    private val startDelayMs: Long,
+    private val connectGate: Semaphore,
     private val onTelemetry: (Telemetry) -> Unit,
     private val onStatus: (String) -> Unit,
 ) {
+    /** Poll interval, adjustable at runtime (stage batteries poll faster). */
+    @Volatile private var intervalMs: Long = initialIntervalMs
+    fun setInterval(ms: Long) { intervalMs = ms }
+
     private var gatt: BluetoothGatt? = null
     private var ffe2: BluetoothGattCharacteristic? = null
     private val buffer = ArrayList<Byte>()
@@ -58,22 +65,32 @@ class BmsConnection(
     }
 
     private suspend fun loop() {
+        // Stagger startup so the whole fleet doesn't slam connectGatt at once.
+        if (startDelayMs > 0) delay(startDelayMs)
         val adapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
         if (adapter == null || !adapter.isEnabled) {
             onStatus("Bluetooth is off")
             return
         }
+        var backoff = 2000L
         while (running) {
+            var permitHeld = false
             try {
+                // Only a few batteries may be in the "connecting" phase at once — the LE
+                // initiator can't pursue many pending connections without thrashing.
+                connectGate.acquire(); permitHeld = true
                 onStatus("connecting")
                 val device = adapter.getRemoteDevice(address)
                 val ready = CompletableDeferred<Boolean>()
                 connectReady = ready
                 synchronized(buffer) { buffer.clear() }
                 gatt = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
-                val ok = withTimeoutOrNull(15000) { ready.await() } ?: false
+                val ok = withTimeoutOrNull(10000) { ready.await() } ?: false
+                // Established links no longer use the initiator — free the gate either way.
+                connectGate.release(); permitHeld = false
                 if (!ok) throw IllegalStateException("connect/discover failed")
                 onStatus("connected")
+                backoff = 2000L  // reset on success
 
                 while (running) {
                     val data = pollOnce()
@@ -83,11 +100,14 @@ class BmsConnection(
                     delay(intervalMs)
                 }
             } catch (e: CancellationException) {
+                if (permitHeld) connectGate.release()
                 throw e
             } catch (e: Exception) {
+                if (permitHeld) connectGate.release()
                 onStatus("retry: ${e.message}")
                 close()
-                if (running) delay(2000)
+                if (running) delay(backoff)
+                backoff = (backoff * 2).coerceAtMost(20000L)  // back off unreachable batteries
             }
         }
     }

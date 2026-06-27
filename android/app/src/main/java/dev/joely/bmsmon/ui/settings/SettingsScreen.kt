@@ -21,6 +21,8 @@ import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -49,8 +51,8 @@ private fun shortMac(addr: String): String = addr.removePrefix("C8:47:80:")
 fun SettingsScreen(
     state: UiState,
     onBack: () -> Unit,
-    onToggleConnect: () -> Unit,
-    onSelectGroup: (String) -> Unit,
+    onToggleMonitoring: () -> Unit,
+    onSetDailyDriver: (String) -> Unit,
     onSetAccent: (Color) -> Unit,
     onSetPower: (Color) -> Unit,
     onSetMode: (Mode) -> Unit,
@@ -79,8 +81,8 @@ fun SettingsScreen(
                 .padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            BluetoothCard(state, onToggleConnect)
-            GroupsCard(state, onSelectGroup)
+            BluetoothCard(state, onToggleMonitoring)
+            GroupsCard(state, onSetDailyDriver)
             ColorCard("Theme Color", null, ThemeSwatches, state.accent, onSetAccent)
             ColorCard("Power Color", "Inner ring — charge / discharge rate", PowerSwatches, state.power, onSetPower)
             AppearanceCard(state, onSetMode)
@@ -103,74 +105,54 @@ private fun Card(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun BluetoothCard(state: UiState, onToggleConnect: () -> Unit) {
+private fun BluetoothCard(state: UiState, onToggleMonitoring: () -> Unit) {
     val c = Bm.colors
-    val group = state.activeGroup
     Card {
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 14.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 10.dp)) {
             Icon(Icons.Filled.Bluetooth, null, Modifier.size(18.dp), tint = Bm.accent)
-            Text("Bluetooth Connection", color = c.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+            Text("Bluetooth Monitoring", color = c.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
                 maxLines = 1, modifier = Modifier.padding(start = 9.dp))
         }
-        Text("Active base: ${group.label}", color = c.text2, fontSize = 12.sp,
-            modifier = Modifier.padding(bottom = 10.dp))
-        ReadonlyAddress(group.a.name, group.a.address)
-        Box(Modifier.size(width = 0.dp, height = 10.dp))
-        ReadonlyAddress(group.b.name, group.b.address)
-        Box(Modifier.size(width = 0.dp, height = 16.dp))
+        Text(
+            "Connects to every reachable base. The base that's discharging (or charging) takes the main stage and polls fast; the rest poll slowly.",
+            color = c.text2, fontSize = 12.sp, lineHeight = 17.sp,
+            modifier = Modifier.padding(bottom = 16.dp),
+        )
         Box(
             Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(9.dp))
                 .background(Bm.accent)
-                .clickable(onClick = onToggleConnect)
+                .clickable(onClick = onToggleMonitoring)
                 .padding(vertical = 13.dp),
             contentAlignment = Alignment.Center,
         ) {
-            Text(if (state.connected) "Disconnect" else "Connect to Base",
+            Text(if (state.monitoring) "Stop Monitoring" else "Start Monitoring",
                 color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         }
     }
 }
 
 @Composable
-private fun ReadonlyAddress(label: String, address: String) {
-    val c = Bm.colors
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
-            .background(c.inputBg)
-            .border(1.dp, c.inputBorder, RoundedCornerShape(8.dp))
-            .padding(horizontal = 13.dp, vertical = 11.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(label, color = c.text2, fontSize = 12.sp)
-        Text(address, color = c.text, fontFamily = MonoFont, fontSize = 14.sp)
-    }
-}
-
-@Composable
-private fun GroupsCard(state: UiState, onSelectGroup: (String) -> Unit) {
+private fun GroupsCard(state: UiState, onSetDailyDriver: (String) -> Unit) {
     val c = Bm.colors
     Card {
         Text("Battery Groups", color = c.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-        Text("Two batteries per base — tap to select active", color = c.text2, fontSize = 12.sp,
-            modifier = Modifier.padding(top = 5.dp))
+        Text("Two batteries per base — tap to set the daily driver (wins the stage on ties)",
+            color = c.text2, fontSize = 12.sp, modifier = Modifier.padding(top = 5.dp))
         Column(Modifier.padding(top = 14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
             ALL_GROUPS.forEach { g ->
-                GroupRow(g, selected = g.id == state.activeGroupId) { onSelectGroup(g.id) }
+                GroupRow(g, isDailyDriver = g.id == state.dailyDriverId) { onSetDailyDriver(g.id) }
             }
         }
     }
 }
 
 @Composable
-private fun GroupRow(group: BatteryGroup, selected: Boolean, onClick: () -> Unit) {
+private fun GroupRow(group: BatteryGroup, isDailyDriver: Boolean, onClick: () -> Unit) {
     val c = Bm.colors
-    val border = if (selected) Bm.accent else c.border
-    val bg = if (selected) Bm.accent.copy(alpha = 0.14f) else Color.Transparent
+    val border = if (isDailyDriver) Bm.accent else c.border
+    val bg = if (isDailyDriver) Bm.accent.copy(alpha = 0.14f) else Color.Transparent
     Row(
         Modifier
             .fillMaxWidth()
@@ -182,14 +164,24 @@ private fun GroupRow(group: BatteryGroup, selected: Boolean, onClick: () -> Unit
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
-            Text("${group.label} base", color = c.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("${group.label} base", color = c.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                if (isDailyDriver) {
+                    Text("DAILY DRIVER", color = Bm.accent, fontSize = 9.sp, fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.8.sp, modifier = Modifier.padding(start = 8.dp))
+                }
+            }
             Text(
                 "${shortMac(group.a.address)}  ·  ${shortMac(group.b.address)}",
                 color = c.text3, fontFamily = MonoFont, fontSize = 11.sp,
                 modifier = Modifier.padding(top = 3.dp),
             )
         }
-        if (selected) Icon(Icons.Filled.Check, "Selected", Modifier.size(22.dp), tint = Bm.accent)
+        Icon(
+            if (isDailyDriver) Icons.Filled.Star else Icons.Filled.StarBorder,
+            "Daily driver", Modifier.size(22.dp),
+            tint = if (isDailyDriver) Bm.accent else c.text3,
+        )
     }
 }
 
