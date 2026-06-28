@@ -94,7 +94,12 @@ fun HomeScreen(
             PageDots(current = pager.currentPage)
             HorizontalPager(state = pager, modifier = Modifier.weight(1f)) { page ->
                 when (page) {
-                    0 -> StageScreen(state.stageItems(), tempInF = state.tempFahrenheit)
+                    0 -> StageScreen(
+                        items = state.stageItems(),
+                        tempInF = state.tempFahrenheit,
+                        isEmpty = state.roster.batteries.isEmpty(),
+                        onAddScan = onAddScan,
+                    )
                     else -> AllBatteriesScreen(
                         state = state,
                         onSetSort = onSetSort,
