@@ -2,6 +2,8 @@ package dev.joely.bmsmon.ui.home
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,8 +12,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.BluetoothDisabled
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -35,11 +41,40 @@ import kotlin.math.roundToInt
 
 /** The main stage: the active base's two packs, full gauges. */
 @Composable
-fun StageScreen(items: List<StageItem>, tempInF: Boolean, modifier: Modifier = Modifier) {
-    // Sit the packs up near the top bar rather than vertically centered in the page.
-    Column(modifier.fillMaxSize().padding(top = 6.dp)) {
-        items.forEach { item ->
-            BatteryBlock(item, tempInF, Modifier.weight(1f))
+fun StageScreen(
+    items: List<StageItem>,
+    tempInF: Boolean,
+    isEmpty: Boolean,
+    onAddScan: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (isEmpty) {
+        val c = Bm.colors
+        Column(modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center) {
+            Box(
+                Modifier.size(120.dp).clip(CircleShape).background(Bm.accent.copy(alpha = 0.12f))
+                    .border(2.dp, Bm.accent, CircleShape).clickable(onClick = onAddScan),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Filled.Add, "Add a battery", Modifier.size(64.dp), tint = Bm.accent)
+            }
+            Text("Add a battery", color = c.text2, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(top = 16.dp))
+        }
+        return
+    }
+    if (items.size > 2) {
+        Row(modifier.fillMaxSize().horizontalScroll(rememberScrollState()),
+            verticalAlignment = Alignment.CenterVertically) {
+            items.forEach { item ->
+                BatteryBlock(item, tempInF, Modifier.width(320.dp))
+            }
+        }
+    } else {
+        // Sit the packs up near the top bar rather than vertically centered in the page.
+        Column(modifier.fillMaxSize().padding(top = 6.dp)) {
+            items.forEach { item -> BatteryBlock(item, tempInF, Modifier.weight(1f)) }
         }
     }
 }

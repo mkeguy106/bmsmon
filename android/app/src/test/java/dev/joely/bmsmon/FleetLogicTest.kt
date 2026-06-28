@@ -5,7 +5,9 @@ import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.StageInputs
 import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.Telemetry
+import dev.joely.bmsmon.model.DEFAULT_ROSTER
 import dev.joely.bmsmon.model.groupById
+import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.model.isRegen
 import dev.joely.bmsmon.model.resolveStage
 import org.junit.Assert.assertEquals
@@ -28,16 +30,18 @@ class FleetLogicTest {
             capacityAh = 50f, cellV = 3.3f, temp = 25f, state = state)
     }
 
+    private val roster = DEFAULT_ROSTER
+
     private fun fleetWith(vararg groupStates: Pair<String, BatteryState>): Map<String, BatteryStatus> =
         groupStates.flatMap { (gid, st) ->
-            groupById(gid).targets.map { it.address to BatteryStatus(tel(st), reachable = true) }
+            roster.groupById(gid)!!.targets.map { it.address to BatteryStatus(tel(st), reachable = true) }
         }.toMap()
 
     private fun inputs(
         fleet: Map<String, BatteryStatus>,
         lastDischargeAt: Map<String, Long> = emptyMap(),
         current: StageTarget = StageTarget.Base("2012"),
-    ) = StageInputs(fleet, "2012", true, null, 0, lastDischargeAt, hold, current, now)
+    ) = StageInputs(fleet, "2012", true, null, 0, lastDischargeAt, hold, current, now, roster.groupViews())
 
     // --- regen detection ---
 

@@ -47,8 +47,8 @@ import dev.joely.bmsmon.UiState
 import dev.joely.bmsmon.fractionToLux
 import dev.joely.bmsmon.luxToFraction
 import kotlin.math.roundToInt
-import dev.joely.bmsmon.model.ALL_GROUPS
 import dev.joely.bmsmon.model.BatteryGroup
+import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.model.STAGE_HOLD_OPTIONS_MIN
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
@@ -273,7 +273,7 @@ private fun GroupsCard(state: UiState, onSetDailyDriver: (String) -> Unit) {
         Text("Two batteries per base — tap to set the daily driver (wins the stage on ties)",
             color = c.text2, fontSize = 12.sp, modifier = Modifier.padding(top = 5.dp))
         Column(Modifier.padding(top = 14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-            ALL_GROUPS.forEach { g ->
+            state.roster.groupViews().forEach { g ->
                 GroupRow(g, isDailyDriver = g.id == state.dailyDriverId) { onSetDailyDriver(g.id) }
             }
         }
@@ -304,7 +304,7 @@ private fun GroupRow(group: BatteryGroup, isDailyDriver: Boolean, onClick: () ->
                 }
             }
             Text(
-                "${shortMac(group.a.address)}  ·  ${shortMac(group.b.address)}",
+                group.targets.joinToString("  ·  ") { shortMac(it.address) },
                 color = c.text3, fontFamily = MonoFont, fontSize = 11.sp,
                 modifier = Modifier.padding(top = 3.dp),
             )

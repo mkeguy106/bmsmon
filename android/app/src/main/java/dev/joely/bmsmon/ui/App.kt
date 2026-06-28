@@ -20,13 +20,19 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import dev.joely.bmsmon.BatteryViewModel
 import dev.joely.bmsmon.Screen
 import dev.joely.bmsmon.ble.blePermissions
 import dev.joely.bmsmon.ble.hasBlePermissions
+import dev.joely.bmsmon.ui.detail.BatteryDetailScreen
 import dev.joely.bmsmon.ui.home.HomeScreen
+import androidx.activity.compose.BackHandler
+import dev.joely.bmsmon.ui.scan.ScanSheet
 import dev.joely.bmsmon.ui.settings.SettingsScreen
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.BmTheme
@@ -37,6 +43,16 @@ fun App(vm: BatteryViewModel) {
     val context = LocalContext.current
     val systemDark = isSystemInDarkTheme()
     LaunchedEffect(systemDark) { vm.applySystemMode(systemDark) }
+
+    // System / gesture back navigates within the app (detail → list, settings → home) instead of
+    // exiting the activity. Disabled on Home so back there still backgrounds the app as usual.
+    BackHandler(enabled = state.screen != Screen.Home) {
+        when (state.screen) {
+            Screen.Detail -> vm.closeDetail()
+            Screen.Settings -> vm.goHome()
+            else -> {}
+        }
+    }
 
     // Hold the screen on (at the user's brightness) while the app is open, when enabled.
     val window = context.findActivity()?.window
@@ -80,6 +96,14 @@ fun App(vm: BatteryViewModel) {
         }
     }
 
+    var showScan by remember { mutableStateOf(false) }
+    val scanPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { result -> if (result.values.all { it }) showScan = true }
+    val onAddScan: () -> Unit = {
+        if (hasBlePermissions(context)) showScan = true else scanPermLauncher.launch(blePermissions())
+    }
+
     BmTheme(dark = state.isDark, accent = state.accent, power = state.power) {
         Box(Modifier.fillMaxSize().background(Bm.colors.bg)) {
             Box(Modifier.fillMaxSize().systemBarsPadding()) {
@@ -97,6 +121,15 @@ fun App(vm: BatteryViewModel) {
                         onReconnect = vm::reconnectBattery,
                         onDisconnectAll = vm::disconnectAll,
                         onAcknowledge = vm::acknowledgeAlert,
+                        onAddScan = onAddScan,
+                        onOpenDetail = vm::openDetail,
+                        onRemove = vm::removeBattery,
+                        onRename = vm::renameBattery,
+                        onSetGroup = vm::setBatteryGroup,
+                        onCreateGroup = vm::createGroupForBattery,
+                        onRenameGroup = vm::renameGroup,
+                        onPinSingle = { addr -> vm.pinStage(dev.joely.bmsmon.model.StageTarget.Single(addr)) },
+                        onHomePageChanged = vm::setHomePage,
                     )
                     Screen.Settings -> SettingsScreen(
                         state = state,
@@ -116,7 +149,15 @@ fun App(vm: BatteryViewModel) {
                         onSetAppearance = vm::setAppearance,
                         onSetAutoLux = vm::setAutoLuxThreshold,
                     )
+                    Screen.Detail -> BatteryDetailScreen(state = state, onBack = vm::closeDetail)
                 }
+            }
+            if (showScan) {
+                ScanSheet(
+                    roster = state.roster,
+                    onAdd = { address, name -> vm.addBattery(address, name) },
+                    onDismiss = { showScan = false },
+                )
             }
         }
     }

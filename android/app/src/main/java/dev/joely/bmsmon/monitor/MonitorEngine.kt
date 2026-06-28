@@ -3,12 +3,16 @@ package dev.joely.bmsmon.monitor
 import android.content.Context
 import dev.joely.bmsmon.ble.BmsRepository
 import dev.joely.bmsmon.data.TelemetryLogger
-import dev.joely.bmsmon.model.ALL_GROUPS
 import dev.joely.bmsmon.model.BatteryStatus
+import dev.joely.bmsmon.model.DEFAULT_ROSTER
 import dev.joely.bmsmon.model.GroupActivity
+import dev.joely.bmsmon.model.Roster
 import dev.joely.bmsmon.model.Telemetry
+import dev.joely.bmsmon.model.allTargets
+import dev.joely.bmsmon.model.batteryAt
 import dev.joely.bmsmon.model.groupActivity
-import dev.joely.bmsmon.model.groupForAddress
+import dev.joely.bmsmon.model.groupOf
+import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.model.isRegen
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -50,6 +54,9 @@ class MonitorEngine(appContext: Context) {
     private val logger = TelemetryLogger(appContext)
 
     @Volatile private var logging = false
+    // The current roster drives the monitoring target set and group lookups (regen, last-discharge).
+    // It's dynamic (the user can add/remove batteries) so the ViewModel pushes updates via setRoster.
+    @Volatile private var roster: Roster = DEFAULT_ROSTER
 
     private val _state = MutableStateFlow(MonitorState())
     val state: StateFlow<MonitorState> = _state.asStateFlow()
@@ -58,9 +65,10 @@ class MonitorEngine(appContext: Context) {
 
     private fun now() = System.currentTimeMillis()
 
-    /** Begin monitoring all known packs. [seed] pre-populates the fleet (shown dimmed until live). */
-    fun start(seed: Map<String, BatteryStatus>, loggingEnabled: Boolean) {
+    /** Begin monitoring every pack in [roster]. [seed] pre-populates the fleet (dimmed until live). */
+    fun start(roster: Roster, seed: Map<String, BatteryStatus>, loggingEnabled: Boolean) {
         if (_state.value.monitoring) return
+        this.roster = roster
         logging = loggingEnabled
         _state.update {
             MonitorState(
@@ -70,10 +78,16 @@ class MonitorEngine(appContext: Context) {
         }
         repository.start(
             scope = scope,
-            targets = ALL_GROUPS.flatMap { it.targets },
+            targets = roster.allTargets(),
             onTelemetry = ::onTelemetry,
             onReachable = ::onReachable,
         )
+    }
+
+    /** Roster edited while monitoring: update the live target set and group lookups. */
+    fun setRoster(roster: Roster) {
+        this.roster = roster
+        repository.setTargets(roster.allTargets())
     }
 
     /** Stop monitoring: cancels all BLE jobs (each session closes its GATT cleanly) and clears state. */
@@ -104,7 +118,7 @@ class MonitorEngine(appContext: Context) {
     private fun onTelemetry(addr: String, t: Telemetry) {
         val now = now()
         val st0 = _state.value
-        val group = groupForAddress(addr)
+        val group = roster.groupOf(addr)
         // Regen is judged against the group's last-discharge time BEFORE this sample updates it.
         val regen = isRegen(t, group?.let { st0.lastDischargeAt[it.id] }, now)
         _state.update { st ->
@@ -140,8 +154,7 @@ class MonitorEngine(appContext: Context) {
         // Log link transitions so a BLE drop/glitch is visible in the CSV (and tellable apart from
         // a genuine low/idle reading). Only on an actual edge, to avoid spam.
         if (reachable != was && logging) {
-            val name = groupForAddress(addr)?.targets
-                ?.firstOrNull { it.address.equals(addr, ignoreCase = true) }?.name ?: addr
+            val name = roster.batteryAt(addr)?.alias ?: addr
             logger.event(addr, name, if (reachable) "Connected" else "Disconnected", now())
         }
     }
@@ -153,7 +166,7 @@ class MonitorEngine(appContext: Context) {
         now: Long,
     ): Map<String, Long> {
         val next = prev.toMutableMap()
-        ALL_GROUPS.forEach { g ->
+        roster.groupViews().forEach { g ->
             if (groupActivity(g, fleet) == GroupActivity.Discharging) next[g.id] = now
         }
         return next

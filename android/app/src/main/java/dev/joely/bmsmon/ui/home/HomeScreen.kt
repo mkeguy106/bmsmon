@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -73,11 +74,23 @@ fun HomeScreen(
     onReconnect: (String) -> Unit,
     onDisconnectAll: () -> Unit,
     onAcknowledge: () -> Unit,
+    onAddScan: () -> Unit,
+    onOpenDetail: (String) -> Unit,
+    onRemove: (String) -> Unit,
+    onRename: (String, String) -> Unit,
+    onSetGroup: (String, String?) -> Unit,
+    onCreateGroup: (String, String) -> Unit,
+    onRenameGroup: (String, String) -> Unit,
+    onPinSingle: (String) -> Unit,
+    onHomePageChanged: (Int) -> Unit,
 ) {
     val c = Bm.colors
     // Page 0 = stage (main); page 1 = all batteries — swipe LEFT from the stage to reach it.
-    val pager = rememberPagerState(initialPage = 0) { 2 }
+    // Start on the remembered page so returning from the detail screen lands you back where you were.
+    val pager = rememberPagerState(initialPage = state.homePage) { 2 }
     val scope = rememberCoroutineScope()
+    // Remember the current page so the detail screen's back button can restore it.
+    LaunchedEffect(pager.currentPage) { onHomePageChanged(pager.currentPage) }
     val alert = state.stageAlert()
 
     Box(Modifier.fillMaxSize()) {
@@ -85,7 +98,12 @@ fun HomeScreen(
             TopBar(state, pager.currentPage, onCycleAppearance, onSettings, onToggleMonitoring)
             HorizontalPager(state = pager, modifier = Modifier.weight(1f)) { page ->
                 when (page) {
-                    0 -> StageScreen(state.stageItems(), tempInF = state.tempFahrenheit)
+                    0 -> StageScreen(
+                        items = state.stageItems(),
+                        tempInF = state.tempFahrenheit,
+                        isEmpty = state.roster.batteries.isEmpty(),
+                        onAddScan = onAddScan,
+                    )
                     else -> AllBatteriesScreen(
                         state = state,
                         onSetSort = onSetSort,
@@ -95,9 +113,20 @@ fun HomeScreen(
                             onPinStage(StageTarget.Base(groupId))
                             scope.launch { pager.animateScrollToPage(0) }
                         },
+                        onPinSingle = { addr ->
+                            onPinSingle(addr)
+                            scope.launch { pager.animateScrollToPage(0) }
+                        },
                         onDisconnect = onDisconnect,
                         onReconnect = onReconnect,
                         onDisconnectAll = onDisconnectAll,
+                        onAddScan = onAddScan,
+                        onOpenDetail = onOpenDetail,
+                        onRemove = onRemove,
+                        onRename = onRename,
+                        onSetGroup = onSetGroup,
+                        onCreateGroup = onCreateGroup,
+                        onRenameGroup = onRenameGroup,
                         modifier = Modifier.padding(top = 6.dp),
                     )
                 }

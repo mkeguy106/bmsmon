@@ -35,7 +35,7 @@ class BmsRepository(private val context: Context) {
     private val gate = Semaphore(2)
 
     private var scope: CoroutineScope? = null
-    private var allTargets: List<BmsTarget> = emptyList()
+    @Volatile private var allTargets: List<BmsTarget> = emptyList()
     @Volatile private var running = false
 
     @Volatile private var stageAddrs: Set<String> = emptySet()
@@ -82,6 +82,14 @@ class BmsRepository(private val context: Context) {
             }
         }
         wakeSampler?.complete(Unit)  // pool changed
+    }
+
+    /** Update the full target set live (roster add/remove). Sampler picks it up next loop. */
+    fun setTargets(targets: List<BmsTarget>) {
+        allTargets = targets.map { it.copy(address = it.address.trim().uppercase()) }
+        val present = allTargets.map { it.address }.toSet()
+        stageJobs.keys.filter { it !in present }.forEach { addr -> stageJobs.remove(addr)?.cancel() }
+        wakeSampler?.complete(Unit)
     }
 
     /** Reset/retry everything immediately (e.g. app returned to foreground). */

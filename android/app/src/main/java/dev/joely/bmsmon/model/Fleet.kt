@@ -26,8 +26,8 @@ sealed interface StageTarget {
     data class Single(val address: String) : StageTarget
 }
 
-fun StageTarget.addresses(): Set<String> = when (this) {
-    is StageTarget.Base -> groupById(groupId).targets.map { it.address }.toSet()
+fun StageTarget.addresses(roster: Roster): Set<String> = when (this) {
+    is StageTarget.Base -> roster.groupById(groupId)?.targets?.map { it.address }?.toSet() ?: emptySet()
     is StageTarget.Single -> setOf(address)
 }
 
@@ -41,6 +41,7 @@ data class StageInputs(
     val holdMs: Long,
     val current: StageTarget,
     val now: Long,
+    val groups: List<BatteryGroup>,
 )
 
 /**
@@ -62,7 +63,7 @@ fun resolveStage(i: StageInputs): StageTarget {
     if (!i.dynamicEnabled) return i.current
 
     fun pick(act: GroupActivity): BatteryGroup? {
-        val matches = ALL_GROUPS.filter { groupActivity(it, i.fleet) == act }
+        val matches = i.groups.filter { groupActivity(it, i.fleet) == act }
         if (matches.isEmpty()) return null
         return matches.firstOrNull { it.id == i.dailyDriverId } ?: matches.first()
     }
@@ -71,7 +72,7 @@ fun resolveStage(i: StageInputs): StageTarget {
     pick(GroupActivity.Discharging)?.let { return StageTarget.Base(it.id) }
 
     // 2. hold: most recent discharge within the window keeps the stage (idle or out of range)
-    ALL_GROUPS
+    i.groups
         .mapNotNull { g -> i.lastDischargeAt[g.id]?.let { ts -> g to ts } }
         .filter { i.now - it.second < i.holdMs }
         .maxByOrNull { it.second }
@@ -98,9 +99,6 @@ private const val CURRENT_EPS = 0.05f
 // moments ago (active driving) — distinct from steady charging (parked on a charger).
 const val REGEN_EPS = 0.1f
 const val REGEN_WINDOW_MS = 30_000L
-
-fun groupForAddress(address: String): BatteryGroup? =
-    ALL_GROUPS.firstOrNull { g -> g.targets.any { it.address.equals(address, ignoreCase = true) } }
 
 /**
  * True when [t] shows charge-direction current but the pack's base discharged within the
