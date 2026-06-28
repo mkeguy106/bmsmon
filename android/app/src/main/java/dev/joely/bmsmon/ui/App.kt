@@ -1,11 +1,15 @@
 package dev.joely.bmsmon.ui
 
+import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.pm.PackageManager
+import android.os.Build
 import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
@@ -42,16 +46,34 @@ fun App(vm: BatteryViewModel) {
         onDispose { window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
     }
 
+    // Notification permission (Android 13+) is requested opportunistically for the foreground-
+    // service notification — it never gates monitoring; BLE only needs the BLE permissions.
+    val notifLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* result ignored: monitoring runs regardless */ }
+    fun askNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { result ->
-        if (result.values.all { it }) vm.startMonitoring()
+        if (result.values.all { it }) {
+            askNotificationPermission()
+            vm.startMonitoring()
+        }
     }
 
     val onMonitorToggle: () -> Unit = {
         if (state.monitoring) {
             vm.stopMonitoring()
         } else if (hasBlePermissions(context)) {
+            askNotificationPermission()
             vm.startMonitoring()
         } else {
             permLauncher.launch(blePermissions())
