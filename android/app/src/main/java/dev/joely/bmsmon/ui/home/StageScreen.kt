@@ -36,7 +36,8 @@ import kotlin.math.roundToInt
 /** The main stage: the active base's two packs, full gauges. */
 @Composable
 fun StageScreen(items: List<StageItem>, tempInF: Boolean, modifier: Modifier = Modifier) {
-    Column(modifier.fillMaxSize()) {
+    // Sit the packs up near the top bar rather than vertically centered in the page.
+    Column(modifier.fillMaxSize().padding(top = 6.dp)) {
         items.forEach { item ->
             BatteryBlock(item, tempInF, Modifier.weight(1f))
         }
@@ -52,7 +53,7 @@ private fun BatteryBlock(item: StageItem, tempInF: Boolean, modifier: Modifier =
             .fillMaxWidth()
             .padding(horizontal = 18.dp, vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
+        verticalArrangement = Arrangement.Top,
     ) {
         Box(Modifier.size(170.dp), contentAlignment = Alignment.Center) {
             DualRingGauge(
