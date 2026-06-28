@@ -86,6 +86,7 @@ fun App(vm: BatteryViewModel) {
                         onSetAlertsOn = vm::setAlertsOn,
                         onToggleThreshold = vm::toggleThreshold,
                         onSetKeepScreenOn = vm::setKeepScreenOn,
+                        onSetTempFahrenheit = vm::setTempFahrenheit,
                         onSetLogging = vm::setLogging,
                         onClearLog = vm::clearLog,
                         onSetAccent = vm::setAccent,

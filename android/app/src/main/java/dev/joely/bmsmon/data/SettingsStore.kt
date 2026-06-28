@@ -31,6 +31,7 @@ data class Persisted(
     val filters: Set<String>?,
     val filterBaseId: String?,
     val lastTelemetry: Map<String, Telemetry>,
+    val tempFahrenheit: Boolean,
 )
 
 /** Persists user preferences (colors, appearance override, BMS addresses) via DataStore. */
@@ -53,6 +54,7 @@ class SettingsStore(private val context: Context) {
         val FILTERS = stringSetPreferencesKey("all_filters")
         val FILTER_BASE = stringPreferencesKey("all_filter_base")
         val LAST_TELEMETRY = stringPreferencesKey("last_telemetry")
+        val TEMP_FAHRENHEIT = booleanPreferencesKey("temp_fahrenheit")
     }
 
     suspend fun load(): Persisted {
@@ -74,6 +76,7 @@ class SettingsStore(private val context: Context) {
             filters = p[K.FILTERS],
             filterBaseId = p[K.FILTER_BASE],
             lastTelemetry = p[K.LAST_TELEMETRY]?.let(::decodeTelemetry) ?: emptyMap(),
+            tempFahrenheit = p[K.TEMP_FAHRENHEIT] ?: true,
         )
     }
 
@@ -97,6 +100,7 @@ class SettingsStore(private val context: Context) {
     suspend fun setFilterBase(id: String) = context.dataStore.edit { it[K.FILTER_BASE] = id }.let {}
     suspend fun setLastTelemetry(map: Map<String, Telemetry>) =
         context.dataStore.edit { it[K.LAST_TELEMETRY] = encodeTelemetry(map) }.let {}
+    suspend fun setTempFahrenheit(on: Boolean) = context.dataStore.edit { it[K.TEMP_FAHRENHEIT] = on }.let {}
 }
 
 /** Compact JSON for the last-known per-battery telemetry (address -> the row's display fields). */

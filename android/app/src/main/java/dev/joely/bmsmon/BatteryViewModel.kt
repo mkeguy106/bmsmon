@@ -93,6 +93,7 @@ data class UiState(
     val enabledThresholds: Set<Int> = ALERT_THRESHOLDS.toSet(),
     val acknowledgedThresholds: Set<Int> = emptySet(),
     val keepScreenOn: Boolean = true,
+    val tempFahrenheit: Boolean = true,
 ) {
     val isDark get() = mode == Mode.Dark
     val dailyDriver: BatteryGroup get() = groupById(dailyDriverId)
@@ -181,6 +182,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     alertsOn = p.alertsOn,
                     enabledThresholds = p.enabledThresholds ?: s.enabledThresholds,
                     keepScreenOn = p.keepScreenOn,
+                    tempFahrenheit = p.tempFahrenheit,
                     sortKey = p.sortKey?.let { runCatching { SortKey.valueOf(it) }.getOrNull() } ?: s.sortKey,
                     filters = p.filters?.mapNotNull { runCatching { FilterKey.valueOf(it) }.getOrNull() }?.toSet()
                         ?: s.filters,
@@ -408,6 +410,10 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     fun setKeepScreenOn(enabled: Boolean) {
         _state.update { it.copy(keepScreenOn = enabled) }
         viewModelScope.launch { store.setKeepScreenOn(enabled) }
+    }
+    fun setTempFahrenheit(enabled: Boolean) {
+        _state.update { it.copy(tempFahrenheit = enabled) }
+        viewModelScope.launch { store.setTempFahrenheit(enabled) }
     }
 
     /** Acknowledge the active alert: silence it until SOC drops past the next enabled level. */
