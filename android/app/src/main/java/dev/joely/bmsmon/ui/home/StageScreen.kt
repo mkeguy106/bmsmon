@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -19,9 +20,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.StageItem
 import dev.joely.bmsmon.model.Telemetry
+import dev.joely.bmsmon.ui.ChargingBolt
 import dev.joely.bmsmon.ui.gauge.DualRingGauge
+import dev.joely.bmsmon.ui.rememberBoltAlpha
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
 import dev.joely.bmsmon.ui.theme.RegenGreen
@@ -59,6 +63,10 @@ private fun BatteryBlock(item: StageItem, modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxSize(),
                 regen = item.regen,
             )
+            // Charging bolt pulses behind the readout, peaking bolder at the top of each beat.
+            if (b.state == BatteryState.Charging) {
+                ChargingBoltIcon()
+            }
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     "${b.soc.roundToInt()}%",
@@ -86,6 +94,17 @@ private fun BatteryBlock(item: StageItem, modifier: Modifier = Modifier) {
         )
         StatGrid(b, Modifier.padding(top = 12.dp))
     }
+}
+
+/** The charging bolt, pulsing its opacity (bolder at the peak of each beat). */
+@Composable
+private fun ChargingBoltIcon() {
+    Icon(
+        ChargingBolt,
+        contentDescription = null,
+        modifier = Modifier.size(width = 116.dp, height = 158.dp),
+        tint = Bm.accent.copy(alpha = rememberBoltAlpha(0.20f, 0.70f)),
+    )
 }
 
 private data class Stat(val label: String, val value: String, val unit: String)

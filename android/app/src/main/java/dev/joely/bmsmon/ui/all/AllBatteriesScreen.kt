@@ -9,8 +9,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -39,8 +41,11 @@ import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.BmsTarget
 import dev.joely.bmsmon.model.Telemetry
+import dev.joely.bmsmon.ui.ChargingBolt
+import dev.joely.bmsmon.ui.rememberBoltAlpha
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
+import dev.joely.bmsmon.ui.theme.socSeverity
 import kotlin.math.roundToInt
 
 private data class Row(val group: BatteryGroup, val target: BmsTarget, val status: BatteryStatus?) {
@@ -111,7 +116,7 @@ fun AllBatteriesScreen(
             }
         }
 
-        LazyColumn(Modifier.fillMaxWidth().padding(top = 6.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+        LazyColumn(Modifier.fillMaxWidth().padding(top = 6.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
             items(rows, key = { it.target.address }) { row ->
                 BatteryRow(
                     row = row,
@@ -168,6 +173,7 @@ private fun BatteryRow(
 ) {
     val c = Bm.colors
     val t = row.tele
+    val reachable = monitoring && row.reachable && !disabled
     val dim = disabled || (monitoring && !row.reachable)
 
     val (stateLabel, stateColor) = when {
@@ -180,56 +186,84 @@ private fun BatteryRow(
         else -> "—" to c.text3
     }
     val borderColor = if (isStage) Bm.accent else c.border
+    val socColor = if (reachable && t != null) socSeverity(t.soc, Bm.accent) else c.text3
 
-    Row(
+    Column(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(9.dp))
             .background(if (isStage) Bm.accent.copy(alpha = 0.08f) else c.card2)
-            .border(1.dp, borderColor, RoundedCornerShape(10.dp))
+            .border(1.dp, borderColor, RoundedCornerShape(9.dp))
             .clickable(onClick = onPin)
-            .padding(horizontal = 13.dp, vertical = 11.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .padding(horizontal = 12.dp, vertical = 9.dp),
+        verticalArrangement = Arrangement.spacedBy(7.dp),
     ) {
-        Column(Modifier.weight(1f).alpha(if (dim) 0.5f else 1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(row.target.name, color = c.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        // Header line: identity + state on the left, SOC% (+ link button) on the right.
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier.weight(1f).alpha(if (dim) 0.5f else 1f),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(row.target.name, color = c.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                 if (isDailyDriver) {
-                    Icon(Icons.Filled.Star, "Daily driver", Modifier.padding(start = 6.dp).size(14.dp), tint = Bm.accent)
+                    Icon(Icons.Filled.Star, "Daily driver", Modifier.padding(start = 6.dp).size(12.dp), tint = Bm.accent)
                 }
                 if (isStage) {
-                    Text("STAGE", color = Bm.accent, fontSize = 9.sp, fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.8.sp, modifier = Modifier.padding(start = 8.dp))
+                    Text("STAGE", color = Bm.accent, fontSize = 8.sp, fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.7.sp, modifier = Modifier.padding(start = 8.dp))
                 }
-            }
-            Row(Modifier.padding(top = 3.dp)) {
-                Text(stateLabel, color = stateColor, fontSize = 12.sp)
+                Text(stateLabel, color = stateColor, fontSize = 11.sp,
+                    modifier = Modifier.padding(start = 8.dp))
                 // last-known voltage stays visible even when out of range / disconnected
                 if (t != null) {
-                    Text(" · %.1f V".format(t.voltage), color = c.text3, fontFamily = MonoFont, fontSize = 12.sp)
+                    Text(" · %.1f V".format(t.voltage), color = c.text3, fontFamily = MonoFont, fontSize = 11.sp)
+                }
+            }
+            // Pulsing charging bolt sits just left of the percentage while this pack charges.
+            if (reachable && t?.state == BatteryState.Charging) {
+                Icon(
+                    ChargingBolt,
+                    contentDescription = "Charging",
+                    modifier = Modifier.padding(start = 8.dp).size(width = 11.dp, height = 16.dp),
+                    tint = Bm.accent.copy(alpha = rememberBoltAlpha(0.35f, 1f)),
+                )
+            }
+            Text(if (reachable && t != null) "${t.soc.roundToInt()}%" else "—",
+                color = socColor, fontFamily = MonoFont, fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.alpha(if (dim) 0.5f else 1f).padding(start = 8.dp))
+            // disconnect / reconnect (Bluetooth link)
+            if (monitoring) {
+                Box(
+                    Modifier.padding(start = 4.dp).size(30.dp).clip(RoundedCornerShape(8.dp))
+                        .clickable(onClick = if (disabled) onReconnect else onDisconnect),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        if (disabled) Icons.Filled.Link else Icons.Filled.LinkOff,
+                        if (disabled) "Reconnect" else "Disconnect",
+                        Modifier.size(17.dp),
+                        tint = if (disabled) Bm.accent else c.text3,
+                    )
                 }
             }
         }
-        Column(horizontalAlignment = Alignment.End, modifier = Modifier.alpha(if (dim) 0.5f else 1f).padding(end = 6.dp)) {
-            Text(if (t != null) "${t.soc.roundToInt()}%" else "—",
-                color = Bm.accent, fontFamily = MonoFont, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-            if (t != null) {
-                Text("${t.capacityAh.roundToInt()} Ah", color = c.text2, fontFamily = MonoFont, fontSize = 11.sp)
-            }
-        }
-        // disconnect / reconnect (Bluetooth link)
-        if (monitoring) {
-            Box(
-                Modifier.size(34.dp).clip(RoundedCornerShape(8.dp))
-                    .clickable(onClick = if (disabled) onReconnect else onDisconnect),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    if (disabled) Icons.Filled.Link else Icons.Filled.LinkOff,
-                    if (disabled) "Reconnect" else "Disconnect",
-                    Modifier.size(18.dp),
-                    tint = if (disabled) Bm.accent else c.text3,
-                )
+        // Capacity bar — only for reachable packs (nominal full = 100 Ah).
+        if (reachable && t != null) {
+            val capPct = (t.capacityAh.coerceIn(0f, 100f)) / 100f
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("CAPACITY", color = c.text3, fontSize = 9.sp, fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.5.sp)
+                Box(
+                    Modifier.weight(1f).padding(horizontal = 10.dp).height(5.dp)
+                        .clip(RoundedCornerShape(3.dp)).background(c.inputBg),
+                ) {
+                    Box(
+                        Modifier.fillMaxWidth(capPct).height(5.dp)
+                            .clip(RoundedCornerShape(3.dp)).background(socColor),
+                    )
+                }
+                Text("${t.capacityAh.roundToInt()} Ah", color = c.text2, fontFamily = MonoFont, fontSize = 11.sp,
+                    modifier = Modifier.width(48.dp), textAlign = androidx.compose.ui.text.style.TextAlign.End)
             }
         }
     }

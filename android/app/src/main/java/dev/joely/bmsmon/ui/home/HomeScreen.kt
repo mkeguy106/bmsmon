@@ -1,7 +1,14 @@
 package dev.joely.bmsmon.ui.home
 
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -14,6 +21,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.BluetoothDisabled
@@ -21,22 +29,30 @@ import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.joely.bmsmon.FilterKey
 import dev.joely.bmsmon.SortKey
+import dev.joely.bmsmon.StageAlert
 import dev.joely.bmsmon.UiState
 import dev.joely.bmsmon.model.GroupActivity
 import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.ui.all.AllBatteriesScreen
+import dev.joely.bmsmon.ui.theme.AlertCritical
+import dev.joely.bmsmon.ui.theme.AlertWarn
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.RegenGreen
 import kotlinx.coroutines.launch
@@ -55,34 +71,98 @@ fun HomeScreen(
     onDisconnect: (String) -> Unit,
     onReconnect: (String) -> Unit,
     onDisconnectAll: () -> Unit,
+    onAcknowledge: () -> Unit,
 ) {
     val c = Bm.colors
     // Page 0 = stage (main); page 1 = all batteries — swipe LEFT from the stage to reach it.
     val pager = rememberPagerState(initialPage = 0) { 2 }
     val scope = rememberCoroutineScope()
+    val alert = state.stageAlert()
 
-    Column(Modifier.fillMaxSize().background(c.bg)) {
-        TopBar(state, onToggleMode, onSettings, onToggleMonitoring)
-        if (state.logging) LoggingBanner(state)
-        PageDots(current = pager.currentPage)
-        HorizontalPager(state = pager, modifier = Modifier.weight(1f)) { page ->
-            when (page) {
-                0 -> StageScreen(state.stageItems())
-                else -> AllBatteriesScreen(
-                    state = state,
-                    onSetSort = onSetSort,
-                    onToggleFilter = onToggleFilter,
-                    onSetFilterBase = onSetFilterBase,
-                    onPinBase = { groupId ->
-                        onPinStage(StageTarget.Base(groupId))
-                        scope.launch { pager.animateScrollToPage(0) }
-                    },
-                    onDisconnect = onDisconnect,
-                    onReconnect = onReconnect,
-                    onDisconnectAll = onDisconnectAll,
-                    modifier = Modifier.padding(top = 6.dp),
-                )
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize().background(c.bg)) {
+            TopBar(state, onToggleMode, onSettings, onToggleMonitoring)
+            if (state.logging) LoggingBanner(state)
+            PageDots(current = pager.currentPage)
+            HorizontalPager(state = pager, modifier = Modifier.weight(1f)) { page ->
+                when (page) {
+                    0 -> StageScreen(state.stageItems())
+                    else -> AllBatteriesScreen(
+                        state = state,
+                        onSetSort = onSetSort,
+                        onToggleFilter = onToggleFilter,
+                        onSetFilterBase = onSetFilterBase,
+                        onPinBase = { groupId ->
+                            onPinStage(StageTarget.Base(groupId))
+                            scope.launch { pager.animateScrollToPage(0) }
+                        },
+                        onDisconnect = onDisconnect,
+                        onReconnect = onReconnect,
+                        onDisconnectAll = onDisconnectAll,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                }
             }
+        }
+        // Alerts are evaluated only while the stage (page 0) is foregrounded.
+        if (alert.flashing && pager.currentPage == 0) {
+            DangerOverlay(alert, onAcknowledge)
+        }
+    }
+}
+
+/** Full-screen pulsing wash + bottom Acknowledge bar, severity-colored. */
+@Composable
+private fun DangerOverlay(alert: StageAlert, onAcknowledge: () -> Unit) {
+    val flashColor = if (alert.critical) AlertCritical else AlertWarn
+    val peak = if (alert.critical) 0.58f else 0.34f
+    val duration = if (alert.critical) 1000 else 1500
+    val label = if (alert.critical) "CRITICAL" else "LOW BATTERY"
+
+    val transition = rememberInfiniteTransition(label = "danger")
+    val washAlpha by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = peak,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = duration, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "washAlpha",
+    )
+
+    // Non-interactive wash over the whole screen.
+    Box(Modifier.fillMaxSize().alpha(washAlpha).background(flashColor))
+
+    // Acknowledge bar pinned to the bottom.
+    Column(
+        Modifier.fillMaxSize().padding(18.dp),
+        verticalArrangement = Arrangement.Bottom,
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(bottom = 12.dp),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Filled.Warning, null, Modifier.size(18.dp), tint = Color.White)
+            Text(
+                "$label · ${alert.lowSoc}% · BELOW ${alert.activeThreshold}%",
+                color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                letterSpacing = 0.6.sp, modifier = Modifier.padding(start = 9.dp),
+            )
+        }
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .shadow(14.dp, RoundedCornerShape(13.dp))
+                .clip(RoundedCornerShape(13.dp))
+                .background(flashColor)
+                .border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(13.dp))
+                .clickable(onClick = onAcknowledge)
+                .padding(16.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("ACKNOWLEDGE", color = Color.White, fontSize = 15.sp,
+                fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
         }
     }
 }

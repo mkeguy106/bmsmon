@@ -11,6 +11,7 @@ import dev.joely.bmsmon.data.SettingsStore
 import dev.joely.bmsmon.data.TelemetryLogger
 import dev.joely.bmsmon.model.ALL_GROUPS
 import dev.joely.bmsmon.model.BatteryGroup
+import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.DEFAULT_GROUP_ID
 import dev.joely.bmsmon.model.DEFAULT_STAGE_HOLD_MIN
@@ -35,12 +36,28 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 import kotlin.random.Random
 
 enum class Screen { Home, Settings }
 enum class Mode { Dark, Light }
 enum class SortKey { Activity, Soc, Base }
 enum class FilterKey { ReachableOnly, ActiveOnly, ByBase, DailyDriverOnly }
+
+/** All low-battery alert thresholds, most severe last (matches the prototype + handoff). */
+val ALERT_THRESHOLDS = listOf(30, 25, 20, 15, 10, 5)
+
+/**
+ * The resolved low-battery alert for the current stage. [flashing] drives the screen wash;
+ * [activeThreshold] is the most-severe crossed level; [ackEffective] are acks still in force.
+ */
+data class StageAlert(
+    val flashing: Boolean,
+    val critical: Boolean,
+    val lowSoc: Int,
+    val activeThreshold: Int?,
+    val ackEffective: Set<Int>,
+)
 
 data class UiState(
     val screen: Screen = Screen.Home,
@@ -68,6 +85,10 @@ data class UiState(
     val peakPowerW: Float = 0f,
     val peakCurrentA: Float = 0f,
     val logPath: String = "",
+    // low-battery alerts
+    val alertsOn: Boolean = true,
+    val enabledThresholds: Set<Int> = ALERT_THRESHOLDS.toSet(),
+    val acknowledgedThresholds: Set<Int> = emptySet(),
 ) {
     val isDark get() = mode == Mode.Dark
     val dailyDriver: BatteryGroup get() = groupById(dailyDriverId)
@@ -104,6 +125,28 @@ data class UiState(
     val stageActivity: GroupActivity
         get() = (stageTarget as? StageTarget.Base)?.let { groupActivity(groupById(it.groupId), fleet) }
             ?: GroupActivity.Unknown
+
+    /**
+     * Low-battery alert for the stage, driven off its reachable packs' real telemetry.
+     * Mirrors the handoff state machine: the most-severe crossed (and un-acked) threshold
+     * flashes; a charging low pack suppresses it; acks only count while still crossed.
+     */
+    fun stageAlert(): StageAlert {
+        val none = StageAlert(false, false, 100, null, emptySet())
+        if (!monitoring) return none
+        val packs = stageTarget.addresses()
+            .mapNotNull { fleet[it]?.takeIf { s -> s.reachable }?.telemetry }
+        val lowPack = packs.minByOrNull { it.soc } ?: return none
+        val lowSoc = lowPack.soc
+        val lowCharging = lowPack.state == BatteryState.Charging
+        val crossed = enabledThresholds.filter { lowSoc < it }.toSet()
+        val activeThreshold = crossed.minOrNull()
+        val ackEffective = acknowledgedThresholds.intersect(crossed)
+        val flashing = alertsOn && !lowCharging &&
+            activeThreshold != null && activeThreshold !in ackEffective
+        val critical = activeThreshold != null && activeThreshold <= 15
+        return StageAlert(flashing, critical, lowSoc.roundToInt(), activeThreshold, ackEffective)
+    }
 }
 
 class BatteryViewModel(app: Application) : AndroidViewModel(app) {
@@ -131,6 +174,8 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     dynamicStage = p.dynamicStage ?: s.dynamicStage,
                     stageHoldMinutes = p.stageHoldMinutes ?: s.stageHoldMinutes,
                     logging = p.logging,
+                    alertsOn = p.alertsOn,
+                    enabledThresholds = p.enabledThresholds ?: s.enabledThresholds,
                     stageTarget = StageTarget.Base(dd.id),
                     filterBaseId = dd.id,
                     demo = demoFor(dd),
@@ -308,6 +353,25 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     fun clearLog() {
         logger.clear()
         _state.update { it.copy(peakPowerW = 0f, peakCurrentA = 0f) }
+    }
+
+    // --- low-battery alerts ---
+    fun setAlertsOn(enabled: Boolean) {
+        _state.update { it.copy(alertsOn = enabled) }
+        viewModelScope.launch { store.setAlertsOn(enabled) }
+    }
+    fun toggleThreshold(t: Int) {
+        _state.update {
+            val next = if (t in it.enabledThresholds) it.enabledThresholds - t else it.enabledThresholds + t
+            it.copy(enabledThresholds = next)
+        }
+        viewModelScope.launch { store.setThresholds(_state.value.enabledThresholds) }
+    }
+    /** Acknowledge the active alert: silence it until SOC drops past the next enabled level. */
+    fun acknowledgeAlert() = _state.update { s ->
+        val a = s.stageAlert()
+        if (a.activeThreshold == null) s
+        else s.copy(acknowledgedThresholds = a.ackEffective + a.activeThreshold)
     }
 
     private fun onReachable(addr: String, r: Boolean) {
