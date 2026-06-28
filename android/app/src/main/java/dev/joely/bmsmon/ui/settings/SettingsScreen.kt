@@ -18,18 +18,22 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.BrightnessAuto
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.Icon
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
@@ -38,8 +42,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.joely.bmsmon.ALERT_THRESHOLDS
-import dev.joely.bmsmon.Mode
+import dev.joely.bmsmon.Appearance
 import dev.joely.bmsmon.UiState
+import dev.joely.bmsmon.fractionToLux
+import dev.joely.bmsmon.luxToFraction
+import kotlin.math.roundToInt
 import dev.joely.bmsmon.model.BatteryGroup
 import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.model.STAGE_HOLD_OPTIONS_MIN
@@ -67,7 +74,8 @@ fun SettingsScreen(
     onClearLog: () -> Unit,
     onSetAccent: (Color) -> Unit,
     onSetPower: (Color) -> Unit,
-    onSetMode: (Mode) -> Unit,
+    onSetAppearance: (Appearance) -> Unit,
+    onSetAutoLux: (Float) -> Unit,
 ) {
     val c = Bm.colors
     Column(Modifier.fillMaxSize().background(c.bg)) {
@@ -99,7 +107,7 @@ fun SettingsScreen(
             GroupsCard(state, onSetDailyDriver)
             ColorCard("Theme Color", null, ThemeSwatches, state.accent, onSetAccent)
             ColorCard("Power Color", "Inner ring — charge / discharge rate", PowerSwatches, state.power, onSetPower)
-            AppearanceCard(state, onSetMode)
+            AppearanceCard(state, onSetAppearance, onSetAutoLux)
             TemperatureCard(state, onSetTempFahrenheit)
             KeepScreenOnCard(state, onSetKeepScreenOn)
             UsageLoggingCard(state, onSetLogging, onClearLog)
@@ -369,17 +377,51 @@ private fun ColorCard(
 }
 
 @Composable
-private fun AppearanceCard(state: UiState, onSetMode: (Mode) -> Unit) {
+private fun AppearanceCard(
+    state: UiState,
+    onSetAppearance: (Appearance) -> Unit,
+    onSetAutoLux: (Float) -> Unit,
+) {
     val c = Bm.colors
     Card {
         Text("Appearance", color = c.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
             modifier = Modifier.padding(bottom = 14.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-            AppearanceButton("Dark", Icons.Filled.DarkMode, state.isDark, Modifier.weight(1f)) { onSetMode(Mode.Dark) }
-            AppearanceButton("Light", Icons.Filled.LightMode, !state.isDark, Modifier.weight(1f)) { onSetMode(Mode.Light) }
+            AppearanceButton("Dark", Icons.Filled.DarkMode, state.appearance == Appearance.Dark,
+                Modifier.weight(1f)) { onSetAppearance(Appearance.Dark) }
+            AppearanceButton("Light", Icons.Filled.LightMode, state.appearance == Appearance.Light,
+                Modifier.weight(1f)) { onSetAppearance(Appearance.Light) }
         }
-        Text("Follows your system setting by default.", color = c.text3, fontSize = 11.sp,
-            modifier = Modifier.padding(top = 10.dp))
+        Row(Modifier.padding(top = 9.dp), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+            AppearanceButton("System", Icons.Filled.PhoneAndroid, state.appearance == Appearance.System,
+                Modifier.weight(1f)) { onSetAppearance(Appearance.System) }
+            AppearanceButton("Auto", Icons.Filled.BrightnessAuto, state.appearance == Appearance.Auto,
+                Modifier.weight(1f), enabled = state.hasLightSensor) { onSetAppearance(Appearance.Auto) }
+        }
+        if (!state.hasLightSensor) {
+            Text("No light sensor on this device — Auto unavailable.", color = c.text3, fontSize = 11.sp,
+                modifier = Modifier.padding(top = 10.dp))
+        } else if (state.appearance == Appearance.Auto) {
+            val lux = state.currentLux?.roundToInt()
+            Text(
+                "Current: ${lux?.toString() ?: "—"} lux   ·   switch around ${state.autoLuxThreshold.roundToInt()} lux",
+                color = c.text2, fontSize = 12.sp, fontFamily = MonoFont,
+                modifier = Modifier.padding(top = 12.dp),
+            )
+            Slider(
+                value = luxToFraction(state.autoLuxThreshold),
+                onValueChange = { onSetAutoLux(fractionToLux(it)) },
+            )
+            Text("Brighter than the cutover → Light; dimmer → Dark.", color = c.text3, fontSize = 11.sp)
+        } else {
+            val note = when (state.appearance) {
+                Appearance.System -> "Follows your phone's theme."
+                Appearance.Dark -> "Dark theme locked on."
+                Appearance.Light -> "Light theme locked on."
+                Appearance.Auto -> ""
+            }
+            Text(note, color = c.text3, fontSize = 11.sp, modifier = Modifier.padding(top = 10.dp))
+        }
     }
 }
 
@@ -389,23 +431,26 @@ private fun AppearanceButton(
     icon: ImageVector,
     active: Boolean,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     val c = Bm.colors
     val border = if (active) Bm.accent else c.border
     val bg = if (active) Bm.accent.copy(alpha = 0.14f) else Color.Transparent
+    val content = if (enabled) c.text else c.text3
     Row(
         modifier
             .clip(RoundedCornerShape(9.dp))
             .background(bg)
             .border(1.dp, border, RoundedCornerShape(9.dp))
-            .clickable(onClick = onClick)
+            .alpha(if (enabled) 1f else 0.4f)
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(11.dp),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(icon, null, Modifier.size(17.dp), tint = c.text)
-        Text(label, color = c.text, fontSize = 14.sp, fontWeight = FontWeight.Medium,
+        Icon(icon, null, Modifier.size(17.dp), tint = content)
+        Text(label, color = content, fontSize = 14.sp, fontWeight = FontWeight.Medium,
             modifier = Modifier.padding(start = 8.dp))
     }
 }

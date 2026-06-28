@@ -12,10 +12,13 @@ val STAGE_HOLD_OPTIONS_MIN = listOf(5, 10, 15, 30, 60)
 const val PIN_HOLD_MS = 30 * 60 * 1000L
 
 /**
- * Power (W) at which the inner wattage ring reads "full". Placeholder until we measure
- * the chair's real peak draw via usage logging — then set this to that peak.
+ * Power (W) at which the inner wattage ring reads "full", per pack. Calibrated from real
+ * usage logging on the 2012 daily driver: per-pack discharge was p50 ~40 W, p90 ~96 W,
+ * p95 ~127 W, p99 ~259 W, with brief hard-pull spikes to ~882 W (67 A). 250 W (≈p99) keeps
+ * everyday cruising expressive on the ring while only the top ~1% of pulls peg it — the exact
+ * wattage always stays in the numeric readout, so a pegged ring never hides the real draw.
  */
-const val POWER_RING_FULL_W = 80f
+const val POWER_RING_FULL_W = 250f
 
 /** What's on the main stage: a whole base (2 packs) or a single battery. */
 sealed interface StageTarget {
@@ -105,8 +108,12 @@ const val REGEN_WINDOW_MS = 30_000L
 fun isRegen(t: Telemetry, groupLastDischargeAt: Long?, now: Long): Boolean =
     t.current > REGEN_EPS && groupLastDischargeAt != null && (now - groupLastDischargeAt) < REGEN_WINDOW_MS
 
-/** One pack on the stage, with its live regen flag. */
-data class StageItem(val telemetry: Telemetry, val regen: Boolean)
+/**
+ * One pack on the stage, with its live regen flag. [connected] is false when the pack isn't
+ * currently reachable over BLE (or has never reported) — the stage then shows it as DISCONNECTED
+ * instead of a misleading 0%/low-battery state. [telemetry] is the last-known reading when present.
+ */
+data class StageItem(val telemetry: Telemetry, val regen: Boolean, val connected: Boolean = true)
 
 fun hasReachable(group: BatteryGroup, fleet: Map<String, BatteryStatus>): Boolean =
     group.targets.any { fleet[it.address]?.reachable == true }

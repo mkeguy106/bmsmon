@@ -5,10 +5,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import dev.joely.bmsmon.ble.BmsRepository
 import dev.joely.bmsmon.ble.hasBlePermissions
+import dev.joely.bmsmon.monitor.MonitoringService
+import dev.joely.bmsmon.sensor.AmbientLightSensor
 import dev.joely.bmsmon.data.SettingsStore
-import dev.joely.bmsmon.data.TelemetryLogger
 import dev.joely.bmsmon.model.BatteryGroup
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.BatteryStatus
@@ -31,9 +31,7 @@ import dev.joely.bmsmon.model.batteryAt
 import dev.joely.bmsmon.model.demoFor
 import dev.joely.bmsmon.model.groupActivity
 import dev.joely.bmsmon.model.groupById
-import dev.joely.bmsmon.model.groupOf
 import dev.joely.bmsmon.model.groupViews
-import dev.joely.bmsmon.model.isRegen
 import dev.joely.bmsmon.model.removeBattery
 import dev.joely.bmsmon.model.renameBattery
 import dev.joely.bmsmon.model.renameGroup
@@ -75,8 +73,11 @@ data class StageAlert(
 
 data class UiState(
     val screen: Screen = Screen.Home,
-    val mode: Mode = Mode.Dark,
-    val manualMode: Boolean = false,
+    val mode: Mode = Mode.Dark,                 // effective (rendered) theme
+    val appearance: Appearance = Appearance.System,
+    val autoLuxThreshold: Float = DEFAULT_AUTO_LUX,
+    val currentLux: Float? = null,
+    val hasLightSensor: Boolean = true,
     val accent: Color = DefaultAccent,
     val power: Color = DefaultPower,
     val monitoring: Boolean = false,
@@ -125,9 +126,13 @@ data class UiState(
             is StageTarget.Single -> roster.targetFor(t.address)?.let { listOf(it) } ?: emptyList()
         }
         return targets.map { tg ->
-            val tel = fleet[tg.address]?.telemetry?.copy(name = tg.name)
+            val status = fleet[tg.address]
+            // Connected only when the pack is reachable AND has actually reported telemetry.
+            // A staged pack that drops BLE (or never connected) shows DISCONNECTED, not 0%.
+            val connected = status?.reachable == true && status.telemetry != null
+            val tel = status?.telemetry?.copy(name = tg.name)
                 ?: Telemetry(tg.name, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
-            StageItem(tel, tg.address in regenAddrs)
+            StageItem(tel, regen = connected && tg.address in regenAddrs, connected = connected)
         }
     }
 
@@ -173,11 +178,17 @@ data class UiState(
 
 class BatteryViewModel(app: Application) : AndroidViewModel(app) {
 
-    private val repository = BmsRepository(app)
+    // Monitoring (BLE + logging) runs in the process-lifetime engine, kept alive in the background
+    // by MonitoringService — not in viewModelScope, so it survives this ViewModel being cleared.
+    private val engine = (app as BmsApp).engine
     private val store = SettingsStore(app)
-    private val logger = TelemetryLogger(app)
+    private val lightSensor = AmbientLightSensor(app)
+    private var foreground = true
+    private var lastSystemDark = true
+    private var autoCandidate: Mode? = null
+    private var autoCandidateSince = 0L
 
-    private val _state = MutableStateFlow(UiState(logPath = logger.path))
+    private val _state = MutableStateFlow(UiState(logPath = engine.logPath))
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     private fun clockMs() = System.currentTimeMillis()
@@ -190,12 +201,23 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                 val dd = roster.groupById(p.dailyDriverId ?: s.dailyDriverId)
                     ?: roster.groupViews().firstOrNull()
                     ?: BatteryGroup(DEFAULT_GROUP_ID, DEFAULT_GROUP_ID, emptyList())
+                val appearance = p.appearance?.let { runCatching { Appearance.valueOf(it) }.getOrNull() }
+                    ?: legacyAppearance(p.manualMode, p.darkMode)
+                val resolvedAppearance =
+                    if (appearance == Appearance.Auto && !lightSensor.hasSensor()) Appearance.System else appearance
+                val effectiveMode = when (resolvedAppearance) {
+                    Appearance.Dark -> Mode.Dark
+                    Appearance.Light -> Mode.Light
+                    Appearance.System, Appearance.Auto -> s.mode  // corrected once system/sensor reports
+                }
                 s.copy(
                     accent = p.accentArgb?.let { Color(it) } ?: s.accent,
                     power = p.powerArgb?.let { Color(it) } ?: s.power,
-                    manualMode = p.manualMode,
-                    mode = if (p.manualMode) (if (p.darkMode) Mode.Dark else Mode.Light) else s.mode,
                     roster = roster,
+                    appearance = resolvedAppearance,
+                    autoLuxThreshold = p.autoLuxThreshold ?: s.autoLuxThreshold,
+                    hasLightSensor = lightSensor.hasSensor(),
+                    mode = effectiveMode,
                     dailyDriverId = dd.id,
                     dynamicStage = p.dynamicStage ?: s.dynamicStage,
                     stageHoldMinutes = p.stageHoldMinutes ?: s.stageHoldMinutes,
@@ -217,6 +239,40 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             }
             // Resume monitoring if it was on before the app was killed/restarted.
             if (p.monitoring && hasBlePermissions(getApplication())) startMonitoring()
+            updateSensor()
+        }
+        // Mirror the engine's BLE-derived state into the UI while we're alive, and re-resolve the
+        // stage off each update. When monitoring stops, fall back to the demo. (The seed fleet set
+        // above survives because the off-branch only clears it on the on->off edge.)
+        viewModelScope.launch {
+            engine.state.collect { es ->
+                if (es.monitoring) {
+                    _state.update {
+                        it.copy(
+                            monitoring = true,
+                            fleet = es.fleet,
+                            regenAddrs = es.regenAddrs,
+                            lastDischargeAt = es.lastDischargeAt,
+                            peakPowerW = es.peakPowerW,
+                            peakCurrentA = es.peakCurrentA,
+                        )
+                    }
+                    refresh()
+                    val now = clockMs()
+                    if (now - lastTeleSaveAt > TELE_SAVE_INTERVAL_MS) {
+                        lastTeleSaveAt = now
+                        persistLastTelemetry()
+                    }
+                } else {
+                    _state.update {
+                        if (it.monitoring) {
+                            it.copy(monitoring = false, fleet = emptyMap(), demo = demoFor(it.dailyDriver))
+                        } else {
+                            it
+                        }
+                    }
+                }
+            }
         }
         // Demo drift while not monitoring.
         viewModelScope.launch {
@@ -254,13 +310,76 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     fun goSettings() = _state.update { it.copy(screen = Screen.Settings) }
     fun goHome() = _state.update { it.copy(screen = Screen.Home) }
 
-    fun setMode(mode: Mode) {
-        _state.update { it.copy(mode = mode, manualMode = true) }
-        viewModelScope.launch { store.setMode(mode == Mode.Dark) }
+    /** User picked an explicit appearance (Dark/Light/System/Auto). */
+    fun setAppearance(a: Appearance) {
+        _state.update { it.copy(appearance = a) }
+        viewModelScope.launch { store.setAppearance(a.name) }
+        recomputeEffectiveMode()
+        updateSensor()
     }
-    fun toggleMode() = setMode(if (_state.value.isDark) Mode.Light else Mode.Dark)
-    fun applySystemMode(dark: Boolean) = _state.update {
-        if (it.manualMode) it else it.copy(mode = if (dark) Mode.Dark else Mode.Light)
+
+    /** Main-stage quick control: advance Dark → Light → System → Auto (skipping Auto if no sensor). */
+    fun cycleAppearance() {
+        val s = _state.value
+        var next = when (s.appearance) {
+            Appearance.Dark -> Appearance.Light
+            Appearance.Light -> Appearance.System
+            Appearance.System -> Appearance.Auto
+            Appearance.Auto -> Appearance.Dark
+        }
+        if (next == Appearance.Auto && !s.hasLightSensor) next = Appearance.Dark
+        setAppearance(next)
+    }
+
+    /** OS theme signal (from Compose). Only takes effect while appearance == System. */
+    fun applySystemMode(dark: Boolean) {
+        lastSystemDark = dark
+        _state.update {
+            if (it.appearance == Appearance.System) it.copy(mode = if (dark) Mode.Dark else Mode.Light) else it
+        }
+    }
+
+    fun setAutoLuxThreshold(lux: Float) {
+        _state.update { it.copy(autoLuxThreshold = lux) }
+        viewModelScope.launch { store.setAutoLuxThreshold(lux) }
+        if (_state.value.appearance == Appearance.Auto) recomputeEffectiveMode()
+    }
+
+    /** Recompute the effective [Mode] from the current appearance (no debounce — immediate). */
+    private fun recomputeEffectiveMode() = _state.update { s ->
+        val m = when (s.appearance) {
+            Appearance.Dark -> Mode.Dark
+            Appearance.Light -> Mode.Light
+            Appearance.System -> if (lastSystemDark) Mode.Dark else Mode.Light
+            Appearance.Auto -> s.currentLux?.let { resolveAutoMode(it, s.autoLuxThreshold, s.mode) } ?: s.mode
+        }
+        s.copy(mode = m)
+    }
+
+    /** Start the light sensor only while Auto is selected and the app is foregrounded. */
+    private fun updateSensor() {
+        val s = _state.value
+        if (s.appearance == Appearance.Auto && foreground && s.hasLightSensor) {
+            lightSensor.start(::onLux)
+        } else {
+            lightSensor.stop()
+            autoCandidate = null
+        }
+    }
+
+    /** Each lux sample: update the readout, then flip the theme through hysteresis + debounce. */
+    private fun onLux(lux: Float) {
+        val now = clockMs()
+        _state.update { it.copy(currentLux = lux) }
+        val s = _state.value
+        if (s.appearance != Appearance.Auto) return
+        val candidate = resolveAutoMode(lux, s.autoLuxThreshold, s.mode)
+        if (candidate == s.mode) { autoCandidate = null; return }
+        if (autoCandidate != candidate) { autoCandidate = candidate; autoCandidateSince = now }
+        if (debouncedMode(s.mode, candidate, autoCandidateSince, now) != s.mode) {
+            autoCandidate = null
+            _state.update { it.copy(mode = candidate) }
+        }
     }
     fun setAccent(c: Color) {
         _state.update { it.copy(accent = c) }
@@ -286,7 +405,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(roster = transform(it.roster)) }
         val r = _state.value.roster
         viewModelScope.launch { store.setRoster(r) }
-        if (_state.value.monitoring) repository.setTargets(r.allTargets())
+        if (_state.value.monitoring) engine.setRoster(r)
         refresh()
     }
 
@@ -308,7 +427,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                 stageTarget = newStageTarget,
             )
         }
-        repository.setDisabled(_state.value.disabled)
+        engine.setDisabled(_state.value.disabled)
         updateRoster { it.removeBattery(a) }
     }
 
@@ -370,37 +489,32 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                 fleet = st.fleet + (a to (st.fleet[a] ?: BatteryStatus()).copy(reachable = false)),
             )
         }
-        repository.setDisabled(_state.value.disabled)
+        engine.setDisabled(_state.value.disabled)
         refresh()
     }
     fun reconnectBattery(address: String) {
         val a = address.uppercase()
         _state.update { it.copy(disabled = it.disabled - a) }
-        repository.setDisabled(_state.value.disabled)
-        repository.kickAll()
+        engine.setDisabled(_state.value.disabled)
+        engine.kickAll()
         refresh()
     }
     fun disconnectAll() = stopMonitoring()
 
-    // --- fleet monitoring ---
+    // --- fleet monitoring (delegated to the process-lifetime engine + foreground service) ---
     fun startMonitoring() {
-        if (_state.value.monitoring) return
-        // Keep last-known readings (marked not-reachable) so rows show stale data until live samples.
-        _state.update { it.copy(monitoring = true, fleet = it.fleet.mapValues { (_, st) -> st.copy(reachable = false) }) }
-        repository.start(
-            scope = viewModelScope,
-            targets = _state.value.roster.allTargets(),
-            onTelemetry = { addr, t -> onTelemetry(addr, t) },
-            onReachable = { addr, r -> onReachable(addr, r) },
-        )
-        repository.setDisabled(_state.value.disabled)
-        repository.setStage(currentStageAddrs())
+        // Seed the engine with the current roster + last-known readings (shown dimmed until live).
+        engine.start(roster = _state.value.roster, seed = _state.value.fleet, loggingEnabled = _state.value.logging)
+        engine.setDisabled(_state.value.disabled)
+        engine.setStage(currentStageAddrs())
+        MonitoringService.start(getApplication())
         viewModelScope.launch { store.setMonitoring(true) }
     }
 
     fun stopMonitoring() {
         persistLastTelemetry()  // keep the latest readings for next launch
-        repository.stop()
+        engine.stop()           // cancels BLE jobs -> each session closes its GATT cleanly
+        MonitoringService.stop(getApplication())
         _state.update { it.copy(monitoring = false, fleet = emptyMap(), demo = demoFor(it.dailyDriver)) }
         viewModelScope.launch { store.setMonitoring(false) }
     }
@@ -408,35 +522,9 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     fun toggleMonitoring() = if (_state.value.monitoring) stopMonitoring() else startMonitoring()
 
     fun onAppForeground() {
-        if (_state.value.monitoring) repository.kickAll()
-    }
-
-    private fun onTelemetry(addr: String, t: Telemetry) {
-        val now = clockMs()
-        val group = _state.value.roster.groupOf(addr)
-        val regen = isRegen(t, group?.let { _state.value.lastDischargeAt[it.id] }, now)
-        _state.update { st ->
-            st.copy(
-                fleet = st.fleet + (addr to (st.fleet[addr] ?: BatteryStatus()).copy(telemetry = t, reachable = true)),
-                regenAddrs = if (regen) st.regenAddrs + addr else st.regenAddrs - addr,
-            )
-        }
-        if (_state.value.logging) {
-            logger.log(addr, t, now, regen)
-            if (t.current < -0.05f) {  // discharging — track peak draw
-                _state.update {
-                    it.copy(
-                        peakPowerW = maxOf(it.peakPowerW, t.powerW),
-                        peakCurrentA = maxOf(it.peakCurrentA, -t.current),
-                    )
-                }
-            }
-        }
-        refresh()
-        if (now - lastTeleSaveAt > TELE_SAVE_INTERVAL_MS) {
-            lastTeleSaveAt = now
-            persistLastTelemetry()
-        }
+        foreground = true
+        updateSensor()
+        if (_state.value.monitoring) engine.kickAll()
     }
 
     private var lastTeleSaveAt = 0L
@@ -451,10 +539,15 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** App backgrounded: flush the latest readings so they survive a process kill. */
-    fun onAppBackground() = persistLastTelemetry()
+    fun onAppBackground() {
+        foreground = false
+        updateSensor()
+        persistLastTelemetry()
+    }
 
     // --- usage logging (to calibrate the power ring) ---
     fun setLogging(enabled: Boolean) {
+        engine.setLogging(enabled)
         _state.update {
             if (enabled) it.copy(logging = true, peakPowerW = 0f, peakCurrentA = 0f) else it.copy(logging = false)
         }
@@ -462,7 +555,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun clearLog() {
-        logger.clear()
+        engine.clearLog()
         _state.update { it.copy(peakPowerW = 0f, peakCurrentA = 0f) }
     }
 
@@ -494,44 +587,35 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         else s.copy(acknowledgedThresholds = a.ackEffective + a.activeThreshold)
     }
 
-    private fun onReachable(addr: String, r: Boolean) {
-        _state.update { st ->
-            st.copy(
-                fleet = st.fleet + (addr to (st.fleet[addr] ?: BatteryStatus()).copy(reachable = r)),
-                regenAddrs = if (r) st.regenAddrs else st.regenAddrs - addr,
-            )
-        }
-        refresh()
-    }
-
     private fun currentStageAddrs(): Set<String> =
         _state.value.stageTarget.addresses(_state.value.roster) - _state.value.disabled
 
-    /** Re-resolve the stage; if its battery set changed, tell the engine. */
+    /** Re-resolve the stage; if its battery set changed, tell the engine. (lastDischargeAt is
+     *  maintained by the engine and mirrored into UiState — we only read it here.) */
     private fun refresh() {
         val now = clockMs()
         val before = currentStageAddrs()
         _state.update { st ->
-            val newLast = st.lastDischargeAt.toMutableMap()
-            st.roster.groupViews().forEach { g ->
-                if (groupActivity(g, st.fleet) == GroupActivity.Discharging) newLast[g.id] = now
-            }
+            // lastDischargeAt is maintained by the engine (mirrored into UiState); pass the roster's
+            // current groups so stage resolution works against the dynamic roster.
             val resolved = resolveStage(
                 StageInputs(st.fleet, st.dailyDriverId, st.dynamicStage, st.manualStage,
-                    st.manualPinnedAt, newLast, st.stageHoldMinutes * 60_000L, st.stageTarget, now,
+                    st.manualPinnedAt, st.lastDischargeAt, st.stageHoldMinutes * 60_000L, st.stageTarget, now,
                     st.roster.groupViews()),
             )
             val isPinned = st.manualStage != null && resolved == st.manualStage &&
                 (!st.dynamicStage || now - st.manualPinnedAt < PIN_HOLD_MS)
-            st.copy(lastDischargeAt = newLast, stageTarget = resolved, pinned = isPinned)
+            st.copy(stageTarget = resolved, pinned = isPinned)
         }
         val after = currentStageAddrs()
-        if (after != before && _state.value.monitoring) repository.setStage(after)
+        if (after != before && _state.value.monitoring) engine.setStage(after)
     }
 
     override fun onCleared() {
         persistLastTelemetry()
-        repository.stop()
+        // Do NOT stop the engine: monitoring must keep running in the background (the foreground
+        // service keeps the process alive). Clean shutdown happens on explicit stop or task removal.
+        lightSensor.stop()
         super.onCleared()
     }
 }

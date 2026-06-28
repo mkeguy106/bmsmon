@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -37,6 +38,8 @@ data class Persisted(
     val lastTelemetry: Map<String, Telemetry>,
     val tempFahrenheit: Boolean,
     val roster: Roster?,
+    val appearance: String?,
+    val autoLuxThreshold: Float?,
 )
 
 /** Persists user preferences (colors, appearance override, BMS addresses) via DataStore. */
@@ -61,6 +64,8 @@ class SettingsStore(private val context: Context) {
         val LAST_TELEMETRY = stringPreferencesKey("last_telemetry")
         val TEMP_FAHRENHEIT = booleanPreferencesKey("temp_fahrenheit")
         val ROSTER = stringPreferencesKey("roster")
+        val APPEARANCE = stringPreferencesKey("appearance")
+        val AUTO_LUX = floatPreferencesKey("auto_lux_threshold")
     }
 
     suspend fun load(): Persisted {
@@ -84,15 +89,15 @@ class SettingsStore(private val context: Context) {
             lastTelemetry = p[K.LAST_TELEMETRY]?.let(::decodeTelemetry) ?: emptyMap(),
             tempFahrenheit = p[K.TEMP_FAHRENHEIT] ?: true,
             roster = p[K.ROSTER]?.let(::decodeRoster),
+            appearance = p[K.APPEARANCE],
+            autoLuxThreshold = p[K.AUTO_LUX],
         )
     }
 
     suspend fun setAccent(argb: Int) = context.dataStore.edit { it[K.ACCENT] = argb }.let {}
     suspend fun setPower(argb: Int) = context.dataStore.edit { it[K.POWER] = argb }.let {}
-    suspend fun setMode(dark: Boolean) = context.dataStore.edit {
-        it[K.MANUAL] = true
-        it[K.DARK] = dark
-    }.let {}
+    suspend fun setAppearance(name: String) = context.dataStore.edit { it[K.APPEARANCE] = name }.let {}
+    suspend fun setAutoLuxThreshold(lux: Float) = context.dataStore.edit { it[K.AUTO_LUX] = lux }.let {}
     suspend fun setDailyDriver(id: String) = context.dataStore.edit { it[K.DAILY_DRIVER] = id }.let {}
     suspend fun setDynamicStage(enabled: Boolean) = context.dataStore.edit { it[K.DYNAMIC_STAGE] = enabled }.let {}
     suspend fun setStageHold(minutes: Int) = context.dataStore.edit { it[K.STAGE_HOLD] = minutes }.let {}

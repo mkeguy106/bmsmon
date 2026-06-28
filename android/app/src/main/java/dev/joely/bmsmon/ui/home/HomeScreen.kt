@@ -48,6 +48,7 @@ import androidx.compose.ui.unit.sp
 import dev.joely.bmsmon.FilterKey
 import dev.joely.bmsmon.SortKey
 import dev.joely.bmsmon.StageAlert
+import dev.joely.bmsmon.Appearance
 import dev.joely.bmsmon.UiState
 import dev.joely.bmsmon.model.GroupActivity
 import dev.joely.bmsmon.model.StageTarget
@@ -62,7 +63,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun HomeScreen(
     state: UiState,
-    onToggleMode: () -> Unit,
+    onCycleAppearance: () -> Unit,
     onSettings: () -> Unit,
     onToggleMonitoring: () -> Unit,
     onSetSort: (SortKey) -> Unit,
@@ -94,9 +95,7 @@ fun HomeScreen(
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().background(c.bg)) {
-            TopBar(state, onToggleMode, onSettings, onToggleMonitoring)
-            if (state.logging) LoggingBanner(state)
-            PageDots(current = pager.currentPage)
+            TopBar(state, pager.currentPage, onCycleAppearance, onSettings, onToggleMonitoring)
             HorizontalPager(state = pager, modifier = Modifier.weight(1f)) { page ->
                 when (page) {
                     0 -> StageScreen(
@@ -197,24 +196,10 @@ private fun DangerOverlay(alert: StageAlert, onAcknowledge: () -> Unit) {
 }
 
 @Composable
-private fun LoggingBanner(state: UiState) {
-    val c = Bm.colors
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 2.dp),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            "● LOGGING   peak ${state.peakPowerW.toInt()} W  ·  ${"%.1f".format(state.peakCurrentA)} A",
-            color = Bm.power, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.5.sp,
-        )
-    }
-}
-
-@Composable
 private fun TopBar(
     state: UiState,
-    onToggleMode: () -> Unit,
+    currentPage: Int,
+    onCycleAppearance: () -> Unit,
     onSettings: () -> Unit,
     onToggleMonitoring: () -> Unit,
 ) {
@@ -229,37 +214,45 @@ private fun TopBar(
         state.stageActivity == GroupActivity.Idle -> Triple("${state.stageLabel} · IDLE", c.text2, false)
         else -> Triple("${state.stageLabel} · …", c.text3, false)
     }
-    Row(
-        Modifier.fillMaxWidth().background(c.bg).padding(horizontal = 18.dp, vertical = 14.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Row(Modifier.clickable(onClick = onToggleMonitoring), verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                if (state.monitoring) Icons.Filled.Bluetooth else Icons.Filled.BluetoothDisabled,
-                null, Modifier.size(18.dp),
-                tint = if (state.monitoring) Bm.accent else c.text3,
-            )
-            if (showPin) Icon(Icons.Filled.PushPin, null, Modifier.padding(start = 6.dp).size(13.dp), tint = Bm.accent)
-            Text(label, color = labelColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
-                letterSpacing = 0.9.sp, modifier = Modifier.padding(start = 7.dp))
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(40.dp).clickable(onClick = onToggleMode), contentAlignment = Alignment.Center) {
-                Icon(if (state.isDark) Icons.Filled.DarkMode else Icons.Filled.LightMode,
-                    "Toggle theme", Modifier.size(21.dp), tint = c.icon)
+    Box(Modifier.fillMaxWidth().background(c.bg).padding(horizontal = 18.dp, vertical = 12.dp)) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(Modifier.clickable(onClick = onToggleMonitoring), verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    if (state.monitoring) Icons.Filled.Bluetooth else Icons.Filled.BluetoothDisabled,
+                    null, Modifier.size(18.dp),
+                    tint = if (state.monitoring) Bm.accent else c.text3,
+                )
+                if (showPin) Icon(Icons.Filled.PushPin, null, Modifier.padding(start = 6.dp).size(13.dp), tint = Bm.accent)
+                Text(label, color = labelColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.9.sp, modifier = Modifier.padding(start = 7.dp))
             }
-            Box(Modifier.size(40.dp).clickable(onClick = onSettings), contentAlignment = Alignment.Center) {
-                Icon(Icons.Filled.Settings, "Settings", Modifier.size(22.dp), tint = c.icon)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(40.dp).clickable(onClick = onCycleAppearance), contentAlignment = Alignment.Center) {
+                    when (state.appearance) {
+                        Appearance.Dark -> Icon(Icons.Filled.DarkMode, "Appearance: Dark", Modifier.size(21.dp), tint = c.icon)
+                        Appearance.Light -> Icon(Icons.Filled.LightMode, "Appearance: Light", Modifier.size(21.dp), tint = c.icon)
+                        Appearance.System -> Text("S", color = c.icon, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                        Appearance.Auto -> Text("A", color = c.icon, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+                Box(Modifier.size(40.dp).clickable(onClick = onSettings), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Filled.Settings, "Settings", Modifier.size(22.dp), tint = c.icon)
+                }
             }
         }
+        // Page dots centered on the top-bar row (between the status label and the icons).
+        PageDots(currentPage, Modifier.align(Alignment.Center))
     }
 }
 
 @Composable
-private fun PageDots(current: Int) {
+private fun PageDots(current: Int, modifier: Modifier = Modifier) {
     val c = Bm.colors
-    Row(Modifier.fillMaxWidth().padding(bottom = 6.dp), horizontalArrangement = Arrangement.Center) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
         for (i in 0..1) {
             Box(
                 Modifier.padding(horizontal = 4.dp).size(if (i == current) 7.dp else 6.dp)

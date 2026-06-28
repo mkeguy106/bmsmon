@@ -192,6 +192,18 @@ Key flow: `main()` → `scan_batteries()` or `query_battery(address)` → `parse
 Kotlin/Jetpack Compose GUI front-end (see `android/README.md`). Same read-only protocol and
 safety rules. Dynamic "main stage" shows the in-use base; a rotating sampler covers the rest.
 
+**Background monitoring (foreground service):** BLE polling + usage logging run in a
+process-lifetime `MonitorEngine` (held by the `BmsApp` Application), kept alive by
+`MonitoringService` (a `connectedDevice`-type foreground service with an ongoing notification +
+Stop action). The `BatteryViewModel` no longer owns the BLE work — it delegates to the engine
+and mirrors `engine.state` into the UI, so monitoring survives the Activity/ViewModel being
+destroyed. Stage resolution and settings stay in the ViewModel. Clean shutdown (cancels BLE
+jobs → each `BleSession.close()` disconnects the GATT) happens on explicit Stop (in-app toggle
+or notification action) and on `onTaskRemoved` (app swiped from Recents) — so closing the app
+never leaves a zombie connection blocking the phone app. Just backgrounding (Home) keeps it
+running. Needs `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_CONNECTED_DEVICE` + runtime
+`POST_NOTIFICATIONS` (requested opportunistically; never gates monitoring).
+
 **Usage logging is intentionally ON right now — do not turn it off.** It records every
 telemetry sample to `…/Android/data/dev.joely.bmsmon/files/usage_log.csv` (columns incl.
 `current_a`, `power_w`, `regen`) so we can collect **real-world data to calibrate the UI later**:
@@ -201,6 +213,19 @@ telemetry sample to `…/Android/data/dev.joely.bmsmon/files/usage_log.csv` (col
 Steady charging is being captured now as a baseline (`regen=0`); regen bursts while driving
 will log as `regen=1`. Pull the CSV (`adb pull …usage_log.csv`), find peak discharge `power_w`,
 and set the calibration constants. Logging + monitoring both persist across restarts.
+
+The inner power ring full-scale `POWER_RING_FULL_W` (Fleet.kt) has been **calibrated to 250 W
+per pack** from real 2012-daily-driver logging (per-pack discharge p50 ~40 W, p95 ~127 W,
+p99 ~259 W; brief hard-pull spikes to ~882 W / 67 A). The log also records BLE link events
+(`state` column = `Connected`/`Disconnected`, telemetry columns blank) so a transient
+disconnect is distinguishable from a real low/idle reading. `REGEN_EPS`/`REGEN_WINDOW_MS`
+remain to be calibrated once driving regen bursts are captured.
+
+Garbage-frame guard: `parseTelemetry` realigns to the `01 93 55 AA` status header (BLE
+notification fragments can prepend stale bytes, which previously decoded as soc=0/37.6 V and
+tripped a false critical alarm) and rejects implausible readings (SOC 0–100, voltage 4–70 V).
+The main stage shows a pack that isn't reachable as **DISCONNECTED** (dimmed ring, no %, no
+alert) rather than a misleading 0%.
 
 ## Development
 

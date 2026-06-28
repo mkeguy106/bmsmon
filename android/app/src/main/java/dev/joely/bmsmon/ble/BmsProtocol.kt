@@ -63,8 +63,41 @@ object BmsProtocol {
         0x00004000 to "Short Circuit",
     )
 
-    /** Parse a 0x13 status response (~105 bytes, little-endian) into [Telemetry], or null if too short. */
-    fun parseTelemetry(d: ByteArray, name: String): Telemetry? {
+    /**
+     * Offset of the status frame start (the leading `00` of `00 00 LEN 01 93 55 AA`), or null if
+     * no status-response header is present. The marker `01 93 55 AA` (response cmd = 0x13|0x80,
+     * then the 55 AA tag) sits at frame offset 3, so the frame begins 3 bytes before it. We scan
+     * because stale notification fragments can prepend bytes; the first match is the real header.
+     */
+    private fun statusFrameStart(d: ByteArray): Int? {
+        var i = 3
+        while (i <= d.size - 4) {
+            if ((d[i].toInt() and 0xFF) == 0x01 &&
+                (d[i + 1].toInt() and 0xFF) == 0x93 &&
+                (d[i + 2].toInt() and 0xFF) == 0x55 &&
+                (d[i + 3].toInt() and 0xFF) == 0xAA
+            ) return i - 3
+            i++
+        }
+        return null
+    }
+
+    /**
+     * Parse a 0x13 status response (~105 bytes, little-endian) into [Telemetry], or null if the
+     * frame is too short, isn't a status response, or is implausible.
+     *
+     * IMPORTANT: BLE notification fragments can leave stale bytes in front of the real frame, so
+     * the status payload doesn't always start at offset 0. Parsing those misaligned bytes at the
+     * fixed offsets below produces garbage (a real capture seen in the field: soc=0, voltage=37.6 V
+     * — the header marker `01 93` shifted into the voltage field). Such garbage was being shown on
+     * the stage as a genuine 0% reading and tripping the critical low-battery alarm. We therefore
+     * (1) realign to the `00 00 LEN 01 93 55 AA` response header before reading any field, and
+     * (2) reject readings outside physically possible bounds. Anything we can't trust returns null,
+     * which the engine treats as a missed poll (keep last-known / mark unreachable), never a 0%.
+     */
+    fun parseTelemetry(raw: ByteArray, name: String): Telemetry? {
+        val base = statusFrameStart(raw) ?: return null
+        val d = if (base == 0) raw else raw.copyOfRange(base, raw.size)
         if (d.size < 100) return null
         val totalV = u16(d, 12) / 1000f
         val current = i32(d, 48) / 1000f
@@ -76,6 +109,10 @@ object BmsProtocol {
         val soc = u16(d, 90).toFloat()
         val soh = u32(d, 92).toInt()
         val cycles = u32(d, 96).toInt()
+        // Sanity gate: a real pack is 0–100% SOC and (12/24/48 V LiFePO4) 4–70 V. Out-of-range
+        // means a corrupt/misframed packet slipped through — drop it rather than display it.
+        if (soc < 0f || soc > 100f) return null
+        if (totalV < 4f || totalV > 70f) return null
         val cells = (0 until 16).map { u16(d, 16 + it * 2) / 1000f }.filter { it > 0.1f }
         val maxCell = cells.maxOrNull() ?: (totalV / 4f)
         val state = when (stateRaw) {

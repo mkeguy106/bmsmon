@@ -16,7 +16,7 @@ import kotlin.math.roundToInt
 /**
  * Two-ring battery gauge — a 1:1 port of the prototype's `gauge()`:
  *  - Outer = 16-segment SOC donut (radius 84, stroke 15, 3° gaps, clockwise from 12 o'clock).
- *  - Inner = wattage arc (radius 60, stroke 9, round cap), full at ~80 W — weighted so the
+ *  - Inner = wattage arc (radius 60, stroke 9, round cap), full at [POWER_RING_FULL_W] — so the
  *    live charge/discharge rate reads at a glance while staying subordinate to the SOC ring.
  * Geometry is defined in a 200x200 design space and scaled to the actual size.
  */
