@@ -91,7 +91,8 @@ fun App(vm: BatteryViewModel) {
                         onClearLog = vm::clearLog,
                         onSetAccent = vm::setAccent,
                         onSetPower = vm::setPower,
-                        onSetMode = vm::setMode,
+                        onSetAppearance = vm::setAppearance,
+                        onSetAutoLux = vm::setAutoLuxThreshold,
                     )
                 }
             }
