@@ -64,7 +64,7 @@ fun App(vm: BatteryViewModel) {
                 when (state.screen) {
                     Screen.Home -> HomeScreen(
                         state = state,
-                        onToggleMode = vm::toggleMode,
+                        onCycleAppearance = vm::cycleAppearance,
                         onSettings = vm::goSettings,
                         onToggleMonitoring = onMonitorToggle,
                         onSetSort = vm::setSort,
@@ -91,7 +91,8 @@ fun App(vm: BatteryViewModel) {
                         onClearLog = vm::clearLog,
                         onSetAccent = vm::setAccent,
                         onSetPower = vm::setPower,
-                        onSetMode = vm::setMode,
+                        onSetAppearance = vm::setAppearance,
+                        onSetAutoLux = vm::setAutoLuxThreshold,
                     )
                 }
             }
