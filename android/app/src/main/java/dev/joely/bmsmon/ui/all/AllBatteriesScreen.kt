@@ -1,8 +1,10 @@
 package dev.joely.bmsmon.ui.all
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,10 +22,17 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.LinkOff
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -160,6 +169,27 @@ private fun Chip(label: String, selected: Boolean, onClick: () -> Unit) {
     }
 }
 
+/**
+ * Long-press context menu for a battery row. Currently just "Set as main stage"; this is the
+ * home for future per-battery actions (e.g. battery history).
+ */
+@Composable
+private fun RowActionMenu(expanded: Boolean, onDismiss: () -> Unit, onPin: () -> Unit) {
+    val c = Bm.colors
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = onDismiss,
+        modifier = Modifier.background(c.card),
+    ) {
+        DropdownMenuItem(
+            text = { Text("Pin to Main Stage", color = c.text, fontSize = 14.sp) },
+            leadingIcon = { Icon(Icons.Filled.PushPin, null, Modifier.size(18.dp), tint = Bm.accent) },
+            onClick = { onDismiss(); onPin() },
+        )
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun BatteryRow(
     row: Row,
@@ -175,6 +205,7 @@ private fun BatteryRow(
     val t = row.tele
     val reachable = monitoring && row.reachable && !disabled
     val dim = disabled || (monitoring && !row.reachable)
+    var menuOpen by remember { mutableStateOf(false) }
 
     val (stateLabel, stateColor) = when {
         disabled -> "Disconnected" to c.text3
@@ -195,10 +226,16 @@ private fun BatteryRow(
             .clip(RoundedCornerShape(9.dp))
             .background(if (isStage) Bm.accent.copy(alpha = 0.08f) else c.card2)
             .border(1.dp, borderColor, RoundedCornerShape(9.dp))
-            .clickable(onClick = onPin)
+            // Single tap no longer jumps to the stage. Double-tap = quick set; long-press = menu.
+            .combinedClickable(
+                onClick = {},
+                onDoubleClick = onPin,
+                onLongClick = { menuOpen = true },
+            )
             .padding(horizontal = 12.dp, vertical = 9.dp),
         verticalArrangement = Arrangement.spacedBy(7.dp),
     ) {
+        RowActionMenu(expanded = menuOpen, onDismiss = { menuOpen = false }, onPin = onPin)
         // Header line: identity + state on the left, SOC% (+ link button) on the right.
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Row(
