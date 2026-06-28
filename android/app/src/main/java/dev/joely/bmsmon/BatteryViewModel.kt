@@ -112,6 +112,7 @@ data class UiState(
     // Which Home pager page is showing (0 = stage, 1 = all batteries). Remembered so the detail
     // screen's back button returns to the page you came from.
     val homePage: Int = 0,
+    val locked: Boolean = false,
 ) {
     val isDark get() = mode == Mode.Dark
     val dailyDriver: BatteryGroup
@@ -226,6 +227,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     enabledThresholds = p.enabledThresholds ?: s.enabledThresholds,
                     keepScreenOn = p.keepScreenOn,
                     tempFahrenheit = p.tempFahrenheit,
+                    locked = p.locked,
                     sortKey = p.sortKey?.let { runCatching { SortKey.valueOf(it) }.getOrNull() } ?: s.sortKey,
                     filters = p.filters?.mapNotNull { runCatching { FilterKey.valueOf(it) }.getOrNull() }?.toSet()
                         ?: s.filters,
@@ -578,6 +580,11 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     fun setTempFahrenheit(enabled: Boolean) {
         _state.update { it.copy(tempFahrenheit = enabled) }
         viewModelScope.launch { store.setTempFahrenheit(enabled) }
+    }
+
+    fun setLocked(enabled: Boolean) {
+        _state.update { it.copy(locked = enabled) }
+        viewModelScope.launch { store.setLocked(enabled) }
     }
 
     /** Acknowledge the active alert: silence it until SOC drops past the next enabled level. */
