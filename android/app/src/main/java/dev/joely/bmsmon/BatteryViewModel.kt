@@ -111,9 +111,13 @@ data class UiState(
             is StageTarget.Single -> ALL_GROUPS.flatMap { it.targets }.filter { it.address == t.address }
         }
         return targets.map { tg ->
-            val tel = fleet[tg.address]?.telemetry?.copy(name = tg.name)
+            val status = fleet[tg.address]
+            // Connected only when the pack is reachable AND has actually reported telemetry.
+            // A staged pack that drops BLE (or never connected) shows DISCONNECTED, not 0%.
+            val connected = status?.reachable == true && status.telemetry != null
+            val tel = status?.telemetry?.copy(name = tg.name)
                 ?: Telemetry(tg.name, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
-            StageItem(tel, tg.address in regenAddrs)
+            StageItem(tel, regen = connected && tg.address in regenAddrs, connected = connected)
         }
     }
 
@@ -514,11 +518,19 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun onReachable(addr: String, r: Boolean) {
+        val was = _state.value.fleet[addr]?.reachable == true
         _state.update { st ->
             st.copy(
                 fleet = st.fleet + (addr to (st.fleet[addr] ?: BatteryStatus()).copy(reachable = r)),
                 regenAddrs = if (r) st.regenAddrs else st.regenAddrs - addr,
             )
+        }
+        // Log link transitions so a BLE drop/glitch is visible in the usage CSV (and tellable
+        // apart from a genuine low/idle reading). Only on an actual edge, to avoid spam.
+        if (r != was && _state.value.logging) {
+            val name = groupForAddress(addr)?.targets
+                ?.firstOrNull { it.address.equals(addr, ignoreCase = true) }?.name ?: addr
+            logger.event(addr, name, if (r) "Connected" else "Disconnected", clockMs())
         }
         refresh()
     }

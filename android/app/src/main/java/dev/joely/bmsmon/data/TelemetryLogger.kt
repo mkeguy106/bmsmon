@@ -39,6 +39,29 @@ class TelemetryLogger(context: Context) {
         }
     }
 
+    /**
+     * Record a BLE connection event (e.g. a stage pack dropping or returning) so a transient
+     * link glitch is visible in the log and can be told apart from a real low/idle reading.
+     * Telemetry columns are left blank; [state] carries "Connected"/"Disconnected".
+     */
+    fun event(address: String, name: String, state: String, timestampMs: Long) {
+        synchronized(lock) {
+            try {
+                val header = !file.exists() || file.length() == 0L
+                file.appendText(buildString {
+                    if (header) append("timestamp_ms,name,address,state,soc,current_a,power_w,voltage_v,regen\n")
+                    append(timestampMs).append(',')
+                    append(name).append(',')
+                    append(address).append(',')
+                    append(state).append(',')
+                    append(",,,,0\n")  // blank soc/current/power/voltage, regen=0
+                })
+            } catch (e: Exception) {
+                Log.d("TelemetryLogger", "event: ${e.message}")
+            }
+        }
+    }
+
     fun clear() {
         synchronized(lock) {
             try { file.delete() } catch (e: Exception) { Log.d("TelemetryLogger", "clear: ${e.message}") }

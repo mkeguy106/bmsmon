@@ -61,6 +61,44 @@ class BmsProtocolTest {
         assertEquals(null, BmsProtocol.parseTelemetry(ByteArray(40), "x"))
     }
 
+    /**
+     * Stale BLE notification fragments can prepend bytes so the real frame no longer starts at
+     * offset 0. The parser must realign to the `01 93 55 AA` header and decode the true values —
+     * not read garbage at the fixed offsets. (This is what produced the field bug: soc=0, 37.6 V.)
+     */
+    @Test
+    fun realignsPrefixedStatusFrame() {
+        val prefixed = hex("aabbccddee" + realStatus)  // 5 junk bytes, no false header
+        val t = BmsProtocol.parseTelemetry(prefixed, "test")!!
+        assertEquals(13.324f, t.voltage, 0.001f)
+        assertEquals(99f, t.soc, 0.0f)
+    }
+
+    /** A long-enough buffer with no status header at all is junk, not a 0% reading -> null. */
+    @Test
+    fun rejectsFrameWithoutHeader() {
+        val junk = ByteArray(110) { 0xAB.toByte() }
+        assertEquals(null, BmsProtocol.parseTelemetry(junk, "x"))
+    }
+
+    /** A valid header but physically impossible SOC (>100%) is a corrupt frame -> null. */
+    @Test
+    fun rejectsImplausibleSoc() {
+        val bad = hex(realStatus)
+        bad[90] = 0xC8.toByte()  // SOC = 200%
+        bad[91] = 0x00
+        assertEquals(null, BmsProtocol.parseTelemetry(bad, "x"))
+    }
+
+    /** A valid header but impossible pack voltage (0 V) is a corrupt frame -> null, not a reading. */
+    @Test
+    fun rejectsImplausibleVoltage() {
+        val bad = hex(realStatus)
+        bad[12] = 0x00  // total voltage = 0.000 V
+        bad[13] = 0x00
+        assertEquals(null, BmsProtocol.parseTelemetry(bad, "x"))
+    }
+
     /** Safety guard: the command whitelist must never contain a destructive opcode. */
     @Test
     fun commandWhitelistIsReadOnly() {
