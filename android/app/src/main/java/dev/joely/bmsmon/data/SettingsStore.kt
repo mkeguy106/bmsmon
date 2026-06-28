@@ -24,6 +24,9 @@ data class Persisted(
     val alertsOn: Boolean,
     val enabledThresholds: Set<Int>?,
     val keepScreenOn: Boolean,
+    val sortKey: String?,
+    val filters: Set<String>?,
+    val filterBaseId: String?,
 )
 
 /** Persists user preferences (colors, appearance override, BMS addresses) via DataStore. */
@@ -42,6 +45,9 @@ class SettingsStore(private val context: Context) {
         val ALERTS_ON = booleanPreferencesKey("alerts_on")
         val THRESHOLDS = stringSetPreferencesKey("alert_thresholds")
         val KEEP_SCREEN_ON = booleanPreferencesKey("keep_screen_on")
+        val SORT_KEY = stringPreferencesKey("all_sort")
+        val FILTERS = stringSetPreferencesKey("all_filters")
+        val FILTER_BASE = stringPreferencesKey("all_filter_base")
     }
 
     suspend fun load(): Persisted {
@@ -59,6 +65,9 @@ class SettingsStore(private val context: Context) {
             alertsOn = p[K.ALERTS_ON] ?: true,
             enabledThresholds = p[K.THRESHOLDS]?.mapNotNull { it.toIntOrNull() }?.toSet(),
             keepScreenOn = p[K.KEEP_SCREEN_ON] ?: true,
+            sortKey = p[K.SORT_KEY],
+            filters = p[K.FILTERS],
+            filterBaseId = p[K.FILTER_BASE],
         )
     }
 
@@ -77,4 +86,7 @@ class SettingsStore(private val context: Context) {
     suspend fun setThresholds(values: Set<Int>) =
         context.dataStore.edit { it[K.THRESHOLDS] = values.map(Int::toString).toSet() }.let {}
     suspend fun setKeepScreenOn(on: Boolean) = context.dataStore.edit { it[K.KEEP_SCREEN_ON] = on }.let {}
+    suspend fun setSort(name: String) = context.dataStore.edit { it[K.SORT_KEY] = name }.let {}
+    suspend fun setFilters(names: Set<String>) = context.dataStore.edit { it[K.FILTERS] = names }.let {}
+    suspend fun setFilterBase(id: String) = context.dataStore.edit { it[K.FILTER_BASE] = id }.let {}
 }
