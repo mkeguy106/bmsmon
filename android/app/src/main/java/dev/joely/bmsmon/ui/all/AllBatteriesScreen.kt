@@ -243,12 +243,16 @@ private fun SwipeableBatteryRow(
         state = dismissState,
         enableDismissFromStartToEnd = false,
         backgroundContent = {
-            Box(
-                Modifier.fillMaxSize().clip(RoundedCornerShape(9.dp))
-                    .background(Bm.power.copy(alpha = 0.18f)).padding(horizontal = 18.dp),
-                contentAlignment = Alignment.CenterEnd,
-            ) {
-                Icon(Icons.Filled.Delete, "Remove", Modifier.size(22.dp), tint = Bm.power)
+            // Only reveal the trash affordance while actively swiping left; otherwise leave the
+            // background fully transparent so it never shows through translucent (stage) rows.
+            if (dismissState.dismissDirection == SwipeToDismissBoxValue.EndToStart) {
+                Box(
+                    Modifier.fillMaxSize().clip(RoundedCornerShape(9.dp))
+                        .background(Bm.power.copy(alpha = 0.18f)).padding(horizontal = 18.dp),
+                    contentAlignment = Alignment.CenterEnd,
+                ) {
+                    Icon(Icons.Filled.Delete, "Remove", Modifier.size(22.dp), tint = Bm.power)
+                }
             }
         },
     ) {

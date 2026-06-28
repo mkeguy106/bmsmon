@@ -27,6 +27,7 @@ import dev.joely.bmsmon.ble.blePermissions
 import dev.joely.bmsmon.ble.hasBlePermissions
 import dev.joely.bmsmon.ui.detail.BatteryDetailScreen
 import dev.joely.bmsmon.ui.home.HomeScreen
+import androidx.activity.compose.BackHandler
 import dev.joely.bmsmon.ui.scan.ScanSheet
 import dev.joely.bmsmon.ui.settings.SettingsScreen
 import dev.joely.bmsmon.ui.theme.Bm
@@ -38,6 +39,16 @@ fun App(vm: BatteryViewModel) {
     val context = LocalContext.current
     val systemDark = isSystemInDarkTheme()
     LaunchedEffect(systemDark) { vm.applySystemMode(systemDark) }
+
+    // System / gesture back navigates within the app (detail → list, settings → home) instead of
+    // exiting the activity. Disabled on Home so back there still backgrounds the app as usual.
+    BackHandler(enabled = state.screen != Screen.Home) {
+        when (state.screen) {
+            Screen.Detail -> vm.closeDetail()
+            Screen.Settings -> vm.goHome()
+            else -> {}
+        }
+    }
 
     // Hold the screen on (at the user's brightness) while the app is open, when enabled.
     val window = context.findActivity()?.window
@@ -96,6 +107,7 @@ fun App(vm: BatteryViewModel) {
                         onCreateGroup = vm::createGroupForBattery,
                         onRenameGroup = vm::renameGroup,
                         onPinSingle = { addr -> vm.pinStage(dev.joely.bmsmon.model.StageTarget.Single(addr)) },
+                        onHomePageChanged = vm::setHomePage,
                     )
                     Screen.Settings -> SettingsScreen(
                         state = state,

@@ -108,6 +108,9 @@ data class UiState(
     val keepScreenOn: Boolean = true,
     val tempFahrenheit: Boolean = true,
     val detailAddress: String? = null,
+    // Which Home pager page is showing (0 = stage, 1 = all batteries). Remembered so the detail
+    // screen's back button returns to the page you came from.
+    val homePage: Int = 0,
 ) {
     val isDark get() = mode == Mode.Dark
     val dailyDriver: BatteryGroup
@@ -324,6 +327,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     fun renameGroup(groupId: String, name: String) =
         updateRoster { it.renameGroup(groupId, name) }
 
+    fun setHomePage(page: Int) = _state.update { if (it.homePage == page) it else it.copy(homePage = page) }
     fun openDetail(address: String) = _state.update { it.copy(screen = Screen.Detail, detailAddress = address) }
     fun closeDetail() = _state.update { it.copy(screen = Screen.Home, detailAddress = null) }
 

@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -80,11 +81,15 @@ fun HomeScreen(
     onCreateGroup: (String, String) -> Unit,
     onRenameGroup: (String, String) -> Unit,
     onPinSingle: (String) -> Unit,
+    onHomePageChanged: (Int) -> Unit,
 ) {
     val c = Bm.colors
     // Page 0 = stage (main); page 1 = all batteries — swipe LEFT from the stage to reach it.
-    val pager = rememberPagerState(initialPage = 0) { 2 }
+    // Start on the remembered page so returning from the detail screen lands you back where you were.
+    val pager = rememberPagerState(initialPage = state.homePage) { 2 }
     val scope = rememberCoroutineScope()
+    // Remember the current page so the detail screen's back button can restore it.
+    LaunchedEffect(pager.currentPage) { onHomePageChanged(pager.currentPage) }
     val alert = state.stageAlert()
 
     Box(Modifier.fillMaxSize()) {
