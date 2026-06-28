@@ -44,8 +44,8 @@ import androidx.compose.ui.unit.sp
 import dev.joely.bmsmon.FilterKey
 import dev.joely.bmsmon.SortKey
 import dev.joely.bmsmon.UiState
-import dev.joely.bmsmon.model.ALL_GROUPS
 import dev.joely.bmsmon.model.BatteryGroup
+import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.BmsTarget
@@ -82,7 +82,7 @@ fun AllBatteriesScreen(
     modifier: Modifier = Modifier,
 ) {
     val c = Bm.colors
-    var rows = ALL_GROUPS.flatMap { g -> g.targets.map { t -> Row(g, t, state.fleet[t.address]) } }
+    var rows = state.roster.groupViews().flatMap { g -> g.targets.map { t -> Row(g, t, state.fleet[t.address]) } }
 
     if (FilterKey.ReachableOnly in state.filters) rows = rows.filter { it.reachable }
     if (FilterKey.ActiveOnly in state.filters) rows = rows.filter { activityRank(it.tele) <= 1 }
@@ -121,7 +121,7 @@ fun AllBatteriesScreen(
         }
         if (FilterKey.ByBase in state.filters) {
             ChipRow("Base") {
-                ALL_GROUPS.forEach { g -> Chip(g.label, state.filterBaseId == g.id) { onSetFilterBase(g.id) } }
+                state.roster.groupViews().forEach { g -> Chip(g.label, state.filterBaseId == g.id) { onSetFilterBase(g.id) } }
             }
         }
 

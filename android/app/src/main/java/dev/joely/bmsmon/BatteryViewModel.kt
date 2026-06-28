@@ -9,25 +9,36 @@ import dev.joely.bmsmon.ble.BmsRepository
 import dev.joely.bmsmon.ble.hasBlePermissions
 import dev.joely.bmsmon.data.SettingsStore
 import dev.joely.bmsmon.data.TelemetryLogger
-import dev.joely.bmsmon.model.ALL_GROUPS
 import dev.joely.bmsmon.model.BatteryGroup
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.DEFAULT_GROUP_ID
+import dev.joely.bmsmon.model.DEFAULT_ROSTER
 import dev.joely.bmsmon.model.DEFAULT_STAGE_HOLD_MIN
 import dev.joely.bmsmon.model.GroupActivity
 import dev.joely.bmsmon.model.PIN_HOLD_MS
+import dev.joely.bmsmon.model.Roster
 import dev.joely.bmsmon.model.StageInputs
 import dev.joely.bmsmon.model.StageItem
 import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.Telemetry
+import dev.joely.bmsmon.model.addBattery
+import dev.joely.bmsmon.model.addGroup
 import dev.joely.bmsmon.model.addresses
+import dev.joely.bmsmon.model.allTargets
+import dev.joely.bmsmon.model.assignGroup
+import dev.joely.bmsmon.model.batteryAt
 import dev.joely.bmsmon.model.demoFor
 import dev.joely.bmsmon.model.groupActivity
 import dev.joely.bmsmon.model.groupById
-import dev.joely.bmsmon.model.groupForAddress
+import dev.joely.bmsmon.model.groupOf
+import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.model.isRegen
+import dev.joely.bmsmon.model.removeBattery
+import dev.joely.bmsmon.model.renameBattery
+import dev.joely.bmsmon.model.renameGroup
 import dev.joely.bmsmon.model.resolveStage
+import dev.joely.bmsmon.model.targetFor
 import dev.joely.bmsmon.ui.theme.DefaultAccent
 import dev.joely.bmsmon.ui.theme.DefaultPower
 import kotlinx.coroutines.delay
@@ -39,7 +50,7 @@ import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import kotlin.random.Random
 
-enum class Screen { Home, Settings }
+enum class Screen { Home, Settings, Detail }
 enum class Mode { Dark, Light }
 enum class SortKey { Activity, Soc, Base }
 enum class FilterKey { ReachableOnly, ActiveOnly, ByBase, DailyDriverOnly }
@@ -70,6 +81,7 @@ data class UiState(
     val power: Color = DefaultPower,
     val monitoring: Boolean = false,
     val dailyDriverId: String = DEFAULT_GROUP_ID,
+    val roster: Roster = DEFAULT_ROSTER,
     val fleet: Map<String, BatteryStatus> = emptyMap(),
     val dynamicStage: Boolean = true,
     val stageHoldMinutes: Int = DEFAULT_STAGE_HOLD_MIN,
@@ -80,7 +92,8 @@ data class UiState(
     val pinned: Boolean = false,
     val regenAddrs: Set<String> = emptySet(),
     val disabled: Set<String> = emptySet(),
-    val demo: List<Telemetry> = demoFor(groupById(DEFAULT_GROUP_ID)),
+    val demo: List<Telemetry> = demoFor(DEFAULT_ROSTER.groupById(DEFAULT_GROUP_ID)
+        ?: BatteryGroup(DEFAULT_GROUP_ID, DEFAULT_GROUP_ID, emptyList())),
     val sortKey: SortKey = SortKey.Activity,
     val filters: Set<FilterKey> = emptySet(),
     val filterBaseId: String = DEFAULT_GROUP_ID,
@@ -94,17 +107,19 @@ data class UiState(
     val acknowledgedThresholds: Set<Int> = emptySet(),
     val keepScreenOn: Boolean = true,
     val tempFahrenheit: Boolean = true,
+    val detailAddress: String? = null,
 ) {
     val isDark get() = mode == Mode.Dark
-    val dailyDriver: BatteryGroup get() = groupById(dailyDriverId)
+    val dailyDriver: BatteryGroup
+        get() = roster.groupById(dailyDriverId) ?: BatteryGroup(dailyDriverId, dailyDriverId, emptyList())
     val stageGroupId: String? get() = (stageTarget as? StageTarget.Base)?.groupId
 
     /** The 1–2 stage packs with their regen flags (last-known when monitoring, demo otherwise). */
     fun stageItems(): List<StageItem> {
         if (!monitoring) return demo.map { StageItem(it, false) }
         val targets = when (val t = stageTarget) {
-            is StageTarget.Base -> groupById(t.groupId).targets
-            is StageTarget.Single -> ALL_GROUPS.flatMap { it.targets }.filter { it.address == t.address }
+            is StageTarget.Base -> roster.groupById(t.groupId)?.targets ?: emptyList()
+            is StageTarget.Single -> roster.targetFor(t.address)?.let { listOf(it) } ?: emptyList()
         }
         return targets.map { tg ->
             val tel = fleet[tg.address]?.telemetry?.copy(name = tg.name)
@@ -116,19 +131,18 @@ data class UiState(
     /** True when any pack on the stage is currently dumping regen current. */
     val stageRegen: Boolean
         get() = when (val t = stageTarget) {
-            is StageTarget.Base -> groupById(t.groupId).targets.any { it.address in regenAddrs }
+            is StageTarget.Base -> roster.groupById(t.groupId)?.targets?.any { it.address in regenAddrs } ?: false
             is StageTarget.Single -> t.address in regenAddrs
         }
 
     val stageLabel: String
         get() = when (val t = stageTarget) {
-            is StageTarget.Base -> groupById(t.groupId).label
-            is StageTarget.Single -> ALL_GROUPS.flatMap { it.targets }
-                .firstOrNull { it.address == t.address }?.name ?: t.address
+            is StageTarget.Base -> roster.groupById(t.groupId)?.label ?: t.groupId
+            is StageTarget.Single -> roster.batteryAt(t.address)?.alias ?: t.address
         }
 
     val stageActivity: GroupActivity
-        get() = (stageTarget as? StageTarget.Base)?.let { groupActivity(groupById(it.groupId), fleet) }
+        get() = (stageTarget as? StageTarget.Base)?.let { roster.groupById(it.groupId)?.let { g -> groupActivity(g, fleet) } }
             ?: GroupActivity.Unknown
 
     /**
@@ -139,7 +153,7 @@ data class UiState(
     fun stageAlert(): StageAlert {
         val none = StageAlert(false, false, 100, null, emptySet())
         if (!monitoring) return none
-        val packs = stageTarget.addresses()
+        val packs = stageTarget.addresses(roster)
             .mapNotNull { fleet[it]?.takeIf { s -> s.reachable }?.telemetry }
         val lowPack = packs.minByOrNull { it.soc } ?: return none
         val lowSoc = lowPack.soc
@@ -169,12 +183,16 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val p = store.load()
             _state.update { s ->
-                val dd = groupById(p.dailyDriverId ?: s.dailyDriverId)
+                val roster = p.roster ?: DEFAULT_ROSTER
+                val dd = roster.groupById(p.dailyDriverId ?: s.dailyDriverId)
+                    ?: roster.groupViews().firstOrNull()
+                    ?: BatteryGroup(DEFAULT_GROUP_ID, DEFAULT_GROUP_ID, emptyList())
                 s.copy(
                     accent = p.accentArgb?.let { Color(it) } ?: s.accent,
                     power = p.powerArgb?.let { Color(it) } ?: s.power,
                     manualMode = p.manualMode,
                     mode = if (p.manualMode) (if (p.darkMode) Mode.Dark else Mode.Light) else s.mode,
+                    roster = roster,
                     dailyDriverId = dd.id,
                     dynamicStage = p.dynamicStage ?: s.dynamicStage,
                     stageHoldMinutes = p.stageHoldMinutes ?: s.stageHoldMinutes,
@@ -251,7 +269,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun setDailyDriver(id: String) {
-        val g = groupById(id)
+        val g = _state.value.roster.groupById(id) ?: return
         _state.update {
             if (it.monitoring) it.copy(dailyDriverId = g.id)
             else it.copy(dailyDriverId = g.id, stageTarget = StageTarget.Base(g.id), demo = demoFor(g), filterBaseId = g.id)
@@ -259,6 +277,43 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { store.setDailyDriver(g.id) }
         refresh()
     }
+
+    // --- roster editing ---
+    private fun updateRoster(transform: (Roster) -> Roster) {
+        _state.update { it.copy(roster = transform(it.roster)) }
+        val r = _state.value.roster
+        viewModelScope.launch { store.setRoster(r) }
+        if (_state.value.monitoring) repository.setTargets(r.allTargets())
+        refresh()
+    }
+
+    fun addBattery(address: String, advertisedName: String) =
+        updateRoster { it.addBattery(address, advertisedName) }
+
+    fun removeBattery(address: String) {
+        val a = address.uppercase()
+        _state.update { it.copy(disabled = it.disabled - a, fleet = it.fleet - a) }
+        repository.setDisabled(_state.value.disabled)
+        updateRoster { it.removeBattery(a) }
+    }
+
+    fun renameBattery(address: String, alias: String) =
+        updateRoster { it.renameBattery(address, alias) }
+
+    fun setBatteryGroup(address: String, groupId: String?) =
+        updateRoster { it.assignGroup(address, groupId) }
+
+    fun createGroupForBattery(address: String, name: String) =
+        updateRoster {
+            val (r, id) = it.addGroup(name)
+            r.assignGroup(address, id)
+        }
+
+    fun renameGroup(groupId: String, name: String) =
+        updateRoster { it.renameGroup(groupId, name) }
+
+    fun openDetail(address: String) = _state.update { it.copy(screen = Screen.Detail, detailAddress = address) }
+    fun closeDetail() = _state.update { it.copy(screen = Screen.Home, detailAddress = null) }
 
     // --- all-batteries page controls (persisted) ---
     fun setSort(s: SortKey) {
@@ -318,7 +373,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(monitoring = true, fleet = it.fleet.mapValues { (_, st) -> st.copy(reachable = false) }) }
         repository.start(
             scope = viewModelScope,
-            targets = ALL_GROUPS.flatMap { it.targets },
+            targets = _state.value.roster.allTargets(),
             onTelemetry = { addr, t -> onTelemetry(addr, t) },
             onReachable = { addr, r -> onReachable(addr, r) },
         )
@@ -342,7 +397,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun onTelemetry(addr: String, t: Telemetry) {
         val now = clockMs()
-        val group = groupForAddress(addr)
+        val group = _state.value.roster.groupOf(addr)
         val regen = isRegen(t, group?.let { _state.value.lastDischargeAt[it.id] }, now)
         _state.update { st ->
             st.copy(
@@ -434,7 +489,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun currentStageAddrs(): Set<String> =
-        _state.value.stageTarget.addresses() - _state.value.disabled
+        _state.value.stageTarget.addresses(_state.value.roster) - _state.value.disabled
 
     /** Re-resolve the stage; if its battery set changed, tell the engine. */
     private fun refresh() {
@@ -442,12 +497,13 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         val before = currentStageAddrs()
         _state.update { st ->
             val newLast = st.lastDischargeAt.toMutableMap()
-            ALL_GROUPS.forEach { g ->
+            st.roster.groupViews().forEach { g ->
                 if (groupActivity(g, st.fleet) == GroupActivity.Discharging) newLast[g.id] = now
             }
             val resolved = resolveStage(
                 StageInputs(st.fleet, st.dailyDriverId, st.dynamicStage, st.manualStage,
-                    st.manualPinnedAt, newLast, st.stageHoldMinutes * 60_000L, st.stageTarget, now),
+                    st.manualPinnedAt, newLast, st.stageHoldMinutes * 60_000L, st.stageTarget, now,
+                    st.roster.groupViews()),
             )
             val isPinned = st.manualStage != null && resolved == st.manualStage &&
                 (!st.dynamicStage || now - st.manualPinnedAt < PIN_HOLD_MS)

@@ -93,6 +93,7 @@ fun App(vm: BatteryViewModel) {
                         onSetPower = vm::setPower,
                         onSetMode = vm::setMode,
                     )
+                    Screen.Detail -> Unit  // detail screen wired in a later milestone
                 }
             }
         }
