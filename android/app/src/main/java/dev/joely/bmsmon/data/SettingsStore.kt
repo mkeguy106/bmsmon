@@ -40,6 +40,7 @@ data class Persisted(
     val roster: Roster?,
     val appearance: String?,
     val autoLuxThreshold: Float?,
+    val locked: Boolean,
 )
 
 /** Persists user preferences (colors, appearance override, BMS addresses) via DataStore. */
@@ -66,6 +67,7 @@ class SettingsStore(private val context: Context) {
         val ROSTER = stringPreferencesKey("roster")
         val APPEARANCE = stringPreferencesKey("appearance")
         val AUTO_LUX = floatPreferencesKey("auto_lux_threshold")
+        val LOCKED = booleanPreferencesKey("locked")
     }
 
     suspend fun load(): Persisted {
@@ -91,6 +93,7 @@ class SettingsStore(private val context: Context) {
             roster = p[K.ROSTER]?.let(::decodeRoster),
             appearance = p[K.APPEARANCE],
             autoLuxThreshold = p[K.AUTO_LUX],
+            locked = p[K.LOCKED] ?: false,
         )
     }
 
@@ -115,6 +118,7 @@ class SettingsStore(private val context: Context) {
     suspend fun setTempFahrenheit(on: Boolean) = context.dataStore.edit { it[K.TEMP_FAHRENHEIT] = on }.let {}
     suspend fun setRoster(roster: Roster) =
         context.dataStore.edit { it[K.ROSTER] = encodeRoster(roster) }.let {}
+    suspend fun setLocked(on: Boolean) = context.dataStore.edit { it[K.LOCKED] = on }.let {}
 }
 
 /** JSON forbids NaN/Infinity; coerce any non-finite reading to 0 before writing. */
