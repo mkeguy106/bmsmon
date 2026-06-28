@@ -144,6 +144,8 @@ fun App(vm: BatteryViewModel) {
                         onRenameGroup = vm::renameGroup,
                         onPinSingle = { addr -> vm.pinStage(dev.joely.bmsmon.model.StageTarget.Single(addr)) },
                         onHomePageChanged = vm::setHomePage,
+                        locked = state.locked,
+                        onToggleLock = { vm.setLocked(!state.locked) },
                     )
                     Screen.Settings -> SettingsScreen(
                         state = state,

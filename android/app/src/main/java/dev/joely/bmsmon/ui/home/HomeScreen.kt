@@ -83,6 +83,8 @@ fun HomeScreen(
     onRenameGroup: (String, String) -> Unit,
     onPinSingle: (String) -> Unit,
     onHomePageChanged: (Int) -> Unit,
+    locked: Boolean,
+    onToggleLock: () -> Unit,
 ) {
     val c = Bm.colors
     // Page 0 = stage (main); page 1 = all batteries — swipe LEFT from the stage to reach it.
@@ -92,11 +94,13 @@ fun HomeScreen(
     // Remember the current page so the detail screen's back button can restore it.
     LaunchedEffect(pager.currentPage) { onHomePageChanged(pager.currentPage) }
     val alert = state.stageAlert()
+    // While locked, force the stage (page 0) and keep it there.
+    LaunchedEffect(locked) { if (locked) pager.scrollToPage(0) }
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().background(c.bg)) {
-            TopBar(state, pager.currentPage, onCycleAppearance, onSettings, onToggleMonitoring)
-            HorizontalPager(state = pager, modifier = Modifier.weight(1f)) { page ->
+            TopBar(state, pager.currentPage, onCycleAppearance, onSettings, onToggleMonitoring, locked, onToggleLock)
+            HorizontalPager(state = pager, userScrollEnabled = !locked, modifier = Modifier.weight(1f)) { page ->
                 when (page) {
                     0 -> StageScreen(
                         items = state.stageItems(),
@@ -202,6 +206,8 @@ private fun TopBar(
     onCycleAppearance: () -> Unit,
     onSettings: () -> Unit,
     onToggleMonitoring: () -> Unit,
+    locked: Boolean,
+    onToggleLock: () -> Unit,
 ) {
     val c = Bm.colors
     val (label, labelColor, showPin) = when {
@@ -214,38 +220,51 @@ private fun TopBar(
         state.stageActivity == GroupActivity.Idle -> Triple("${state.stageLabel} · IDLE", c.text2, false)
         else -> Triple("${state.stageLabel} · …", c.text3, false)
     }
+    val statusLabel = if (locked) "$label · LOCKED" else label
     Box(Modifier.fillMaxWidth().background(c.bg).padding(horizontal = 18.dp, vertical = 12.dp)) {
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(Modifier.clickable(onClick = onToggleMonitoring), verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                if (locked) Modifier else Modifier.clickable(onClick = onToggleMonitoring),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Icon(
                     if (state.monitoring) Icons.Filled.Bluetooth else Icons.Filled.BluetoothDisabled,
                     null, Modifier.size(18.dp),
                     tint = if (state.monitoring) Bm.accent else c.text3,
                 )
                 if (showPin) Icon(Icons.Filled.PushPin, null, Modifier.padding(start = 6.dp).size(13.dp), tint = Bm.accent)
-                Text(label, color = labelColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                Text(statusLabel, color = labelColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
                     letterSpacing = 0.9.sp, modifier = Modifier.padding(start = 7.dp))
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(40.dp).clickable(onClick = onCycleAppearance), contentAlignment = Alignment.Center) {
-                    when (state.appearance) {
-                        Appearance.Dark -> Icon(Icons.Filled.DarkMode, "Appearance: Dark", Modifier.size(21.dp), tint = c.icon)
-                        Appearance.Light -> Icon(Icons.Filled.LightMode, "Appearance: Light", Modifier.size(21.dp), tint = c.icon)
-                        Appearance.System -> Text("S", color = c.icon, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                        Appearance.Auto -> Text("A", color = c.icon, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                // While locked, hide appearance + settings; only the lock control remains (hold to unlock).
+                if (!locked) {
+                    Box(Modifier.size(40.dp).clickable(onClick = onCycleAppearance), contentAlignment = Alignment.Center) {
+                        when (state.appearance) {
+                            Appearance.Dark -> Icon(Icons.Filled.DarkMode, "Appearance: Dark", Modifier.size(21.dp), tint = c.icon)
+                            Appearance.Light -> Icon(Icons.Filled.LightMode, "Appearance: Light", Modifier.size(21.dp), tint = c.icon)
+                            Appearance.System -> Text("S", color = c.icon, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                            Appearance.Auto -> Text("A", color = c.icon, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    Box(Modifier.size(40.dp).clickable(onClick = onSettings), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Filled.Settings, "Settings", Modifier.size(22.dp), tint = c.icon)
                     }
                 }
-                Box(Modifier.size(40.dp).clickable(onClick = onSettings), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Filled.Settings, "Settings", Modifier.size(22.dp), tint = c.icon)
-                }
+                LockButton(
+                    locked = locked,
+                    onToggle = onToggleLock,
+                    iconTint = if (locked) Bm.accent else c.icon,
+                    ringColor = Bm.accent,
+                )
             }
         }
-        // Page dots centered on the top-bar row (between the status label and the icons).
-        PageDots(currentPage, Modifier.align(Alignment.Center))
+        // Page dots centered on the top-bar row (hidden while locked — the stage is frozen on page 0).
+        if (!locked) PageDots(currentPage, Modifier.align(Alignment.Center))
     }
 }
 
