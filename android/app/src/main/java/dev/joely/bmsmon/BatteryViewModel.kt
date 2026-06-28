@@ -181,7 +181,9 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                 val dd = groupById(p.dailyDriverId ?: s.dailyDriverId)
                 val appearance = p.appearance?.let { runCatching { Appearance.valueOf(it) }.getOrNull() }
                     ?: legacyAppearance(p.manualMode, p.darkMode)
-                val effectiveMode = when (appearance) {
+                val resolvedAppearance =
+                    if (appearance == Appearance.Auto && !lightSensor.hasSensor()) Appearance.System else appearance
+                val effectiveMode = when (resolvedAppearance) {
                     Appearance.Dark -> Mode.Dark
                     Appearance.Light -> Mode.Light
                     Appearance.System, Appearance.Auto -> s.mode  // corrected once system/sensor reports
@@ -189,7 +191,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                 s.copy(
                     accent = p.accentArgb?.let { Color(it) } ?: s.accent,
                     power = p.powerArgb?.let { Color(it) } ?: s.power,
-                    appearance = appearance,
+                    appearance = resolvedAppearance,
                     autoLuxThreshold = p.autoLuxThreshold ?: s.autoLuxThreshold,
                     hasLightSensor = lightSensor.hasSensor(),
                     mode = effectiveMode,

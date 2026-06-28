@@ -28,6 +28,8 @@ class AppearanceTest {
         val t0 = 1_000_000L
         // candidate differs but not sustained long enough → keep current
         assertEquals(Mode.Dark, debouncedMode(Mode.Dark, Mode.Light, candidateSince = t0, now = t0 + 1000, debounceMs = 2500))
+        // one ms before the window closes → still hold current
+        assertEquals(Mode.Dark, debouncedMode(Mode.Dark, Mode.Light, candidateSince = t0, now = t0 + 2499, debounceMs = 2500))
         // sustained past the window → commit candidate
         assertEquals(Mode.Light, debouncedMode(Mode.Dark, Mode.Light, candidateSince = t0, now = t0 + 2500, debounceMs = 2500))
     }
