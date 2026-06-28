@@ -62,6 +62,7 @@ fun SettingsScreen(
     onSetAlertsOn: (Boolean) -> Unit,
     onToggleThreshold: (Int) -> Unit,
     onSetKeepScreenOn: (Boolean) -> Unit,
+    onSetTempFahrenheit: (Boolean) -> Unit,
     onSetLogging: (Boolean) -> Unit,
     onClearLog: () -> Unit,
     onSetAccent: (Color) -> Unit,
@@ -99,6 +100,7 @@ fun SettingsScreen(
             ColorCard("Theme Color", null, ThemeSwatches, state.accent, onSetAccent)
             ColorCard("Power Color", "Inner ring — charge / discharge rate", PowerSwatches, state.power, onSetPower)
             AppearanceCard(state, onSetMode)
+            TemperatureCard(state, onSetTempFahrenheit)
             KeepScreenOnCard(state, onSetKeepScreenOn)
             UsageLoggingCard(state, onSetLogging, onClearLog)
             AboutCard()
@@ -405,6 +407,24 @@ private fun AppearanceButton(
         Icon(icon, null, Modifier.size(17.dp), tint = c.text)
         Text(label, color = c.text, fontSize = 14.sp, fontWeight = FontWeight.Medium,
             modifier = Modifier.padding(start = 8.dp))
+    }
+}
+
+@Composable
+private fun TemperatureCard(state: UiState, onSetTempFahrenheit: (Boolean) -> Unit) {
+    val c = Bm.colors
+    Card {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                Text("Temperature", color = c.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text("Unit shown on the stage stat grid", color = c.text2, fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 4.dp))
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SelectChip("°F", state.tempFahrenheit) { onSetTempFahrenheit(true) }
+                SelectChip("°C", !state.tempFahrenheit) { onSetTempFahrenheit(false) }
+            }
+        }
     }
 }
 

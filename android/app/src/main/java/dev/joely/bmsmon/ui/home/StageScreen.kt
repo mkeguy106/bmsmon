@@ -33,16 +33,16 @@ import kotlin.math.roundToInt
 
 /** The main stage: the active base's two packs, full gauges. */
 @Composable
-fun StageScreen(items: List<StageItem>, modifier: Modifier = Modifier) {
+fun StageScreen(items: List<StageItem>, tempInF: Boolean, modifier: Modifier = Modifier) {
     Column(modifier.fillMaxSize()) {
         items.forEach { item ->
-            BatteryBlock(item, Modifier.weight(1f))
+            BatteryBlock(item, tempInF, Modifier.weight(1f))
         }
     }
 }
 
 @Composable
-private fun BatteryBlock(item: StageItem, modifier: Modifier = Modifier) {
+private fun BatteryBlock(item: StageItem, tempInF: Boolean, modifier: Modifier = Modifier) {
     val c = Bm.colors
     val b = item.telemetry
     Column(
@@ -92,7 +92,7 @@ private fun BatteryBlock(item: StageItem, modifier: Modifier = Modifier) {
             letterSpacing = 2.2.sp,
             modifier = Modifier.padding(top = 10.dp),
         )
-        StatGrid(b, Modifier.padding(top = 12.dp))
+        StatGrid(b, tempInF, Modifier.padding(top = 12.dp))
     }
 }
 
@@ -110,14 +110,15 @@ private fun ChargingBoltIcon() {
 private data class Stat(val label: String, val value: String, val unit: String)
 
 @Composable
-private fun StatGrid(b: Telemetry, modifier: Modifier = Modifier) {
+private fun StatGrid(b: Telemetry, tempInF: Boolean, modifier: Modifier = Modifier) {
+    val temp = if (tempInF) b.temp * 9f / 5f + 32f else b.temp
     val stats = listOf(
         Stat("Power", "%.1f".format(b.powerW), "W"),
         Stat("Current", "%.2f".format(b.current), "A"),
         Stat("Voltage", "%.1f".format(b.voltage), "V"),
         Stat("Capacity", b.capacityAh.roundToInt().toString(), "Ah"),
         Stat("Cell V", "%.2f".format(b.cellV), "V"),
-        Stat("Temp", "%.1f".format(b.temp), "°C"),
+        Stat("Temp", "%.1f".format(temp), if (tempInF) "°F" else "°C"),
     )
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         for (row in stats.chunked(3)) {
