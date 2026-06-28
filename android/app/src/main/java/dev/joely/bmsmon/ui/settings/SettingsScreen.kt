@@ -61,6 +61,7 @@ fun SettingsScreen(
     onSetStageHold: (Int) -> Unit,
     onSetAlertsOn: (Boolean) -> Unit,
     onToggleThreshold: (Int) -> Unit,
+    onSetKeepScreenOn: (Boolean) -> Unit,
     onSetLogging: (Boolean) -> Unit,
     onClearLog: () -> Unit,
     onSetAccent: (Color) -> Unit,
@@ -98,6 +99,7 @@ fun SettingsScreen(
             ColorCard("Theme Color", null, ThemeSwatches, state.accent, onSetAccent)
             ColorCard("Power Color", "Inner ring — charge / discharge rate", PowerSwatches, state.power, onSetPower)
             AppearanceCard(state, onSetMode)
+            KeepScreenOnCard(state, onSetKeepScreenOn)
             UsageLoggingCard(state, onSetLogging, onClearLog)
             AboutCard()
         }
@@ -403,6 +405,30 @@ private fun AppearanceButton(
         Icon(icon, null, Modifier.size(17.dp), tint = c.text)
         Text(label, color = c.text, fontSize = 14.sp, fontWeight = FontWeight.Medium,
             modifier = Modifier.padding(start = 8.dp))
+    }
+}
+
+@Composable
+private fun KeepScreenOnCard(state: UiState, onSetKeepScreenOn: (Boolean) -> Unit) {
+    val c = Bm.colors
+    Card {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                Text("Keep screen on", color = c.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text("Hold the display at your set brightness while the app is open. Turn off to let the screen time out normally.",
+                    color = c.text2, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.padding(top = 4.dp))
+            }
+            Switch(
+                checked = state.keepScreenOn,
+                onCheckedChange = onSetKeepScreenOn,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = Bm.accent,
+                    uncheckedTrackColor = c.inputBg,
+                    uncheckedBorderColor = c.inputBorder,
+                ),
+            )
+        }
     }
 }
 
