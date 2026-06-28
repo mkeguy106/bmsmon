@@ -64,3 +64,38 @@ fun Roster.allTargets(): List<BmsTarget> =
 
 fun Roster.targetFor(address: String): BmsTarget? =
     batteryAt(address)?.let { BmsTarget(it.address, it.alias) }
+
+// --- pure mutations (each returns a new Roster) ---
+
+/** Add a battery if its MAC is not already present (case-insensitive). Alias defaults to the name. */
+fun Roster.addBattery(address: String, advertisedName: String): Roster {
+    val a = address.trim().uppercase()
+    if (batteries.any { it.address.equals(a, ignoreCase = true) }) return this
+    return copy(batteries = batteries + Battery(a, advertisedName, advertisedName, null))
+}
+
+fun Roster.removeBattery(address: String): Roster =
+    copy(batteries = batteries.filterNot { it.address.equals(address, ignoreCase = true) })
+
+fun Roster.renameBattery(address: String, alias: String): Roster =
+    copy(batteries = batteries.map { if (it.address.equals(address, ignoreCase = true)) it.copy(alias = alias) else it })
+
+fun Roster.assignGroup(address: String, groupId: String?): Roster =
+    copy(batteries = batteries.map { if (it.address.equals(address, ignoreCase = true)) it.copy(groupId = groupId) else it })
+
+/** Create a new group with a generated id; returns the new roster and the new group's id. */
+fun Roster.addGroup(name: String): Pair<Roster, String> {
+    val id = newGroupId()
+    return copy(groups = groups + Group(id, name)) to id
+}
+
+fun Roster.renameGroup(groupId: String, name: String): Roster =
+    copy(groups = groups.map { if (it.id == groupId) it.copy(name = name) else it })
+
+/** Deterministic fresh id ("g1", "g2", …) that doesn't collide with existing group ids. */
+private fun Roster.newGroupId(): String {
+    val existing = groups.map { it.id }.toSet()
+    var n = 1
+    while ("g$n" in existing) n++
+    return "g$n"
+}
