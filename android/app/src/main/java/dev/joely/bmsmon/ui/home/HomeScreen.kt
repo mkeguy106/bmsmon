@@ -83,7 +83,6 @@ fun HomeScreen(
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().background(c.bg)) {
             TopBar(state, onCycleAppearance, onSettings, onToggleMonitoring)
-            if (state.logging) LoggingBanner(state)
             PageDots(current = pager.currentPage)
             HorizontalPager(state = pager, modifier = Modifier.weight(1f)) { page ->
                 when (page) {
@@ -165,21 +164,6 @@ private fun DangerOverlay(alert: StageAlert, onAcknowledge: () -> Unit) {
             Text("ACKNOWLEDGE", color = Color.White, fontSize = 15.sp,
                 fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
         }
-    }
-}
-
-@Composable
-private fun LoggingBanner(state: UiState) {
-    val c = Bm.colors
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 2.dp),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            "● LOGGING   peak ${state.peakPowerW.toInt()} W  ·  ${"%.1f".format(state.peakCurrentA)} A",
-            color = Bm.power, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.5.sp,
-        )
     }
 }
 
