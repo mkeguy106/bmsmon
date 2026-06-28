@@ -23,6 +23,7 @@ data class Persisted(
     val logging: Boolean,
     val alertsOn: Boolean,
     val enabledThresholds: Set<Int>?,
+    val keepScreenOn: Boolean,
 )
 
 /** Persists user preferences (colors, appearance override, BMS addresses) via DataStore. */
@@ -40,6 +41,7 @@ class SettingsStore(private val context: Context) {
         val LOGGING = booleanPreferencesKey("logging")
         val ALERTS_ON = booleanPreferencesKey("alerts_on")
         val THRESHOLDS = stringSetPreferencesKey("alert_thresholds")
+        val KEEP_SCREEN_ON = booleanPreferencesKey("keep_screen_on")
     }
 
     suspend fun load(): Persisted {
@@ -56,6 +58,7 @@ class SettingsStore(private val context: Context) {
             logging = p[K.LOGGING] ?: false,
             alertsOn = p[K.ALERTS_ON] ?: true,
             enabledThresholds = p[K.THRESHOLDS]?.mapNotNull { it.toIntOrNull() }?.toSet(),
+            keepScreenOn = p[K.KEEP_SCREEN_ON] ?: true,
         )
     }
 
@@ -73,4 +76,5 @@ class SettingsStore(private val context: Context) {
     suspend fun setAlertsOn(on: Boolean) = context.dataStore.edit { it[K.ALERTS_ON] = on }.let {}
     suspend fun setThresholds(values: Set<Int>) =
         context.dataStore.edit { it[K.THRESHOLDS] = values.map(Int::toString).toSet() }.let {}
+    suspend fun setKeepScreenOn(on: Boolean) = context.dataStore.edit { it[K.KEEP_SCREEN_ON] = on }.let {}
 }

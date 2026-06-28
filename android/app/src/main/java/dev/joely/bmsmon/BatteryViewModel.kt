@@ -89,6 +89,7 @@ data class UiState(
     val alertsOn: Boolean = true,
     val enabledThresholds: Set<Int> = ALERT_THRESHOLDS.toSet(),
     val acknowledgedThresholds: Set<Int> = emptySet(),
+    val keepScreenOn: Boolean = true,
 ) {
     val isDark get() = mode == Mode.Dark
     val dailyDriver: BatteryGroup get() = groupById(dailyDriverId)
@@ -176,6 +177,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     logging = p.logging,
                     alertsOn = p.alertsOn,
                     enabledThresholds = p.enabledThresholds ?: s.enabledThresholds,
+                    keepScreenOn = p.keepScreenOn,
                     stageTarget = StageTarget.Base(dd.id),
                     filterBaseId = dd.id,
                     demo = demoFor(dd),
@@ -367,6 +369,11 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         }
         viewModelScope.launch { store.setThresholds(_state.value.enabledThresholds) }
     }
+    fun setKeepScreenOn(enabled: Boolean) {
+        _state.update { it.copy(keepScreenOn = enabled) }
+        viewModelScope.launch { store.setKeepScreenOn(enabled) }
+    }
+
     /** Acknowledge the active alert: silence it until SOC drops past the next enabled level. */
     fun acknowledgeAlert() = _state.update { s ->
         val a = s.stageAlert()

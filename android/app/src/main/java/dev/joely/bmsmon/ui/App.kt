@@ -1,5 +1,9 @@
 package dev.joely.bmsmon.ui
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -8,6 +12,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -28,6 +33,14 @@ fun App(vm: BatteryViewModel) {
     val context = LocalContext.current
     val systemDark = isSystemInDarkTheme()
     LaunchedEffect(systemDark) { vm.applySystemMode(systemDark) }
+
+    // Hold the screen on (at the user's brightness) while the app is open, when enabled.
+    val window = context.findActivity()?.window
+    DisposableEffect(window, state.keepScreenOn) {
+        if (state.keepScreenOn) window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose { window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+    }
 
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -72,6 +85,7 @@ fun App(vm: BatteryViewModel) {
                         onSetStageHold = vm::setStageHold,
                         onSetAlertsOn = vm::setAlertsOn,
                         onToggleThreshold = vm::toggleThreshold,
+                        onSetKeepScreenOn = vm::setKeepScreenOn,
                         onSetLogging = vm::setLogging,
                         onClearLog = vm::clearLog,
                         onSetAccent = vm::setAccent,
@@ -82,4 +96,11 @@ fun App(vm: BatteryViewModel) {
             }
         }
     }
+}
+
+/** Walk the context chain to the hosting Activity (for window-level flags). */
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
