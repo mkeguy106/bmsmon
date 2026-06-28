@@ -40,7 +40,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -239,10 +238,6 @@ private fun SwipeableBatteryRow(
             if (target == SwipeToDismissBoxValue.EndToStart) { confirmDelete = true; false } else false
         },
     )
-    // Always snap back; deletion happens through the dialog.
-    LaunchedEffect(dismissState.currentValue) {
-        if (dismissState.currentValue != SwipeToDismissBoxValue.Settled) dismissState.reset()
-    }
 
     SwipeToDismissBox(
         state = dismissState,

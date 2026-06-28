@@ -47,8 +47,8 @@ fun StageScreen(
     onAddScan: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val c = Bm.colors
     if (isEmpty) {
+        val c = Bm.colors
         Column(modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center) {
             Box(

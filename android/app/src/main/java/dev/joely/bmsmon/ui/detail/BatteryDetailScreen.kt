@@ -104,7 +104,11 @@ fun BatteryDetailScreen(state: UiState, onBack: () -> Unit) {
                         KeyVal("Min / Max", "%.3f / %.3f V".format(mn, mx), mono = true)
                         KeyVal("Delta", "%.0f mV".format((mx - mn) * 1000f), mono = true)
                         tele.cells.forEachIndexed { i, v ->
-                            val color = when (v) { mx -> Bm.accent; mn -> Bm.power; else -> c.text }
+                            val color = when {
+                                mn < mx && v == mx -> Bm.accent
+                                mn < mx && v == mn -> Bm.power
+                                else -> c.text
+                            }
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                 Text("Cell ${i + 1}", color = c.text2, fontSize = 13.sp)
                                 Text("%.3f V".format(v), color = color, fontFamily = MonoFont, fontSize = 13.sp)
