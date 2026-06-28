@@ -103,19 +103,23 @@ class SettingsStore(private val context: Context) {
     suspend fun setTempFahrenheit(on: Boolean) = context.dataStore.edit { it[K.TEMP_FAHRENHEIT] = on }.let {}
 }
 
+/** JSON forbids NaN/Infinity; coerce any non-finite reading to 0 before writing. */
+private fun Float.jsonSafe(): Double = if (isFinite()) toDouble() else 0.0
+
 /** Compact JSON for the last-known per-battery telemetry (address -> the row's display fields). */
 private fun encodeTelemetry(map: Map<String, Telemetry>): String {
     val root = JSONObject()
     map.forEach { (addr, t) ->
         root.put(addr, JSONObject().apply {
             put("name", t.name)
-            put("soc", t.soc.toDouble())
-            put("powerW", t.powerW.toDouble())
-            put("current", t.current.toDouble())
-            put("voltage", t.voltage.toDouble())
-            put("capacityAh", t.capacityAh.toDouble())
-            put("cellV", t.cellV.toDouble())
-            put("temp", t.temp.toDouble())
+            put("soc", t.soc.jsonSafe())
+            put("powerW", t.powerW.jsonSafe())
+            put("current", t.current.jsonSafe())
+            put("voltage", t.voltage.jsonSafe())
+            put("capacityAh", t.capacityAh.jsonSafe())
+            put("fullChargeAh", t.fullChargeAh.jsonSafe())
+            put("cellV", t.cellV.jsonSafe())
+            put("temp", t.temp.jsonSafe())
             put("soh", t.soh)
             put("cycles", t.cycles)
             put("state", t.state.name)
@@ -129,15 +133,18 @@ private fun decodeTelemetry(json: String): Map<String, Telemetry> = runCatching 
     buildMap {
         root.keys().forEach { addr ->
             val o = root.getJSONObject(addr)
+            // optDouble defaults to NaN for absent keys — always pass an explicit 0.0 fallback so
+            // older blobs (missing newly-added fields) never decode to NaN and crash on re-encode.
             put(addr, Telemetry(
                 name = o.optString("name"),
-                soc = o.optDouble("soc").toFloat(),
-                powerW = o.optDouble("powerW").toFloat(),
-                current = o.optDouble("current").toFloat(),
-                voltage = o.optDouble("voltage").toFloat(),
-                capacityAh = o.optDouble("capacityAh").toFloat(),
-                cellV = o.optDouble("cellV").toFloat(),
-                temp = o.optDouble("temp").toFloat(),
+                soc = o.optDouble("soc", 0.0).toFloat(),
+                powerW = o.optDouble("powerW", 0.0).toFloat(),
+                current = o.optDouble("current", 0.0).toFloat(),
+                voltage = o.optDouble("voltage", 0.0).toFloat(),
+                capacityAh = o.optDouble("capacityAh", 0.0).toFloat(),
+                fullChargeAh = o.optDouble("fullChargeAh", 0.0).toFloat(),
+                cellV = o.optDouble("cellV", 0.0).toFloat(),
+                temp = o.optDouble("temp", 0.0).toFloat(),
                 soh = o.optInt("soh", 100),
                 cycles = o.optInt("cycles", 0),
                 state = runCatching { BatteryState.valueOf(o.optString("state")) }

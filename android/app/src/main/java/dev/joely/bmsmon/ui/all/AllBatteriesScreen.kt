@@ -285,10 +285,12 @@ private fun BatteryRow(
                 }
             }
         }
-        // Capacity bar — show the last-known reading whenever we have one (nominal full = 100 Ah),
-        // dimmed when the pack is disconnected/stale so the value stays visible but reads as old.
+        // Capacity bar — show the last-known reading whenever we have one, dimmed when the pack is
+        // disconnected/stale. Fill = remaining ÷ the BMS's reported full-charge capacity (falls
+        // back to 100 Ah nominal when the BMS hasn't reported a full-charge value yet).
         if (t != null) {
-            val capPct = (t.capacityAh.coerceIn(0f, 100f)) / 100f
+            val fullAh = if (t.fullChargeAh > 0f) t.fullChargeAh else 100f
+            val capPct = (t.capacityAh / fullAh).coerceIn(0f, 1f)
             Row(Modifier.fillMaxWidth().alpha(if (dim) 0.5f else 1f), verticalAlignment = Alignment.CenterVertically) {
                 Text("CAPACITY", color = c.text3, fontSize = 9.sp, fontWeight = FontWeight.SemiBold,
                     letterSpacing = 0.5.sp)
