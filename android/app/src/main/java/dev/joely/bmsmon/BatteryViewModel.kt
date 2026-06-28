@@ -7,6 +7,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.joely.bmsmon.ble.BmsRepository
 import dev.joely.bmsmon.ble.hasBlePermissions
+import dev.joely.bmsmon.sensor.AmbientLightSensor
 import dev.joely.bmsmon.data.SettingsStore
 import dev.joely.bmsmon.data.TelemetryLogger
 import dev.joely.bmsmon.model.ALL_GROUPS
@@ -64,8 +65,11 @@ data class StageAlert(
 
 data class UiState(
     val screen: Screen = Screen.Home,
-    val mode: Mode = Mode.Dark,
-    val manualMode: Boolean = false,
+    val mode: Mode = Mode.Dark,                 // effective (rendered) theme
+    val appearance: Appearance = Appearance.System,
+    val autoLuxThreshold: Float = DEFAULT_AUTO_LUX,
+    val currentLux: Float? = null,
+    val hasLightSensor: Boolean = true,
     val accent: Color = DefaultAccent,
     val power: Color = DefaultPower,
     val monitoring: Boolean = false,
@@ -159,6 +163,11 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     private val repository = BmsRepository(app)
     private val store = SettingsStore(app)
     private val logger = TelemetryLogger(app)
+    private val lightSensor = AmbientLightSensor(app)
+    private var foreground = true
+    private var lastSystemDark = true
+    private var autoCandidate: Mode? = null
+    private var autoCandidateSince = 0L
 
     private val _state = MutableStateFlow(UiState(logPath = logger.path))
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -170,11 +179,20 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             val p = store.load()
             _state.update { s ->
                 val dd = groupById(p.dailyDriverId ?: s.dailyDriverId)
+                val appearance = p.appearance?.let { runCatching { Appearance.valueOf(it) }.getOrNull() }
+                    ?: legacyAppearance(p.manualMode, p.darkMode)
+                val effectiveMode = when (appearance) {
+                    Appearance.Dark -> Mode.Dark
+                    Appearance.Light -> Mode.Light
+                    Appearance.System, Appearance.Auto -> s.mode  // corrected once system/sensor reports
+                }
                 s.copy(
                     accent = p.accentArgb?.let { Color(it) } ?: s.accent,
                     power = p.powerArgb?.let { Color(it) } ?: s.power,
-                    manualMode = p.manualMode,
-                    mode = if (p.manualMode) (if (p.darkMode) Mode.Dark else Mode.Light) else s.mode,
+                    appearance = appearance,
+                    autoLuxThreshold = p.autoLuxThreshold ?: s.autoLuxThreshold,
+                    hasLightSensor = lightSensor.hasSensor(),
+                    mode = effectiveMode,
                     dailyDriverId = dd.id,
                     dynamicStage = p.dynamicStage ?: s.dynamicStage,
                     stageHoldMinutes = p.stageHoldMinutes ?: s.stageHoldMinutes,
@@ -196,6 +214,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             }
             // Resume monitoring if it was on before the app was killed/restarted.
             if (p.monitoring && hasBlePermissions(getApplication())) startMonitoring()
+            updateSensor()
         }
         // Demo drift while not monitoring.
         viewModelScope.launch {
@@ -233,13 +252,67 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     fun goSettings() = _state.update { it.copy(screen = Screen.Settings) }
     fun goHome() = _state.update { it.copy(screen = Screen.Home) }
 
-    fun setMode(mode: Mode) {
-        _state.update { it.copy(mode = mode, manualMode = true) }
-        viewModelScope.launch { store.setMode(mode == Mode.Dark) }
+    /** User picked an explicit appearance (Dark/Light/System/Auto). */
+    fun setAppearance(a: Appearance) {
+        _state.update { it.copy(appearance = a) }
+        viewModelScope.launch { store.setAppearance(a.name) }
+        recomputeEffectiveMode()
+        updateSensor()
     }
+
+    /** Top-bar quick toggle / legacy two-button picker → an explicit Dark/Light lock. */
+    fun setMode(mode: Mode) = setAppearance(if (mode == Mode.Dark) Appearance.Dark else Appearance.Light)
     fun toggleMode() = setMode(if (_state.value.isDark) Mode.Light else Mode.Dark)
-    fun applySystemMode(dark: Boolean) = _state.update {
-        if (it.manualMode) it else it.copy(mode = if (dark) Mode.Dark else Mode.Light)
+
+    /** OS theme signal (from Compose). Only takes effect while appearance == System. */
+    fun applySystemMode(dark: Boolean) {
+        lastSystemDark = dark
+        _state.update {
+            if (it.appearance == Appearance.System) it.copy(mode = if (dark) Mode.Dark else Mode.Light) else it
+        }
+    }
+
+    fun setAutoLuxThreshold(lux: Float) {
+        _state.update { it.copy(autoLuxThreshold = lux) }
+        viewModelScope.launch { store.setAutoLuxThreshold(lux) }
+        if (_state.value.appearance == Appearance.Auto) recomputeEffectiveMode()
+    }
+
+    /** Recompute the effective [Mode] from the current appearance (no debounce — immediate). */
+    private fun recomputeEffectiveMode() = _state.update { s ->
+        val m = when (s.appearance) {
+            Appearance.Dark -> Mode.Dark
+            Appearance.Light -> Mode.Light
+            Appearance.System -> if (lastSystemDark) Mode.Dark else Mode.Light
+            Appearance.Auto -> s.currentLux?.let { resolveAutoMode(it, s.autoLuxThreshold, s.mode) } ?: s.mode
+        }
+        s.copy(mode = m)
+    }
+
+    /** Start the light sensor only while Auto is selected and the app is foregrounded. */
+    private fun updateSensor() {
+        val s = _state.value
+        if (s.appearance == Appearance.Auto && foreground && s.hasLightSensor) {
+            lightSensor.start(::onLux)
+        } else {
+            lightSensor.stop()
+            autoCandidate = null
+        }
+    }
+
+    /** Each lux sample: update the readout, then flip the theme through hysteresis + debounce. */
+    private fun onLux(lux: Float) {
+        val now = clockMs()
+        _state.update { it.copy(currentLux = lux) }
+        val s = _state.value
+        if (s.appearance != Appearance.Auto) return
+        val candidate = resolveAutoMode(lux, s.autoLuxThreshold, s.mode)
+        if (candidate == s.mode) { autoCandidate = null; return }
+        if (autoCandidate != candidate) { autoCandidate = candidate; autoCandidateSince = now }
+        if (debouncedMode(s.mode, candidate, autoCandidateSince, now) != s.mode) {
+            autoCandidate = null
+            _state.update { it.copy(mode = candidate) }
+        }
     }
     fun setAccent(c: Color) {
         _state.update { it.copy(accent = c) }
@@ -337,6 +410,8 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     fun toggleMonitoring() = if (_state.value.monitoring) stopMonitoring() else startMonitoring()
 
     fun onAppForeground() {
+        foreground = true
+        updateSensor()
         if (_state.value.monitoring) repository.kickAll()
     }
 
@@ -380,7 +455,11 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** App backgrounded: flush the latest readings so they survive a process kill. */
-    fun onAppBackground() = persistLastTelemetry()
+    fun onAppBackground() {
+        foreground = false
+        updateSensor()
+        persistLastTelemetry()
+    }
 
     // --- usage logging (to calibrate the power ring) ---
     fun setLogging(enabled: Boolean) {
@@ -460,6 +539,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         persistLastTelemetry()
         repository.stop()
+        lightSensor.stop()
         super.onCleared()
     }
 }
