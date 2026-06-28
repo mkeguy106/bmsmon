@@ -130,6 +130,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     dailyDriverId = dd.id,
                     dynamicStage = p.dynamicStage ?: s.dynamicStage,
                     stageHoldMinutes = p.stageHoldMinutes ?: s.stageHoldMinutes,
+                    logging = p.logging,
                     stageTarget = StageTarget.Base(dd.id),
                     filterBaseId = dd.id,
                     demo = demoFor(dd),
@@ -301,6 +302,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         _state.update {
             if (enabled) it.copy(logging = true, peakPowerW = 0f, peakCurrentA = 0f) else it.copy(logging = false)
         }
+        viewModelScope.launch { store.setLogging(enabled) }
     }
 
     fun clearLog() {

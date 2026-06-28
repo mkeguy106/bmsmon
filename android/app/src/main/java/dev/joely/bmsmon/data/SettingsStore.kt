@@ -19,6 +19,7 @@ data class Persisted(
     val dynamicStage: Boolean?,
     val stageHoldMinutes: Int?,
     val monitoring: Boolean,
+    val logging: Boolean,
 )
 
 /** Persists user preferences (colors, appearance override, BMS addresses) via DataStore. */
@@ -33,6 +34,7 @@ class SettingsStore(private val context: Context) {
         val DYNAMIC_STAGE = booleanPreferencesKey("dynamic_stage")
         val STAGE_HOLD = intPreferencesKey("stage_hold_min")
         val MONITORING = booleanPreferencesKey("monitoring")
+        val LOGGING = booleanPreferencesKey("logging")
     }
 
     suspend fun load(): Persisted {
@@ -46,6 +48,7 @@ class SettingsStore(private val context: Context) {
             dynamicStage = p[K.DYNAMIC_STAGE],
             stageHoldMinutes = p[K.STAGE_HOLD],
             monitoring = p[K.MONITORING] ?: false,
+            logging = p[K.LOGGING] ?: false,
         )
     }
 
@@ -59,4 +62,5 @@ class SettingsStore(private val context: Context) {
     suspend fun setDynamicStage(enabled: Boolean) = context.dataStore.edit { it[K.DYNAMIC_STAGE] = enabled }.let {}
     suspend fun setStageHold(minutes: Int) = context.dataStore.edit { it[K.STAGE_HOLD] = minutes }.let {}
     suspend fun setMonitoring(on: Boolean) = context.dataStore.edit { it[K.MONITORING] = on }.let {}
+    suspend fun setLogging(on: Boolean) = context.dataStore.edit { it[K.LOGGING] = on }.let {}
 }
