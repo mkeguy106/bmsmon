@@ -47,6 +47,9 @@ val LightBmColors = BmColors(
 val DefaultAccent = Color(0xFFE67E22)
 val DefaultPower = Color(0xFFC85A1A)
 
+/** Regen / current-dump indication (green, distinct from accent/power). */
+val RegenGreen = Color(0xFF2ECC71)
+
 /** The eight preset swatches (theme list leads with accent default, power list with power default). */
 val ThemeSwatches = listOf(
     0xFFE67E22, 0xFF2A6C9C, 0xFF2E8B57, 0xFF8B2520,

@@ -17,12 +17,12 @@ class TelemetryLogger(context: Context) {
 
     val path: String get() = file.absolutePath
 
-    fun log(address: String, t: Telemetry, timestampMs: Long) {
+    fun log(address: String, t: Telemetry, timestampMs: Long, regen: Boolean) {
         synchronized(lock) {
             try {
                 val header = !file.exists() || file.length() == 0L
                 file.appendText(buildString {
-                    if (header) append("timestamp_ms,name,address,state,soc,current_a,power_w,voltage_v\n")
+                    if (header) append("timestamp_ms,name,address,state,soc,current_a,power_w,voltage_v,regen\n")
                     append(timestampMs).append(',')
                     append(t.name).append(',')
                     append(address).append(',')
@@ -30,7 +30,8 @@ class TelemetryLogger(context: Context) {
                     append(t.soc.toInt()).append(',')
                     append("%.3f".format(t.current)).append(',')
                     append("%.2f".format(t.powerW)).append(',')
-                    append("%.3f".format(t.voltage)).append('\n')
+                    append("%.3f".format(t.voltage)).append(',')
+                    append(if (regen) 1 else 0).append('\n')
                 })
             } catch (e: Exception) {
                 Log.d("TelemetryLogger", "log: ${e.message}")

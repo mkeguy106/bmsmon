@@ -38,6 +38,7 @@ import dev.joely.bmsmon.model.GroupActivity
 import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.ui.all.AllBatteriesScreen
 import dev.joely.bmsmon.ui.theme.Bm
+import dev.joely.bmsmon.ui.theme.RegenGreen
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -66,7 +67,7 @@ fun HomeScreen(
         PageDots(current = pager.currentPage)
         HorizontalPager(state = pager, modifier = Modifier.weight(1f)) { page ->
             when (page) {
-                0 -> StageScreen(state.stageBatteries())
+                0 -> StageScreen(state.stageItems())
                 else -> AllBatteriesScreen(
                     state = state,
                     onSetSort = onSetSort,
@@ -111,6 +112,7 @@ private fun TopBar(
     val c = Bm.colors
     val (label, labelColor, showPin) = when {
         !state.monitoring -> Triple("DEMO DATA", c.text3, false)
+        state.stageRegen -> Triple("${state.stageLabel} · REGEN ↻", RegenGreen, false)
         state.pinned -> Triple("${state.stageLabel} · PINNED", Bm.accent, true)
         !state.dynamicStage -> Triple("${state.stageLabel} · MANUAL", c.text2, false)
         state.stageActivity == GroupActivity.Discharging -> Triple("${state.stageLabel} · DISCHARGING", Bm.power, false)

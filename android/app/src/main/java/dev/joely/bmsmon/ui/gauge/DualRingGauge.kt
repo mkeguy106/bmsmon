@@ -9,6 +9,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import dev.joely.bmsmon.model.POWER_RING_FULL_W
+import dev.joely.bmsmon.ui.theme.RegenGreen
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -27,6 +28,7 @@ fun DualRingGauge(
     segEmpty: Color,
     innerTrack: Color,
     modifier: Modifier = Modifier,
+    regen: Boolean = false,
 ) {
     val n = 16
     val filled = (soc.coerceIn(0f, 100f) / 100f * n).roundToInt()
@@ -73,10 +75,11 @@ fun DualRingGauge(
             style = Stroke(width = innerW, cap = StrokeCap.Butt),
         )
         if (frac > 0f) {
+            // Regen (current dumped in) sweeps the OTHER way, in green.
             drawArc(
-                color = power.copy(alpha = 0.9f),
+                color = if (regen) RegenGreen else power.copy(alpha = 0.9f),
                 startAngle = -90f,
-                sweepAngle = 360f * frac,
+                sweepAngle = (if (regen) -360f else 360f) * frac,
                 useCenter = false,
                 topLeft = innerTopLeft,
                 size = innerSize,

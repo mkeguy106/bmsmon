@@ -17,12 +17,15 @@ import dev.joely.bmsmon.model.DEFAULT_STAGE_HOLD_MIN
 import dev.joely.bmsmon.model.GroupActivity
 import dev.joely.bmsmon.model.PIN_HOLD_MS
 import dev.joely.bmsmon.model.StageInputs
+import dev.joely.bmsmon.model.StageItem
 import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.Telemetry
 import dev.joely.bmsmon.model.addresses
 import dev.joely.bmsmon.model.demoFor
 import dev.joely.bmsmon.model.groupActivity
 import dev.joely.bmsmon.model.groupById
+import dev.joely.bmsmon.model.groupForAddress
+import dev.joely.bmsmon.model.isRegen
 import dev.joely.bmsmon.model.resolveStage
 import dev.joely.bmsmon.ui.theme.DefaultAccent
 import dev.joely.bmsmon.ui.theme.DefaultPower
@@ -55,6 +58,7 @@ data class UiState(
     val lastDischargeAt: Map<String, Long> = emptyMap(),
     val stageTarget: StageTarget = StageTarget.Base(DEFAULT_GROUP_ID),
     val pinned: Boolean = false,
+    val regenAddrs: Set<String> = emptySet(),
     val disabled: Set<String> = emptySet(),
     val demo: List<Telemetry> = demoFor(groupById(DEFAULT_GROUP_ID)),
     val sortKey: SortKey = SortKey.Activity,
@@ -69,18 +73,26 @@ data class UiState(
     val dailyDriver: BatteryGroup get() = groupById(dailyDriverId)
     val stageGroupId: String? get() = (stageTarget as? StageTarget.Base)?.groupId
 
-    /** The 1–2 telemetry samples for the stage (last-known when monitoring, demo otherwise). */
-    fun stageBatteries(): List<Telemetry> {
-        if (!monitoring) return demo
+    /** The 1–2 stage packs with their regen flags (last-known when monitoring, demo otherwise). */
+    fun stageItems(): List<StageItem> {
+        if (!monitoring) return demo.map { StageItem(it, false) }
         val targets = when (val t = stageTarget) {
             is StageTarget.Base -> groupById(t.groupId).targets
             is StageTarget.Single -> ALL_GROUPS.flatMap { it.targets }.filter { it.address == t.address }
         }
         return targets.map { tg ->
-            fleet[tg.address]?.telemetry?.copy(name = tg.name)
+            val tel = fleet[tg.address]?.telemetry?.copy(name = tg.name)
                 ?: Telemetry(tg.name, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
+            StageItem(tel, tg.address in regenAddrs)
         }
     }
+
+    /** True when any pack on the stage is currently dumping regen current. */
+    val stageRegen: Boolean
+        get() = when (val t = stageTarget) {
+            is StageTarget.Base -> groupById(t.groupId).targets.any { it.address in regenAddrs }
+            is StageTarget.Single -> t.address in regenAddrs
+        }
 
     val stageLabel: String
         get() = when (val t = stageTarget) {
@@ -261,11 +273,17 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun onTelemetry(addr: String, t: Telemetry) {
+        val now = clockMs()
+        val group = groupForAddress(addr)
+        val regen = isRegen(t, group?.let { _state.value.lastDischargeAt[it.id] }, now)
         _state.update { st ->
-            st.copy(fleet = st.fleet + (addr to (st.fleet[addr] ?: BatteryStatus()).copy(telemetry = t, reachable = true)))
+            st.copy(
+                fleet = st.fleet + (addr to (st.fleet[addr] ?: BatteryStatus()).copy(telemetry = t, reachable = true)),
+                regenAddrs = if (regen) st.regenAddrs + addr else st.regenAddrs - addr,
+            )
         }
         if (_state.value.logging) {
-            logger.log(addr, t, clockMs())
+            logger.log(addr, t, now, regen)
             if (t.current < -0.05f) {  // discharging — track peak draw
                 _state.update {
                     it.copy(
@@ -292,7 +310,10 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun onReachable(addr: String, r: Boolean) {
         _state.update { st ->
-            st.copy(fleet = st.fleet + (addr to (st.fleet[addr] ?: BatteryStatus()).copy(reachable = r)))
+            st.copy(
+                fleet = st.fleet + (addr to (st.fleet[addr] ?: BatteryStatus()).copy(reachable = r)),
+                regenAddrs = if (r) st.regenAddrs else st.regenAddrs - addr,
+            )
         }
         refresh()
     }

@@ -91,6 +91,25 @@ enum class GroupActivity { Discharging, Charging, Idle, Unknown }
 
 private const val CURRENT_EPS = 0.05f
 
+// Regen / current dump: a brief charge-direction current while the pack was discharging
+// moments ago (active driving) — distinct from steady charging (parked on a charger).
+const val REGEN_EPS = 0.1f
+const val REGEN_WINDOW_MS = 30_000L
+
+fun groupForAddress(address: String): BatteryGroup? =
+    ALL_GROUPS.firstOrNull { g -> g.targets.any { it.address.equals(address, ignoreCase = true) } }
+
+/**
+ * True when [t] shows charge-direction current but the pack's base discharged within the
+ * last [REGEN_WINDOW_MS] — i.e. regenerative braking dumping current in mid-use, not a
+ * steady charge. [groupLastDischargeAt] is the base's last-seen-discharging timestamp.
+ */
+fun isRegen(t: Telemetry, groupLastDischargeAt: Long?, now: Long): Boolean =
+    t.current > REGEN_EPS && groupLastDischargeAt != null && (now - groupLastDischargeAt) < REGEN_WINDOW_MS
+
+/** One pack on the stage, with its live regen flag. */
+data class StageItem(val telemetry: Telemetry, val regen: Boolean)
+
 fun hasReachable(group: BatteryGroup, fleet: Map<String, BatteryStatus>): Boolean =
     group.targets.any { fleet[it.address]?.reachable == true }
 

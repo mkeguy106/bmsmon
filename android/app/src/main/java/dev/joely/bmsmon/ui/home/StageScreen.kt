@@ -19,25 +19,28 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.joely.bmsmon.model.StageItem
 import dev.joely.bmsmon.model.Telemetry
 import dev.joely.bmsmon.ui.gauge.DualRingGauge
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
+import dev.joely.bmsmon.ui.theme.RegenGreen
 import kotlin.math.roundToInt
 
 /** The main stage: the active base's two packs, full gauges. */
 @Composable
-fun StageScreen(batteries: List<Telemetry>, modifier: Modifier = Modifier) {
+fun StageScreen(items: List<StageItem>, modifier: Modifier = Modifier) {
     Column(modifier.fillMaxSize()) {
-        batteries.forEach { b ->
-            BatteryBlock(b, Modifier.weight(1f))
+        items.forEach { item ->
+            BatteryBlock(item, Modifier.weight(1f))
         }
     }
 }
 
 @Composable
-private fun BatteryBlock(b: Telemetry, modifier: Modifier = Modifier) {
+private fun BatteryBlock(item: StageItem, modifier: Modifier = Modifier) {
     val c = Bm.colors
+    val b = item.telemetry
     Column(
         modifier
             .fillMaxWidth()
@@ -54,6 +57,7 @@ private fun BatteryBlock(b: Telemetry, modifier: Modifier = Modifier) {
                 segEmpty = c.segEmpty,
                 innerTrack = c.innerTrack,
                 modifier = Modifier.fillMaxSize(),
+                regen = item.regen,
             )
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
@@ -64,10 +68,11 @@ private fun BatteryBlock(b: Telemetry, modifier: Modifier = Modifier) {
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    "${b.powerW.roundToInt()}W",
-                    color = c.text2,
+                    if (item.regen) "↻ +${b.powerW.roundToInt()}W" else "${b.powerW.roundToInt()}W",
+                    color = if (item.regen) RegenGreen else c.text2,
                     fontFamily = MonoFont,
                     fontSize = 14.sp,
+                    fontWeight = if (item.regen) FontWeight.SemiBold else FontWeight.Normal,
                 )
             }
         }
