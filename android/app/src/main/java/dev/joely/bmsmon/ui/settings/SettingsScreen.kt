@@ -18,8 +18,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Bluetooth
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.BrightnessAuto
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.PhoneAndroid
@@ -414,8 +414,13 @@ private fun AppearanceCard(
             )
             Text("Brighter than the cutover → Light; dimmer → Dark.", color = c.text3, fontSize = 11.sp)
         } else {
-            Text("System follows your phone's theme.", color = c.text3, fontSize = 11.sp,
-                modifier = Modifier.padding(top = 10.dp))
+            val note = when (state.appearance) {
+                Appearance.System -> "Follows your phone's theme."
+                Appearance.Dark -> "Dark theme locked on."
+                Appearance.Light -> "Light theme locked on."
+                Appearance.Auto -> ""
+            }
+            Text(note, color = c.text3, fontSize = 11.sp, modifier = Modifier.padding(top = 10.dp))
         }
     }
 }
