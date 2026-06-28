@@ -181,11 +181,16 @@ class BmsRepository(private val context: Context) {
         }
     }
 
-    /** Only flag a sampled battery out-of-range after it misses 2 polls in a row (avoids flicker). */
+    /**
+     * Only flag a sampled battery out-of-range after it misses [SAMPLE_FAIL_LIMIT] polls in a
+     * row. The sampler connects → reads → disconnects on purpose, and a single connect attempt
+     * often fails transiently on a flaky adapter; we don't want those deliberate cycles to read
+     * as "disconnected". Each successful sample resets the counter.
+     */
     private fun markSampleFail(address: String) {
         val f = (sampleFailures[address] ?: 0) + 1
         sampleFailures[address] = f
-        if (f >= 2) onReachable(address, false)
+        if (f >= SAMPLE_FAIL_LIMIT) onReachable(address, false)
     }
 
     /** Sleep up to [ms], but wake early on kick()/stage change. */
@@ -207,5 +212,6 @@ class BmsRepository(private val context: Context) {
         const val TAG = "BmsRepository"
         const val SAMPLER_CONCURRENCY = 2
         const val SAMPLER_GAP_MS = 3000L  // leisurely pacing between sample batches
+        const val SAMPLE_FAIL_LIMIT = 3   // consecutive failed samples before "out of range"
     }
 }

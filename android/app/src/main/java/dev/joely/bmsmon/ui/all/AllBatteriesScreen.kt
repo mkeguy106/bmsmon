@@ -186,7 +186,8 @@ private fun BatteryRow(
         else -> "—" to c.text3
     }
     val borderColor = if (isStage) Bm.accent else c.border
-    val socColor = if (reachable && t != null) socSeverity(t.soc, Bm.accent) else c.text3
+    // Show the last-known reading even when disconnected; the dim (below) signals it's stale.
+    val socColor = if (t != null) socSeverity(t.soc, Bm.accent) else c.text3
 
     Column(
         Modifier
@@ -228,7 +229,7 @@ private fun BatteryRow(
                     tint = Bm.accent.copy(alpha = rememberBoltAlpha(0.35f, 1f)),
                 )
             }
-            Text(if (reachable && t != null) "${t.soc.roundToInt()}%" else "—",
+            Text(if (t != null) "${t.soc.roundToInt()}%" else "—",
                 color = socColor, fontFamily = MonoFont, fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.alpha(if (dim) 0.5f else 1f).padding(start = 8.dp))
             // disconnect / reconnect (Bluetooth link)
@@ -247,10 +248,11 @@ private fun BatteryRow(
                 }
             }
         }
-        // Capacity bar — only for reachable packs (nominal full = 100 Ah).
-        if (reachable && t != null) {
+        // Capacity bar — show the last-known reading whenever we have one (nominal full = 100 Ah),
+        // dimmed when the pack is disconnected/stale so the value stays visible but reads as old.
+        if (t != null) {
             val capPct = (t.capacityAh.coerceIn(0f, 100f)) / 100f
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().alpha(if (dim) 0.5f else 1f), verticalAlignment = Alignment.CenterVertically) {
                 Text("CAPACITY", color = c.text3, fontSize = 9.sp, fontWeight = FontWeight.SemiBold,
                     letterSpacing = 0.5.sp)
                 Box(
