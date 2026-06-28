@@ -25,4 +25,10 @@ class MainActivity : ComponentActivity() {
         // Coming back to the app => immediately retry out-of-range batteries.
         vm.onAppForeground()
     }
+
+    override fun onPause() {
+        super.onPause()
+        // Flush the latest readings so they survive a process kill (restored next launch).
+        vm.onAppBackground()
+    }
 }

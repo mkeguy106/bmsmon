@@ -47,6 +47,9 @@ enum class FilterKey { ReachableOnly, ActiveOnly, ByBase, DailyDriverOnly }
 /** All low-battery alert thresholds, most severe last (matches the prototype + handoff). */
 val ALERT_THRESHOLDS = listOf(30, 25, 20, 15, 10, 5)
 
+/** Throttle for writing the last-known telemetry snapshot to disk while monitoring. */
+private const val TELE_SAVE_INTERVAL_MS = 15_000L
+
 /**
  * The resolved low-battery alert for the current stage. [flashing] drives the screen wash;
  * [activeThreshold] is the most-severe crossed level; [ackEffective] are acks still in force.
@@ -184,6 +187,9 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     stageTarget = StageTarget.Base(dd.id),
                     filterBaseId = p.filterBaseId ?: dd.id,
                     demo = demoFor(dd),
+                    // Seed the fleet with the last-known reading per battery (dimmed/not reachable
+                    // until the first live connect), so All Batteries isn't blank on launch.
+                    fleet = p.lastTelemetry.mapValues { (_, tel) -> BatteryStatus(telemetry = tel, reachable = false) },
                 )
             }
             // Resume monitoring if it was on before the app was killed/restarted.
@@ -306,7 +312,8 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     // --- fleet monitoring ---
     fun startMonitoring() {
         if (_state.value.monitoring) return
-        _state.update { it.copy(monitoring = true, fleet = emptyMap()) }
+        // Keep last-known readings (marked not-reachable) so rows show stale data until live samples.
+        _state.update { it.copy(monitoring = true, fleet = it.fleet.mapValues { (_, st) -> st.copy(reachable = false) }) }
         repository.start(
             scope = viewModelScope,
             targets = ALL_GROUPS.flatMap { it.targets },
@@ -319,6 +326,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun stopMonitoring() {
+        persistLastTelemetry()  // keep the latest readings for next launch
         repository.stop()
         _state.update { it.copy(monitoring = false, fleet = emptyMap(), demo = demoFor(it.dailyDriver)) }
         viewModelScope.launch { store.setMonitoring(false) }
@@ -352,7 +360,25 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         refresh()
+        if (now - lastTeleSaveAt > TELE_SAVE_INTERVAL_MS) {
+            lastTeleSaveAt = now
+            persistLastTelemetry()
+        }
     }
+
+    private var lastTeleSaveAt = 0L
+
+    /** Snapshot the current per-battery readings to disk for restore on the next launch. */
+    private fun persistLastTelemetry() {
+        val snapshot = _state.value.fleet
+            .filterValues { it.telemetry != null }
+            .mapValues { it.value.telemetry!! }
+        if (snapshot.isEmpty()) return
+        viewModelScope.launch { store.setLastTelemetry(snapshot) }
+    }
+
+    /** App backgrounded: flush the latest readings so they survive a process kill. */
+    fun onAppBackground() = persistLastTelemetry()
 
     // --- usage logging (to calibrate the power ring) ---
     fun setLogging(enabled: Boolean) {
@@ -426,6 +452,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        persistLastTelemetry()
         repository.stop()
         super.onCleared()
     }
