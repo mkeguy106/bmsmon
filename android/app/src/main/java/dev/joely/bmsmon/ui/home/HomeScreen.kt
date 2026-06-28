@@ -72,6 +72,14 @@ fun HomeScreen(
     onReconnect: (String) -> Unit,
     onDisconnectAll: () -> Unit,
     onAcknowledge: () -> Unit,
+    onAddScan: () -> Unit,
+    onOpenDetail: (String) -> Unit,
+    onRemove: (String) -> Unit,
+    onRename: (String, String) -> Unit,
+    onSetGroup: (String, String?) -> Unit,
+    onCreateGroup: (String, String) -> Unit,
+    onRenameGroup: (String, String) -> Unit,
+    onPinSingle: (String) -> Unit,
 ) {
     val c = Bm.colors
     // Page 0 = stage (main); page 1 = all batteries — swipe LEFT from the stage to reach it.
@@ -96,9 +104,20 @@ fun HomeScreen(
                             onPinStage(StageTarget.Base(groupId))
                             scope.launch { pager.animateScrollToPage(0) }
                         },
+                        onPinSingle = { addr ->
+                            onPinSingle(addr)
+                            scope.launch { pager.animateScrollToPage(0) }
+                        },
                         onDisconnect = onDisconnect,
                         onReconnect = onReconnect,
                         onDisconnectAll = onDisconnectAll,
+                        onAddScan = onAddScan,
+                        onOpenDetail = onOpenDetail,
+                        onRemove = onRemove,
+                        onRename = onRename,
+                        onSetGroup = onSetGroup,
+                        onCreateGroup = onCreateGroup,
+                        onRenameGroup = onRenameGroup,
                         modifier = Modifier.padding(top = 6.dp),
                     )
                 }
