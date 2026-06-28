@@ -262,9 +262,18 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         updateSensor()
     }
 
-    /** Top-bar quick toggle / legacy two-button picker → an explicit Dark/Light lock. */
-    fun setMode(mode: Mode) = setAppearance(if (mode == Mode.Dark) Appearance.Dark else Appearance.Light)
-    fun toggleMode() = setMode(if (_state.value.isDark) Mode.Light else Mode.Dark)
+    /** Main-stage quick control: advance Dark → Light → System → Auto (skipping Auto if no sensor). */
+    fun cycleAppearance() {
+        val s = _state.value
+        var next = when (s.appearance) {
+            Appearance.Dark -> Appearance.Light
+            Appearance.Light -> Appearance.System
+            Appearance.System -> Appearance.Auto
+            Appearance.Auto -> Appearance.Dark
+        }
+        if (next == Appearance.Auto && !s.hasLightSensor) next = Appearance.Dark
+        setAppearance(next)
+    }
 
     /** OS theme signal (from Compose). Only takes effect while appearance == System. */
     fun applySystemMode(dark: Boolean) {
