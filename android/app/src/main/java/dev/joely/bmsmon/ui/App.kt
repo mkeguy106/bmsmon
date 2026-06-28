@@ -61,6 +61,7 @@ fun App(vm: BatteryViewModel) {
                         onDisconnect = vm::disconnectBattery,
                         onReconnect = vm::reconnectBattery,
                         onDisconnectAll = vm::disconnectAll,
+                        onAcknowledge = vm::acknowledgeAlert,
                     )
                     Screen.Settings -> SettingsScreen(
                         state = state,
@@ -69,6 +70,8 @@ fun App(vm: BatteryViewModel) {
                         onSetDailyDriver = vm::setDailyDriver,
                         onSetDynamicStage = vm::setDynamicStage,
                         onSetStageHold = vm::setStageHold,
+                        onSetAlertsOn = vm::setAlertsOn,
+                        onToggleThreshold = vm::toggleThreshold,
                         onSetLogging = vm::setLogging,
                         onClearLog = vm::clearLog,
                         onSetAccent = vm::setAccent,

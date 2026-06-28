@@ -37,6 +37,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.joely.bmsmon.ALERT_THRESHOLDS
 import dev.joely.bmsmon.Mode
 import dev.joely.bmsmon.UiState
 import dev.joely.bmsmon.model.ALL_GROUPS
@@ -58,6 +59,8 @@ fun SettingsScreen(
     onSetDailyDriver: (String) -> Unit,
     onSetDynamicStage: (Boolean) -> Unit,
     onSetStageHold: (Int) -> Unit,
+    onSetAlertsOn: (Boolean) -> Unit,
+    onToggleThreshold: (Int) -> Unit,
     onSetLogging: (Boolean) -> Unit,
     onClearLog: () -> Unit,
     onSetAccent: (Color) -> Unit,
@@ -90,6 +93,7 @@ fun SettingsScreen(
         ) {
             BluetoothCard(state, onToggleMonitoring)
             MainStageCard(state, onSetDynamicStage, onSetStageHold)
+            AlertsCard(state, onSetAlertsOn, onToggleThreshold)
             GroupsCard(state, onSetDailyDriver)
             ColorCard("Theme Color", null, ThemeSwatches, state.accent, onSetAccent)
             ColorCard("Power Color", "Inner ring — charge / discharge rate", PowerSwatches, state.power, onSetPower)
@@ -192,6 +196,60 @@ private fun SelectChip(label: String, selected: Boolean, onClick: () -> Unit) {
     ) {
         Text(label, color = if (selected) Bm.accent else c.text2, fontSize = 13.sp,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+    }
+}
+
+@Composable
+private fun AlertsCard(state: UiState, onSetAlertsOn: (Boolean) -> Unit, onToggleThreshold: (Int) -> Unit) {
+    val c = Bm.colors
+    Card {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                Text("Flash stage when low", color = c.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text("Pulse the screen until acknowledged", color = c.text2, fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 4.dp))
+            }
+            Switch(
+                checked = state.alertsOn,
+                onCheckedChange = onSetAlertsOn,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = Bm.accent,
+                    uncheckedTrackColor = c.inputBg,
+                    uncheckedBorderColor = c.inputBorder,
+                ),
+            )
+        }
+        Text("Alert thresholds", color = c.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(top = 18.dp))
+        Text(
+            "Flash and require acknowledgement each time the lowest pack on the stage drops past one of these levels.",
+            color = c.text2, fontSize = 12.sp, lineHeight = 17.sp,
+            modifier = Modifier.padding(top = 6.dp, bottom = 12.dp),
+        )
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (row in ALERT_THRESHOLDS.chunked(3)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    row.forEach { t ->
+                        ThresholdChip("$t%", t in state.enabledThresholds) { onToggleThreshold(t) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ThresholdChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    val c = Bm.colors
+    val border = if (selected) Bm.accent else c.border
+    val bg = if (selected) Bm.accent.copy(alpha = 0.14f) else Color.Transparent
+    Box(
+        Modifier.clip(RoundedCornerShape(20.dp)).background(bg).border(1.dp, border, RoundedCornerShape(20.dp))
+            .clickable(onClick = onClick).padding(horizontal = 15.dp, vertical = 8.dp),
+    ) {
+        Text(label, color = if (selected) Bm.accent else c.text2, fontFamily = MonoFont,
+            fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 

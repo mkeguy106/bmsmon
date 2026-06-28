@@ -50,6 +50,14 @@ val DefaultPower = Color(0xFFC85A1A)
 /** Regen / current-dump indication (green, distinct from accent/power). */
 val RegenGreen = Color(0xFF2ECC71)
 
+/** Low-battery alert colors (severity-graded): amber warning, red critical. */
+val AlertWarn = Color(0xFFE2B01E)
+val AlertCritical = Color(0xFFE5342B)
+
+/** SOC / capacity severity ramp: <15% critical, <30% warning, else accent. */
+fun socSeverity(soc: Float, accent: Color): Color =
+    if (soc < 15f) AlertCritical else if (soc < 30f) AlertWarn else accent
+
 /** The eight preset swatches (theme list leads with accent default, power list with power default). */
 val ThemeSwatches = listOf(
     0xFFE67E22, 0xFF2A6C9C, 0xFF2E8B57, 0xFF8B2520,

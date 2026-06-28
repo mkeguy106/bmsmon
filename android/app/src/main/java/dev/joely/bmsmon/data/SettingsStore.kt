@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.first
 
@@ -20,6 +21,8 @@ data class Persisted(
     val stageHoldMinutes: Int?,
     val monitoring: Boolean,
     val logging: Boolean,
+    val alertsOn: Boolean,
+    val enabledThresholds: Set<Int>?,
 )
 
 /** Persists user preferences (colors, appearance override, BMS addresses) via DataStore. */
@@ -35,6 +38,8 @@ class SettingsStore(private val context: Context) {
         val STAGE_HOLD = intPreferencesKey("stage_hold_min")
         val MONITORING = booleanPreferencesKey("monitoring")
         val LOGGING = booleanPreferencesKey("logging")
+        val ALERTS_ON = booleanPreferencesKey("alerts_on")
+        val THRESHOLDS = stringSetPreferencesKey("alert_thresholds")
     }
 
     suspend fun load(): Persisted {
@@ -49,6 +54,8 @@ class SettingsStore(private val context: Context) {
             stageHoldMinutes = p[K.STAGE_HOLD],
             monitoring = p[K.MONITORING] ?: false,
             logging = p[K.LOGGING] ?: false,
+            alertsOn = p[K.ALERTS_ON] ?: true,
+            enabledThresholds = p[K.THRESHOLDS]?.mapNotNull { it.toIntOrNull() }?.toSet(),
         )
     }
 
@@ -63,4 +70,7 @@ class SettingsStore(private val context: Context) {
     suspend fun setStageHold(minutes: Int) = context.dataStore.edit { it[K.STAGE_HOLD] = minutes }.let {}
     suspend fun setMonitoring(on: Boolean) = context.dataStore.edit { it[K.MONITORING] = on }.let {}
     suspend fun setLogging(on: Boolean) = context.dataStore.edit { it[K.LOGGING] = on }.let {}
+    suspend fun setAlertsOn(on: Boolean) = context.dataStore.edit { it[K.ALERTS_ON] = on }.let {}
+    suspend fun setThresholds(values: Set<Int>) =
+        context.dataStore.edit { it[K.THRESHOLDS] = values.map(Int::toString).toSet() }.let {}
 }
