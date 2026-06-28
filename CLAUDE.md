@@ -187,6 +187,21 @@ Key flow: `main()` → `scan_batteries()` or `query_battery(address)` → `parse
 - `is_compatible()`: Filters BLE scan results by `KNOWN_PREFIXES` tuple
 - No tests, no linting, no packaging — run directly with `python3 bmsmon.py`
 
+## Android App (`android/`)
+
+Kotlin/Jetpack Compose GUI front-end (see `android/README.md`). Same read-only protocol and
+safety rules. Dynamic "main stage" shows the in-use base; a rotating sampler covers the rest.
+
+**Usage logging is intentionally ON right now — do not turn it off.** It records every
+telemetry sample to `…/Android/data/dev.joely.bmsmon/files/usage_log.csv` (columns incl.
+`current_a`, `power_w`, `regen`) so we can collect **real-world data to calibrate the UI later**:
+- the inner power ring's full scale `POWER_RING_FULL_W` (Fleet.kt, currently an 80 W placeholder),
+- the regen detection thresholds `REGEN_EPS` / `REGEN_WINDOW_MS` (Fleet.kt).
+
+Steady charging is being captured now as a baseline (`regen=0`); regen bursts while driving
+will log as `regen=1`. Pull the CSV (`adb pull …usage_log.csv`), find peak discharge `power_w`,
+and set the calibration constants. Logging + monitoring both persist across restarts.
+
 ## Development
 
 ```bash
