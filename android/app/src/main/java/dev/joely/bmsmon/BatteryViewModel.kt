@@ -292,7 +292,19 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
 
     fun removeBattery(address: String) {
         val a = address.uppercase()
-        _state.update { it.copy(disabled = it.disabled - a, fleet = it.fleet - a) }
+        _state.update { st ->
+            val ms = st.manualStage
+            val newManualStage = if (ms is StageTarget.Single && ms.address.uppercase() == a) null else ms
+            val tgt = st.stageTarget
+            val newStageTarget = if (tgt is StageTarget.Single && tgt.address.uppercase() == a)
+                StageTarget.Base(st.dailyDriverId) else tgt
+            st.copy(
+                disabled = st.disabled - a,
+                fleet = st.fleet - a,
+                manualStage = newManualStage,
+                stageTarget = newStageTarget,
+            )
+        }
         repository.setDisabled(_state.value.disabled)
         updateRoster { it.removeBattery(a) }
     }

@@ -35,7 +35,7 @@ class BmsRepository(private val context: Context) {
     private val gate = Semaphore(2)
 
     private var scope: CoroutineScope? = null
-    private var allTargets: List<BmsTarget> = emptyList()
+    @Volatile private var allTargets: List<BmsTarget> = emptyList()
     @Volatile private var running = false
 
     @Volatile private var stageAddrs: Set<String> = emptySet()
