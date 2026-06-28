@@ -7,9 +7,13 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import dev.joely.bmsmon.model.Battery
 import dev.joely.bmsmon.model.BatteryState
+import dev.joely.bmsmon.model.Group
+import dev.joely.bmsmon.model.Roster
 import dev.joely.bmsmon.model.Telemetry
 import kotlinx.coroutines.flow.first
+import org.json.JSONArray
 import org.json.JSONObject
 
 private val Context.dataStore by preferencesDataStore("bms_settings")
@@ -32,6 +36,7 @@ data class Persisted(
     val filterBaseId: String?,
     val lastTelemetry: Map<String, Telemetry>,
     val tempFahrenheit: Boolean,
+    val roster: Roster?,
 )
 
 /** Persists user preferences (colors, appearance override, BMS addresses) via DataStore. */
@@ -55,6 +60,7 @@ class SettingsStore(private val context: Context) {
         val FILTER_BASE = stringPreferencesKey("all_filter_base")
         val LAST_TELEMETRY = stringPreferencesKey("last_telemetry")
         val TEMP_FAHRENHEIT = booleanPreferencesKey("temp_fahrenheit")
+        val ROSTER = stringPreferencesKey("roster")
     }
 
     suspend fun load(): Persisted {
@@ -77,6 +83,7 @@ class SettingsStore(private val context: Context) {
             filterBaseId = p[K.FILTER_BASE],
             lastTelemetry = p[K.LAST_TELEMETRY]?.let(::decodeTelemetry) ?: emptyMap(),
             tempFahrenheit = p[K.TEMP_FAHRENHEIT] ?: true,
+            roster = p[K.ROSTER]?.let(::decodeRoster),
         )
     }
 
@@ -101,6 +108,8 @@ class SettingsStore(private val context: Context) {
     suspend fun setLastTelemetry(map: Map<String, Telemetry>) =
         context.dataStore.edit { it[K.LAST_TELEMETRY] = encodeTelemetry(map) }.let {}
     suspend fun setTempFahrenheit(on: Boolean) = context.dataStore.edit { it[K.TEMP_FAHRENHEIT] = on }.let {}
+    suspend fun setRoster(roster: Roster) =
+        context.dataStore.edit { it[K.ROSTER] = encodeRoster(roster) }.let {}
 }
 
 /** JSON forbids NaN/Infinity; coerce any non-finite reading to 0 before writing. */
@@ -127,6 +136,41 @@ private fun encodeTelemetry(map: Map<String, Telemetry>): String {
     }
     return root.toString()
 }
+
+/** Compact JSON for the editable roster (groups + batteries). */
+private fun encodeRoster(r: Roster): String {
+    val groups = JSONArray()
+    r.groups.forEach { g -> groups.put(JSONObject().put("id", g.id).put("name", g.name)) }
+    val batteries = JSONArray()
+    r.batteries.forEach { b ->
+        batteries.put(JSONObject()
+            .put("address", b.address)
+            .put("advertisedName", b.advertisedName)
+            .put("alias", b.alias)
+            .put("groupId", b.groupId ?: JSONObject.NULL))
+    }
+    return JSONObject().put("groups", groups).put("batteries", batteries).toString()
+}
+
+private fun decodeRoster(json: String): Roster? = runCatching {
+    val root = JSONObject(json)
+    val ga = root.getJSONArray("groups")
+    val groups = (0 until ga.length()).map { i ->
+        val o = ga.getJSONObject(i)
+        Group(o.getString("id"), o.optString("name"))
+    }
+    val ba = root.getJSONArray("batteries")
+    val batteries = (0 until ba.length()).map { i ->
+        val o = ba.getJSONObject(i)
+        Battery(
+            address = o.getString("address"),
+            advertisedName = o.optString("advertisedName"),
+            alias = o.optString("alias"),
+            groupId = if (o.isNull("groupId")) null else o.optString("groupId"),
+        )
+    }
+    Roster(batteries, groups)
+}.getOrNull()
 
 private fun decodeTelemetry(json: String): Map<String, Telemetry> = runCatching {
     val root = JSONObject(json)
