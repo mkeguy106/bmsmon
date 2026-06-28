@@ -154,7 +154,7 @@ In `load()`, in the `Persisted(...)` constructor call, after `autoLuxThreshold =
 
 - [ ] **Step 4: Add the setter**
 
-After the `setTempFahrenheit` setter line, add:
+After the `setRoster` setter line (the last setter in the class, added by the editable-roster work), add:
 
 ```kotlin
     suspend fun setLocked(on: Boolean) = context.dataStore.edit { it[K.LOCKED] = on }.let {}
@@ -190,7 +190,7 @@ Wire the lock flag into UI state, load it on startup, and expose a setter that p
 
 - [ ] **Step 1: Add the field to `UiState`**
 
-In `UiState`, after `val tempFahrenheit: Boolean = true,` add:
+In `UiState`, add the field after the last field — `val homePage: Int = 0,` (added by the editable-roster work; it has a `// Which Home pager page...` comment above it). Insert immediately after that line:
 
 ```kotlin
     val locked: Boolean = false,
@@ -538,19 +538,13 @@ Surface the lock button in the top bar, append `· LOCKED` to the status, hide t
 - Consumes: `LockButton` (Task 6), `UiState.locked` and `BatteryViewModel.setLocked` (Task 3).
 - Produces: `HomeScreen` gains params `locked: Boolean` and `onToggleLock: () -> Unit`; `TopBar` gains the same two params.
 
-- [ ] **Step 1: Add imports to HomeScreen**
+- [ ] **Step 1: Confirm imports (no change expected)**
 
-In `HomeScreen.kt`, add alongside the existing imports:
-
-```kotlin
-import androidx.compose.runtime.LaunchedEffect
-```
-
-(`Bm`, `Color`, layout, and pager imports are already present.)
+No new imports are needed. As of the editable-roster work, `HomeScreen.kt` already imports `androidx.compose.runtime.LaunchedEffect` (used for the existing `onHomePageChanged` effect), plus `Bm`, `Color`, layout, and pager imports. `LockButton` lives in the same package (`dev.joely.bmsmon.ui.home`), so it needs no import. If `./gradlew compileDebugKotlin` later reports a missing symbol, add it then.
 
 - [ ] **Step 2: Add params to `HomeScreen`**
 
-In the `fun HomeScreen(` signature, after `onAcknowledge: () -> Unit,` add:
+In the `fun HomeScreen(` signature, add the two params after the last existing param `onHomePageChanged: (Int) -> Unit,`:
 
 ```kotlin
     locked: Boolean,
@@ -566,17 +560,19 @@ In `HomeScreen`'s body, after `val alert = state.stageAlert()`, add:
     LaunchedEffect(locked) { if (locked) pager.scrollToPage(0) }
 ```
 
-Then change the `TopBar(...)` call to pass the new params:
+Then change the `TopBar(...)` call to pass the new params (note: post-#12 the call already passes `pager.currentPage` as the 2nd arg). Replace:
 
 ```kotlin
-            TopBar(state, onCycleAppearance, onSettings, onToggleMonitoring, locked, onToggleLock)
+            TopBar(state, pager.currentPage, onCycleAppearance, onSettings, onToggleMonitoring)
 ```
 
-Then replace `PageDots(current = pager.currentPage)` with:
+with:
 
 ```kotlin
-            if (!locked) PageDots(current = pager.currentPage)
+            TopBar(state, pager.currentPage, onCycleAppearance, onSettings, onToggleMonitoring, locked, onToggleLock)
 ```
+
+(There is **no** `PageDots(...)` call in the `HomeScreen` body anymore — post-#12 it lives inside `TopBar`. Hiding it while locked is handled in Step 6.)
 
 Then change the pager declaration line:
 
@@ -597,6 +593,7 @@ In `HomeScreen.kt`, change the `private fun TopBar(` signature. Replace:
 ```kotlin
 private fun TopBar(
     state: UiState,
+    currentPage: Int,
     onCycleAppearance: () -> Unit,
     onSettings: () -> Unit,
     onToggleMonitoring: () -> Unit,
@@ -608,6 +605,7 @@ with:
 ```kotlin
 private fun TopBar(
     state: UiState,
+    currentPage: Int,
     onCycleAppearance: () -> Unit,
     onSettings: () -> Unit,
     onToggleMonitoring: () -> Unit,
@@ -631,7 +629,7 @@ Then change the status `Text(...)` inside the left Row from `Text(label, ...)` t
                 letterSpacing = 0.9.sp, modifier = Modifier.padding(start = 7.dp))
 ```
 
-- [ ] **Step 6: Disable the monitoring toggle and gate the right-side controls while locked**
+- [ ] **Step 6: Disable the monitoring toggle, gate the right-side controls, and hide page dots while locked**
 
 In `TopBar`, change the left Row so its click is disabled while locked. Replace:
 
@@ -693,9 +691,23 @@ with:
         }
 ```
 
+Finally, hide the centered page dots while locked. In `TopBar` (post-#12 the dots are an overlay inside the wrapping `Box`), replace:
+
+```kotlin
+        // Page dots centered on the top-bar row (between the status label and the icons).
+        PageDots(currentPage, Modifier.align(Alignment.Center))
+```
+
+with:
+
+```kotlin
+        // Page dots centered on the top-bar row (hidden while locked — the stage is frozen on page 0).
+        if (!locked) PageDots(currentPage, Modifier.align(Alignment.Center))
+```
+
 - [ ] **Step 7: Pass the new params from App.kt**
 
-In `App.kt`, in the `Screen.Home -> HomeScreen(` call, after `onAcknowledge = vm::acknowledgeAlert,` add:
+In `App.kt`, in the `Screen.Home -> HomeScreen(` call, add the two args after the last existing arg `onHomePageChanged = vm::setHomePage,`:
 
 ```kotlin
                         locked = state.locked,
@@ -741,6 +753,9 @@ git commit -m "Wire lock control into top bar and freeze stage while locked"
 - Alerts still work while locked (forced to page 0) → Task 7 step 3 keeps page 0, existing `DangerOverlay` gate unchanged. ✅
 - Monitoring/foreground service untouched → no task modifies `MonitorEngine`/`MonitoringService`. ✅
 - Reboot auto-relaunch is out of scope → not built (noted in spec Non-Goals). ✅
+- `Screen.Detail` / `ScanSheet` unreachable while locked → no task makes them reachable; Detail opens only from All Batteries (pager frozen) and Scan only from the All-Batteries / empty-stage add affordance. Known empty-roster edge documented in the spec. ✅
+
+**Post-#12 reconciliation:** This plan was re-validated against `main` after the editable-roster merge (PR #12). Confirmed current anchors: `SettingsStore` (`setRoster` now precedes the new setter), `UiState` (new `roster`/`detailAddress`/`homePage` fields — `locked` appended last), `App.kt` keep-screen-on block (byte-identical) and the expanded `HomeScreen(...)` call site, and `HomeScreen`/`TopBar` (now `TopBar(state, currentPage, …)` with `PageDots` moved inside `TopBar`). Task 7 rewritten accordingly. ✅
 
 **Placeholder scan:** No TBD/TODO/"handle edge cases"/"similar to" — every code step shows complete code. ✅
 

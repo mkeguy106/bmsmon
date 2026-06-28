@@ -123,6 +123,13 @@ long-press LockButton again (1.5s)
 - Foreground service and BLE monitoring are unaffected by lock state.
 - If `startLockTask()` throws or is unavailable (e.g. another lock-task app active), the
   app stays usable; `locked` UI freeze still applies as a soft fallback.
+- **`Screen.Detail` and the `ScanSheet` (added by the editable-roster work) are unreachable
+  while locked:** the detail screen is only opened from the All Batteries page (which the
+  pager freeze blocks), and the scan sheet is only triggered by an "add" affordance shown on
+  the All Batteries page and on the *empty-roster* stage placeholder. Freezing on page 0 with
+  a populated roster therefore exposes neither. Known minor edge: locking with an **empty
+  roster** still shows the stage's "add" button (it sits on page 0); this is harmless and
+  nonsensical to do in practice, so it is left as-is rather than special-cased.
 
 ## Testing
 
