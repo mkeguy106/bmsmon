@@ -178,8 +178,11 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     alertsOn = p.alertsOn,
                     enabledThresholds = p.enabledThresholds ?: s.enabledThresholds,
                     keepScreenOn = p.keepScreenOn,
+                    sortKey = p.sortKey?.let { runCatching { SortKey.valueOf(it) }.getOrNull() } ?: s.sortKey,
+                    filters = p.filters?.mapNotNull { runCatching { FilterKey.valueOf(it) }.getOrNull() }?.toSet()
+                        ?: s.filters,
                     stageTarget = StageTarget.Base(dd.id),
-                    filterBaseId = dd.id,
+                    filterBaseId = p.filterBaseId ?: dd.id,
                     demo = demoFor(dd),
                 )
             }
@@ -249,12 +252,19 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         refresh()
     }
 
-    // --- all-batteries page controls ---
-    fun setSort(s: SortKey) = _state.update { it.copy(sortKey = s) }
-    fun toggleFilter(f: FilterKey) = _state.update {
-        it.copy(filters = if (f in it.filters) it.filters - f else it.filters + f)
+    // --- all-batteries page controls (persisted) ---
+    fun setSort(s: SortKey) {
+        _state.update { it.copy(sortKey = s) }
+        viewModelScope.launch { store.setSort(s.name) }
     }
-    fun setFilterBase(id: String) = _state.update { it.copy(filterBaseId = id) }
+    fun toggleFilter(f: FilterKey) {
+        _state.update { it.copy(filters = if (f in it.filters) it.filters - f else it.filters + f) }
+        viewModelScope.launch { store.setFilters(_state.value.filters.map { it.name }.toSet()) }
+    }
+    fun setFilterBase(id: String) {
+        _state.update { it.copy(filterBaseId = id) }
+        viewModelScope.launch { store.setFilterBase(id) }
+    }
 
     // --- stage control ---
     fun pinStage(target: StageTarget) {
