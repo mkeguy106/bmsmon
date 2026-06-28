@@ -23,7 +23,6 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
-import dev.joely.bmsmon.model.LOCK_HOLD_MS
 import dev.joely.bmsmon.model.lockHoldComplete
 import dev.joely.bmsmon.model.lockHoldFraction
 

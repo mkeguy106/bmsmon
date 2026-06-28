@@ -58,7 +58,8 @@ fun App(vm: BatteryViewModel) {
     }
 
     // Hold the screen on (at the user's brightness) while the app is open, when enabled.
-    val window = context.findActivity()?.window
+    val activity = context.findActivity()
+    val window = activity?.window
     // Locking forces the screen on regardless of the setting; unlocking reverts to the setting.
     val keepOn = state.keepScreenOn || state.locked
     DisposableEffect(window, keepOn) {
@@ -70,7 +71,6 @@ fun App(vm: BatteryViewModel) {
     // Enter/exit Android Lock Task Mode to pin the app while locked. Device-owner-aware:
     // an ordinary install gets screen pinning (escapable via the system gesture); a
     // provisioned device owner gets a true kiosk with no escape gesture.
-    val activity = context.findActivity()
     LaunchedEffect(activity, state.locked) {
         val act = activity ?: return@LaunchedEffect
         if (state.locked) startLockTaskCompat(act) else runCatching { act.stopLockTask() }
