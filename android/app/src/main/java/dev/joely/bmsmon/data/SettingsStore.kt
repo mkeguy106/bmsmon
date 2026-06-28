@@ -7,7 +7,10 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import dev.joely.bmsmon.model.BatteryState
+import dev.joely.bmsmon.model.Telemetry
 import kotlinx.coroutines.flow.first
+import org.json.JSONObject
 
 private val Context.dataStore by preferencesDataStore("bms_settings")
 
@@ -27,6 +30,7 @@ data class Persisted(
     val sortKey: String?,
     val filters: Set<String>?,
     val filterBaseId: String?,
+    val lastTelemetry: Map<String, Telemetry>,
 )
 
 /** Persists user preferences (colors, appearance override, BMS addresses) via DataStore. */
@@ -48,6 +52,7 @@ class SettingsStore(private val context: Context) {
         val SORT_KEY = stringPreferencesKey("all_sort")
         val FILTERS = stringSetPreferencesKey("all_filters")
         val FILTER_BASE = stringPreferencesKey("all_filter_base")
+        val LAST_TELEMETRY = stringPreferencesKey("last_telemetry")
     }
 
     suspend fun load(): Persisted {
@@ -68,6 +73,7 @@ class SettingsStore(private val context: Context) {
             sortKey = p[K.SORT_KEY],
             filters = p[K.FILTERS],
             filterBaseId = p[K.FILTER_BASE],
+            lastTelemetry = p[K.LAST_TELEMETRY]?.let(::decodeTelemetry) ?: emptyMap(),
         )
     }
 
@@ -89,4 +95,50 @@ class SettingsStore(private val context: Context) {
     suspend fun setSort(name: String) = context.dataStore.edit { it[K.SORT_KEY] = name }.let {}
     suspend fun setFilters(names: Set<String>) = context.dataStore.edit { it[K.FILTERS] = names }.let {}
     suspend fun setFilterBase(id: String) = context.dataStore.edit { it[K.FILTER_BASE] = id }.let {}
+    suspend fun setLastTelemetry(map: Map<String, Telemetry>) =
+        context.dataStore.edit { it[K.LAST_TELEMETRY] = encodeTelemetry(map) }.let {}
 }
+
+/** Compact JSON for the last-known per-battery telemetry (address -> the row's display fields). */
+private fun encodeTelemetry(map: Map<String, Telemetry>): String {
+    val root = JSONObject()
+    map.forEach { (addr, t) ->
+        root.put(addr, JSONObject().apply {
+            put("name", t.name)
+            put("soc", t.soc.toDouble())
+            put("powerW", t.powerW.toDouble())
+            put("current", t.current.toDouble())
+            put("voltage", t.voltage.toDouble())
+            put("capacityAh", t.capacityAh.toDouble())
+            put("cellV", t.cellV.toDouble())
+            put("temp", t.temp.toDouble())
+            put("soh", t.soh)
+            put("cycles", t.cycles)
+            put("state", t.state.name)
+        })
+    }
+    return root.toString()
+}
+
+private fun decodeTelemetry(json: String): Map<String, Telemetry> = runCatching {
+    val root = JSONObject(json)
+    buildMap {
+        root.keys().forEach { addr ->
+            val o = root.getJSONObject(addr)
+            put(addr, Telemetry(
+                name = o.optString("name"),
+                soc = o.optDouble("soc").toFloat(),
+                powerW = o.optDouble("powerW").toFloat(),
+                current = o.optDouble("current").toFloat(),
+                voltage = o.optDouble("voltage").toFloat(),
+                capacityAh = o.optDouble("capacityAh").toFloat(),
+                cellV = o.optDouble("cellV").toFloat(),
+                temp = o.optDouble("temp").toFloat(),
+                soh = o.optInt("soh", 100),
+                cycles = o.optInt("cycles", 0),
+                state = runCatching { BatteryState.valueOf(o.optString("state")) }
+                    .getOrDefault(BatteryState.Idle),
+            ))
+        }
+    }
+}.getOrDefault(emptyMap())
