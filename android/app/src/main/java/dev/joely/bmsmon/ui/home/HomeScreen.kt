@@ -75,6 +75,7 @@ fun HomeScreen(
     onDisconnect: (String) -> Unit,
     onReconnect: (String) -> Unit,
     onDisconnectAll: () -> Unit,
+    onReconnectAll: () -> Unit,
     onAcknowledge: () -> Unit,
     onAddScan: () -> Unit,
     onOpenDetail: (String) -> Unit,
@@ -126,6 +127,7 @@ fun HomeScreen(
                         onDisconnect = onDisconnect,
                         onReconnect = onReconnect,
                         onDisconnectAll = onDisconnectAll,
+                        onReconnectAll = onReconnectAll,
                         onAddScan = onAddScan,
                         onOpenDetail = onOpenDetail,
                         onRemove = onRemove,
@@ -214,7 +216,7 @@ private fun TopBar(
 ) {
     val c = Bm.colors
     val (label, labelColor, showPin) = when {
-        !state.monitoring -> Triple("DEMO DATA", c.text3, false)
+        !state.monitoring -> Triple("MONITORING OFF", c.text3, false)
         state.stageRegen -> Triple("${state.stageLabel} · REGEN ↻", RegenGreen, false)
         state.pinned -> Triple("${state.stageLabel} · PINNED", Bm.accent, true)
         !state.dynamicStage -> Triple("${state.stageLabel} · MANUAL", c.text2, false)
