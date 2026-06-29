@@ -2,18 +2,20 @@ package dev.joely.bmsmon.monitor
 
 import android.content.Context
 import dev.joely.bmsmon.ble.BmsRepository
-import dev.joely.bmsmon.data.TelemetryLogger
+import dev.joely.bmsmon.data.TelemetryRepository
+import dev.joely.bmsmon.data.classifyFrame
+import dev.joely.bmsmon.data.db.BmsDatabase
 import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.DEFAULT_ROSTER
 import dev.joely.bmsmon.model.GroupActivity
 import dev.joely.bmsmon.model.Roster
 import dev.joely.bmsmon.model.Telemetry
 import dev.joely.bmsmon.model.allTargets
-import dev.joely.bmsmon.model.batteryAt
 import dev.joely.bmsmon.model.groupActivity
 import dev.joely.bmsmon.model.groupOf
 import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.model.isRegen
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -21,6 +23,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 
 /**
  * The BLE-derived state the engine maintains, independent of any UI lifecycle. Mirrored into the
@@ -38,7 +41,7 @@ data class MonitorState(
 
 /**
  * Process-lifetime monitoring engine. Owns the [BmsRepository], its coroutine scope, and the
- * usage [TelemetryLogger] — none tied to an Activity/ViewModel — so BLE polling and CSV logging
+ * [TelemetryRepository] — none tied to an Activity/ViewModel — so BLE polling and DB logging
  * keep running while the app is backgrounded (kept alive by [MonitoringService]) and even if the
  * hosting Activity is destroyed. Held as a singleton by the Application ([dev.joely.bmsmon.BmsApp]).
  *
@@ -50,9 +53,13 @@ data class MonitorState(
 class MonitorEngine(appContext: Context) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val repository = BmsRepository(appContext)
-    private val logger = TelemetryLogger(appContext)
+    private val ble = BmsRepository(appContext)
+    private val repository = TelemetryRepository(BmsDatabase.create(appContext))
 
+    /** Exposed so the ViewModel can read session history for the graphs. */
+    val history: TelemetryRepository get() = repository
+
+    @Volatile private var importChecked = false
     @Volatile private var logging = false
     // The current roster drives the monitoring target set and group lookups (regen, last-discharge).
     // It's dynamic (the user can add/remove batteries) so the ViewModel pushes updates via setRoster.
@@ -60,8 +67,6 @@ class MonitorEngine(appContext: Context) {
 
     private val _state = MutableStateFlow(MonitorState())
     val state: StateFlow<MonitorState> = _state.asStateFlow()
-
-    val logPath: String get() = logger.path
 
     private fun now() = System.currentTimeMillis()
 
@@ -76,10 +81,10 @@ class MonitorEngine(appContext: Context) {
                 fleet = seed.mapValues { (_, s) -> s.copy(reachable = false) },
             )
         }
-        repository.start(
+        ble.start(
             scope = scope,
             targets = roster.allTargets(),
-            onTelemetry = ::onTelemetry,
+            onPoll = ::onPoll,
             onReachable = ::onReachable,
         )
     }
@@ -87,19 +92,31 @@ class MonitorEngine(appContext: Context) {
     /** Roster edited while monitoring: update the live target set and group lookups. */
     fun setRoster(roster: Roster) {
         this.roster = roster
-        repository.setTargets(roster.allTargets())
+        ble.setTargets(roster.allTargets())
     }
 
     /** Stop monitoring: cancels all BLE jobs (each session closes its GATT cleanly) and clears state. */
     fun stop() {
         if (!_state.value.monitoring && _state.value.fleet.isEmpty()) return
-        repository.stop()
+        repository.finalizeOpenSessions()
+        ble.stop()
         _state.value = MonitorState()
     }
 
-    fun setStage(addresses: Set<String>) = repository.setStage(addresses)
-    fun setDisabled(addresses: Set<String>) = repository.setDisabled(addresses)
-    fun kickAll() = repository.kickAll()
+    fun setStage(addresses: Set<String>) = ble.setStage(addresses)
+    fun setDisabled(addresses: Set<String>) = ble.setDisabled(addresses)
+    fun kickAll() = ble.kickAll()
+
+    /** Backfill the legacy CSVs into the DB exactly once (guarded by a persisted flag). */
+    fun importLegacyCsvIfNeeded(alreadyImported: Boolean, markImported: suspend () -> Unit, filesDir: File?) {
+        if (importChecked || alreadyImported) { importChecked = true; return }
+        importChecked = true
+        scope.launch {
+            val dir = filesDir ?: return@launch
+            repository.importCsvOnce(listOf(File(dir, "usage_log.csv"), File(dir, "usage_log.1.csv")))
+            markImported()
+        }
+    }
 
     fun setLogging(enabled: Boolean) {
         logging = enabled
@@ -107,7 +124,7 @@ class MonitorEngine(appContext: Context) {
     }
 
     fun clearLog() {
-        logger.clear()
+        repository.clearAll()
         _state.update { it.copy(peakPowerW = 0f, peakCurrentA = 0f) }
     }
 
@@ -115,8 +132,12 @@ class MonitorEngine(appContext: Context) {
     fun telemetrySnapshot(): Map<String, Telemetry> =
         _state.value.fleet.filterValues { it.telemetry != null }.mapValues { it.value.telemetry!! }
 
-    private fun onTelemetry(addr: String, t: Telemetry) {
+    private fun onPoll(addr: String, raw: ByteArray, t: Telemetry?) {
         val now = now()
+        if (t == null) {
+            if (logging) repository.ingestRawOnly(addr, raw, "decode_fail", now)
+            return
+        }
         val st0 = _state.value
         val group = roster.groupOf(addr)
         // Regen is judged against the group's last-discharge time BEFORE this sample updates it.
@@ -138,7 +159,7 @@ class MonitorEngine(appContext: Context) {
                 peakCurrentA = peakC,
             )
         }
-        if (logging) logger.log(addr, t, now, regen)
+        if (logging) repository.ingest(addr, t, raw, classifyFrame(raw, parsedOk = true), regen, now)
     }
 
     private fun onReachable(addr: String, reachable: Boolean) {
@@ -151,11 +172,8 @@ class MonitorEngine(appContext: Context) {
                 lastDischargeAt = recomputeLastDischarge(fleet, st.lastDischargeAt, now()),
             )
         }
-        // Log link transitions so a BLE drop/glitch is visible in the CSV (and tellable apart from
-        // a genuine low/idle reading). Only on an actual edge, to avoid spam.
         if (reachable != was && logging) {
-            val name = roster.batteryAt(addr)?.alias ?: addr
-            logger.event(addr, name, if (reachable) "Connected" else "Disconnected", now())
+            repository.logLink(addr, reachable, now())
         }
     }
 

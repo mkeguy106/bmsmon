@@ -214,12 +214,16 @@ Steady charging is being captured now as a baseline (`regen=0`); regen bursts wh
 will log as `regen=1`. Pull the CSV (`adb pull …usage_log.csv`), find peak discharge `power_w`,
 and set the calibration constants. Logging + monitoring both persist across restarts.
 
-The inner power ring full-scale `POWER_RING_FULL_W` (Fleet.kt) has been **calibrated to 250 W
-per pack** from real 2012-daily-driver logging (per-pack discharge p50 ~40 W, p95 ~127 W,
-p99 ~259 W; brief hard-pull spikes to ~882 W / 67 A). The log also records BLE link events
-(`state` column = `Connected`/`Disconnected`, telemetry columns blank) so a transient
-disconnect is distinguishable from a real low/idle reading. `REGEN_EPS`/`REGEN_WINDOW_MS`
-remain to be calibrated once driving regen bursts are captured.
+The inner power ring full-scale `POWER_RING_FULL_W` (Fleet.kt) has been **calibrated to 300 W
+per pack** from real 2012-daily-driver logging. A fuller cumulative log (~96 k samples, ~5.5 k
+discharge) reads per-pack discharge p50 ~53 W, p90 ~127 W, p95 ~164 W, p99 ~341 W; brief
+hard-pull spikes still ~882 W / 67 A. (The earlier, sparser log read p99 ~259 W → 250 W; the
+heavier-loaded fuller dataset pushed p99 up, hence 300 W ≈ the new p98.) The log also records
+BLE link events (`state` column = `Connected`/`Disconnected`, telemetry columns blank) so a
+transient disconnect is distinguishable from a real low/idle reading. `REGEN_EPS`/
+`REGEN_WINDOW_MS` are now **validated** against 34 captured regen bursts (1.0–22.3 A, up to
+~297 W) — cleanly separated from the noise floor, so the 0.1 A threshold / 30 s window are
+left as-is.
 
 Garbage-frame guard: `parseTelemetry` realigns to the `01 93 55 AA` status header (BLE
 notification fragments can prepend stale bytes, which previously decoded as soc=0/37.6 V and

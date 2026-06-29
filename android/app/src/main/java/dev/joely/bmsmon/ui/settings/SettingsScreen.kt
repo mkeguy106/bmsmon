@@ -523,8 +523,8 @@ private fun UsageLoggingCard(state: UiState, onSetLogging: (Boolean) -> Unit, on
             color = Bm.power, fontSize = 14.sp, fontFamily = MonoFont, fontWeight = FontWeight.SemiBold,
             modifier = Modifier.padding(top = 14.dp),
         )
-        Text(state.logPath, color = c.text3, fontSize = 10.sp, fontFamily = MonoFont,
-            modifier = Modifier.padding(top = 8.dp))
+        Text("Database: ${state.dbSize}", color = c.text3, fontSize = 10.sp, fontFamily = MonoFont,
+            modifier = Modifier.padding(top = 4.dp))
         Box(
             Modifier.padding(top = 14.dp).clip(RoundedCornerShape(8.dp))
                 .border(1.dp, c.border, RoundedCornerShape(8.dp))

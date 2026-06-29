@@ -12,6 +12,7 @@ import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
@@ -33,6 +34,7 @@ import dev.joely.bmsmon.Screen
 import dev.joely.bmsmon.ble.blePermissions
 import dev.joely.bmsmon.ble.hasBlePermissions
 import dev.joely.bmsmon.ui.detail.BatteryDetailScreen
+import dev.joely.bmsmon.ui.history.HistoryScreen
 import dev.joely.bmsmon.ui.home.HomeScreen
 import androidx.activity.compose.BackHandler
 import dev.joely.bmsmon.ui.scan.ScanSheet
@@ -53,6 +55,7 @@ fun App(vm: BatteryViewModel) {
         when (state.screen) {
             Screen.Detail -> vm.closeDetail()
             Screen.Settings -> vm.goHome()
+            Screen.History -> vm.goHome()
             else -> {}
         }
     }
@@ -66,6 +69,18 @@ fun App(vm: BatteryViewModel) {
         if (keepOn) window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         onDispose { window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+    }
+
+    // Match the system-bar icon contrast to the resolved theme. With edge-to-edge the bars are
+    // transparent and the app background shows through, so in Light mode the icons (clock, signal,
+    // *battery*) must switch to dark — otherwise they're white-on-white and unreadable.
+    DisposableEffect(window, state.isDark) {
+        if (window != null) {
+            val controller = WindowCompat.getInsetsController(window, window.decorView)
+            controller.isAppearanceLightStatusBars = !state.isDark
+            controller.isAppearanceLightNavigationBars = !state.isDark
+        }
+        onDispose {}
     }
 
     // Enter/exit Android Lock Task Mode to pin the app while locked. Device-owner-aware:
@@ -126,6 +141,7 @@ fun App(vm: BatteryViewModel) {
                         state = state,
                         onCycleAppearance = vm::cycleAppearance,
                         onSettings = vm::goSettings,
+                        onHistory = vm::goHistory,
                         onToggleMonitoring = onMonitorToggle,
                         onSetSort = vm::setSort,
                         onToggleFilter = vm::toggleFilter,
@@ -147,6 +163,10 @@ fun App(vm: BatteryViewModel) {
                         locked = state.locked,
                         onToggleLock = { vm.setLocked(!state.locked) },
                     )
+                    Screen.History -> {
+                        val sessions by vm.allSessions().collectAsState(initial = emptyList())
+                        HistoryScreen(sessions = sessions, accent = state.accent, onBack = vm::goHome)
+                    }
                     Screen.Settings -> SettingsScreen(
                         state = state,
                         onBack = vm::goHome,
@@ -165,7 +185,12 @@ fun App(vm: BatteryViewModel) {
                         onSetAppearance = vm::setAppearance,
                         onSetAutoLux = vm::setAutoLuxThreshold,
                     )
-                    Screen.Detail -> BatteryDetailScreen(state = state, onBack = vm::closeDetail)
+                    Screen.Detail -> {
+                        val addr = state.detailAddress
+                        val sessions by (if (addr != null) vm.sessionsFor(addr) else kotlinx.coroutines.flow.flowOf(emptyList()))
+                            .collectAsState(initial = emptyList())
+                        BatteryDetailScreen(state = state, sessions = sessions, onBack = vm::closeDetail)
+                    }
                 }
             }
             if (showScan) {

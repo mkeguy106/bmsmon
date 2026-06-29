@@ -47,19 +47,19 @@ class BmsRepository(private val context: Context) {
     private val sampleFailures = ConcurrentHashMap<String, Int>()
     @Volatile private var wakeSampler: CompletableDeferred<Unit>? = null
 
-    private var onTelemetry: (String, Telemetry) -> Unit = { _, _ -> }
+    private var onPoll: (String, ByteArray, Telemetry?) -> Unit = { _, _, _ -> }
     private var onReachable: (String, Boolean) -> Unit = { _, _ -> }
 
     fun start(
         scope: CoroutineScope,
         targets: List<BmsTarget>,
-        onTelemetry: (String, Telemetry) -> Unit,
+        onPoll: (String, ByteArray, Telemetry?) -> Unit,
         onReachable: (String, Boolean) -> Unit,
     ) {
         stop()
         this.scope = scope
         this.allTargets = targets.map { it.copy(address = it.address.trim().uppercase()) }
-        this.onTelemetry = onTelemetry
+        this.onPoll = onPoll
         this.onReachable = onReachable
         running = true
         samplerJob = scope.launch(Dispatchers.IO) { samplerLoop() }
@@ -120,10 +120,9 @@ class BmsRepository(private val context: Context) {
                 backoff = 2000L
                 while (running && target.address in stageAddrs) {
                     val data = session.poll(4000) ?: break  // a miss → reconnect
-                    BmsProtocol.parseTelemetry(data, target.name)?.let {
-                        lastState[target.address] = it.state
-                        onTelemetry(target.address, it)
-                    }
+                    val tel = BmsProtocol.parseTelemetry(data, target.name)
+                    if (tel != null) lastState[target.address] = tel.state
+                    onPoll(target.address, data, tel)
                     delay(STAGE_POLL_MS)
                 }
                 session.close()
@@ -171,15 +170,16 @@ class BmsRepository(private val context: Context) {
         val session = BleSession(context, t.address)
         try {
             val ok = gate.withPermit { session.connect(8000) }
-            val tel = if (ok) session.poll(4000)?.let { BmsProtocol.parseTelemetry(it, t.name) } else null
+            val data = if (ok) session.poll(4000) else null
+            val tel = data?.let { BmsProtocol.parseTelemetry(it, t.name) }
             if (tel != null) {
                 sampleFailures[t.address] = 0
                 lastState[t.address] = tel.state
-                onTelemetry(t.address, tel)
                 onReachable(t.address, true)
             } else {
                 markSampleFail(t.address)
             }
+            if (data != null) onPoll(t.address, data, tel)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

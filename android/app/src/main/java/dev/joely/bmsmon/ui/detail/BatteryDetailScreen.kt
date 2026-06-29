@@ -26,14 +26,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.joely.bmsmon.UiState
+import dev.joely.bmsmon.data.db.SessionEntity
 import dev.joely.bmsmon.model.batteryAt
 import dev.joely.bmsmon.model.groupOf
+import dev.joely.bmsmon.ui.history.BatteryGraphs
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
 import kotlin.math.roundToInt
 
 @Composable
-fun BatteryDetailScreen(state: UiState, onBack: () -> Unit) {
+fun BatteryDetailScreen(state: UiState, sessions: List<SessionEntity>, onBack: () -> Unit) {
     val c = Bm.colors
     val address = state.detailAddress
     val battery = address?.let { state.roster.batteryAt(it) }
@@ -124,7 +126,7 @@ fun BatteryDetailScreen(state: UiState, onBack: () -> Unit) {
             }
 
             Section("History") {
-                Text("Graphs from logged data — coming soon.", color = Bm.colors.text3, fontSize = 13.sp)
+                BatteryGraphs(sessions = sessions, accent = state.accent, power = state.power)
             }
         }
     }

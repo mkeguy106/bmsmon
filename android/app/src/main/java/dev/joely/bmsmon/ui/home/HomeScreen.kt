@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -65,6 +66,7 @@ fun HomeScreen(
     state: UiState,
     onCycleAppearance: () -> Unit,
     onSettings: () -> Unit,
+    onHistory: () -> Unit,
     onToggleMonitoring: () -> Unit,
     onSetSort: (SortKey) -> Unit,
     onToggleFilter: (FilterKey) -> Unit,
@@ -99,7 +101,7 @@ fun HomeScreen(
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().background(c.bg)) {
-            TopBar(state, pager.currentPage, onCycleAppearance, onSettings, onToggleMonitoring, locked, onToggleLock)
+            TopBar(state, pager.currentPage, onCycleAppearance, onSettings, onHistory, onToggleMonitoring, locked, onToggleLock)
             HorizontalPager(state = pager, userScrollEnabled = !locked, modifier = Modifier.weight(1f)) { page ->
                 when (page) {
                     0 -> StageScreen(
@@ -205,6 +207,7 @@ private fun TopBar(
     currentPage: Int,
     onCycleAppearance: () -> Unit,
     onSettings: () -> Unit,
+    onHistory: () -> Unit,
     onToggleMonitoring: () -> Unit,
     locked: Boolean,
     onToggleLock: () -> Unit,
@@ -250,6 +253,9 @@ private fun TopBar(
                             Appearance.System -> Text("S", color = c.icon, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                             Appearance.Auto -> Text("A", color = c.icon, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                         }
+                    }
+                    Box(Modifier.size(40.dp).clickable(onClick = onHistory), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Filled.ShowChart, "History", Modifier.size(22.dp), tint = c.icon)
                     }
                     Box(Modifier.size(40.dp).clickable(onClick = onSettings), contentAlignment = Alignment.Center) {
                         Icon(Icons.Filled.Settings, "Settings", Modifier.size(22.dp), tint = c.icon)

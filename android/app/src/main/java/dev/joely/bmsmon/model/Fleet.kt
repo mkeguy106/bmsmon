@@ -13,12 +13,13 @@ const val PIN_HOLD_MS = 30 * 60 * 1000L
 
 /**
  * Power (W) at which the inner wattage ring reads "full", per pack. Calibrated from real
- * usage logging on the 2012 daily driver: per-pack discharge was p50 ~40 W, p90 ~96 W,
- * p95 ~127 W, p99 ~259 W, with brief hard-pull spikes to ~882 W (67 A). 250 W (≈p99) keeps
- * everyday cruising expressive on the ring while only the top ~1% of pulls peg it — the exact
- * wattage always stays in the numeric readout, so a pegged ring never hides the real draw.
+ * usage logging on the 2012 daily driver. With a fuller log (~96 k samples, ~5.5 k discharge):
+ * per-pack discharge is p50 ~53 W, p90 ~127 W, p95 ~164 W, p99 ~341 W, with brief hard-pull
+ * spikes to ~882 W (67 A). 300 W (≈p98) keeps everyday cruising expressive on the ring while
+ * only genuine hard pulls peg it — the exact wattage always stays in the numeric readout, so a
+ * pegged ring never hides the real draw. (Earlier, sparser data read p99 ~259 W → was 250 W.)
  */
-const val POWER_RING_FULL_W = 250f
+const val POWER_RING_FULL_W = 300f
 
 /** What's on the main stage: a whole base (2 packs) or a single battery. */
 sealed interface StageTarget {
@@ -97,6 +98,9 @@ private const val CURRENT_EPS = 0.05f
 
 // Regen / current dump: a brief charge-direction current while the pack was discharging
 // moments ago (active driving) — distinct from steady charging (parked on a charger).
+// Validated against real driving: 34 captured regen bursts ran 1.0–22.3 A (up to ~297 W),
+// cleanly separated from the noise floor, so EPS=0.1 A never marginally misfires and the 30 s
+// window correctly ties each burst to active driving. Left as-is.
 const val REGEN_EPS = 0.1f
 const val REGEN_WINDOW_MS = 30_000L
 

@@ -48,7 +48,7 @@ import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import kotlin.random.Random
 
-enum class Screen { Home, Settings, Detail }
+enum class Screen { Home, Settings, Detail, History }
 enum class Mode { Dark, Light }
 enum class SortKey { Activity, Soc, Base }
 enum class FilterKey { ReachableOnly, ActiveOnly, ByBase, DailyDriverOnly }
@@ -101,7 +101,7 @@ data class UiState(
     val logging: Boolean = false,
     val peakPowerW: Float = 0f,
     val peakCurrentA: Float = 0f,
-    val logPath: String = "",
+    val dbSize: String = "",
     // low-battery alerts
     val alertsOn: Boolean = true,
     val enabledThresholds: Set<Int> = ALERT_THRESHOLDS.toSet(),
@@ -113,6 +113,7 @@ data class UiState(
     // screen's back button returns to the page you came from.
     val homePage: Int = 0,
     val locked: Boolean = false,
+    val csvImported: Boolean = false,
 ) {
     val isDark get() = mode == Mode.Dark
     val dailyDriver: BatteryGroup
@@ -189,7 +190,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     private var autoCandidate: Mode? = null
     private var autoCandidateSince = 0L
 
-    private val _state = MutableStateFlow(UiState(logPath = engine.logPath))
+    private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     private fun clockMs() = System.currentTimeMillis()
@@ -223,6 +224,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     dynamicStage = p.dynamicStage ?: s.dynamicStage,
                     stageHoldMinutes = p.stageHoldMinutes ?: s.stageHoldMinutes,
                     logging = p.logging,
+                    csvImported = p.csvImported,
                     alertsOn = p.alertsOn,
                     enabledThresholds = p.enabledThresholds ?: s.enabledThresholds,
                     keepScreenOn = p.keepScreenOn,
@@ -309,8 +311,20 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // --- navigation / theme ---
-    fun goSettings() = _state.update { it.copy(screen = Screen.Settings) }
+    fun goSettings() {
+        _state.update { it.copy(screen = Screen.Settings) }
+        refreshDbSize()
+    }
+    fun refreshDbSize() = viewModelScope.launch {
+        val bytes = engine.history.approxSizeBytes()
+        val mb = bytes / (1024f * 1024f)
+        _state.update { it.copy(dbSize = "%.1f MB".format(mb)) }
+    }
     fun goHome() = _state.update { it.copy(screen = Screen.Home) }
+    fun goHistory() = _state.update { it.copy(screen = Screen.History) }
+
+    fun sessionsFor(address: String) = engine.history.sessions(address)
+    fun allSessions() = engine.history.allSessions()
 
     /** User picked an explicit appearance (Dark/Light/System/Auto). */
     fun setAppearance(a: Appearance) {
@@ -509,6 +523,11 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         engine.start(roster = _state.value.roster, seed = _state.value.fleet, loggingEnabled = _state.value.logging)
         engine.setDisabled(_state.value.disabled)
         engine.setStage(currentStageAddrs())
+        engine.importLegacyCsvIfNeeded(
+            alreadyImported = _state.value.csvImported,
+            markImported = { store.setCsvImported(true) },
+            filesDir = getApplication<Application>().getExternalFilesDir(null),
+        )
         MonitoringService.start(getApplication())
         viewModelScope.launch { store.setMonitoring(true) }
     }
