@@ -63,6 +63,9 @@ object BmsProtocol {
         0x00004000 to "Short Circuit",
     )
 
+    /** Frame offset of the status header (00 00 LEN 01 93 55 AA), or null if none. 0 = aligned. */
+    fun statusFrameOffset(raw: ByteArray): Int? = statusFrameStart(raw)
+
     /**
      * Offset of the status frame start (the leading `00` of `00 00 LEN 01 93 55 AA`), or null if
      * no status-response header is present. The marker `01 93 55 AA` (response cmd = 0x13|0x80,
