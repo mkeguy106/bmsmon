@@ -57,6 +57,7 @@ class BmsRepository(private val context: Context) {
         data class ConnectFailure(val addr: String) : LoopEvent()
         data class PollFrame(val addr: String, val raw: ByteArray) : LoopEvent()
         data class PollDrop(val addr: String) : LoopEvent()
+        object Kick : LoopEvent()
     }
 
     fun start(
@@ -97,8 +98,11 @@ class BmsRepository(private val context: Context) {
         wake()
     }
 
-    /** Reset / retry everything immediately (e.g. app returned to foreground). */
-    fun kickAll() = wake()
+    /** Reset backoff and retry everything immediately (e.g. app returned to foreground). */
+    fun kickAll() {
+        resultChannel.trySend(LoopEvent.Kick)
+        wake()
+    }
 
     fun stop() {
         running = false
@@ -106,6 +110,12 @@ class BmsRepository(private val context: Context) {
         monitoringJob?.cancel()
         monitoringJob = null
         resultChannel.close()
+        // Drain in-transit ConnectSuccess events so their sessions aren't leaked as zombie GATT links.
+        var ev = resultChannel.tryReceive().getOrNull()
+        while (ev != null) {
+            if (ev is LoopEvent.ConnectSuccess) ev.session.close()
+            ev = resultChannel.tryReceive().getOrNull()
+        }
         stageAddrs = emptySet()
         disabledAddrs = emptySet()
     }
@@ -167,15 +177,21 @@ class BmsRepository(private val context: Context) {
                     val ch = resultChannel
                     childScope.launch {
                         val session = BleSession(context, addr, profile)
+                        var handed = false
                         try {
                             val ok = gate.withPermit { session.connect(profile.connectTimeoutMs) }
-                            if (ok) ch.trySend(LoopEvent.ConnectSuccess(addr, session))
-                            else { session.close(); ch.trySend(LoopEvent.ConnectFailure(addr)) }
+                            if (ok) {
+                                handed = ch.trySend(LoopEvent.ConnectSuccess(addr, session)).isSuccess
+                            } else {
+                                ch.trySend(LoopEvent.ConnectFailure(addr))
+                            }
                         } catch (e: CancellationException) {
-                            session.close(); throw e
+                            throw e
                         } catch (e: Exception) {
                             Log.d(TAG, "connect $addr: ${e.message}")
-                            session.close(); ch.trySend(LoopEvent.ConnectFailure(addr))
+                            ch.trySend(LoopEvent.ConnectFailure(addr))
+                        } finally {
+                            if (!handed) session.close()
                         }
                     }
                 }
@@ -238,6 +254,10 @@ class BmsRepository(private val context: Context) {
                     onReachable(event.addr, false)
                     // Short backoff so the control loop reconnects promptly.
                     backoffUntil[event.addr] = now + RECONNECT_BACKOFF_MS
+                }
+                is LoopEvent.Kick -> {
+                    backoffUntil.clear()
+                    failCount.clear()
                 }
             }
         }
