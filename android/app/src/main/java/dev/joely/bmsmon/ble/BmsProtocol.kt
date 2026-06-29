@@ -65,8 +65,9 @@ object BmsProtocol {
         0x00004000 to "Short Circuit",
     )
 
-    /** Frame offset of the status header (00 00 LEN 01 93 55 AA), or null if none. 0 = aligned. */
-    fun statusFrameOffset(raw: ByteArray): Int? = statusFrameStart(raw, RedodoBekenProfile.responseHeader)
+    /** Frame offset of the status header for [header], or null if none. 0 = aligned. */
+    fun statusFrameOffset(raw: ByteArray, header: ByteArray = RedodoBekenProfile.responseHeader): Int? =
+        statusFrameStart(raw, header)
 
     /**
      * Offset of the status frame start (the leading `00` of the realigned response frame), or null if

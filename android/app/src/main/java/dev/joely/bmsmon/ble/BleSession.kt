@@ -18,8 +18,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * One reusable BLE GATT session against a single BMS: connect, read STATUS (0x13), close.
- * Used by both the persistent stage worker and the rotating sampler. The ONLY thing ever
- * written is [BmsProtocol.STATUS_FRAME] — read-only.
+ * Held open by the persistent-fleet connection manager. The ONLY thing ever written is the
+ * profile's prebuilt status frame ([dev.joely.bmsmon.ble.profile.BatteryProfile.statusFrame]) — read-only.
  */
 @SuppressLint("MissingPermission")
 class BleSession(
