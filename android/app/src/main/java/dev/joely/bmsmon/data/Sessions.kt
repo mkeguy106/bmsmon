@@ -78,7 +78,7 @@ fun computeRollup(address: String, sessionId: Long, samples: List<SampleEntity>)
 
     val peakPowerW = dischargePowers.lastOrNull() ?: 0f
     val p95PowerW = if (dischargePowers.isEmpty()) 0f
-        else dischargePowers[((dischargePowers.size - 1) * 0.95f).toInt()]
+        else dischargePowers[(dischargePowers.size - 1) * 95 / 100]
     val meanPowerW = if (dischargePowers.isEmpty()) 0f else dischargePowers.average().toFloat()
     val peakCurrentA = discharge.mapNotNull { it.currentA }.minOrNull()?.let { -it } ?: 0f
     val peakRegenW = tel.filter { it.regen }.mapNotNull { it.powerW }.maxOrNull() ?: 0f

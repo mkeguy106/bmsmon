@@ -39,11 +39,13 @@ fun HistoryScreen(sessions: List<SessionEntity>, accent: Color, onBack: () -> Un
                 color = c.text2, fontSize = 12.sp, modifier = Modifier.padding(bottom = 4.dp),
             )
             LineChart(
+                // Drop sessions with no trustworthy estimate so a low-confidence reading doesn't
+                // pull a pack's line down to a false 0 mΩ.
                 series = byAddress.mapIndexed { i, (_, list) ->
                     ChartSeries(
                         label = list.first().address,
                         color = ThemeSwatches[i % ThemeSwatches.size],
-                        points = list.map { it.estInternalResistanceMohm ?: 0f },
+                        points = list.mapNotNull { it.estInternalResistanceMohm },
                     )
                 },
                 modifier = Modifier.fillMaxWidth().height(200.dp),
