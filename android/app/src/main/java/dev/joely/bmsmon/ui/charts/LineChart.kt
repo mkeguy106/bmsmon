@@ -3,7 +3,6 @@ package dev.joely.bmsmon.ui.charts
 import androidx.compose.foundation.Canvas
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -21,7 +20,7 @@ fun normalize(values: List<Float>, min: Float, max: Float): List<Float> {
  * series so they share a y-axis. No external chart deps — matches the hand-rolled gauge style.
  */
 @Composable
-fun LineChart(series: List<ChartSeries>, modifier: Modifier = Modifier, yLabel: String = "") {
+fun LineChart(series: List<ChartSeries>, modifier: Modifier = Modifier) {
     val all = series.flatMap { it.points }
     val lo = all.minOrNull() ?: 0f
     val hi = all.maxOrNull() ?: 1f
