@@ -8,21 +8,10 @@ import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.util.Log
+import dev.joely.bmsmon.ble.profile.ProfileRegistry
 
-/** BLE-advertised-name prefixes for compatible BMS modules (see bmsmon/CLAUDE.md). */
-private val KNOWN_PREFIXES = listOf(
-    "R-12", "R-24", "RO-12", "RO-24",
-    "L-12", "L-24", "L-51", "LT-",
-    "P-12", "P-24", "PQ-12", "PQ-24",
-    "SS-", "S-",
-)
-
-/** True only for advertised names that match a known compatible BMS prefix. */
-fun isCompatibleBmsName(name: String?): Boolean {
-    val n = name?.trim().orEmpty()
-    if (n.isEmpty()) return false
-    return KNOWN_PREFIXES.any { n.startsWith(it, ignoreCase = true) }
-}
+/** True only for advertised names that match a known battery profile (see ble/profile). */
+fun isCompatibleBmsName(name: String?): Boolean = ProfileRegistry.profileFor(name) != null
 
 /** A compatible device seen during a scan. */
 data class DiscoveredDevice(val address: String, val name: String)
