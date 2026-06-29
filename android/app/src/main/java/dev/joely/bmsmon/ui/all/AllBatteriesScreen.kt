@@ -1,7 +1,11 @@
 package dev.joely.bmsmon.ui.all
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -13,6 +17,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -34,24 +39,29 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.SwipeToDismissBox
-import androidx.compose.material3.SwipeToDismissBoxValue
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.launch
 import dev.joely.bmsmon.FilterKey
 import dev.joely.bmsmon.SortKey
 import dev.joely.bmsmon.UiState
@@ -241,29 +251,8 @@ private fun SwipeableBatteryRow(
 ) {
     val c = Bm.colors
     var confirmDelete by remember { mutableStateOf(false) }
-    val dismissState = rememberSwipeToDismissBoxState(
-        confirmValueChange = { target ->
-            if (target == SwipeToDismissBoxValue.EndToStart) { confirmDelete = true; false } else false
-        },
-    )
 
-    SwipeToDismissBox(
-        state = dismissState,
-        enableDismissFromStartToEnd = false,
-        backgroundContent = {
-            // Only reveal the trash affordance while actively swiping left; otherwise leave the
-            // background fully transparent so it never shows through translucent (stage) rows.
-            if (dismissState.dismissDirection == SwipeToDismissBoxValue.EndToStart) {
-                Box(
-                    Modifier.fillMaxSize().clip(RoundedCornerShape(9.dp))
-                        .background(Bm.power.copy(alpha = 0.18f)).padding(horizontal = 18.dp),
-                    contentAlignment = Alignment.CenterEnd,
-                ) {
-                    Icon(Icons.Filled.Delete, "Remove", Modifier.size(22.dp), tint = Bm.power)
-                }
-            }
-        },
-    ) {
+    SwipeLeftToDelete(onTriggered = { confirmDelete = true }) {
         BatteryRow(
             row = row, groups = groups, isStage = isStage, isDailyDriver = isDailyDriver,
             disabled = disabled, monitoring = monitoring,
@@ -284,6 +273,65 @@ private fun SwipeableBatteryRow(
             confirmButton = { TextButton(onClick = { confirmDelete = false; onRemove() }) { Text("Remove", color = Bm.power) } },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel", color = c.text2) } },
         )
+    }
+}
+
+/**
+ * Swipe a row LEFT to reveal a trash affordance and (past threshold) fire [onTriggered]; the row
+ * always springs back. Only leftward drags are claimed — a rightward drag is left unconsumed so the
+ * parent HorizontalPager can swipe the whole page back to the main stage. (Material3's
+ * SwipeToDismissBox still consumed right-drags at rest even with start-to-end disabled, which blocked
+ * the page swipe — hence this hand-rolled, direction-aware gesture.)
+ */
+@Composable
+private fun SwipeLeftToDelete(onTriggered: () -> Unit, content: @Composable () -> Unit) {
+    val scope = rememberCoroutineScope()
+    val offsetX = remember { Animatable(0f) }
+    val density = LocalDensity.current
+    val maxRevealPx = with(density) { 160.dp.toPx() }
+    val triggerPx = with(density) { 96.dp.toPx() }
+
+    Box(Modifier.fillMaxWidth()) {
+        if (offsetX.value < -1f) {
+            Box(
+                Modifier.matchParentSize().clip(RoundedCornerShape(9.dp))
+                    .background(Bm.power.copy(alpha = 0.18f)).padding(horizontal = 18.dp),
+                contentAlignment = Alignment.CenterEnd,
+            ) { Icon(Icons.Filled.Delete, "Remove", Modifier.size(22.dp), tint = Bm.power) }
+        }
+        Box(
+            Modifier
+                .offset { IntOffset(offsetX.value.toInt(), 0) }
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val slop = viewConfiguration.touchSlop
+                        var claimed = offsetX.value < -1f   // already open → keep handling
+                        var current = offsetX.value
+                        var total = 0f
+                        while (true) {
+                            val ev = awaitPointerEvent()
+                            val ch = ev.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!ch.pressed) break
+                            val dx = ch.positionChange().x
+                            if (!claimed) {
+                                total += dx
+                                if (total <= -slop) claimed = true        // leftward → ours
+                                else if (total >= slop) break             // rightward → let the pager have it
+                            }
+                            if (claimed) {
+                                ch.consume()
+                                current = (current + dx).coerceIn(-maxRevealPx, 0f)
+                                scope.launch { offsetX.snapTo(current) }
+                            }
+                        }
+                        if (claimed) {
+                            val fire = current <= -triggerPx
+                            scope.launch { offsetX.animateTo(0f, tween(180)); if (fire) onTriggered() }
+                        }
+                    }
+                },
+        ) { content() }
     }
 }
 
@@ -523,7 +571,17 @@ private fun TextPromptDialog(
         text = {
             OutlinedTextField(
                 value = value, onValueChange = { value = it },
-                label = { Text(label, color = c.text3) }, singleLine = true,
+                label = { Text(label) }, singleLine = true,
+                // The app themes via BmColors, not a Material ColorScheme, so Material3 text fields
+                // fall back to their (light) defaults — dark, unreadable text in dark mode. Map the
+                // field's colors to the active theme tokens explicitly.
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = c.text, unfocusedTextColor = c.text,
+                    cursorColor = Bm.accent,
+                    focusedBorderColor = Bm.accent, unfocusedBorderColor = c.border,
+                    focusedLabelColor = Bm.accent, unfocusedLabelColor = c.text3,
+                    focusedContainerColor = c.inputBg, unfocusedContainerColor = c.inputBg,
+                ),
             )
         },
         confirmButton = {
