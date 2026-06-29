@@ -231,6 +231,18 @@ tripped a false critical alarm) and rejects implausible readings (SOC 0–100, v
 The main stage shows a pack that isn't reachable as **DISCONNECTED** (dimmed ring, no %, no
 alert) rather than a misleading 0%.
 
+**No demo data (removed).** The old offline "demo" telemetry (`demoFor()`, `UiState.demo`,
+`tickDemo` drift loop) was removed — we're past needing it. When monitoring is off, the app keeps
+the **last-known fleet marked unreachable** and renders every pack as **DISCONNECTED** (dimmed,
+no %) instead of synthetic data; the top-bar status reads **MONITORING OFF**.
+
+**Disconnect semantics.** Per-battery disconnect and **Disconnect all** both drop the BLE link
+the same way — they add the pack(s) to the `disabled` set and call `engine.setDisabled(...)`,
+which cancels the staged worker so its GATT closes; the engine keeps running. Each disconnected
+row shows a **reconnect (link) icon**, and the All Batteries header toggles **Disconnect all ⇄
+Reconnect all**. "Disconnect all" is therefore distinct from *stopping monitoring* (the
+foreground-service Stop), which tears the engine down entirely.
+
 ## Development
 
 ```bash
