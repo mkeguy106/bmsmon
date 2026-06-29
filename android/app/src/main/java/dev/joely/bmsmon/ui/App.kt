@@ -150,6 +150,7 @@ fun App(vm: BatteryViewModel) {
                         onDisconnect = vm::disconnectBattery,
                         onReconnect = vm::reconnectBattery,
                         onDisconnectAll = vm::disconnectAll,
+                        onReconnectAll = vm::reconnectAll,
                         onAcknowledge = vm::acknowledgeAlert,
                         onAddScan = onAddScan,
                         onOpenDetail = vm::openDetail,

@@ -28,7 +28,6 @@ import dev.joely.bmsmon.model.addresses
 import dev.joely.bmsmon.model.allTargets
 import dev.joely.bmsmon.model.assignGroup
 import dev.joely.bmsmon.model.batteryAt
-import dev.joely.bmsmon.model.demoFor
 import dev.joely.bmsmon.model.groupActivity
 import dev.joely.bmsmon.model.groupById
 import dev.joely.bmsmon.model.groupViews
@@ -46,7 +45,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
-import kotlin.random.Random
 
 enum class Screen { Home, Settings, Detail, History }
 enum class Mode { Dark, Light }
@@ -93,8 +91,6 @@ data class UiState(
     val pinned: Boolean = false,
     val regenAddrs: Set<String> = emptySet(),
     val disabled: Set<String> = emptySet(),
-    val demo: List<Telemetry> = demoFor(DEFAULT_ROSTER.groupById(DEFAULT_GROUP_ID)
-        ?: BatteryGroup(DEFAULT_GROUP_ID, DEFAULT_GROUP_ID, emptyList())),
     val sortKey: SortKey = SortKey.Activity,
     val filters: Set<FilterKey> = emptySet(),
     val filterBaseId: String = DEFAULT_GROUP_ID,
@@ -120,9 +116,8 @@ data class UiState(
         get() = roster.groupById(dailyDriverId) ?: BatteryGroup(dailyDriverId, dailyDriverId, emptyList())
     val stageGroupId: String? get() = (stageTarget as? StageTarget.Base)?.groupId
 
-    /** The 1–2 stage packs with their regen flags (last-known when monitoring, demo otherwise). */
+    /** The 1–2 stage packs with their regen flags. A pack without live data reads DISCONNECTED. */
     fun stageItems(): List<StageItem> {
-        if (!monitoring) return demo.map { StageItem(it, false) }
         val targets = when (val t = stageTarget) {
             is StageTarget.Base -> roster.groupById(t.groupId)?.targets ?: emptyList()
             is StageTarget.Single -> roster.targetFor(t.address)?.let { listOf(it) } ?: emptyList()
@@ -235,7 +230,6 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                         ?: s.filters,
                     stageTarget = StageTarget.Base(dd.id),
                     filterBaseId = p.filterBaseId ?: dd.id,
-                    demo = demoFor(dd),
                     // Seed the fleet with the last-known reading per battery (dimmed/not reachable
                     // until the first live connect), so All Batteries isn't blank on launch.
                     fleet = p.lastTelemetry.mapValues { (_, tel) -> BatteryStatus(telemetry = tel, reachable = false) },
@@ -246,8 +240,8 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             updateSensor()
         }
         // Mirror the engine's BLE-derived state into the UI while we're alive, and re-resolve the
-        // stage off each update. When monitoring stops, fall back to the demo. (The seed fleet set
-        // above survives because the off-branch only clears it on the on->off edge.)
+        // stage off each update. When monitoring stops, keep the last-known fleet but mark every
+        // pack unreachable, so the stage/list shows them dimmed as DISCONNECTED (no demo data).
         viewModelScope.launch {
             engine.state.collect { es ->
                 if (es.monitoring) {
@@ -270,19 +264,15 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                 } else {
                     _state.update {
                         if (it.monitoring) {
-                            it.copy(monitoring = false, fleet = emptyMap(), demo = demoFor(it.dailyDriver))
+                            it.copy(
+                                monitoring = false,
+                                fleet = it.fleet.mapValues { (_, s) -> s.copy(reachable = false) },
+                            )
                         } else {
                             it
                         }
                     }
                 }
-            }
-        }
-        // Demo drift while not monitoring.
-        viewModelScope.launch {
-            while (true) {
-                delay(1800)
-                if (!_state.value.monitoring) tickDemo()
             }
         }
         // Periodic re-resolve so sticky/pin holds can expire even with no new samples.
@@ -291,22 +281,6 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                 delay(30_000)
                 if (_state.value.monitoring) refresh()
             }
-        }
-    }
-
-    private fun clamp(v: Float, lo: Float, hi: Float) = v.coerceIn(lo, hi)
-
-    private fun tickDemo() {
-        _state.update { s ->
-            s.copy(demo = s.demo.map { b ->
-                b.copy(
-                    current = clamp(b.current + (Random.nextFloat() - 0.5f) * 0.12f, 0f, 14f),
-                    voltage = clamp(b.voltage + (Random.nextFloat() - 0.5f) * 0.04f, 20f, 29f),
-                    temp = clamp(b.temp + (Random.nextFloat() - 0.5f) * 0.08f, 5f, 50f),
-                    cellV = clamp(b.cellV + (Random.nextFloat() - 0.5f) * 0.004f, 2.9f, 3.65f),
-                    powerW = clamp(b.powerW + (Random.nextFloat() - 0.5f) * 0.9f, 0f, 120f),
-                )
-            })
         }
     }
 
@@ -410,7 +384,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         val g = _state.value.roster.groupById(id) ?: return
         _state.update {
             if (it.monitoring) it.copy(dailyDriverId = g.id)
-            else it.copy(dailyDriverId = g.id, stageTarget = StageTarget.Base(g.id), demo = demoFor(g), filterBaseId = g.id)
+            else it.copy(dailyDriverId = g.id, stageTarget = StageTarget.Base(g.id), filterBaseId = g.id)
         }
         viewModelScope.launch { store.setDailyDriver(g.id) }
         refresh()
@@ -515,7 +489,29 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         engine.kickAll()
         refresh()
     }
-    fun disconnectAll() = stopMonitoring()
+    /** Drop the BLE link to every pack (closing each GATT) but keep the engine running, so each
+     *  row shows DISCONNECTED with a reconnect icon — distinct from stopping monitoring entirely. */
+    fun disconnectAll() {
+        val all = _state.value.roster.allTargets().map { it.address.uppercase() }.toSet()
+        _state.update { st ->
+            st.copy(
+                disabled = st.disabled + all,
+                fleet = st.fleet + all.associateWith { a ->
+                    (st.fleet[a] ?: BatteryStatus()).copy(reachable = false)
+                },
+            )
+        }
+        engine.setDisabled(_state.value.disabled)
+        refresh()
+    }
+
+    /** Re-enable every pack the user had disconnected and kick an immediate retry. */
+    fun reconnectAll() {
+        _state.update { it.copy(disabled = emptySet()) }
+        engine.setDisabled(emptySet())
+        engine.kickAll()
+        refresh()
+    }
 
     // --- fleet monitoring (delegated to the process-lifetime engine + foreground service) ---
     fun startMonitoring() {
@@ -536,7 +532,9 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         persistLastTelemetry()  // keep the latest readings for next launch
         engine.stop()           // cancels BLE jobs -> each session closes its GATT cleanly
         MonitoringService.stop(getApplication())
-        _state.update { it.copy(monitoring = false, fleet = emptyMap(), demo = demoFor(it.dailyDriver)) }
+        _state.update {
+            it.copy(monitoring = false, fleet = it.fleet.mapValues { (_, s) -> s.copy(reachable = false) })
+        }
         viewModelScope.launch { store.setMonitoring(false) }
     }
 

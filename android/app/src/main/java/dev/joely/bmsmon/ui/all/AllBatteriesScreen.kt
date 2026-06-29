@@ -93,6 +93,7 @@ fun AllBatteriesScreen(
     onDisconnect: (String) -> Unit,
     onReconnect: (String) -> Unit,
     onDisconnectAll: () -> Unit,
+    onReconnectAll: () -> Unit,
     onAddScan: () -> Unit,
     onOpenDetail: (String) -> Unit,
     onRemove: (String) -> Unit,
@@ -131,8 +132,15 @@ fun AllBatteriesScreen(
             Text("All Batteries", color = c.text, fontSize = 21.sp, fontWeight = FontWeight.Bold)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (state.monitoring) {
-                    Text("Disconnect all", color = Bm.power, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.clickable(onClick = onDisconnectAll).padding(4.dp))
+                    // Toggle to "Reconnect all" once every pack the user can act on is disconnected.
+                    val allDisabled = rows.isNotEmpty() && rows.all { it.target.address in state.disabled }
+                    if (allDisabled) {
+                        Text("Reconnect all", color = Bm.accent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.clickable(onClick = onReconnectAll).padding(4.dp))
+                    } else {
+                        Text("Disconnect all", color = Bm.power, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.clickable(onClick = onDisconnectAll).padding(4.dp))
+                    }
                 }
                 Box(
                     Modifier.padding(start = 6.dp).size(34.dp).clip(RoundedCornerShape(9.dp))
