@@ -109,4 +109,18 @@ class BmsProtocolTest {
             assertTrue("opcode ${cmd.opcode} not in known-safe set", cmd.opcode in allowed)
         }
     }
+
+    @Test
+    fun parsesWithExplicitDefaultLayout() {
+        // Same real frame the existing test uses, but passing the profile layout/header explicitly.
+        val raw = hex(realStatus)
+        val a = BmsProtocol.parseTelemetry(raw, "x")
+        val b = BmsProtocol.parseTelemetry(
+            raw, "x",
+            dev.joely.bmsmon.ble.profile.RedodoBekenProfile.layout,
+            dev.joely.bmsmon.ble.profile.RedodoBekenProfile.responseHeader,
+        )
+        assertEquals(a?.soc, b?.soc)
+        assertEquals(a?.voltage, b?.voltage)
+    }
 }

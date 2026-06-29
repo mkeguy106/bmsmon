@@ -2,6 +2,8 @@ package dev.joely.bmsmon.ble
 
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.Telemetry
+import dev.joely.bmsmon.ble.profile.RedodoBekenProfile
+import dev.joely.bmsmon.ble.profile.TelemetryLayout
 import java.util.UUID
 import kotlin.math.abs
 
@@ -64,22 +66,20 @@ object BmsProtocol {
     )
 
     /** Frame offset of the status header (00 00 LEN 01 93 55 AA), or null if none. 0 = aligned. */
-    fun statusFrameOffset(raw: ByteArray): Int? = statusFrameStart(raw)
+    fun statusFrameOffset(raw: ByteArray): Int? = statusFrameStart(raw, RedodoBekenProfile.responseHeader)
 
     /**
-     * Offset of the status frame start (the leading `00` of `00 00 LEN 01 93 55 AA`), or null if
-     * no status-response header is present. The marker `01 93 55 AA` (response cmd = 0x13|0x80,
-     * then the 55 AA tag) sits at frame offset 3, so the frame begins 3 bytes before it. We scan
-     * because stale notification fragments can prepend bytes; the first match is the real header.
+     * Offset of the status frame start (the leading `00` of the realigned response frame), or null if
+     * no status-response header is present. The marker sits at frame offset 3, so the frame begins 3
+     * bytes before it. We scan because stale notification fragments can prepend bytes; the first match
+     * is the real header.
      */
-    private fun statusFrameStart(d: ByteArray): Int? {
+    private fun statusFrameStart(d: ByteArray, header: ByteArray): Int? {
         var i = 3
-        while (i <= d.size - 4) {
-            if ((d[i].toInt() and 0xFF) == 0x01 &&
-                (d[i + 1].toInt() and 0xFF) == 0x93 &&
-                (d[i + 2].toInt() and 0xFF) == 0x55 &&
-                (d[i + 3].toInt() and 0xFF) == 0xAA
-            ) return i - 3
+        while (i <= d.size - header.size) {
+            var match = true
+            for (k in header.indices) if (d[i + k] != header[k]) { match = false; break }
+            if (match) return i - 3
             i++
         }
         return null
@@ -94,29 +94,34 @@ object BmsProtocol {
      * fixed offsets below produces garbage (a real capture seen in the field: soc=0, voltage=37.6 V
      * — the header marker `01 93` shifted into the voltage field). Such garbage was being shown on
      * the stage as a genuine 0% reading and tripping the critical low-battery alarm. We therefore
-     * (1) realign to the `00 00 LEN 01 93 55 AA` response header before reading any field, and
+     * (1) realign to the response header before reading any field, and
      * (2) reject readings outside physically possible bounds. Anything we can't trust returns null,
      * which the engine treats as a missed poll (keep last-known / mark unreachable), never a 0%.
      */
-    fun parseTelemetry(raw: ByteArray, name: String): Telemetry? {
-        val base = statusFrameStart(raw) ?: return null
+    fun parseTelemetry(
+        raw: ByteArray,
+        name: String,
+        layout: TelemetryLayout = RedodoBekenProfile.layout,
+        header: ByteArray = RedodoBekenProfile.responseHeader,
+    ): Telemetry? {
+        val base = statusFrameStart(raw, header) ?: return null
         val d = if (base == 0) raw else raw.copyOfRange(base, raw.size)
-        if (d.size < 100) return null
-        val totalV = u16(d, 12) / 1000f
-        val current = i32(d, 48) / 1000f
-        val cellTemp = i16(d, 52)
-        val mosfetTemp = i16(d, 54)
-        val remainingAh = u16(d, 62) / 100f
-        val fullAh = u32(d, 64) / 100f
-        val stateRaw = u16(d, 88)
-        val soc = u16(d, 90).toFloat()
-        val soh = u32(d, 92).toInt()
-        val cycles = u32(d, 96).toInt()
-        // Sanity gate: a real pack is 0–100% SOC and (12/24/48 V LiFePO4) 4–70 V. Out-of-range
+        if (d.size < layout.minBytes) return null
+        val totalV = u16(d, layout.voltageOff) / 1000f
+        val current = i32(d, layout.currentOff) / 1000f
+        val cellTemp = i16(d, layout.cellTempOff)
+        val mosfetTemp = i16(d, layout.mosfetTempOff)
+        val remainingAh = u16(d, layout.remainingAhOff) / 100f
+        val fullAh = u32(d, layout.fullAhOff) / 100f
+        val stateRaw = u16(d, layout.stateOff)
+        val soc = u16(d, layout.socOff).toFloat()
+        val soh = u32(d, layout.sohOff).toInt()
+        val cycles = u32(d, layout.cyclesOff).toInt()
+        // Sanity gate: a real pack is within plausibility bounds. Out-of-range
         // means a corrupt/misframed packet slipped through — drop it rather than display it.
-        if (soc < 0f || soc > 100f) return null
-        if (totalV < 4f || totalV > 70f) return null
-        val cells = (0 until 16).map { u16(d, 16 + it * 2) / 1000f }.filter { it > 0.1f }
+        if (soc < layout.socMin || soc > layout.socMax) return null
+        if (totalV < layout.voltMin || totalV > layout.voltMax) return null
+        val cells = (0 until layout.cellCount).map { u16(d, layout.cellsBaseOff + it * 2) / 1000f }.filter { it > 0.1f }
         val maxCell = cells.maxOrNull() ?: (totalV / 4f)
         val state = when (stateRaw) {
             1 -> BatteryState.Charging
@@ -124,7 +129,7 @@ object BmsProtocol {
             4 -> BatteryState.Disabled
             else -> BatteryState.Idle
         }
-        val prot = u32(d, 76).toInt()
+        val prot = u32(d, layout.protOff).toInt()
         val protections = PROTECTION_FLAGS.filter { (prot and it.key) != 0 }.values.toList()
 
         return Telemetry(
