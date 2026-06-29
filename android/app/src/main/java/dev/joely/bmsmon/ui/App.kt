@@ -164,7 +164,8 @@ fun App(vm: BatteryViewModel) {
                         onToggleLock = { vm.setLocked(!state.locked) },
                     )
                     Screen.History -> {
-                        val sessions by vm.allSessions().collectAsState(initial = emptyList())
+                        val sessionsFlow = remember { vm.allSessions() }
+                        val sessions by sessionsFlow.collectAsState(initial = emptyList())
                         HistoryScreen(sessions = sessions, accent = state.accent, onBack = vm::goHome)
                     }
                     Screen.Settings -> SettingsScreen(
@@ -187,8 +188,10 @@ fun App(vm: BatteryViewModel) {
                     )
                     Screen.Detail -> {
                         val addr = state.detailAddress
-                        val sessions by (if (addr != null) vm.sessionsFor(addr) else kotlinx.coroutines.flow.flowOf(emptyList()))
-                            .collectAsState(initial = emptyList())
+                        val sessionsFlow = remember(addr) {
+                            if (addr != null) vm.sessionsFor(addr) else kotlinx.coroutines.flow.flowOf(emptyList())
+                        }
+                        val sessions by sessionsFlow.collectAsState(initial = emptyList())
                         BatteryDetailScreen(state = state, sessions = sessions, onBack = vm::closeDetail)
                     }
                 }

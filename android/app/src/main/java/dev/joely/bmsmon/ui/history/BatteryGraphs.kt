@@ -39,13 +39,19 @@ fun BatteryGraphs(sessions: List<SessionEntity>, accent: Color, power: Color) {
         )
     }
 
-    val irSeries = sessions.map { it.estInternalResistanceMohm ?: Float.NaN }
-        .map { if (it.isNaN()) 0f else it }
+    // Skip sessions with no trustworthy estimate (null = too little load variation) rather than
+    // plotting them as a misleading 0 mΩ dip.
+    val irSeries = sessions.mapNotNull { it.estInternalResistanceMohm }
     Graph("Internal resistance (mΩ) — rising = aging", c.text2) {
-        LineChart(
-            series = listOf(ChartSeries("mΩ", accent, irSeries)),
-            modifier = Modifier.fillMaxWidth().height(140.dp),
-        )
+        if (irSeries.size < 2) {
+            Text("Not enough load variation yet to estimate resistance.",
+                color = c.text3, fontSize = 11.sp, modifier = Modifier.padding(4.dp))
+        } else {
+            LineChart(
+                series = listOf(ChartSeries("mΩ", accent, irSeries)),
+                modifier = Modifier.fillMaxWidth().height(140.dp),
+            )
+        }
     }
 
     Graph("Capacity (Ah) & SOH (%) vs cycles", c.text2) {

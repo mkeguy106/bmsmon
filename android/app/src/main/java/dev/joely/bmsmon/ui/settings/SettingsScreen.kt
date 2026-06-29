@@ -504,7 +504,7 @@ private fun UsageLoggingCard(state: UiState, onSetLogging: (Boolean) -> Unit, on
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f).padding(end = 12.dp)) {
                 Text("Usage Logging", color = c.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                Text("Record telemetry to a CSV to find the chair's peak draw (to calibrate the power ring).",
+                Text("Record telemetry to the database for usage history and aging graphs (and to calibrate the power ring).",
                     color = c.text2, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.padding(top = 4.dp))
             }
             Switch(
@@ -524,13 +524,13 @@ private fun UsageLoggingCard(state: UiState, onSetLogging: (Boolean) -> Unit, on
             modifier = Modifier.padding(top = 14.dp),
         )
         Text("Database: ${state.dbSize}", color = c.text3, fontSize = 10.sp, fontFamily = MonoFont,
-            modifier = Modifier.padding(top = 4.dp))
+            modifier = Modifier.padding(top = 8.dp))
         Box(
             Modifier.padding(top = 14.dp).clip(RoundedCornerShape(8.dp))
                 .border(1.dp, c.border, RoundedCornerShape(8.dp))
                 .clickable(onClick = onClearLog).padding(horizontal = 16.dp, vertical = 9.dp),
         ) {
-            Text("Clear log", color = c.text2, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            Text("Clear data", color = c.text2, fontSize = 13.sp, fontWeight = FontWeight.Medium)
         }
     }
 }
