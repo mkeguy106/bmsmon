@@ -34,6 +34,7 @@ import dev.joely.bmsmon.Screen
 import dev.joely.bmsmon.ble.blePermissions
 import dev.joely.bmsmon.ble.hasBlePermissions
 import dev.joely.bmsmon.ui.detail.BatteryDetailScreen
+import dev.joely.bmsmon.ui.history.HistoryScreen
 import dev.joely.bmsmon.ui.home.HomeScreen
 import androidx.activity.compose.BackHandler
 import dev.joely.bmsmon.ui.scan.ScanSheet
@@ -54,6 +55,7 @@ fun App(vm: BatteryViewModel) {
         when (state.screen) {
             Screen.Detail -> vm.closeDetail()
             Screen.Settings -> vm.goHome()
+            Screen.History -> vm.goHome()
             else -> {}
         }
     }
@@ -139,6 +141,7 @@ fun App(vm: BatteryViewModel) {
                         state = state,
                         onCycleAppearance = vm::cycleAppearance,
                         onSettings = vm::goSettings,
+                        onHistory = vm::goHistory,
                         onToggleMonitoring = onMonitorToggle,
                         onSetSort = vm::setSort,
                         onToggleFilter = vm::toggleFilter,
@@ -160,6 +163,10 @@ fun App(vm: BatteryViewModel) {
                         locked = state.locked,
                         onToggleLock = { vm.setLocked(!state.locked) },
                     )
+                    Screen.History -> {
+                        val sessions by vm.allSessions().collectAsState(initial = emptyList())
+                        HistoryScreen(sessions = sessions, accent = state.accent, onBack = vm::goHome)
+                    }
                     Screen.Settings -> SettingsScreen(
                         state = state,
                         onBack = vm::goHome,

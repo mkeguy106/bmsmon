@@ -48,7 +48,7 @@ import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import kotlin.random.Random
 
-enum class Screen { Home, Settings, Detail }
+enum class Screen { Home, Settings, Detail, History }
 enum class Mode { Dark, Light }
 enum class SortKey { Activity, Soc, Base }
 enum class FilterKey { ReachableOnly, ActiveOnly, ByBase, DailyDriverOnly }
@@ -321,6 +321,10 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(dbSize = "%.1f MB".format(mb)) }
     }
     fun goHome() = _state.update { it.copy(screen = Screen.Home) }
+    fun goHistory() = _state.update { it.copy(screen = Screen.History) }
+
+    fun sessionsFor(address: String) = engine.history.sessions(address)
+    fun allSessions() = engine.history.allSessions()
 
     /** User picked an explicit appearance (Dark/Light/System/Auto). */
     fun setAppearance(a: Appearance) {
