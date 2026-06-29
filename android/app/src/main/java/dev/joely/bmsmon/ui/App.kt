@@ -185,7 +185,12 @@ fun App(vm: BatteryViewModel) {
                         onSetAppearance = vm::setAppearance,
                         onSetAutoLux = vm::setAutoLuxThreshold,
                     )
-                    Screen.Detail -> BatteryDetailScreen(state = state, onBack = vm::closeDetail)
+                    Screen.Detail -> {
+                        val addr = state.detailAddress
+                        val sessions by (if (addr != null) vm.sessionsFor(addr) else kotlinx.coroutines.flow.flowOf(emptyList()))
+                            .collectAsState(initial = emptyList())
+                        BatteryDetailScreen(state = state, sessions = sessions, onBack = vm::closeDetail)
+                    }
                 }
             }
             if (showScan) {
