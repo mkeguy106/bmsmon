@@ -8,7 +8,10 @@ import androidx.lifecycle.viewModelScope
 import dev.joely.bmsmon.ble.hasBlePermissions
 import dev.joely.bmsmon.monitor.MonitoringService
 import dev.joely.bmsmon.sensor.AmbientLightSensor
+import dev.joely.bmsmon.data.PackHealth
 import dev.joely.bmsmon.data.SettingsStore
+import dev.joely.bmsmon.data.buildPackHealth
+import dev.joely.bmsmon.data.peakPool
 import dev.joely.bmsmon.model.BatteryGroup
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.BatteryStatus
@@ -42,11 +45,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
-enum class Screen { Home, Settings, Detail, History }
+enum class Screen { Home, Settings, Detail, History, Review, Timeline }
 enum class Mode { Dark, Light }
 enum class SortKey { Activity, Soc, Base }
 enum class FilterKey { ReachableOnly, ActiveOnly, ByBase, DailyDriverOnly }
@@ -105,6 +109,8 @@ data class UiState(
     val keepScreenOn: Boolean = true,
     val tempFahrenheit: Boolean = true,
     val detailAddress: String? = null,
+    val reviewAddress: String? = null,     // pack open in the Health & Usage Review screen
+    val timelineSession: Long? = null,     // session open in the Session timeline drill-down
     // Which Home pager page is showing (0 = stage, 1 = all batteries). Remembered so the detail
     // screen's back button returns to the page you came from.
     val homePage: Int = 0,
@@ -299,6 +305,34 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
 
     fun sessionsFor(address: String) = engine.history.sessions(address)
     fun allSessions() = engine.history.allSessions()
+
+    // --- history redesign: navigation + derived-health loaders ---
+    fun openReview(address: String) = _state.update { it.copy(screen = Screen.Review, reviewAddress = address) }
+    fun closeReview() = _state.update { it.copy(screen = Screen.Detail) }   // back to the live detail
+    fun openTimeline(sessionId: Long) = _state.update { it.copy(screen = Screen.Timeline, timelineSession = sessionId) }
+    fun closeTimeline() = _state.update { it.copy(screen = Screen.Review) }
+
+    /** Build one pack's full derived health (resistance, V–I cloud, cell Δ, usage) off Room. */
+    suspend fun loadPackHealth(address: String): PackHealth {
+        val alias = _state.value.roster.batteryAt(address)?.alias ?: address
+        val sessions = engine.history.sessions(address).first()
+        val samples = engine.history.telemetry(address)
+        return buildPackHealth(address, alias, sessions, samples)
+    }
+
+    /** Build derived health for every roster pack that has recorded sessions (Group health). */
+    suspend fun loadFleetHealth(): List<PackHealth> =
+        _state.value.roster.allTargets()
+            .map { loadPackHealth(it.address) }
+            .filter { it.sessionCount > 0 }
+
+    /** Load one session's rollups + peak-pooled timeline buckets for the drill-down. */
+    suspend fun loadTimeline(sessionId: Long): Triple<String, dev.joely.bmsmon.data.db.SessionEntity, List<dev.joely.bmsmon.data.TimelineBucket>>? {
+        val session = engine.history.session(sessionId) ?: return null
+        val alias = _state.value.roster.batteryAt(session.address)?.alias ?: session.address
+        val buckets = peakPool(engine.history.samplesForSession(sessionId))
+        return Triple(alias, session, buckets)
+    }
 
     /** User picked an explicit appearance (Dark/Light/System/Auto). */
     fun setAppearance(a: Appearance) {
