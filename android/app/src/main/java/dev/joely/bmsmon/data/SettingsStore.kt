@@ -41,6 +41,7 @@ data class Persisted(
     val appearance: String?,
     val autoLuxThreshold: Float?,
     val locked: Boolean,
+    val csvImported: Boolean,
 )
 
 /** Persists user preferences (colors, appearance override, BMS addresses) via DataStore. */
@@ -68,6 +69,7 @@ class SettingsStore(private val context: Context) {
         val APPEARANCE = stringPreferencesKey("appearance")
         val AUTO_LUX = floatPreferencesKey("auto_lux_threshold")
         val LOCKED = booleanPreferencesKey("locked")
+        val CSV_IMPORTED = booleanPreferencesKey("csv_imported")
     }
 
     suspend fun load(): Persisted {
@@ -94,6 +96,7 @@ class SettingsStore(private val context: Context) {
             appearance = p[K.APPEARANCE],
             autoLuxThreshold = p[K.AUTO_LUX],
             locked = p[K.LOCKED] ?: false,
+            csvImported = p[K.CSV_IMPORTED] ?: false,
         )
     }
 
@@ -119,6 +122,7 @@ class SettingsStore(private val context: Context) {
     suspend fun setRoster(roster: Roster) =
         context.dataStore.edit { it[K.ROSTER] = encodeRoster(roster) }.let {}
     suspend fun setLocked(on: Boolean) = context.dataStore.edit { it[K.LOCKED] = on }.let {}
+    suspend fun setCsvImported(on: Boolean) = context.dataStore.edit { it[K.CSV_IMPORTED] = on }.let {}
 }
 
 /** JSON forbids NaN/Infinity; coerce any non-finite reading to 0 before writing. */

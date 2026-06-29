@@ -15,6 +15,7 @@ import dev.joely.bmsmon.model.groupActivity
 import dev.joely.bmsmon.model.groupOf
 import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.model.isRegen
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -40,7 +41,7 @@ data class MonitorState(
 
 /**
  * Process-lifetime monitoring engine. Owns the [BmsRepository], its coroutine scope, and the
- * usage [TelemetryLogger] — none tied to an Activity/ViewModel — so BLE polling and CSV logging
+ * [TelemetryRepository] — none tied to an Activity/ViewModel — so BLE polling and DB logging
  * keep running while the app is backgrounded (kept alive by [MonitoringService]) and even if the
  * hosting Activity is destroyed. Held as a singleton by the Application ([dev.joely.bmsmon.BmsApp]).
  *
@@ -58,6 +59,7 @@ class MonitorEngine(appContext: Context) {
     /** Exposed so the ViewModel can read session history for the graphs. */
     val history: TelemetryRepository get() = repository
 
+    @Volatile private var importChecked = false
     @Volatile private var logging = false
     // The current roster drives the monitoring target set and group lookups (regen, last-discharge).
     // It's dynamic (the user can add/remove batteries) so the ViewModel pushes updates via setRoster.
@@ -105,6 +107,17 @@ class MonitorEngine(appContext: Context) {
     fun setStage(addresses: Set<String>) = ble.setStage(addresses)
     fun setDisabled(addresses: Set<String>) = ble.setDisabled(addresses)
     fun kickAll() = ble.kickAll()
+
+    /** Backfill the legacy CSVs into the DB exactly once (guarded by a persisted flag). */
+    fun importLegacyCsvIfNeeded(alreadyImported: Boolean, markImported: suspend () -> Unit, filesDir: File?) {
+        if (importChecked || alreadyImported) { importChecked = true; return }
+        importChecked = true
+        scope.launch {
+            val dir = filesDir ?: return@launch
+            repository.importCsvOnce(listOf(File(dir, "usage_log.csv"), File(dir, "usage_log.1.csv")))
+            markImported()
+        }
+    }
 
     fun setLogging(enabled: Boolean) {
         logging = enabled

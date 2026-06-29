@@ -113,6 +113,7 @@ data class UiState(
     // screen's back button returns to the page you came from.
     val homePage: Int = 0,
     val locked: Boolean = false,
+    val csvImported: Boolean = false,
 ) {
     val isDark get() = mode == Mode.Dark
     val dailyDriver: BatteryGroup
@@ -223,6 +224,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     dynamicStage = p.dynamicStage ?: s.dynamicStage,
                     stageHoldMinutes = p.stageHoldMinutes ?: s.stageHoldMinutes,
                     logging = p.logging,
+                    csvImported = p.csvImported,
                     alertsOn = p.alertsOn,
                     enabledThresholds = p.enabledThresholds ?: s.enabledThresholds,
                     keepScreenOn = p.keepScreenOn,
@@ -509,6 +511,11 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         engine.start(roster = _state.value.roster, seed = _state.value.fleet, loggingEnabled = _state.value.logging)
         engine.setDisabled(_state.value.disabled)
         engine.setStage(currentStageAddrs())
+        engine.importLegacyCsvIfNeeded(
+            alreadyImported = _state.value.csvImported,
+            markImported = { store.setCsvImported(true) },
+            filesDir = getApplication<Application>().getExternalFilesDir(null),
+        )
         MonitoringService.start(getApplication())
         viewModelScope.launch { store.setMonitoring(true) }
     }
