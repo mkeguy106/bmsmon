@@ -11,6 +11,8 @@ import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.os.Build
 import android.util.Log
+import dev.joely.bmsmon.ble.profile.BatteryProfile
+import dev.joely.bmsmon.ble.profile.RedodoBekenProfile
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -20,7 +22,11 @@ import kotlinx.coroutines.withTimeoutOrNull
  * written is [BmsProtocol.STATUS_FRAME] — read-only.
  */
 @SuppressLint("MissingPermission")
-class BleSession(private val context: Context, private val address: String) {
+class BleSession(
+    private val context: Context,
+    private val address: String,
+    private val profile: BatteryProfile = RedodoBekenProfile
+) {
 
     private var gatt: BluetoothGatt? = null
     private var ffe2: BluetoothGattCharacteristic? = null
@@ -61,13 +67,15 @@ class BleSession(private val context: Context, private val address: String) {
     }
 
     private fun writeStatus(g: BluetoothGatt, ch: BluetoothGattCharacteristic) {
-        val frame = BmsProtocol.STATUS_FRAME
+        val frame = profile.statusFrame
+        val type = if (profile.writeWithResponse) BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                   else BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
         if (Build.VERSION.SDK_INT >= 33) {
-            g.writeCharacteristic(ch, frame, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
+            g.writeCharacteristic(ch, frame, type)
         } else {
             @Suppress("DEPRECATION")
             run {
-                ch.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                ch.writeType = type
                 ch.value = frame
                 g.writeCharacteristic(ch)
             }
@@ -86,15 +94,16 @@ class BleSession(private val context: Context, private val address: String) {
         }
 
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
-            val service = g.getService(BmsProtocol.SERVICE_UUID)
-            val ffe1 = service?.getCharacteristic(BmsProtocol.FFE1_NOTIFY)
-            ffe2 = service?.getCharacteristic(BmsProtocol.FFE2_WRITE)
+            val service = g.getService(profile.serviceUuid)
+            val ffe1 = service?.getCharacteristic(profile.notifyUuid)
+            ffe2 = service?.getCharacteristic(profile.writeUuid)
             if (ffe1 == null || ffe2 == null) {
                 connectReady?.complete(false)
                 return
             }
             g.setCharacteristicNotification(ffe1, true)
-            val cccd = ffe1.getDescriptor(BmsProtocol.CCCD)
+            runCatching { g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER) }
+            val cccd = ffe1.getDescriptor(profile.cccdUuid)
             if (cccd == null) {
                 connectReady?.complete(false)
                 return
