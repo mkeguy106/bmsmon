@@ -102,6 +102,7 @@ class BleSession(
                 return
             }
             g.setCharacteristicNotification(ffe1, true)
+            runCatching { g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER) }
             val cccd = ffe1.getDescriptor(profile.cccdUuid)
             if (cccd == null) {
                 connectReady?.complete(false)
