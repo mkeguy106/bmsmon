@@ -26,8 +26,42 @@ fun isNewSession(
 /** A current more negative than this (A) counts as discharge. */
 const val DISCHARGE_EPS = 0.05f
 
+/** Minimum discharge-current spread (A) within a session to trust the resistance estimate. */
+const val IR_MIN_CURRENT_SPREAD_A = 8f
+
 data class IrEstimate(val mohm: Float, val confidence: Float)
-fun estimateInternalResistanceMohm(dischargeSamples: List<SampleEntity>): IrEstimate? = null
+
+/**
+ * Estimate effective internal resistance from discharge samples by regressing voltage on current.
+ * With the discharge-negative sign convention, V ≈ Voc + I·R, so the slope dV/dI is the resistance
+ * in ohms (reported here in mΩ). Returns null when the current spread is too small to be reliable.
+ * [confidence] scales with spread (1.0 at >= 4× the minimum spread).
+ */
+fun estimateInternalResistanceMohm(dischargeSamples: List<SampleEntity>): IrEstimate? {
+    val pts = dischargeSamples.mapNotNull { sample ->
+        val i = sample.currentA ?: return@mapNotNull null
+        val v = sample.voltageV ?: return@mapNotNull null
+        i to v
+    }
+    if (pts.size < 2) return null
+    val currents = pts.map { it.first }
+    val spread = (currents.maxOrNull()!! - currents.minOrNull()!!)
+    if (spread < IR_MIN_CURRENT_SPREAD_A) return null
+
+    val meanI = currents.average()
+    val meanV = pts.map { it.second }.average()
+    var cov = 0.0
+    var varI = 0.0
+    for ((i, v) in pts) {
+        cov += (i - meanI) * (v - meanV)
+        varI += (i - meanI) * (i - meanI)
+    }
+    if (varI == 0.0) return null
+    val slopeOhm = cov / varI            // dV/dI = R (ohms)
+    val mohm = (slopeOhm * 1000.0).toFloat()
+    val confidence = (spread / (IR_MIN_CURRENT_SPREAD_A * 4f)).coerceIn(0f, 1f)
+    return IrEstimate(mohm = mohm, confidence = confidence)
+}
 
 /**
  * Compute a [SessionEntity] (rollups) from a session's [samples]. Link-event rows are ignored.
