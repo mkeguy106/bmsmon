@@ -68,8 +68,6 @@ class MonitorEngine(appContext: Context) {
     private val _state = MutableStateFlow(MonitorState())
     val state: StateFlow<MonitorState> = _state.asStateFlow()
 
-    val logPath: String get() = ""  // CSV path gone; removed together with the UiState field in Task 13
-
     private fun now() = System.currentTimeMillis()
 
     /** Begin monitoring every pack in [roster]. [seed] pre-populates the fleet (dimmed until live). */

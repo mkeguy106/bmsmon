@@ -101,7 +101,7 @@ data class UiState(
     val logging: Boolean = false,
     val peakPowerW: Float = 0f,
     val peakCurrentA: Float = 0f,
-    val logPath: String = "",
+    val dbSize: String = "",
     // low-battery alerts
     val alertsOn: Boolean = true,
     val enabledThresholds: Set<Int> = ALERT_THRESHOLDS.toSet(),
@@ -190,7 +190,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     private var autoCandidate: Mode? = null
     private var autoCandidateSince = 0L
 
-    private val _state = MutableStateFlow(UiState(logPath = engine.logPath))
+    private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     private fun clockMs() = System.currentTimeMillis()
@@ -311,7 +311,15 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // --- navigation / theme ---
-    fun goSettings() = _state.update { it.copy(screen = Screen.Settings) }
+    fun goSettings() {
+        _state.update { it.copy(screen = Screen.Settings) }
+        refreshDbSize()
+    }
+    fun refreshDbSize() = viewModelScope.launch {
+        val bytes = engine.history.approxSizeBytes()
+        val mb = bytes / (1024f * 1024f)
+        _state.update { it.copy(dbSize = "%.1f MB".format(mb)) }
+    }
     fun goHome() = _state.update { it.copy(screen = Screen.Home) }
 
     /** User picked an explicit appearance (Dark/Light/System/Auto). */
