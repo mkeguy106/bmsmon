@@ -159,10 +159,18 @@ class TelemetryRepository(private val db: BmsDatabase) {
         openId.keys.toList().forEach { localFinalize(it) }
     }
 
-    suspend fun clearAll() {
-        db.samples().clear(); db.sessions().clear(); db.rawFrames().clear()
-        openSessionId.clear(); lastSampleTs.clear(); pendingDisconnect.clear()
-        sinceLastPrune = 0
+    fun finalizeOpenSessions() {
+        ops.trySend {
+            openSessionId.keys.toList().forEach { finalizeSession(it) }
+        }
+    }
+
+    fun clearAll() {
+        ops.trySend {
+            db.samples().clear(); db.sessions().clear(); db.rawFrames().clear()
+            openSessionId.clear(); lastSampleTs.clear(); pendingDisconnect.clear()
+            sinceLastPrune = 0
+        }
     }
 
     suspend fun approxSizeBytes(): Long =

@@ -20,7 +20,7 @@ interface SampleDao {
     @Query("DELETE FROM samples WHERE tsMs < :cutoffMs")
     suspend fun deleteOlderThan(cutoffMs: Long): Int
 
-    @Query("SELECT COUNT(*) FROM samples") fun count(): Long
+    @Query("SELECT COUNT(*) FROM samples") suspend fun count(): Long
 
     @Query("DELETE FROM samples") suspend fun clear()
 }
@@ -30,10 +30,10 @@ interface SessionDao {
     @Insert suspend fun insert(session: SessionEntity): Long
     @Update suspend fun update(session: SessionEntity)
 
-    @Query("SELECT * FROM sessions WHERE address = :address ORDER BY startMs ASC")
+    @Query("SELECT * FROM sessions WHERE address = :address AND sampleCount > 0 ORDER BY startMs ASC")
     fun forAddress(address: String): Flow<List<SessionEntity>>
 
-    @Query("SELECT * FROM sessions ORDER BY startMs ASC")
+    @Query("SELECT * FROM sessions WHERE sampleCount > 0 ORDER BY startMs ASC")
     fun all(): Flow<List<SessionEntity>>
 
     @Query("SELECT * FROM sessions WHERE id = :id") suspend fun byId(id: Long): SessionEntity?

@@ -98,6 +98,7 @@ class MonitorEngine(appContext: Context) {
     /** Stop monitoring: cancels all BLE jobs (each session closes its GATT cleanly) and clears state. */
     fun stop() {
         if (!_state.value.monitoring && _state.value.fleet.isEmpty()) return
+        repository.finalizeOpenSessions()
         ble.stop()
         _state.value = MonitorState()
     }
@@ -123,7 +124,7 @@ class MonitorEngine(appContext: Context) {
     }
 
     fun clearLog() {
-        scope.launch { repository.clearAll() }
+        repository.clearAll()
         _state.update { it.copy(peakPowerW = 0f, peakCurrentA = 0f) }
     }
 
