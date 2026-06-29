@@ -2,11 +2,14 @@ package dev.joely.bmsmon.monitor
 
 import android.content.Context
 import dev.joely.bmsmon.ble.BmsRepository
+import dev.joely.bmsmon.ble.profile.ProfileRegistry
+import dev.joely.bmsmon.ble.profile.RedodoBekenProfile
 import dev.joely.bmsmon.data.TelemetryRepository
 import dev.joely.bmsmon.data.classifyFrame
 import dev.joely.bmsmon.data.db.BmsDatabase
 import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.DEFAULT_ROSTER
+import dev.joely.bmsmon.model.batteryAt
 import dev.joely.bmsmon.model.GroupActivity
 import dev.joely.bmsmon.model.Roster
 import dev.joely.bmsmon.model.Telemetry
@@ -159,7 +162,11 @@ class MonitorEngine(appContext: Context) {
                 peakCurrentA = peakC,
             )
         }
-        if (logging) repository.ingest(addr, t, raw, classifyFrame(raw, parsedOk = true), regen, now)
+        if (logging) {
+            val header = (ProfileRegistry.profileFor(roster.batteryAt(addr)?.advertisedName)
+                ?: RedodoBekenProfile).responseHeader
+            repository.ingest(addr, t, raw, classifyFrame(raw, parsedOk = true, header), regen, now)
+        }
     }
 
     private fun onReachable(addr: String, reachable: Boolean) {

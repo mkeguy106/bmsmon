@@ -246,7 +246,12 @@ class BmsRepository(private val context: Context) {
                 }
                 is LoopEvent.PollFrame -> {
                     val name = allTargets.firstOrNull { it.address == event.addr }?.name ?: event.addr
-                    onPoll(event.addr, event.raw, BmsProtocol.parseTelemetry(event.raw, name))
+                    val profile = ProfileRegistry.profileFor(name) ?: RedodoBekenProfile
+                    onPoll(
+                        event.addr,
+                        event.raw,
+                        BmsProtocol.parseTelemetry(event.raw, name, profile.layout, profile.responseHeader),
+                    )
                 }
                 is LoopEvent.PollDrop -> {
                     pollJobs.remove(event.addr)?.cancel()

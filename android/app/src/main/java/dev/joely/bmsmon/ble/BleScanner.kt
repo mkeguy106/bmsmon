@@ -17,8 +17,8 @@ fun isCompatibleBmsName(name: String?): Boolean = ProfileRegistry.profileFor(nam
 data class DiscoveredDevice(val address: String, val name: String)
 
 /**
- * Scans for compatible BMS devices only. SAFETY: surfaces nothing but [KNOWN_PREFIXES] matches,
- * and never connects here — discovery only.
+ * Scans for compatible BMS devices only. SAFETY: surfaces nothing but names matching a known
+ * [dev.joely.bmsmon.ble.profile.BatteryProfile], and never connects here — discovery only.
  */
 @SuppressLint("MissingPermission")
 class BleScanner(private val context: Context) {
