@@ -11,7 +11,7 @@
 - **The batteries are fine.** All 8 packs are powered, advertising, and *connectable*. Nothing is bricked, shut down, or damaged.
 - **Our app did not change the BMS.** It is provably read-only — the only thing it ever transmits is the `0x13` status-read query. The destructive opcodes (MOSFET toggles `0x0A–0x0D`, shutdown `0x60`) **do not exist anywhere in the codebase**, and the type system makes them unsendable.
 - **What actually happened:** two packs intermittently failed to *connect* (not advertise) from the phone. The most likely contributors are (a) edge-of-range RF from the phone's fixed position and (b) our app's aggressive reconnect behavior contending for each BMS's **single BLE client slot** and stressing the finicky Beken BLE module.
-- **Key reframing (from the official app):** the Redodo app on iPhone connects to all 8 by **cycling** through them (sequential connect → read → disconnect) — it does *not* hold 8 simultaneous links, because the phone can't. This confirms the packs are connectable and tells us the right model is *gentle cycling*, not aggressive parallel reconnects.
+- **DEFINITIVE (HCI capture of the official app, 2026-06-29):** the Redodo Android app **holds all 8 packs connected simultaneously** (persistent links, ~3 min continuous), and it sends the **byte-identical `0x13` status query we send** (`00 00 04 01 13 55 AA 17`) plus a `0x16` firmware read — and *nothing else*. No destructive opcodes. So **we are doing exactly what the official app does**; we are not harming the BMS. (This corrects an earlier guess that it "cycles because the phone can't hold 8" — on the Pixel it held all 8.)
 - **The main stage works great** and produced 2 full days of excellent real-world data. The problem is confined to how we poll the **off-stage** packs.
 
 ---
@@ -124,6 +124,66 @@ The decisive real-world signal: the iPhone Redodo app reaches **all 8** by **cyc
 
 ---
 
+## Official Redodo app — full HCI capture (2026-06-29)
+
+We installed the Redodo app (`com.redodopower.ble`) on the **Pixel 6** (with our own bmsmon app stopped) and captured, in parallel, three streams while the user connected all 8 packs:
+1. **Android Bluetooth HCI snoop log** (full, unfiltered — ATT payloads present), retrieved via `adb bugreport` and decoded with `tshark`.
+2. **A screen recording** (`screenrecord --bugreport`, timestamped frames) of the app UI.
+3. **Touch events** (`getevent -lt /dev/input/event3`) for tap timing — 59 taps over ~186 s.
+
+This is the definitive evidence; it answers every open question.
+
+### Finding 1 — it holds all 8 connected *simultaneously* (not cycling, not faking)
+The HCI log assigns one connection handle per pack and they are **all open at once**:
+
+| Handle | Battery |
+|---|---|
+| 0x41 | 2024·A (`…07:DE`) |
+| 0x42 | 2024·B (`…25:01`) |
+| 0x43 | 2012·A (`…67:44`) |
+| 0x44 | 2012·B (`…62:1B`) |
+| 0x45 | 2023·A (`…0A:D6`) |
+| 0x46 | 2023·B (`…90:FB`) |
+| 0x47 | 2016·A (`…DB:13`) |
+| 0x48 | 2016·B (`…25:9A`) |
+
+From **14:52:46 to 14:55:47 all eight handles were open continuously** (no drops). The on-screen "8/8" is eight real concurrent BLE links. The app tracks genuine per-pack Online/Offline state and the count climbs as each truly connects (0 → 3 → 4 → 7 → 8). **The "connects to one and fakes the rest" theory is disproven.** (The capacity-only-on-detail observation is just UI: the device list shows SOC %, the detail page shows Ah.)
+
+> Note: this also corrects the earlier "Android caps at ~7 / the phone can't hold 8" assumption — this Pixel 6 held **8** concurrent LE connections fine. The ~7 figure is a soft default, not a hard wall here.
+
+### Finding 2 — connection establishment is flaky and is solved by *patient retry*
+Several packs failed to establish and were retried until they held (each failure = connect, then GATT drops ~0.1–0.3 s later — the same `GATT_CONN_FAILED_ESTABLISHMENT` signature as our app):
+
+- **2016·B: ~8 attempts over 26 s** before it stuck
+- 2016·A: 3 · 2012·B: 3 · 2023·A: 2 · 2024·A: 2 · (2012·A, 2024·B, 2023·B: first try)
+
+The app never gives up and never hammers blindly — it retries with spacing, and **once a pack connects it keeps the link open.**
+
+### Finding 3 — it sends the *exact bytes we send*, and only safe reads
+Every write the Redodo app made over the whole session (complete, nothing omitted):
+
+| Bytes written (to FFE2) | Meaning | Count |
+|---|---|---|
+| `00 00 04 01 13 55 AA 17` | **0x13 status query — byte-identical to our `STATUS_FRAME`** | 17 |
+| `00 00 04 01 16 55 AA 1A` | 0x16 firmware-version query (a documented safe read) | 8 |
+| CCCD descriptor writes (`0x2902`) | enable notifications — standard BLE | 16 |
+
+**No `0x60` shutdown, no `0x0A–0x0D` MOSFET commands, no unknown opcodes — nothing else.** Status responses arrive as notifications with the same framing we parse (`01 93 55 AA …` for 0x13; `01 96 55 AA …"T12100-V1.2"` for the firmware). The only protocol difference: Redodo uses ATT **Write Request** (with response, opcode 0x12); we use **Write Command** (no response). Functionally equivalent.
+
+**Conclusion: the official app is read-only and speaks the identical protocol — it literally transmits the same `0x13` frame our app does. We are not doing anything to the BMS that Redodo doesn't do.**
+
+### Finding 4 — it polls *gently*
+Across ~3 minutes holding all 8 links, the app issued only **~17 status reads total** (plus one firmware read per pack on connect). It is far less aggressive than our 1.65 s stage poll + 3 s sampler churn. Holding persistent connections + infrequent reads is the gentle pattern.
+
+### What this means for our app (refines the mitigations below)
+- **Hold persistent connections instead of churning.** 8 simultaneous persistent links work on Android; our connect→read→disconnect sampler is the *more* stressful pattern. Moving off-stage packs to persistent (or longer-lived) connections, polled slowly, mirrors the official app and eases the finicky modules.
+- **Patient retry, then hold** is the established recipe for flaky packs — connect, retry-with-spacing on GATT failure until it sticks, then keep it (pairs naturally with the backoff idea).
+- **Poll slowly off-stage** — the official app proves infrequent reads are fine for fleet awareness.
+
+Artifacts saved locally: `/tmp/redodo_1.mp4`, `/tmp/redodo_2.mp4` (screen), `/tmp/taps.txt` (tap log), `/tmp/br.zip` → `btsnoop_hci.log` (HCI).
+
+---
+
 ## What we tried
 
 | Action | Result |
@@ -135,6 +195,7 @@ The decisive real-world signal: the iPhone Redodo app reaches **all 8** by **cyc
 | Passive BLE scan from the PC | All 8 advertising |
 | `btmon` capture + Props analysis | All 8 advertise *connectable*; no advertising-level anomaly |
 | (Deliberately did **not** open a GATT connection) | Per user's request to stay listen-only |
+| **Full HCI capture of the official Redodo app on the Pixel** | **Definitive:** holds 8 simultaneous persistent links; sends the identical `0x13` (+ `0x16`) reads, nothing destructive; flaky packs solved by patient retry (see section above) |
 
 ---
 
@@ -154,18 +215,13 @@ Today a pack that keeps failing is retried every ~3–4 s forever. Instead, afte
 The off-stage packs don't need 3 s polling. They're parked/idle context; a reading every **30–60 s** (or even minutes) is plenty for fleet awareness. Raise `SAMPLER_GAP_MS` substantially for the off-stage pool (keep the stage fast). This directly matches "slow things way down with the packs not on the main page."
 - Optionally make it adaptive: idle packs polled rarely, discharging/charging packs a bit more often.
 
-### C. Mimic the official app's cycling (learn the right cadence)
-Sniff the **Redodo app** while it cycles all 8, and copy what works. With our PC adapter we can `btmon`-capture the HCI traffic *of our own host*, but the iPhone's traffic isn't on our host — so to watch the iPhone we'd need either:
-- an **over-the-air BLE sniffer** (e.g. nRF52840 dongle + Wireshark/`nRF Sniffer`, or an Ubertooth), capturing on the advertising/data channels while the iPhone cycles; or
-- repeat the official-app cycle next to the PC and capture **our** side by having the PC do a controlled connect to one pack and measuring the module's accepted connection parameters.
+### C. Copy the official app's model: hold persistent links, poll gently (CONFIRMED by capture)
+The HCI capture (section above) settled what the official app does — it does **not** cycle. It **holds all 8 connected simultaneously** and polls slowly (~17 status reads over ~3 min). To mirror it:
+- **Hold persistent connections** to off-stage packs (within the controller's limit — the Pixel did 8) instead of connect→read→disconnect churn.
+- **Poll infrequently** off-stage (tens of seconds), keeping only the live stage fast.
+- **Patient retry on connect failure**, then keep the link (see D / the established recipe).
 
-What to measure and then copy:
-- **Connection interval / latency / supervision timeout** the module is happy with.
-- **How long the app holds** each connection (does it read once and drop, or linger?).
-- **Gap between packs** in the cycle, and the **cycle order**.
-- **MTU** negotiated, and whether it discovers services every time or caches.
-
-The likely finding: the official app holds **one** connection at a time, briefly, with relaxed connection parameters, and spaces the cycle out — i.e. exactly what backoff + slower cadence approximate.
+> The earlier guess that the app "cycles one at a time" was wrong — the capture shows persistent simultaneous links. The over-the-air-sniffer note is moot now that we captured it directly on the Android.
 
 ### D. Single-client coexistence / yielding
 Because the BMS allows only one client:
@@ -187,7 +243,7 @@ If a pack flaps (connects then fails GATT repeatedly), avoid promoting it to a p
 
 1. **Recover the two packs now** (no urgency, both healthy): a BLE-module power-cycle — let the BMS sleep (chair fully off, no charger, no client) so the module re-inits on wake, **or** briefly disconnect/reconnect the pack. (User is currently waiting for natural sleep.)
 2. **Implement A + B first** — backoff + slower off-stage cadence. Low risk, high payoff, leaves the great main-stage behavior untouched.
-3. **Then C (sniff/mirror the Redodo app)** if we want to fine-tune the cycle to the module's true comfort zone — this is the "do it exactly like the official app" path and needs a BLE sniffer for the iPhone side.
+3. **C is now answered by the capture** — copy the official model (persistent links + gentle polling + patient retry). No iPhone sniffer needed; we captured it directly on the Android.
 4. Keep usage logging on; verify after the change that off-stage packs still appear (just less frequently) and that flaky packs no longer get hammered.
 
 ---
@@ -215,4 +271,23 @@ sqlite3 /tmp/bms.db "SELECT address, COUNT(*),
   datetime(MAX(tsMs)/1000,'unixepoch','localtime') last_seen,
   CAST(ROUND(AVG(fullChargeAh)) AS INT) ah
   FROM samples WHERE linkEvent IS NULL GROUP BY address ORDER BY ah;"
+
+# --- Capture the OFFICIAL app's BLE behavior on the Android (definitive) ---
+D=<phone-ip:port>
+# 1. Stop our app so it doesn't contend / pollute the log
+adb -s $D shell am force-stop dev.joely.bmsmon
+# 2. Enable HCI snoop (Developer Options -> "Enable Bluetooth HCI snoop log"), then restart BT for a fresh log:
+adb -s $D shell svc bluetooth disable; sleep 3; adb -s $D shell svc bluetooth enable
+# 3. (optional) screen-record with timestamp overlay + capture taps
+adb -s $D shell screenrecord --bugreport --time-limit 180 /sdcard/rec.mp4 &
+adb -s $D shell getevent -lt /dev/input/event3 > /tmp/taps.txt &   # touchscreen = the device with ABS_MT_POSITION_X
+# 4. <reproduce in the Redodo app>, then pull the snoop log via bugreport:
+adb -s $D bugreport /tmp/br.zip
+unzip -o /tmp/br.zip "*btsnoop*" -d /tmp/bt
+L=/tmp/bt/FS/data/misc/bluetooth/logs/btsnoop_hci.log
+# 5. Decode with tshark:
+tshark -r "$L" -q -z io,phs                                   # protocol hierarchy (confirm ATT present)
+tshark -r "$L" -t ad -Y 'bthci_evt.le_meta_subevent==0x0a or bthci_evt.code==0x05' \
+  -T fields -e frame.time -e bthci_evt.bd_addr -e bthci_evt.connection_handle   # connect/disconnect timeline
+tshark -r "$L" -Y 'btatt.opcode==0x12' -T fields -e btatt.value | sort | uniq -c   # exact bytes written
 ```

@@ -161,6 +161,34 @@ Example payload decodes to: model `T12100`, HW `V1.2`, FW `V1.4`, built `2024-03
 - The BLE module AT command set (on FFE3) only supports `AT+NAME?` and `AT+BAUD?`. All other AT commands return `+ER`.
 - **Query batteries one at a time, not rapidly back-to-back or in parallel.** Each query runs its own BLE scan; firing several in quick succession (e.g. a shell loop over all batteries) causes scan-cache contention and most queries return "not found" even though the devices are present and healthy. Querying the same device individually then succeeds. This is worse on cheap/flaky USB BT adapters. To status multiple batteries, query them sequentially in separate invocations and let the adapter settle between each.
 
+### What the official Redodo app does (verified by full HCI capture, 2026-06-29)
+
+We captured the Redodo Android app (`com.redodopower.ble`) connecting to all 8 packs, via the
+Android **Bluetooth HCI snoop log** (`adb bugreport` → `btsnoop_hci.log`, decoded with `tshark`).
+Findings — these are the **reference behavior** to model the Android app's BLE on:
+
+- **It holds all 8 packs connected *simultaneously*** (persistent links, 8 concurrent GATT
+  connections held continuously for minutes). It does **not** cycle/poll-then-disconnect, and it
+  does not fake "connected." A Pixel 6 held 8 concurrent LE connections fine — the oft-cited
+  Android "~7 connection" cap is a soft default, not a wall here.
+- **It sends the byte-identical commands we send, and only safe reads:**
+  `00 00 04 01 13 55 AA 17` (the `0x13` status query — same as our `STATUS_FRAME`) and
+  `00 00 04 01 16 55 AA 1A` (`0x16` firmware), plus standard CCCD notification-enable writes.
+  **No `0x60`, no `0x0A–0x0D`, no unknown opcodes.** Confirms the protocol is correct AND that
+  our read-only app does exactly what the official app does — we are not stressing the BMS in any
+  way Redodo doesn't. (Only diff: Redodo uses ATT Write Request *with* response; we use Write
+  Command *without*. Functionally equivalent.)
+- **Flaky GATT establishment is normal and is solved by patient retry, then hold.** Marginal packs
+  failed to establish (connect, then GATT drops ~0.1–0.3 s later — the `GATT_CONN_FAILED_ESTABLISHMENT`
+  / status-133 signature) and were retried with spacing until they stuck (one pack took ~8 tries
+  over 26 s). Once connected, the link is **kept open**.
+- **It polls gently** — ~17 status reads total across 8 packs over ~3 minutes.
+
+**Implication for our Android app:** holding persistent connections + slow polling + patient
+retry-then-hold is the proven-gentle model; our rotating connect→read→disconnect sampler is the
+*more* stressful pattern on these finicky Beken modules. Full write-up, the connection timeline,
+and the capture/decode commands are in `docs/ble-connectivity-investigation.md`.
+
 ## Hardware Context
 
 Tested with 6x Redodo 12V 100Ah LiFePO4 batteries:
