@@ -243,7 +243,7 @@ class BmsRepository(private val context: Context) {
         }
     }
 
-    /** Per-session poll loop: delay → poll → post result; exits on null (session dropped). */
+    /** Per-session poll loop: poll immediately, then delay between iterations. Exits on null (session dropped). */
     private suspend fun pollLoop(
         addr: String,
         session: BleSession,
@@ -251,8 +251,6 @@ class BmsRepository(private val context: Context) {
         ch: Channel<LoopEvent>,
     ) {
         while (true) {
-            val pollMs = if (addr in stageAddrs) profile.stagePollMs else profile.slowPollMs
-            delay(pollMs)
             val raw = try {
                 session.poll(POLL_TIMEOUT_MS)
             } catch (e: CancellationException) {
@@ -266,6 +264,8 @@ class BmsRepository(private val context: Context) {
                 return
             }
             ch.trySend(LoopEvent.PollFrame(addr, raw))
+            val pollMs = if (addr in stageAddrs) profile.stagePollMs else profile.slowPollMs
+            delay(pollMs)
         }
     }
 
