@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
 package dev.joely.bmsmon.ui.detail
 
 import androidx.compose.foundation.background
@@ -6,6 +8,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -22,6 +25,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -42,14 +46,14 @@ fun BatteryDetailScreen(state: UiState, sessions: List<SessionEntity>, onBack: (
 
     Column(Modifier.fillMaxSize().background(c.bg)) {
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 12.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(Modifier.size(40.dp).clip(RoundedCornerShape(10.dp)).clickable(onClick = onBack),
+            Box(Modifier.size(36.dp).clip(RoundedCornerShape(10.dp)).clickable(onClick = onBack),
                 contentAlignment = Alignment.Center) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", Modifier.size(22.dp), tint = c.icon)
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", Modifier.size(20.dp), tint = c.icon)
             }
-            Text(battery?.alias ?: "Battery", color = c.text, fontSize = 19.sp,
+            Text(battery?.alias ?: "Battery", color = c.text, fontSize = 18.sp,
                 fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 6.dp))
         }
 
@@ -59,8 +63,22 @@ fun BatteryDetailScreen(state: UiState, sessions: List<SessionEntity>, onBack: (
         }
 
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp).padding(bottom = 28.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            .padding(horizontal = 16.dp).padding(bottom = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)) {
+
+            // Primary action at the top: the derived health & usage review.
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(11.dp)).background(c.card2)
+                    .border(1.dp, Bm.accent.copy(alpha = 0.5f), RoundedCornerShape(11.dp))
+                    .clickable(onClick = onOpenReview).padding(horizontal = 13.dp, vertical = 11.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Health & Usage Review", color = c.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text("Derived resistance, V–I cloud & usage trends", color = c.text3, fontSize = 11.sp)
+                }
+                Text("›", color = Bm.accent, fontSize = 22.sp)
+            }
 
             Section("Identity") {
                 KeyVal("Alias", battery.alias)
@@ -72,31 +90,26 @@ fun BatteryDetailScreen(state: UiState, sessions: List<SessionEntity>, onBack: (
             if (tele == null) {
                 Section("Telemetry") {
                     Text("No live or stored reading yet. Start monitoring to populate.",
-                        color = Bm.colors.text3, fontSize = 13.sp)
+                        color = c.text3, fontSize = 13.sp)
                 }
             } else {
-                val tempC = tele.temp
-                val temp = if (state.tempFahrenheit) tempC * 9f / 5f + 32f else tempC
                 val tUnit = if (state.tempFahrenheit) "°F" else "°C"
-                val mosC = tele.mosfetTemp.toFloat()
-                val mos = if (state.tempFahrenheit) mosC * 9f / 5f + 32f else mosC
+                fun conv(v: Float) = if (state.tempFahrenheit) v * 9f / 5f + 32f else v
 
-                Section("State of charge") {
+                // One condensed "Telemetry" card instead of three (SOC / Power / Temperature).
+                Section("Telemetry") {
                     KeyVal("SOC", "${tele.soc.roundToInt()} %", mono = true)
                     KeyVal("SOH", "${tele.soh} %", mono = true)
                     KeyVal("Cycles", tele.cycles.toString(), mono = true)
                     KeyVal("Capacity", "%.1f / %.1f Ah".format(tele.capacityAh, tele.fullChargeAh), mono = true)
-                }
-                Section("Power") {
                     KeyVal("Voltage", "%.2f V".format(tele.voltage), mono = true)
                     KeyVal("Current", "%.2f A".format(tele.current), mono = true)
                     KeyVal("Power", "%.1f W".format(tele.powerW), mono = true)
-                    KeyVal("State", tele.state.name, mono = false)
+                    KeyVal("State", tele.state.name)
+                    KeyVal("Cell temp", "%.1f %s".format(conv(tele.temp), tUnit), mono = true)
+                    KeyVal("MOSFET temp", "%.1f %s".format(conv(tele.mosfetTemp.toFloat()), tUnit), mono = true)
                 }
-                Section("Temperature") {
-                    KeyVal("Cell temp", "%.1f %s".format(temp, tUnit), mono = true)
-                    KeyVal("MOSFET temp", "%.1f %s".format(mos, tUnit), mono = true)
-                }
+
                 Section("Cells (${tele.cells.size})") {
                     if (tele.cells.isEmpty()) {
                         Text("No per-cell data in the last reading.", color = c.text3, fontSize = 13.sp)
@@ -104,39 +117,42 @@ fun BatteryDetailScreen(state: UiState, sessions: List<SessionEntity>, onBack: (
                         val mn = tele.cells.min(); val mx = tele.cells.max()
                         KeyVal("Min / Max", "%.3f / %.3f V".format(mn, mx), mono = true)
                         KeyVal("Delta", "%.0f mV".format((mx - mn) * 1000f), mono = true)
-                        tele.cells.forEachIndexed { i, v ->
-                            val color = when {
-                                mn < mx && v == mx -> Bm.accent
-                                mn < mx && v == mn -> Bm.power
-                                else -> c.text
-                            }
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text("Cell ${i + 1}", color = c.text2, fontSize = 13.sp)
-                                Text("%.3f V".format(v), color = color, fontFamily = MonoFont, fontSize = 13.sp)
+                        FlowRow(
+                            Modifier.fillMaxWidth().padding(top = 2.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            tele.cells.forEachIndexed { i, v ->
+                                val color = when {
+                                    mn < mx && v == mx -> Bm.accent
+                                    mn < mx && v == mn -> Bm.power
+                                    else -> c.text
+                                }
+                                CellChip(i + 1, v, color)
                             }
                         }
                     }
                 }
+
                 if (tele.protections.isNotEmpty()) {
                     Section("Active protections") {
                         tele.protections.forEach { p -> Text("• $p", color = Bm.power, fontSize = 13.sp) }
                     }
                 }
             }
-
-            Row(
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(11.dp)).background(c.card2)
-                    .border(1.dp, c.border, RoundedCornerShape(11.dp)).clickable(onClick = onOpenReview)
-                    .padding(14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("Health & Usage Review", color = c.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                    Text("Derived resistance, V–I cloud & usage trends", color = c.text3, fontSize = 11.sp)
-                }
-                Text("›", color = c.icon, fontSize = 22.sp)
-            }
         }
+    }
+}
+
+@Composable
+private fun CellChip(index: Int, v: Float, valueColor: Color) {
+    val c = Bm.colors
+    Row(
+        Modifier.clip(RoundedCornerShape(7.dp)).background(c.inputBg).padding(horizontal = 8.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Text("$index", color = c.text3, fontSize = 11.sp, fontFamily = MonoFont)
+        Text("%.3f".format(v), color = valueColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, fontFamily = MonoFont)
     }
 }
 
@@ -145,10 +161,11 @@ private fun Section(title: String, content: @Composable () -> Unit) {
     val c = Bm.colors
     Column(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(11.dp)).background(c.card2)
-            .border(1.dp, c.border, RoundedCornerShape(11.dp)).padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+            .border(1.dp, c.border, RoundedCornerShape(11.dp)).padding(horizontal = 13.dp, vertical = 11.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
-        Text(title.uppercase(), color = c.text3, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.8.sp)
+        Text(title.uppercase(), color = c.text3, fontSize = 10.5f.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.7.sp,
+            modifier = Modifier.padding(bottom = 1.dp))
         content()
     }
 }
@@ -157,8 +174,8 @@ private fun Section(title: String, content: @Composable () -> Unit) {
 private fun KeyVal(key: String, value: String, mono: Boolean = false) {
     val c = Bm.colors
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(key, color = c.text2, fontSize = 13.sp)
-        Text(value, color = c.text, fontSize = 13.sp,
+        Text(key, color = c.text2, fontSize = 12.5f.sp)
+        Text(value, color = c.text, fontSize = 12.5f.sp,
             fontFamily = if (mono) MonoFont else null, fontWeight = FontWeight.SemiBold)
     }
 }
