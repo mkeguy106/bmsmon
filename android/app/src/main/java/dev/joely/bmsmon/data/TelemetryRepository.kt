@@ -125,24 +125,44 @@ class TelemetryRepository(private val db: BmsDatabase) {
 
     /** One-time backfill of legacy CSV files (oldest first). Segments via the same gap rule. */
     suspend fun importCsvOnce(files: List<File>) {
+        // Local bookkeeping — fully decoupled from the live-path shared maps so concurrent
+        // ingest ops flowing through the channel cannot race with this import.
+        val openId = HashMap<String, Long>()
+        val lastTs = HashMap<String, Long>()
+        val wasDisconnect = HashMap<String, Boolean>()
+
+        suspend fun localFinalize(addr: String) {
+            val id = openId.remove(addr) ?: return
+            val samples = db.samples().forSession(id)
+            if (samples.none { it.linkEvent == null }) return
+            db.sessions().update(computeRollup(addr, id, samples))
+        }
+
         for (file in files) {
             if (!file.exists()) continue
-            file.useLines { lines ->
-                for (line in lines) {
-                    val parsed = parseCsvLine(line) ?: continue
-                    val sessionId = advanceSession(parsed.address, parsed.tsMs)
-                    db.samples().insert(parsed.copy(sessionId = sessionId))
-                    lastSampleTs[parsed.address] = parsed.tsMs
-                    pendingDisconnect[parsed.address] = parsed.linkEvent == "Disconnected"
+            for (line in file.readLines()) {
+                val parsed = parseCsvLine(line) ?: continue
+                val addr = parsed.address
+                val isNew = isNewSession(lastTs[addr], wasDisconnect[addr] == true, parsed.tsMs)
+                if (isNew) {
+                    localFinalize(addr)
+                    val id = db.sessions().insert(emptySession(addr, parsed.tsMs))
+                    openId[addr] = id
                 }
+                val sessionId = openId[addr]
+                    ?: db.sessions().insert(emptySession(addr, parsed.tsMs)).also { openId[addr] = it }
+                db.samples().insert(parsed.copy(sessionId = sessionId))
+                lastTs[addr] = parsed.tsMs
+                wasDisconnect[addr] = parsed.linkEvent == "Disconnected"
             }
         }
-        openSessionId.keys.toList().forEach { finalizeSession(it) }
+        openId.keys.toList().forEach { localFinalize(it) }
     }
 
     suspend fun clearAll() {
         db.samples().clear(); db.sessions().clear(); db.rawFrames().clear()
         openSessionId.clear(); lastSampleTs.clear(); pendingDisconnect.clear()
+        sinceLastPrune = 0
     }
 
     suspend fun approxSizeBytes(): Long =
