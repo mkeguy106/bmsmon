@@ -182,7 +182,7 @@ Findings — these are the **reference behavior** to model the Android app's BLE
   failed to establish (connect, then GATT drops ~0.1–0.3 s later — the `GATT_CONN_FAILED_ESTABLISHMENT`
   / status-133 signature) and were retried with spacing until they stuck (one pack took ~8 tries
   over 26 s). Once connected, the link is **kept open**.
-- **It polls gently** — ~17 status reads total across 8 packs over ~3 minutes.
+- **Two-tier polling rate (measured):** on the **actively-viewed single battery** (live detail page) it polls `0x13` status **every ~1.5 s** (mean 1.487 s, range 1.43–1.53 s, rock-steady) — this is the rate we mirror for the **main stage** (`STAGE_POLL_MS = 1500`). For **background** packs it's far slower (~17 reads across 8 packs over ~3 min). Fast on the one you're watching, slow on the rest.
 
 **Implication for our Android app:** holding persistent connections + slow polling + patient
 retry-then-hold is the proven-gentle model; our rotating connect→read→disconnect sampler is the

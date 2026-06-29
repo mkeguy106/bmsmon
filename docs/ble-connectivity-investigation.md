@@ -172,8 +172,11 @@ Every write the Redodo app made over the whole session (complete, nothing omitte
 
 **Conclusion: the official app is read-only and speaks the identical protocol — it literally transmits the same `0x13` frame our app does. We are not doing anything to the BMS that Redodo doesn't do.**
 
-### Finding 4 — it polls *gently*
-Across ~3 minutes holding all 8 links, the app issued only **~17 status reads total** (plus one firmware read per pack on connect). It is far less aggressive than our 1.65 s stage poll + 3 s sampler churn. Holding persistent connections + infrequent reads is the gentle pattern.
+### Finding 4 — two-tier polling: ~1.5 s on the active pack, slow on the rest
+- **Active / foreground pack (single battery's live detail page):** a second capture (2026-06-29, pack 2012-A) measured the app polling `0x13` status in a steady request/response loop **every ~1.5 s — mean 1.487 s, range 1.43–1.53 s** over 18 consecutive intervals. (Same rate whether discharging or in Standby — it's a fixed cadence.) **This is the fast rate we mirror for the main stage** (`STAGE_POLL_MS` set to 1500 ms to match).
+- **Background packs (held but not foregrounded):** across ~3 min holding all 8 links, only **~17 status reads total** — i.e. each background pack is read very infrequently. Holding persistent connections + slow background reads is the gentle pattern.
+
+So the official model is **two-tier**: fast (~1.5 s) on the one you're watching, slow on the rest, all held persistently.
 
 ### What this means for our app (refines the mitigations below)
 - **Hold persistent connections instead of churning.** 8 simultaneous persistent links work on Android; our connect→read→disconnect sampler is the *more* stressful pattern. Moving off-stage packs to persistent (or longer-lived) connections, polled slowly, mirrors the official app and eases the finicky modules.

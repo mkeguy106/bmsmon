@@ -1,7 +1,11 @@
 package dev.joely.bmsmon.model
 
-/** Poll cadences: stage matches the official Redodo app (~1.65 s); the rest poll slowly. */
-const val STAGE_POLL_MS = 1650L
+/**
+ * Poll cadences. The stage rate is set to match the official Redodo app: an HCI capture of Redodo
+ * actively viewing one battery's live detail page showed it polls `0x13` status every ~1.5 s
+ * (mean 1.487 s, range 1.43–1.53 s, rock-steady). See docs/ble-connectivity-investigation.md.
+ */
+const val STAGE_POLL_MS = 1500L
 const val SLOW_POLL_MS = 10_000L
 
 /** Default minutes the active (discharging) base holds the stage after its last discharge. */
