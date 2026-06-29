@@ -26,6 +26,12 @@ data class BmColors(
     val divider: Color,
     val segEmpty: Color,
     val innerTrack: Color,
+    // Chart-series / status tokens (light & dark variants from the history handoff). Accent and
+    // power stay user-themeable via LocalAccent / LocalPower; these are the fixed semantic colors.
+    val grid: Color,       // chart gridlines
+    val regen: Color,      // regen / charge series
+    val warn: Color,       // watch / caution
+    val critical: Color,   // service / alarm / link-loss
 )
 
 val DarkBmColors = BmColors(
@@ -34,6 +40,8 @@ val DarkBmColors = BmColors(
     text = Color(0xFFECECEC), text2 = Color(0xFF8A8A8A), text3 = Color(0xFF777777),
     name = Color(0xFFBCBCBC), icon = Color(0xFFD8D8D8), divider = Color(0xFF1F1F1F),
     segEmpty = Color(0xFFD6D6D6), innerTrack = Color(0xFF2B2B2B),
+    grid = Color.White.copy(alpha = 0.06f), regen = Color(0xFF2ECC71),
+    warn = Color(0xFFE2B01E), critical = Color(0xFFE5342B),
 )
 
 val LightBmColors = BmColors(
@@ -42,7 +50,12 @@ val LightBmColors = BmColors(
     text = Color(0xFF18181B), text2 = Color(0xFF5F5F66), text3 = Color(0xFF9A9AA0),
     name = Color(0xFF52525B), icon = Color(0xFF3A3A40), divider = Color(0xFFE7E7EA),
     segEmpty = Color(0xFFE2E2E6), innerTrack = Color(0xFFEBEBEE),
+    grid = Color.Black.copy(alpha = 0.07f), regen = Color(0xFF1F9E54),
+    warn = Color(0xFFB6860D), critical = Color(0xFFD62F26),
 )
+
+/** Voltage series in the session timeline — a literal warm tone (same in both themes). */
+val VoltageSeries = Color(0xFFD39150)
 
 val DefaultAccent = Color(0xFFE67E22)
 val DefaultPower = Color(0xFFC85A1A)

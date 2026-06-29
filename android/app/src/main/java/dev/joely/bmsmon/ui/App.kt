@@ -28,13 +28,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.sp
 import dev.joely.bmsmon.BatteryViewModel
 import dev.joely.bmsmon.BmsDeviceAdminReceiver
 import dev.joely.bmsmon.Screen
 import dev.joely.bmsmon.ble.blePermissions
 import dev.joely.bmsmon.ble.hasBlePermissions
 import dev.joely.bmsmon.ui.detail.BatteryDetailScreen
-import dev.joely.bmsmon.ui.history.HistoryScreen
+import dev.joely.bmsmon.ui.history.GroupHealthScreen
+import dev.joely.bmsmon.ui.history.HealthReviewScreen
+import dev.joely.bmsmon.ui.history.SessionTimelineScreen
 import dev.joely.bmsmon.ui.home.HomeScreen
 import androidx.activity.compose.BackHandler
 import dev.joely.bmsmon.ui.scan.ScanSheet
@@ -56,6 +59,8 @@ fun App(vm: BatteryViewModel) {
             Screen.Detail -> vm.closeDetail()
             Screen.Settings -> vm.goHome()
             Screen.History -> vm.goHome()
+            Screen.Review -> vm.closeReview()
+            Screen.Timeline -> vm.closeTimeline()
             else -> {}
         }
     }
@@ -165,9 +170,29 @@ fun App(vm: BatteryViewModel) {
                         onToggleLock = { vm.setLocked(!state.locked) },
                     )
                     Screen.History -> {
-                        val sessionsFlow = remember { vm.allSessions() }
-                        val sessions by sessionsFlow.collectAsState(initial = emptyList())
-                        HistoryScreen(sessions = sessions, accent = state.accent, onBack = vm::goHome)
+                        val packs by androidx.compose.runtime.produceState<List<dev.joely.bmsmon.data.PackHealth>?>(null, vm) {
+                            value = vm.loadFleetHealth()
+                        }
+                        val p = packs
+                        if (p == null) HistoryLoading() else GroupHealthScreen(packs = p, onBack = vm::goHome)
+                    }
+                    Screen.Review -> {
+                        val addr = state.reviewAddress
+                        val pack by androidx.compose.runtime.produceState<dev.joely.bmsmon.data.PackHealth?>(null, addr) {
+                            value = addr?.let { vm.loadPackHealth(it) }
+                        }
+                        val p = pack
+                        if (p == null) HistoryLoading()
+                        else HealthReviewScreen(pack = p, onBack = vm::closeReview, onOpenTimeline = vm::openTimeline)
+                    }
+                    Screen.Timeline -> {
+                        val sid = state.timelineSession
+                        val data by androidx.compose.runtime.produceState<Triple<String, dev.joely.bmsmon.data.db.SessionEntity, List<dev.joely.bmsmon.data.TimelineBucket>>?>(null, sid) {
+                            value = sid?.let { vm.loadTimeline(it) }
+                        }
+                        val d = data
+                        if (d == null) HistoryLoading()
+                        else SessionTimelineScreen(alias = d.first, session = d.second, buckets = d.third, onBack = vm::closeTimeline)
                     }
                     Screen.Settings -> SettingsScreen(
                         state = state,
@@ -193,7 +218,8 @@ fun App(vm: BatteryViewModel) {
                             if (addr != null) vm.sessionsFor(addr) else kotlinx.coroutines.flow.flowOf(emptyList())
                         }
                         val sessions by sessionsFlow.collectAsState(initial = emptyList())
-                        BatteryDetailScreen(state = state, sessions = sessions, onBack = vm::closeDetail)
+                        BatteryDetailScreen(state = state, sessions = sessions, onBack = vm::closeDetail,
+                            onOpenReview = { addr?.let(vm::openReview) })
                     }
                 }
             }
@@ -205,6 +231,14 @@ fun App(vm: BatteryViewModel) {
                 )
             }
         }
+    }
+}
+
+/** Full-screen placeholder while a history surface computes its derived data off Room. */
+@Composable
+private fun HistoryLoading() {
+    Box(Modifier.fillMaxSize().background(Bm.colors.bg), contentAlignment = androidx.compose.ui.Alignment.Center) {
+        androidx.compose.material3.Text("Loading…", color = Bm.colors.text3, fontSize = 13.sp)
     }
 }
 

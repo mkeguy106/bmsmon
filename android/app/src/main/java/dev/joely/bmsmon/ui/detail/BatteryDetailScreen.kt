@@ -29,13 +29,12 @@ import dev.joely.bmsmon.UiState
 import dev.joely.bmsmon.data.db.SessionEntity
 import dev.joely.bmsmon.model.batteryAt
 import dev.joely.bmsmon.model.groupOf
-import dev.joely.bmsmon.ui.history.BatteryGraphs
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
 import kotlin.math.roundToInt
 
 @Composable
-fun BatteryDetailScreen(state: UiState, sessions: List<SessionEntity>, onBack: () -> Unit) {
+fun BatteryDetailScreen(state: UiState, sessions: List<SessionEntity>, onBack: () -> Unit, onOpenReview: () -> Unit) {
     val c = Bm.colors
     val address = state.detailAddress
     val battery = address?.let { state.roster.batteryAt(it) }
@@ -125,8 +124,17 @@ fun BatteryDetailScreen(state: UiState, sessions: List<SessionEntity>, onBack: (
                 }
             }
 
-            Section("History") {
-                BatteryGraphs(sessions = sessions, accent = state.accent, power = state.power)
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(11.dp)).background(c.card2)
+                    .border(1.dp, c.border, RoundedCornerShape(11.dp)).clickable(onClick = onOpenReview)
+                    .padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Health & Usage Review", color = c.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text("Derived resistance, V–I cloud & usage trends", color = c.text3, fontSize = 11.sp)
+                }
+                Text("›", color = c.icon, fontSize = 22.sp)
             }
         }
     }

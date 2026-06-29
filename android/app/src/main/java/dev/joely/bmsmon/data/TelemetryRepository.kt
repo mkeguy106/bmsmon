@@ -123,6 +123,16 @@ class TelemetryRepository(private val db: BmsDatabase) {
     fun sessions(address: String): Flow<List<SessionEntity>> = db.sessions().forAddress(address)
     fun allSessions(): Flow<List<SessionEntity>> = db.sessions().all()
 
+    /** All stored telemetry rows for one pack (link rows excluded), oldest first — for derived-R,
+     *  the V–I cloud and cell-imbalance analysis. */
+    suspend fun telemetry(address: String): List<SampleEntity> = db.samples().telemetryFor(address)
+
+    /** All rows (telemetry + link events) for one session, oldest first — for the timeline pooler. */
+    suspend fun samplesForSession(sessionId: Long): List<SampleEntity> = db.samples().forSession(sessionId)
+
+    /** One session's rollups by id (for the timeline drill-down header/summary). */
+    suspend fun session(sessionId: Long): SessionEntity? = db.sessions().byId(sessionId)
+
     /** One-time backfill of legacy CSV files (oldest first). Segments via the same gap rule. */
     suspend fun importCsvOnce(files: List<File>) {
         // Local bookkeeping — fully decoupled from the live-path shared maps so concurrent
