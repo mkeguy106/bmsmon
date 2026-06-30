@@ -133,7 +133,8 @@ fun AllBatteriesScreen(
         SortKey.Base -> rows
     }
 
-    Column(modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+    // Fill the page height so content is top-aligned (the HorizontalPager centers wrap-height pages).
+    Column(modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         Row(
             Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 12.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -179,7 +180,7 @@ fun AllBatteriesScreen(
             }
         }
 
-        LazyColumn(Modifier.fillMaxWidth().padding(top = 6.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        LazyColumn(Modifier.fillMaxWidth().weight(1f).padding(top = 6.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
             items(rows, key = { it.target.address }) { row ->
                 SwipeableBatteryRow(
                     row = row,
