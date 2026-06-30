@@ -28,6 +28,11 @@ def create_app() -> FastAPI:
     app.include_router(api_device.router)
     app.include_router(web.router)
     app.include_router(ws.router)
+    import os
+    from fastapi.staticfiles import StaticFiles
+    web_dist = os.environ.get("BMSMON_WEB_DIST", "/app/web/dist")
+    if os.path.isdir(web_dist):
+        app.mount("/", StaticFiles(directory=web_dist, html=True), name="web")
     return app
 
 
