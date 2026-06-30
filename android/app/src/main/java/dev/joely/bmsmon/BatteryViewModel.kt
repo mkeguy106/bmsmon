@@ -310,6 +310,10 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                 if (_state.value.monitoring) refresh()
             }
         }
+        // Mirror reporter upload stats into UiState so the Cloud sync page can show them.
+        getApplication<BmsApp>().reporter.onStatus = { depth, ts ->
+            _state.update { it.copy(cloudOutboxDepth = depth.toInt(), cloudLastUploadMs = ts) }
+        }
     }
 
     // --- navigation / theme ---
@@ -629,8 +633,43 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // --- cloud sync settings ---
-    fun setCloudEnabled(on: Boolean) { viewModelScope.launch { store.setCloudEnabled(on) }; _state.update { it.copy(cloudEnabled = on) } }
+    fun setCloudEnabled(on: Boolean) {
+        viewModelScope.launch { store.setCloudEnabled(on) }
+        _state.update { it.copy(cloudEnabled = on) }
+        if (on) getApplication<BmsApp>().reporter.start()
+    }
     fun setApiBaseUrl(url: String) { viewModelScope.launch { store.setApiBaseUrl(url) }; _state.update { it.copy(apiBaseUrl = url) } }
+
+    fun enroll(baseUrl: String, code: String) {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            dev.joely.bmsmon.cloud.DeviceKeys.ensureKeyPair()
+            val installUuid = store.installUuid()
+            val res = dev.joely.bmsmon.cloud.EnrollClient(okhttp3.OkHttpClient())
+                .enroll(baseUrl, code, installUuid, dev.joely.bmsmon.cloud.DeviceKeys.publicKeySpkiB64())
+            res.onSuccess { id ->
+                store.setApiBaseUrl(baseUrl)
+                store.setDeviceId(id)
+                store.setEnrolled(true)
+                store.setCloudEnabled(true)
+                _state.update { it.copy(apiBaseUrl = baseUrl, enrolled = true, cloudEnabled = true) }
+                val app = getApplication<BmsApp>()
+                app.reporter.start()
+                app.reporter.runImport(_state.value.roster)
+            }
+        }
+    }
+
+    fun forgetDevice() {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            dev.joely.bmsmon.cloud.DeviceKeys.deleteKey()
+            store.setEnrolled(false)
+            store.setCloudEnabled(false)
+            store.setDeviceId("")
+            store.setImportDone(false)
+            store.setImportWatermark(0)
+            _state.update { it.copy(enrolled = false, cloudEnabled = false) }
+        }
+    }
 
     // --- usage logging (to calibrate the power ring) ---
     fun setLogging(enabled: Boolean) {

@@ -241,6 +241,9 @@ fun App(vm: BatteryViewModel) {
                         onSetLockShowTime = vm::setLockShowTime,
                         onSetLockShowWifi = vm::setLockShowWifi,
                         onSetLockShowBattery = vm::setLockShowBattery,
+                        onEnroll = vm::enroll,
+                        onSetCloudEnabled = vm::setCloudEnabled,
+                        onForget = vm::forgetDevice,
                     )
                     Screen.Detail -> {
                         val addr = state.detailAddress
