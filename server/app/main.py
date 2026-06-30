@@ -5,7 +5,7 @@ from fastapi import FastAPI
 
 from app.db.partitions import ensure_partitions_for_range
 from app.db.pool import create_pool
-from app.routers import api_device
+from app.routers import api_device, web, ws
 
 
 @asynccontextmanager
@@ -26,6 +26,8 @@ def create_app() -> FastAPI:
     app.state.jti_cache = JtiCache()
     app.state.bus = LiveBus()
     app.include_router(api_device.router)
+    app.include_router(web.router)
+    app.include_router(ws.router)
     return app
 
 

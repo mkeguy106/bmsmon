@@ -108,3 +108,13 @@ async def create_device(conn, install_uuid, public_key_spki: bytes, label) -> st
 
 async def get_device(conn, device_id):
     return await conn.fetchrow("SELECT * FROM devices WHERE id=$1", device_id)
+
+
+async def list_devices(conn) -> list[dict]:
+    rows = await conn.fetch(
+        "SELECT id, install_uuid, label, created_at, last_seen_at, revoked FROM devices ORDER BY created_at")
+    return [dict(r) for r in rows]
+
+
+async def revoke_device(conn, device_id) -> None:
+    await conn.execute("UPDATE devices SET revoked=true WHERE id=$1", device_id)
