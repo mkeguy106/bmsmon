@@ -4,7 +4,9 @@ import android.content.Context
 import dev.joely.bmsmon.data.SettingsStore
 import dev.joely.bmsmon.data.db.BmsDatabase
 import dev.joely.bmsmon.data.db.OutboxEntity
+import dev.joely.bmsmon.model.Roster
 import dev.joely.bmsmon.model.Telemetry
+import dev.joely.bmsmon.model.batteryAt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -19,6 +21,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 
 private const val BATCH = 200
 private const val OUTBOX_MAX = 200_000
+private const val IMPORT_PAGE = 500
 
 class TelemetryReporter(
     appContext: Context,
@@ -33,6 +36,7 @@ class TelemetryReporter(
     @Volatile var lastUploadMs = 0L
     private var uploaderJob: Job? = null
     var onStatus: ((outboxCount: Long, lastUploadMs: Long) -> Unit)? = null
+    var onImportProgress: ((Long) -> Unit)? = null
 
     init {
         // Single-writer drain from the channel into the outbox — never blocks callers.
@@ -89,6 +93,62 @@ class TelemetryReporter(
         started = false
     }
 
+    /**
+     * One-time resumable historical importer. Pages through all rows in [samples] after the
+     * stored watermark, POSTs them as signed import batches (seq = -1), and marks [importDone]
+     * when the table is drained. Idempotent on the server (ON CONFLICT DO NOTHING). Throttled
+     * below the live uploader path. Safe to cancel and re-launch — the watermark persists.
+     */
+    suspend fun runImport(roster: Roster) {
+        val p = settings.load()
+        if (!p.enrolled || p.importDone || p.deviceId == null || p.apiBaseUrl == null) return
+        var after = p.importWatermark
+        val ingestUrl = CloudConfig(p.apiBaseUrl).ingestUrl
+        while (true) {
+            try {
+                val page = db.samples().pageAfter(after, IMPORT_PAGE)
+                if (page.isEmpty()) {
+                    settings.setImportDone(true)
+                    break
+                }
+                val rows = page.map { e ->
+                    val bat = roster.batteryAt(e.address)
+                    CloudJson.sampleJson(
+                        e.tsMs, e.address, bat?.advertisedName, bat?.alias, bat?.groupId,
+                        e.state, e.soc, e.currentA, e.powerW, e.voltageV, e.tempC, e.mosfetTempC,
+                        e.soh, e.fullChargeAh, e.remainingAh, e.cycles,
+                        e.cellMinV, e.cellMaxV, e.regen, e.linkEvent,
+                    )
+                }
+                // seq = -1 marks this as an import batch; the server ignores seq ordering for imports.
+                val body = CloudJson.encodeBatch(seq = -1, rows = rows)
+                val ok = postSigned(ingestUrl, p.deviceId, body)
+                if (!ok) {
+                    delay(5000)
+                    continue
+                }
+                after = page.last().id
+                settings.setImportWatermark(after)
+                onImportProgress?.invoke(after)
+                delay(750)
+            } catch (e: Exception) {
+                delay(5000)
+            }
+        }
+    }
+
+    /** Sign [body] with the device key and POST to [url]. Returns true on HTTP 2xx. */
+    private fun postSigned(url: String, deviceId: String, body: ByteArray): Boolean =
+        runCatching {
+            val token = Jwt.signEs256(DeviceKeys.privateKey(), deviceId, body, System.currentTimeMillis())
+            val req = Request.Builder()
+                .url(url)
+                .header("Authorization", "Bearer $token")
+                .post(body.toRequestBody("application/json".toMediaType()))
+                .build()
+            http.newCall(req).execute().use { it.isSuccessful }
+        }.getOrDefault(false)
+
     private suspend fun uploadLoop() {
         var backoff = 1000L
         var seq = 0
@@ -116,17 +176,7 @@ class TelemetryReporter(
                 seq += 1
                 // The SAME body bytes are used for both signing and POSTing.
                 val body = CloudJson.encodeBatch(seq, rows.map { it.payload })
-                val ok = runCatching {
-                    val token = Jwt.signEs256(
-                        DeviceKeys.privateKey(), p.deviceId, body, System.currentTimeMillis(),
-                    )
-                    val req = Request.Builder()
-                        .url(CloudConfig(base).ingestUrl)
-                        .header("Authorization", "Bearer $token")
-                        .post(body.toRequestBody("application/json".toMediaType()))
-                        .build()
-                    http.newCall(req).execute().use { it.isSuccessful }
-                }.getOrDefault(false)
+                val ok = postSigned(CloudConfig(base).ingestUrl, p.deviceId, body)
                 if (ok) {
                     db.outbox().deleteUpTo(rows.last().id)
                     lastUploadMs = System.currentTimeMillis()
