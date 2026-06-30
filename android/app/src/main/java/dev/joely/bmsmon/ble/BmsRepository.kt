@@ -41,6 +41,11 @@ class BmsRepository(private val context: Context) {
     @Volatile private var disabledAddrs: Set<String> = emptySet()
     @Volatile private var running = false
     @Volatile private var wakeDeferred: CompletableDeferred<Unit>? = null
+    // Launch priority barrier: until [stagePriorityUntil], hold off connecting any non-stage pack so
+    // the (restored) main stage connects and starts polling first. [stageInitialized] gates the very
+    // first ticks before setStage lands, so we never admit a background pack ahead of the stage.
+    @Volatile private var stagePriorityUntil = 0L
+    @Volatile private var stageInitialized = false
 
     private var onPoll: (String, ByteArray, Telemetry?) -> Unit = { _, _, _ -> }
     private var onReachable: (String, Boolean) -> Unit = { _, _ -> }
@@ -71,6 +76,9 @@ class BmsRepository(private val context: Context) {
         this.onPoll = onPoll
         this.onReachable = onReachable
         resultChannel = Channel(Channel.UNLIMITED)
+        // Arm the launch barrier: prioritize the stage's connect/poll for a grace window.
+        stagePriorityUntil = System.currentTimeMillis() + STAGE_PRIORITY_GRACE_MS
+        stageInitialized = false
         running = true
         // SupervisorJob: a failing worker doesn't tear down siblings or the control loop.
         // Cancelling it stops the control loop and every worker it launched.
@@ -83,6 +91,7 @@ class BmsRepository(private val context: Context) {
     /** Set which batteries are on the stage (persistent, fast poll). */
     fun setStage(addresses: Set<String>) {
         stageAddrs = addresses.map { it.uppercase() }.toSet()
+        stageInitialized = true  // the launch stage is now known; the barrier can admit it
         wake()
     }
 
@@ -118,6 +127,8 @@ class BmsRepository(private val context: Context) {
         }
         stageAddrs = emptySet()
         disabledAddrs = emptySet()
+        stageInitialized = false
+        stagePriorityUntil = 0L
     }
 
     private fun wake() { wakeDeferred?.complete(Unit) }
@@ -150,6 +161,13 @@ class BmsRepository(private val context: Context) {
 
                 // 2. Decide connects/disconnects for this tick.
                 val desired = allTargets.map { it.address }.toSet() - disabledAddrs
+                // Launch barrier: while within the grace window and the stage isn't fully up yet,
+                // admit only stage packs. Releases the moment every stage pack is held (their poll
+                // loops are then already running) or the grace window expires — then normal rotation.
+                val stageDesired = desired.filter { it in stageAddrs }
+                val allStageHeld = stageDesired.isNotEmpty() && stageDesired.all { it in held.keys }
+                val stageFirst = now < stagePriorityUntil &&
+                    (!stageInitialized || (stageDesired.isNotEmpty() && !allStageHeld))
                 val plan = planFleet(
                     desired      = desired,
                     stage        = stageAddrs,
@@ -159,6 +177,7 @@ class BmsRepository(private val context: Context) {
                     heldSince    = heldSince,
                     maxHeld      = RedodoBekenProfile.maxHeldConnections,
                     now          = now,
+                    stageFirst   = stageFirst,
                 )
 
                 // 3. Drop connections the planner no longer wants.
@@ -299,5 +318,9 @@ class BmsRepository(private val context: Context) {
         const val CONTROL_TICK_MS      = 1_000L
         const val POLL_TIMEOUT_MS      = 4_000L
         const val RECONNECT_BACKOFF_MS = 2_000L
+        // Launch window during which the stage connects/polls before any background pack. Releases
+        // early once the stage is fully connected; this is just the safety cap so an unreachable
+        // stage pack can't starve the rest of the fleet forever.
+        const val STAGE_PRIORITY_GRACE_MS = 20_000L
     }
 }

@@ -268,7 +268,14 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     sortKey = p.sortKey?.let { runCatching { SortKey.valueOf(it) }.getOrNull() } ?: s.sortKey,
                     filters = p.filters?.mapNotNull { runCatching { FilterKey.valueOf(it) }.getOrNull() }?.toSet()
                         ?: s.filters,
-                    stageTarget = StageTarget.Base(dd.id),
+                    // Restore the *actual* main stage from last run (validated against the current
+                    // roster) so launch reconnects to what was on stage, not just the daily driver.
+                    stageTarget = p.lastStage?.let { ls ->
+                        when (ls) {
+                            is StageTarget.Base -> ls.takeIf { roster.groupById(it.groupId) != null }
+                            is StageTarget.Single -> ls.takeIf { roster.targetFor(it.address) != null }
+                        }
+                    } ?: StageTarget.Base(dd.id),
                     filterBaseId = p.filterBaseId ?: dd.id,
                     // Seed the fleet with the last-known reading per battery (dimmed/not reachable
                     // until the first live connect), so All Batteries isn't blank on launch.
@@ -783,6 +790,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     private fun refresh() {
         val now = clockMs()
         val before = currentStageAddrs()
+        val prevTarget = _state.value.stageTarget
         _state.update { st ->
             // lastDischargeAt is maintained by the engine (mirrored into UiState); pass the roster's
             // current groups so stage resolution works against the dynamic roster.
@@ -795,6 +803,9 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                 (!st.dynamicStage || now - st.manualPinnedAt < PIN_HOLD_MS)
             st.copy(stageTarget = resolved, pinned = isPinned)
         }
+        // Persist the resolved stage whenever it changes, so the next launch restores + prioritizes it.
+        val newTarget = _state.value.stageTarget
+        if (newTarget != prevTarget) viewModelScope.launch { store.setLastStage(newTarget) }
         val after = currentStageAddrs()
         if (after != before && _state.value.monitoring) engine.setStage(after)
     }
