@@ -116,6 +116,11 @@ data class UiState(
     val homePage: Int = 0,
     val locked: Boolean = false,
     val csvImported: Boolean = false,
+    // Which system-info items to replicate at the top while locked (screen pinning hides the real
+    // status bar). Per-item, all on by default.
+    val lockShowTime: Boolean = true,
+    val lockShowWifi: Boolean = true,
+    val lockShowBattery: Boolean = true,
 ) {
     val isDark get() = mode == Mode.Dark
     val dailyDriver: BatteryGroup
@@ -231,6 +236,9 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     keepScreenOn = p.keepScreenOn,
                     tempFahrenheit = p.tempFahrenheit,
                     locked = p.locked,
+                    lockShowTime = p.lockShowTime,
+                    lockShowWifi = p.lockShowWifi,
+                    lockShowBattery = p.lockShowBattery,
                     sortKey = p.sortKey?.let { runCatching { SortKey.valueOf(it) }.getOrNull() } ?: s.sortKey,
                     filters = p.filters?.mapNotNull { runCatching { FilterKey.valueOf(it) }.getOrNull() }?.toSet()
                         ?: s.filters,
@@ -636,6 +644,19 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     fun setLocked(enabled: Boolean) {
         _state.update { it.copy(locked = enabled) }
         viewModelScope.launch { store.setLocked(enabled) }
+    }
+
+    fun setLockShowTime(on: Boolean) {
+        _state.update { it.copy(lockShowTime = on) }
+        viewModelScope.launch { store.setLockShowTime(on) }
+    }
+    fun setLockShowWifi(on: Boolean) {
+        _state.update { it.copy(lockShowWifi = on) }
+        viewModelScope.launch { store.setLockShowWifi(on) }
+    }
+    fun setLockShowBattery(on: Boolean) {
+        _state.update { it.copy(lockShowBattery = on) }
+        viewModelScope.launch { store.setLockShowBattery(on) }
     }
 
     /** Acknowledge the active alert: silence it until SOC drops past the next enabled level. */

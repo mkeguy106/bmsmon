@@ -42,6 +42,9 @@ data class Persisted(
     val autoLuxThreshold: Float?,
     val locked: Boolean,
     val csvImported: Boolean,
+    val lockShowTime: Boolean,
+    val lockShowWifi: Boolean,
+    val lockShowBattery: Boolean,
 )
 
 /** Persists user preferences (colors, appearance override, BMS addresses) via DataStore. */
@@ -70,6 +73,9 @@ class SettingsStore(private val context: Context) {
         val AUTO_LUX = floatPreferencesKey("auto_lux_threshold")
         val LOCKED = booleanPreferencesKey("locked")
         val CSV_IMPORTED = booleanPreferencesKey("csv_imported")
+        val LOCK_SHOW_TIME = booleanPreferencesKey("lock_show_time")
+        val LOCK_SHOW_WIFI = booleanPreferencesKey("lock_show_wifi")
+        val LOCK_SHOW_BATTERY = booleanPreferencesKey("lock_show_battery")
     }
 
     suspend fun load(): Persisted {
@@ -97,6 +103,9 @@ class SettingsStore(private val context: Context) {
             autoLuxThreshold = p[K.AUTO_LUX],
             locked = p[K.LOCKED] ?: false,
             csvImported = p[K.CSV_IMPORTED] ?: false,
+            lockShowTime = p[K.LOCK_SHOW_TIME] ?: true,
+            lockShowWifi = p[K.LOCK_SHOW_WIFI] ?: true,
+            lockShowBattery = p[K.LOCK_SHOW_BATTERY] ?: true,
         )
     }
 
@@ -123,6 +132,9 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { it[K.ROSTER] = encodeRoster(roster) }.let {}
     suspend fun setLocked(on: Boolean) = context.dataStore.edit { it[K.LOCKED] = on }.let {}
     suspend fun setCsvImported(on: Boolean) = context.dataStore.edit { it[K.CSV_IMPORTED] = on }.let {}
+    suspend fun setLockShowTime(on: Boolean) = context.dataStore.edit { it[K.LOCK_SHOW_TIME] = on }.let {}
+    suspend fun setLockShowWifi(on: Boolean) = context.dataStore.edit { it[K.LOCK_SHOW_WIFI] = on }.let {}
+    suspend fun setLockShowBattery(on: Boolean) = context.dataStore.edit { it[K.LOCK_SHOW_BATTERY] = on }.let {}
 }
 
 /** JSON forbids NaN/Infinity; coerce any non-finite reading to 0 before writing. */
