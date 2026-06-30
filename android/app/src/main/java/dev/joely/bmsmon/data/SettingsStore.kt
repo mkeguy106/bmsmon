@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.floatPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -46,6 +47,12 @@ data class Persisted(
     val lockShowWifi: Boolean,
     val lockShowBattery: Boolean,
     val disabledAddrs: Set<String>?,
+    val cloudEnabled: Boolean,
+    val apiBaseUrl: String?,
+    val deviceId: String?,
+    val enrolled: Boolean,
+    val importWatermark: Long,
+    val importDone: Boolean,
 )
 
 /** Persists user preferences (colors, appearance override, BMS addresses) via DataStore. */
@@ -78,6 +85,13 @@ class SettingsStore(private val context: Context) {
         val LOCK_SHOW_WIFI = booleanPreferencesKey("lock_show_wifi")
         val LOCK_SHOW_BATTERY = booleanPreferencesKey("lock_show_battery")
         val DISABLED = stringSetPreferencesKey("disabled_addrs")
+        val CLOUD_ENABLED = booleanPreferencesKey("cloud_enabled")
+        val API_BASE_URL = stringPreferencesKey("api_base_url")
+        val DEVICE_ID = stringPreferencesKey("device_id")
+        val ENROLLED = booleanPreferencesKey("enrolled")
+        val IMPORT_WATERMARK = longPreferencesKey("import_watermark")
+        val IMPORT_DONE = booleanPreferencesKey("import_done")
+        val INSTALL_UUID = stringPreferencesKey("install_uuid")
     }
 
     suspend fun load(): Persisted {
@@ -109,6 +123,12 @@ class SettingsStore(private val context: Context) {
             lockShowWifi = p[K.LOCK_SHOW_WIFI] ?: true,
             lockShowBattery = p[K.LOCK_SHOW_BATTERY] ?: true,
             disabledAddrs = p[K.DISABLED],
+            cloudEnabled = p[K.CLOUD_ENABLED] ?: false,
+            apiBaseUrl = p[K.API_BASE_URL],
+            deviceId = p[K.DEVICE_ID],
+            enrolled = p[K.ENROLLED] ?: false,
+            importWatermark = p[K.IMPORT_WATERMARK] ?: 0L,
+            importDone = p[K.IMPORT_DONE] ?: false,
         )
     }
 
@@ -139,6 +159,20 @@ class SettingsStore(private val context: Context) {
     suspend fun setLockShowWifi(on: Boolean) = context.dataStore.edit { it[K.LOCK_SHOW_WIFI] = on }.let {}
     suspend fun setLockShowBattery(on: Boolean) = context.dataStore.edit { it[K.LOCK_SHOW_BATTERY] = on }.let {}
     suspend fun setDisabled(addrs: Set<String>) = context.dataStore.edit { it[K.DISABLED] = addrs }.let {}
+    suspend fun setCloudEnabled(on: Boolean) = context.dataStore.edit { it[K.CLOUD_ENABLED] = on }.let {}
+    suspend fun setApiBaseUrl(url: String) = context.dataStore.edit { it[K.API_BASE_URL] = url }.let {}
+    suspend fun setDeviceId(id: String) = context.dataStore.edit { it[K.DEVICE_ID] = id }.let {}
+    suspend fun setEnrolled(on: Boolean) = context.dataStore.edit { it[K.ENROLLED] = on }.let {}
+    suspend fun setImportWatermark(v: Long) = context.dataStore.edit { it[K.IMPORT_WATERMARK] = v }.let {}
+    suspend fun setImportDone(on: Boolean) = context.dataStore.edit { it[K.IMPORT_DONE] = on }.let {}
+
+    suspend fun installUuid(): String {
+        val existing = context.dataStore.data.first()[K.INSTALL_UUID]
+        if (existing != null) return existing
+        val fresh = java.util.UUID.randomUUID().toString()
+        context.dataStore.edit { it[K.INSTALL_UUID] = fresh }
+        return fresh
+    }
 }
 
 /** JSON forbids NaN/Infinity; coerce any non-finite reading to 0 before writing. */

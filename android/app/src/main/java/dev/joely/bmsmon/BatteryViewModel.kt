@@ -121,6 +121,14 @@ data class UiState(
     val lockShowTime: Boolean = true,
     val lockShowWifi: Boolean = true,
     val lockShowBattery: Boolean = true,
+    val cloudEnabled: Boolean = false,
+    val apiBaseUrl: String? = null,
+    val enrolled: Boolean = false,
+    val cloudOutboxDepth: Int = 0,
+    val cloudLastUploadMs: Long = 0,
+    val importDone: Boolean = false,
+    val importTotal: Int = 0,
+    val importSent: Int = 0,
 ) {
     val isDark get() = mode == Mode.Dark
     val dailyDriver: BatteryGroup
@@ -241,6 +249,10 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     lockShowBattery = p.lockShowBattery,
                     // Per-battery disconnects persist across restarts.
                     disabled = p.disabledAddrs ?: emptySet(),
+                    cloudEnabled = p.cloudEnabled,
+                    apiBaseUrl = p.apiBaseUrl,
+                    enrolled = p.enrolled,
+                    importDone = p.importDone,
                     sortKey = p.sortKey?.let { runCatching { SortKey.valueOf(it) }.getOrNull() } ?: s.sortKey,
                     filters = p.filters?.mapNotNull { runCatching { FilterKey.valueOf(it) }.getOrNull() }?.toSet()
                         ?: s.filters,
@@ -615,6 +627,10 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         updateSensor()
         persistLastTelemetry()
     }
+
+    // --- cloud sync settings ---
+    fun setCloudEnabled(on: Boolean) { viewModelScope.launch { store.setCloudEnabled(on) }; _state.update { it.copy(cloudEnabled = on) } }
+    fun setApiBaseUrl(url: String) { viewModelScope.launch { store.setApiBaseUrl(url) }; _state.update { it.copy(apiBaseUrl = url) } }
 
     // --- usage logging (to calibrate the power ring) ---
     fun setLogging(enabled: Boolean) {
