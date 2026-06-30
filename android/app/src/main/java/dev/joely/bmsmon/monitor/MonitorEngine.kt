@@ -14,7 +14,14 @@ import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.DEFAULT_ROSTER
 import dev.joely.bmsmon.model.PackSoc
+import dev.joely.bmsmon.model.TempRank
+import dev.joely.bmsmon.model.TempSide
+import dev.joely.bmsmon.model.TempThresholds
+import dev.joely.bmsmon.model.TempUnit
 import dev.joely.bmsmon.model.evalStageAlert
+import dev.joely.bmsmon.model.formatDelta
+import dev.joely.bmsmon.model.tempMarginToCutoffC
+import dev.joely.bmsmon.model.tempZone
 import dev.joely.bmsmon.model.batteryAt
 import dev.joely.bmsmon.model.GroupActivity
 import dev.joely.bmsmon.model.Roster
@@ -75,6 +82,8 @@ class MonitorEngine(
     // Stage addresses + alert config, mirrored from the ViewModel so alerts can fire headless.
     @Volatile private var stageAddrs: Set<String> = emptySet()
     @Volatile private var alertConfig: AlertConfig? = null
+    @Volatile private var tempAlertsEnabled: Boolean = true
+    @Volatile private var tempThresholdsByProfile: Map<String, TempThresholds> = emptyMap()
 
     init {
         reporter?.start()
@@ -149,16 +158,51 @@ class MonitorEngine(
         evaluateAlerts()
     }
 
+    /** Mirror the temperature-alert settings from the ViewModel. */
+    fun setTempAlertConfig(enabled: Boolean, thresholdsByProfile: Map<String, TempThresholds>) {
+        tempAlertsEnabled = enabled
+        tempThresholdsByProfile = thresholdsByProfile
+        evaluateAlerts()
+    }
+
     /** Evaluate the stage against the alert config and drive headless notifications. */
     private fun evaluateAlerts() {
-        val cfg = alertConfig ?: return
         if (!_state.value.monitoring) return
         val fleet = _state.value.fleet
-        val packs = stageAddrs
-            .mapNotNull { fleet[it]?.takeIf { s -> s.reachable }?.telemetry }
-            .map { PackSoc(it.soc, it.state == BatteryState.Charging) }
         val label = stageAddrs.firstNotNullOfOrNull { roster.groupOf(it)?.id }
-        alertNotifier.update(evalStageAlert(packs, cfg), label)
+        alertConfig?.let { cfg ->
+            val packs = stageAddrs
+                .mapNotNull { fleet[it]?.takeIf { s -> s.reachable }?.telemetry }
+                .map { PackSoc(it.soc, it.state == BatteryState.Charging) }
+            alertNotifier.update(evalStageAlert(packs, cfg), label)
+        }
+        evaluateTempAlerts(fleet, label)
+    }
+
+    /** Worst reachable stage pack's temperature zone → headless temperature notification. */
+    private fun evaluateTempAlerts(fleet: Map<String, BatteryStatus>, label: String?) {
+        if (!tempAlertsEnabled) { alertNotifier.updateTemp(TempRank.SAFE, TempSide.NONE, label, ""); return }
+        val worst = stageAddrs
+            .mapNotNull { a -> fleet[a]?.takeIf { it.reachable }?.telemetry?.let { a to it } }
+            .map { (a, t) ->
+                val profile = ProfileRegistry.profileFor(roster.batteryAt(a)?.advertisedName)
+                    ?: RedodoBekenProfile
+                val thr = tempThresholdsByProfile[profile.id] ?: profile.tempEnvelope.defaults
+                Triple(a, t, tempZone(t.temp, thr, profile.tempEnvelope) to profile.tempEnvelope)
+            }
+            .maxByOrNull { it.third.first.rank.ordinal }
+        if (worst == null) { alertNotifier.updateTemp(TempRank.SAFE, TempSide.NONE, label, ""); return }
+        val (addr, tel, zoneEnv) = worst
+        val (zone, env) = zoneEnv
+        val name = roster.batteryAt(addr)?.alias ?: tel.name
+        val side = if (zone.side == TempSide.COLD) "COLD" else "HOT"
+        val detail = if (zone.rank == TempRank.CUTOFF) {
+            "$side · $name · load disconnected"
+        } else {
+            // Headless notification text uses °F (the app-wide default unit).
+            "$side · $name · ${formatDelta(tempMarginToCutoffC(tel.temp, zone.side, env), TempUnit.F)} to cutoff"
+        }
+        alertNotifier.updateTemp(zone.rank, zone.side, label, detail)
     }
 
     /** Backfill the legacy CSVs into the DB exactly once (guarded by a persisted flag). */

@@ -12,7 +12,9 @@ from app.auth.device_jwt import JwtError, unverified_sub, verify
 from app.auth.enroll import hash_code
 from app.db import queries as q
 from app.db.pool import get_pool
-from app.models import EnrollBody, EnrollResponse, IngestBody, IngestResponse
+from app.models import (
+    EnrollBody, EnrollResponse, IngestBody, IngestResponse, OkResponse, TempConfigBody,
+)
 
 router = APIRouter(prefix="/api/v1")
 
@@ -86,3 +88,38 @@ async def ingest(request: Request, pool=Depends(get_pool)):
     for s in body.samples:
         await request.app.state.bus.publish({"type": "sample", **s.model_dump()})
     return IngestResponse(accepted=accepted, last_seq=body.batch_seq)
+
+
+@router.post("/config", response_model=OkResponse)
+async def config(request: Request, pool=Depends(get_pool)):
+    """One-way temperature-alert config push from the phone (same auth/gzip/verify as ingest)."""
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("bearer "):
+        raise HTTPException(401, "missing bearer")
+    token = auth[7:]
+    raw = await request.body()
+    if request.headers.get("content-encoding", "").lower() == "gzip":
+        try:
+            raw = gzip.decompress(raw)
+        except (OSError, EOFError):
+            raise HTTPException(400, "bad gzip")
+    try:
+        device_id = unverified_sub(token)
+        uuid.UUID(device_id)
+    except (JwtError, ValueError, TypeError):
+        raise HTTPException(401, "bad token")
+    async with pool.acquire() as conn:
+        dev = await q.get_device(conn, device_id)
+        if dev is None or dev["revoked"]:
+            raise HTTPException(401, "unknown or revoked device")
+        try:
+            verify(token, bytes(dev["public_key_spki"]), raw, request.app.state.jti_cache)
+        except JwtError:
+            raise HTTPException(401, "bad signature")
+        try:
+            cfg = TempConfigBody.model_validate_json(raw)
+        except ValidationError:
+            raise HTTPException(422, "invalid body")
+        await q.upsert_temp_config(conn, device_id, cfg.model_dump())
+        await conn.execute("UPDATE devices SET last_seen_at=now() WHERE id=$1", device_id)
+    return OkResponse()

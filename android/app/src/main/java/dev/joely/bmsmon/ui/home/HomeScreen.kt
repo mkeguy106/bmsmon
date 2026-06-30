@@ -110,6 +110,10 @@ fun HomeScreen(
                         tempInF = state.tempFahrenheit,
                         isEmpty = state.roster.batteries.isEmpty(),
                         onAddScan = onAddScan,
+                        showTempGauge = state.showTempGauge,
+                        tempGaugeSide = state.tempGaugeSide,
+                        thresholds = state.tempThresholdsFor(state.stageProfile().id),
+                        envelope = state.stageProfile().tempEnvelope,
                     )
                     else -> AllBatteriesScreen(
                         state = state,
@@ -148,19 +152,28 @@ fun HomeScreen(
             )
         }
         // Alerts are evaluated only while the stage (page 0) is foregrounded.
-        if (alert.flashing && pager.currentPage == 0) {
-            DangerOverlay(alert, onAcknowledge)
+        if (pager.currentPage == 0) {
+            if (alert.flashing) DangerOverlay(alert, onAcknowledge)
+            else if (alert.present) AckedStrip(alert, Modifier.align(Alignment.TopCenter))
         }
     }
 }
 
-/** Full-screen pulsing wash + bottom Acknowledge bar, severity-colored. */
+/** Layered shadow so white overlay text stays legible on the colored wash in light or dark theme. */
+private val overlayTextShadow = androidx.compose.ui.graphics.Shadow(
+    color = Color.Black.copy(alpha = 0.55f),
+    offset = androidx.compose.ui.geometry.Offset(0f, 4f),
+    blurRadius = 12f,
+)
+
+/** Full-screen pulsing wash + naming headline + bottom Acknowledge bar, severity-colored. */
 @Composable
-private fun DangerOverlay(alert: StageAlert, onAcknowledge: () -> Unit) {
+internal fun DangerOverlay(alert: StageAlert, onAcknowledge: () -> Unit) {
     val flashColor = if (alert.critical) AlertCritical else AlertWarn
     val peak = if (alert.critical) 0.58f else 0.34f
     val duration = if (alert.critical) 1000 else 1500
-    val label = if (alert.critical) "CRITICAL" else "LOW BATTERY"
+    val fallbackDetail = "LOW BATTERY · ${alert.lowSoc}% · BELOW ${alert.activeThreshold}%"
+    val detail = alert.detail.ifBlank { fallbackDetail }
 
     val transition = rememberInfiniteTransition(label = "danger")
     val washAlpha by transition.animateFloat(
@@ -176,23 +189,30 @@ private fun DangerOverlay(alert: StageAlert, onAcknowledge: () -> Unit) {
     // Non-interactive wash over the whole screen.
     Box(Modifier.fillMaxSize().alpha(washAlpha).background(flashColor))
 
-    // Acknowledge bar pinned to the bottom.
+    // Naming headline + detail near the top.
     Column(
-        Modifier.fillMaxSize().padding(18.dp),
-        verticalArrangement = Arrangement.Bottom,
+        Modifier.fillMaxWidth().padding(top = 96.dp, start = 22.dp, end = 22.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Row(
-            Modifier.fillMaxWidth().padding(bottom = 12.dp),
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(Icons.Filled.Warning, null, Modifier.size(18.dp), tint = Color.White)
-            Text(
-                "$label · ${alert.lowSoc}% · BELOW ${alert.activeThreshold}%",
-                color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold,
-                letterSpacing = 0.6.sp, modifier = Modifier.padding(start = 9.dp),
-            )
-        }
+        Icon(Icons.Filled.Warning, null, Modifier.size(20.dp), tint = Color.White)
+        Text(
+            alert.headline, color = Color.White, fontSize = 42.sp, fontWeight = FontWeight.ExtraBold,
+            letterSpacing = 1.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            modifier = Modifier.padding(top = 6.dp),
+            style = androidx.compose.ui.text.TextStyle(shadow = overlayTextShadow),
+        )
+        Text(
+            detail, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+            letterSpacing = 0.6.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            modifier = Modifier.padding(top = 12.dp),
+            style = androidx.compose.ui.text.TextStyle(
+                fontFamily = dev.joely.bmsmon.ui.theme.MonoFont, shadow = overlayTextShadow,
+            ),
+        )
+    }
+
+    // Acknowledge bar pinned to the bottom.
+    Column(Modifier.fillMaxSize().padding(18.dp), verticalArrangement = Arrangement.Bottom) {
         Box(
             Modifier
                 .fillMaxWidth()
@@ -207,6 +227,31 @@ private fun DangerOverlay(alert: StageAlert, onAcknowledge: () -> Unit) {
             Text("ACKNOWLEDGE", color = Color.White, fontSize = 15.sp,
                 fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
         }
+    }
+}
+
+/** Small persistent strip at the top of the stage once an alert is acknowledged (condition still on). */
+@Composable
+internal fun AckedStrip(alert: StageAlert, modifier: Modifier = Modifier) {
+    val c = Bm.colors
+    Row(
+        modifier
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(AlertCritical.copy(alpha = 0.10f))
+            .border(1.dp, AlertCritical.copy(alpha = 0.55f), RoundedCornerShape(10.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Filled.Warning, null, Modifier.size(14.dp), tint = AlertCritical)
+        Column(Modifier.weight(1f).padding(start = 10.dp)) {
+            Text(alert.headline, color = AlertCritical, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                letterSpacing = 0.5.sp, fontFamily = dev.joely.bmsmon.ui.theme.MonoFont)
+            Text(alert.detail.ifBlank { "${alert.lowSoc}%" }, color = c.text2, fontSize = 9.sp,
+                fontFamily = dev.joely.bmsmon.ui.theme.MonoFont, maxLines = 1)
+        }
+        Text("ACK'D", color = c.text3, fontSize = 9.sp, fontFamily = dev.joely.bmsmon.ui.theme.MonoFont)
     }
 }
 

@@ -11,6 +11,8 @@ import androidx.core.app.NotificationManagerCompat
 import dev.joely.bmsmon.MainActivity
 import dev.joely.bmsmon.R
 import dev.joely.bmsmon.model.AlertEval
+import dev.joely.bmsmon.model.TempRank
+import dev.joely.bmsmon.model.TempSide
 import dev.joely.bmsmon.model.nextNotifyDecision
 
 /**
@@ -23,6 +25,7 @@ class AlertNotifier(private val context: Context) {
 
     private val nm = NotificationManagerCompat.from(context)
     private var lastNotified: Int? = null
+    private var lastTempKey: String? = null
 
     init { createChannels() }
 
@@ -36,10 +39,48 @@ class AlertNotifier(private val context: Context) {
         }
     }
 
+    /**
+     * Headless temperature alert: posts on the critical channel when the worst stage pack is at
+     * rank >= CRITICAL (loud — same urgency as a critical capacity alert), deduped by side+rank so it
+     * fires once per crossing/escalation; cancels when temperature recovers below CRITICAL.
+     */
+    fun updateTemp(rank: TempRank, side: TempSide, stageLabel: String?, detail: String) {
+        val key = if (rank.ordinal >= TempRank.CRITICAL.ordinal) "$side:$rank" else null
+        if (key == null) {
+            if (lastTempKey != null) { lastTempKey = null; nm.cancel(NOTIF_TEMP_ID) }
+            return
+        }
+        if (key == lastTempKey) return  // same band — no repeat
+        lastTempKey = key
+        val where = stageLabel?.let { " · $it" } ?: ""
+        val title = if (rank == TempRank.CUTOFF) "Temperature cutoff$where" else "Critical temperature$where"
+        postCritical(NOTIF_TEMP_ID, title, detail)
+    }
+
     /** Clear any active alert notification (e.g. monitoring stopped). */
     fun clear() {
         lastNotified = null
+        lastTempKey = null
         nm.cancel(NOTIF_ID)
+        nm.cancel(NOTIF_TEMP_ID)
+    }
+
+    private fun postCritical(id: Int, title: String, text: String) {
+        val open = PendingIntent.getActivity(
+            context, 3,
+            Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_IMMUTABLE,
+        )
+        val n = NotificationCompat.Builder(context, CH_CRITICAL)
+            .setContentTitle(title).setContentText(text)
+            .setSmallIcon(android.R.drawable.stat_sys_warning)
+            .setContentIntent(open).setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+        if (NotificationManagerCompat.from(context).areNotificationsEnabled()) {
+            try { nm.notify(id, n) } catch (_: SecurityException) {}
+        }
     }
 
     private fun post(eval: AlertEval, stageLabel: String?) {
@@ -85,6 +126,7 @@ class AlertNotifier(private val context: Context) {
     private companion object {
         const val CH_CRITICAL = "alerts_critical"
         const val CH_WARNING = "alerts_warning"
-        const val NOTIF_ID = 2  // distinct from MonitoringService's ongoing notification (1)
+        const val NOTIF_ID = 2       // capacity alert; distinct from the FGS ongoing notification (1)
+        const val NOTIF_TEMP_ID = 3  // temperature alert
     }
 }

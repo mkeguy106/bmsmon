@@ -1,5 +1,6 @@
 package dev.joely.bmsmon.ble.profile
 
+import dev.joely.bmsmon.model.TempEnvelope
 import java.util.UUID
 
 /** Field offsets (bytes, little-endian, from the realigned status frame) + plausibility bounds. */
@@ -52,6 +53,7 @@ data class BatteryProfile(
     val connectTimeoutMs: Long,
     val failThreshold: Int,
     val backoff: BackoffSpec,
+    val tempEnvelope: TempEnvelope = TempEnvelope(),
 ) {
     fun matches(name: String?): Boolean {
         val n = name?.trim().orEmpty()

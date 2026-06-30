@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Debug-only visual preview for emulator screenshots of the temperature feature.
+             Never present in release builds (src/debug source set). -->
+        <activity
+            android:name=".TempPreviewActivity"
+            android:exported="true"
+            android:theme="@style/Theme.BmsMon" />
+    </application>
+</manifest>

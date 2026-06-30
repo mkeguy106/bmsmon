@@ -49,6 +49,20 @@ class IngestResponse(BaseModel):
     last_seq: int
 
 
+class TempConfigBody(BaseModel):
+    profile_id: str
+    cold_caution_c: int
+    hot_caution_c: int
+    cold_crit_c: int
+    hot_crit_c: int
+    unit: str
+    updated_at_ms: int
+
+
+class OkResponse(BaseModel):
+    ok: bool = True
+
+
 class MintCodeResponse(BaseModel):
     code: str
     expires_at: str

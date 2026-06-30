@@ -15,6 +15,7 @@ import dev.joely.bmsmon.model.Group
 import dev.joely.bmsmon.model.Roster
 import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.Telemetry
+import dev.joely.bmsmon.model.TempThresholds
 import kotlinx.coroutines.flow.first
 import org.json.JSONArray
 import org.json.JSONObject
@@ -57,6 +58,12 @@ data class Persisted(
     val gpsEnabled: Boolean?,
     val importWatermark: Long,
     val importDone: Boolean,
+    val tempThresholdsByProfile: Map<String, TempThresholds>,
+    val tempAlertsEnabled: Boolean,
+    val showTempGauge: Boolean,
+    val tempGaugeSide: String?,
+    val cloudSyncAlerts: Boolean,
+    val pendingTempConfig: String?,
 )
 
 /** Persists user preferences (colors, appearance override, BMS addresses) via DataStore. */
@@ -99,6 +106,12 @@ class SettingsStore(private val context: Context) {
         val IMPORT_WATERMARK = longPreferencesKey("import_watermark")
         val IMPORT_DONE = booleanPreferencesKey("import_done")
         val INSTALL_UUID = stringPreferencesKey("install_uuid")
+        val TEMP_THRESHOLDS = stringPreferencesKey("temp_thresholds_by_profile")
+        val TEMP_ALERTS_ENABLED = booleanPreferencesKey("temp_alerts_enabled")
+        val SHOW_TEMP_GAUGE = booleanPreferencesKey("show_temp_gauge")
+        val TEMP_GAUGE_SIDE = stringPreferencesKey("temp_gauge_side")
+        val CLOUD_SYNC_ALERTS = booleanPreferencesKey("cloud_sync_alerts")
+        val PENDING_TEMP_CONFIG = stringPreferencesKey("pending_temp_config")
     }
 
     suspend fun load(): Persisted {
@@ -139,6 +152,12 @@ class SettingsStore(private val context: Context) {
             gpsEnabled = p[K.GPS_ENABLED],
             importWatermark = p[K.IMPORT_WATERMARK] ?: 0L,
             importDone = p[K.IMPORT_DONE] ?: false,
+            tempThresholdsByProfile = p[K.TEMP_THRESHOLDS]?.let(::decodeTempThresholds) ?: emptyMap(),
+            tempAlertsEnabled = p[K.TEMP_ALERTS_ENABLED] ?: true,
+            showTempGauge = p[K.SHOW_TEMP_GAUGE] ?: true,
+            tempGaugeSide = p[K.TEMP_GAUGE_SIDE],
+            cloudSyncAlerts = p[K.CLOUD_SYNC_ALERTS] ?: true,
+            pendingTempConfig = p[K.PENDING_TEMP_CONFIG],
         )
     }
 
@@ -180,6 +199,16 @@ class SettingsStore(private val context: Context) {
     suspend fun setGpsEnabled(on: Boolean) = context.dataStore.edit { it[K.GPS_ENABLED] = on }.let {}
     suspend fun setImportWatermark(v: Long) = context.dataStore.edit { it[K.IMPORT_WATERMARK] = v }.let {}
     suspend fun setImportDone(on: Boolean) = context.dataStore.edit { it[K.IMPORT_DONE] = on }.let {}
+    suspend fun setTempThresholds(map: Map<String, TempThresholds>) =
+        context.dataStore.edit { it[K.TEMP_THRESHOLDS] = encodeTempThresholds(map) }.let {}
+    suspend fun setTempAlertsEnabled(on: Boolean) = context.dataStore.edit { it[K.TEMP_ALERTS_ENABLED] = on }.let {}
+    suspend fun setShowTempGauge(on: Boolean) = context.dataStore.edit { it[K.SHOW_TEMP_GAUGE] = on }.let {}
+    suspend fun setTempGaugeSide(side: String) = context.dataStore.edit { it[K.TEMP_GAUGE_SIDE] = side }.let {}
+    suspend fun setCloudSyncAlerts(on: Boolean) = context.dataStore.edit { it[K.CLOUD_SYNC_ALERTS] = on }.let {}
+    suspend fun setPendingTempConfig(json: String) =
+        context.dataStore.edit { it[K.PENDING_TEMP_CONFIG] = json }.let {}
+    suspend fun clearPendingTempConfig() =
+        context.dataStore.edit { it.remove(K.PENDING_TEMP_CONFIG) }.let {}
 
     suspend fun installUuid(): String {
         val existing = context.dataStore.data.first()[K.INSTALL_UUID]
@@ -202,6 +231,32 @@ private fun decodeStage(s: String?): StageTarget? = when {
     s.startsWith("single:") -> StageTarget.Single(s.removePrefix("single:"))
     else -> null
 }
+
+/** Per-profile temperature thresholds (profileId -> the four °C values). */
+private fun encodeTempThresholds(map: Map<String, TempThresholds>): String {
+    val root = JSONObject()
+    map.forEach { (id, t) ->
+        root.put(id, JSONObject()
+            .put("coldCautionC", t.coldCautionC).put("hotCautionC", t.hotCautionC)
+            .put("coldCritC", t.coldCritC).put("hotCritC", t.hotCritC))
+    }
+    return root.toString()
+}
+
+private fun decodeTempThresholds(json: String): Map<String, TempThresholds> = runCatching {
+    val root = JSONObject(json)
+    buildMap {
+        root.keys().forEach { id ->
+            val o = root.getJSONObject(id)
+            put(id, TempThresholds(
+                coldCautionC = o.optInt("coldCautionC", 5),
+                hotCautionC = o.optInt("hotCautionC", 45),
+                coldCritC = o.optInt("coldCritC", -12),
+                hotCritC = o.optInt("hotCritC", 53),
+            ))
+        }
+    }
+}.getOrDefault(emptyMap())
 
 /** JSON forbids NaN/Infinity; coerce any non-finite reading to 0 before writing. */
 private fun Float.jsonSafe(): Double = if (isFinite()) toDouble() else 0.0

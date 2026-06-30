@@ -12,9 +12,22 @@ import dev.joely.bmsmon.data.PackHealth
 import dev.joely.bmsmon.data.SettingsStore
 import dev.joely.bmsmon.data.buildPackHealth
 import dev.joely.bmsmon.data.peakPool
+import dev.joely.bmsmon.ble.profile.BatteryProfile
+import dev.joely.bmsmon.ble.profile.ProfileRegistry
+import dev.joely.bmsmon.cloud.CloudJson
+import dev.joely.bmsmon.ble.profile.RedodoBekenProfile
 import dev.joely.bmsmon.model.AlertConfig
+import dev.joely.bmsmon.model.AlertKind
 import dev.joely.bmsmon.model.BatteryGroup
 import dev.joely.bmsmon.model.BatteryState
+import dev.joely.bmsmon.model.GaugeSide
+import dev.joely.bmsmon.model.TempRank
+import dev.joely.bmsmon.model.TempSide
+import dev.joely.bmsmon.model.TempThresholds
+import dev.joely.bmsmon.model.TempUnit
+import dev.joely.bmsmon.model.formatDelta
+import dev.joely.bmsmon.model.tempMarginToCutoffC
+import dev.joely.bmsmon.model.tempZone
 import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.DEFAULT_GROUP_ID
 import dev.joely.bmsmon.model.DEFAULT_ROSTER
@@ -81,6 +94,13 @@ data class StageAlert(
     val lowSoc: Int,
     val activeThreshold: Int?,
     val ackEffective: Set<Int>,
+    val kind: AlertKind = AlertKind.CAPACITY,
+    val headline: String = "BATTERY CAPACITY",
+    val detail: String = "",
+    val tempAckKey: String? = null,
+    val tempActive: Boolean = false,
+    /** A condition is present (flashing OR acknowledged). Drives the persistent ack'd strip. */
+    val present: Boolean = false,
 )
 
 data class UiState(
@@ -117,6 +137,13 @@ data class UiState(
     val enabledThresholds: Set<Int> = DEFAULT_THRESHOLDS.toSet(),
     val acknowledgedThresholds: Set<Int> = emptySet(),
     val criticalThreshold: Int = DEFAULT_CRITICAL_THRESHOLD,
+    // temperature alerts (per-profile thresholds; unit reuses tempFahrenheit below)
+    val tempAlertsEnabled: Boolean = true,
+    val tempThresholdsByProfile: Map<String, TempThresholds> = emptyMap(),
+    val acknowledgedTempKeys: Set<String> = emptySet(),
+    val showTempGauge: Boolean = true,
+    val tempGaugeSide: GaugeSide = GaugeSide.LEFT,
+    val cloudSyncAlerts: Boolean = true,
     val keepScreenOn: Boolean = true,
     val tempFahrenheit: Boolean = true,
     val detailAddress: String? = null,
@@ -147,6 +174,21 @@ data class UiState(
     val dailyDriver: BatteryGroup
         get() = roster.groupById(dailyDriverId) ?: BatteryGroup(dailyDriverId, dailyDriverId, emptyList())
     val stageGroupId: String? get() = (stageTarget as? StageTarget.Base)?.groupId
+
+    /** App-wide temperature unit (reuses the existing °C/°F preference). */
+    val tempUnit: TempUnit get() = if (tempFahrenheit) TempUnit.F else TempUnit.C
+
+    /** Battery profile backing the current stage (Redodo today); carries the temp envelope/defaults. */
+    fun stageProfile(): BatteryProfile {
+        val name = stageTarget.addresses(roster).firstOrNull()?.let { roster.batteryAt(it)?.advertisedName }
+        return ProfileRegistry.profileFor(name) ?: RedodoBekenProfile
+    }
+
+    /** Resolved temperature thresholds for [profileId] — stored overrides, else the profile defaults. */
+    fun tempThresholdsFor(profileId: String): TempThresholds =
+        tempThresholdsByProfile[profileId]
+            ?: (ProfileRegistry.all.firstOrNull { it.id == profileId } ?: RedodoBekenProfile)
+                .tempEnvelope.defaults
 
     /** The 1–2 stage packs with their regen flags. A pack without live data reads DISCONNECTED. */
     fun stageItems(): List<StageItem> {
@@ -188,18 +230,65 @@ data class UiState(
      * flashes; a charging low pack suppresses it; acks only count while still crossed.
      */
     fun stageAlert(): StageAlert {
-        if (!monitoring) return StageAlert(false, false, 100, null, emptySet())
+        val none = StageAlert(false, false, 100, null, emptySet())
+        if (!monitoring) return none
         val packs = stageTarget.addresses(roster)
-            .mapNotNull { fleet[it]?.takeIf { s -> s.reachable }?.telemetry }
-        // Shared with the headless engine notifier via evalStageAlert; the ack layer is UI-only.
-        val eval = evalStageAlert(
-            packs.map { PackSoc(it.soc, it.state == BatteryState.Charging) },
+            .mapNotNull { a -> fleet[a]?.takeIf { it.reachable }?.telemetry?.let { a to it } }
+        if (packs.isEmpty()) return none
+
+        // --- capacity (existing low-battery behavior) ---
+        val capEval = evalStageAlert(
+            packs.map { PackSoc(it.second.soc, it.second.state == BatteryState.Charging) },
             AlertConfig(alertsOn, enabledThresholds, criticalThreshold),
         )
-        val ackEffective = acknowledgedThresholds.intersect(eval.crossed)
-        val flashing = !eval.charging &&
-            eval.activeThreshold != null && eval.activeThreshold !in ackEffective
-        return StageAlert(flashing, eval.critical, eval.lowSoc, eval.activeThreshold, ackEffective)
+        val capAck = acknowledgedThresholds.intersect(capEval.crossed)
+        val capFlashing = !capEval.charging &&
+            capEval.activeThreshold != null && capEval.activeThreshold !in capAck
+        val capSeverity = when {
+            capEval.activeThreshold == null || capEval.charging -> -1
+            capEval.critical -> 3
+            else -> 2
+        }
+
+        // --- temperature (worst reachable stage pack; flashes only at rank >= CRITICAL) ---
+        val profile = stageProfile()
+        val thr = tempThresholdsFor(profile.id)
+        val env = profile.tempEnvelope
+        val worst = packs
+            .map { (addr, t) -> Triple(addr, t, tempZone(t.temp, thr, env)) }
+            .maxByOrNull { it.third.rank.ordinal }
+        val tempRank = worst?.third?.rank ?: TempRank.SAFE
+        val tempPresent = tempAlertsEnabled && tempRank.ordinal >= TempRank.CRITICAL.ordinal
+        val tempSeverity = if (tempPresent) tempRank.ordinal else -1
+
+        // Worst alert wins; on a tie temperature takes the stage (it warns before the BMS cutoff).
+        if (tempPresent && tempSeverity >= capSeverity && worst != null) {
+            val (addr, tel, zone) = worst
+            val name = roster.batteryAt(addr)?.alias ?: tel.name
+            val side = if (zone.side == TempSide.COLD) "COLD" else "HOT"
+            val rankStr = if (zone.rank == TempRank.CUTOFF) "CUTOFF" else "CRITICAL"
+            val detail = if (zone.rank == TempRank.CUTOFF) {
+                "$rankStr · $side · $name · LOAD DISCONNECTED"
+            } else {
+                val margin = tempMarginToCutoffC(tel.temp, zone.side, env)
+                "$rankStr · $side · $name · ${formatDelta(margin, tempUnit)} TO CUTOFF"
+            }
+            val ackKey = "temp:$side:$rankStr"
+            return StageAlert(
+                flashing = ackKey !in acknowledgedTempKeys, critical = true,
+                lowSoc = tel.soc.roundToInt(), activeThreshold = null, ackEffective = emptySet(),
+                kind = AlertKind.TEMPERATURE, headline = "TEMPERATURE", detail = detail,
+                tempAckKey = ackKey, tempActive = true, present = true,
+            )
+        }
+
+        return StageAlert(
+            flashing = capFlashing, critical = capEval.critical, lowSoc = capEval.lowSoc,
+            activeThreshold = capEval.activeThreshold, ackEffective = capAck,
+            kind = AlertKind.CAPACITY, headline = "BATTERY CAPACITY",
+            detail = "LOW BATTERY · ${capEval.lowSoc}% · BELOW ${capEval.activeThreshold ?: 0}%",
+            present = capEval.activeThreshold != null && !capEval.charging,
+        )
     }
 }
 
@@ -255,6 +344,12 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     criticalThreshold = p.criticalThreshold ?: s.criticalThreshold,
                     keepScreenOn = p.keepScreenOn,
                     tempFahrenheit = p.tempFahrenheit,
+                    tempAlertsEnabled = p.tempAlertsEnabled,
+                    tempThresholdsByProfile = p.tempThresholdsByProfile,
+                    showTempGauge = p.showTempGauge,
+                    tempGaugeSide = runCatching { GaugeSide.valueOf(p.tempGaugeSide ?: "LEFT") }
+                        .getOrDefault(GaugeSide.LEFT),
+                    cloudSyncAlerts = p.cloudSyncAlerts,
                     locked = p.locked,
                     lockShowTime = p.lockShowTime,
                     lockShowWifi = p.lockShowWifi,
@@ -610,6 +705,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         engine.setDisabled(_state.value.disabled)
         engine.setStage(currentStageAddrs())
         pushAlertConfig()
+        pushTempConfig()
         engine.setGpsActive(_state.value.gpsEnabled && _state.value.enrolled && _state.value.cloudEnabled)
         engine.importLegacyCsvIfNeeded(
             alreadyImported = _state.value.csvImported,
@@ -771,6 +867,52 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(tempFahrenheit = enabled) }
         viewModelScope.launch { store.setTempFahrenheit(enabled) }
     }
+    fun toggleTempUnit() = setTempFahrenheit(!_state.value.tempFahrenheit)
+
+    // --- temperature alerts ---
+    /** Mirror temp settings to the headless engine so it can flash/notify off-screen. */
+    private fun pushTempConfig() =
+        engine.setTempAlertConfig(_state.value.tempAlertsEnabled, _state.value.tempThresholdsByProfile)
+
+    fun setTempAlertsEnabled(on: Boolean) {
+        _state.update { it.copy(tempAlertsEnabled = on) }
+        viewModelScope.launch { store.setTempAlertsEnabled(on) }
+        pushTempConfig()
+    }
+    fun setShowTempGauge(on: Boolean) {
+        _state.update { it.copy(showTempGauge = on) }
+        viewModelScope.launch { store.setShowTempGauge(on) }
+    }
+    fun setTempGaugeSide(side: GaugeSide) {
+        _state.update { it.copy(tempGaugeSide = side) }
+        viewModelScope.launch { store.setTempGaugeSide(side.name) }
+    }
+    fun setTempThresholds(profileId: String, t: TempThresholds) {
+        _state.update { it.copy(tempThresholdsByProfile = it.tempThresholdsByProfile + (profileId to t)) }
+        viewModelScope.launch { store.setTempThresholds(_state.value.tempThresholdsByProfile) }
+        pushTempConfig()
+        enqueueTempConfig(profileId)
+    }
+    fun resetTempThresholds(profileId: String) {
+        val defaults = (ProfileRegistry.all.firstOrNull { it.id == profileId } ?: RedodoBekenProfile)
+            .tempEnvelope.defaults
+        setTempThresholds(profileId, defaults)
+    }
+    fun setCloudSyncAlerts(on: Boolean) {
+        _state.update { it.copy(cloudSyncAlerts = on) }
+        viewModelScope.launch { store.setCloudSyncAlerts(on) }
+        if (on) enqueueTempConfig(_state.value.stageProfile().id)
+    }
+
+    /** Queue this profile's threshold config for the one-way cloud push (drained by the uploader). */
+    private fun enqueueTempConfig(profileId: String) {
+        if (!_state.value.cloudSyncAlerts || !_state.value.enrolled) return
+        val t = _state.value.tempThresholdsFor(profileId)
+        val unit = if (_state.value.tempFahrenheit) "F" else "C"
+        viewModelScope.launch {
+            store.setPendingTempConfig(CloudJson.encodeTempConfig(profileId, t, unit, clockMs()))
+        }
+    }
 
     fun setLocked(enabled: Boolean) {
         _state.update { it.copy(locked = enabled) }
@@ -790,11 +932,16 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { store.setLockShowBattery(on) }
     }
 
-    /** Acknowledge the active alert: silence it until SOC drops past the next enabled level. */
+    /** Acknowledge the active alert: silence it until the condition changes/resolves. */
     fun acknowledgeAlert() = _state.update { s ->
         val a = s.stageAlert()
-        if (a.activeThreshold == null) s
-        else s.copy(acknowledgedThresholds = a.ackEffective + a.activeThreshold)
+        when {
+            a.kind == AlertKind.TEMPERATURE && a.tempAckKey != null ->
+                s.copy(acknowledgedTempKeys = s.acknowledgedTempKeys + a.tempAckKey)
+            a.activeThreshold != null ->
+                s.copy(acknowledgedThresholds = a.ackEffective + a.activeThreshold)
+            else -> s
+        }
     }
 
     private fun currentStageAddrs(): Set<String> =

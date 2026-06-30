@@ -1,5 +1,6 @@
 package dev.joely.bmsmon.cloud
 
+import dev.joely.bmsmon.model.TempThresholds
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -50,4 +51,23 @@ object CloudJson {
     /** Wrap pre-serialized sample JSON object strings into the ingest batch body bytes. */
     fun encodeBatch(seq: Int, rows: List<String>): ByteArray =
         ("""{"batch_seq":$seq,"samples":[""" + rows.joinToString(",") + "]}").toByteArray()
+
+    /** One-way temperature-alert config push body (phone → cloud). [unit] is "C"/"F". */
+    fun encodeTempConfig(profileId: String, t: TempThresholds, unit: String, updatedAtMs: Long): String =
+        json.encodeToString(
+            TempConfigJson.serializer(),
+            TempConfigJson(profileId, t.coldCautionC, t.hotCautionC, t.coldCritC, t.hotCritC,
+                unit, updatedAtMs),
+        )
 }
+
+@Serializable
+data class TempConfigJson(
+    val profile_id: String,
+    val cold_caution_c: Int,
+    val hot_caution_c: Int,
+    val cold_crit_c: Int,
+    val hot_crit_c: Int,
+    val unit: String,
+    val updated_at_ms: Long,
+)

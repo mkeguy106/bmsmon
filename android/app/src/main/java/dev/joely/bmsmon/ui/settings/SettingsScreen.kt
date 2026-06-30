@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DisplaySettings
+import androidx.compose.material.icons.filled.Thermostat
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Lock
@@ -70,7 +71,10 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -80,13 +84,21 @@ import dev.joely.bmsmon.UiState
 import dev.joely.bmsmon.fractionToLux
 import dev.joely.bmsmon.luxToFraction
 import dev.joely.bmsmon.model.BatteryGroup
+import dev.joely.bmsmon.model.GaugeSide
 import dev.joely.bmsmon.model.STAGE_HOLD_OPTIONS_MIN
+import dev.joely.bmsmon.model.TempThresholds
+import dev.joely.bmsmon.model.TempUnit
+import dev.joely.bmsmon.model.cToF
+import dev.joely.bmsmon.model.formatDelta
+import dev.joely.bmsmon.model.formatTemp
 import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.ui.theme.AlertCritical
+import dev.joely.bmsmon.ui.theme.AlertWarn
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
 import dev.joely.bmsmon.ui.theme.PowerSwatches
 import dev.joely.bmsmon.ui.theme.RegenGreen
+import dev.joely.bmsmon.ui.theme.TempCool
 import dev.joely.bmsmon.ui.theme.ThemeSwatches
 import kotlin.math.roundToInt
 
@@ -98,7 +110,7 @@ private val CatPurple = Color(0xFF8B6BC9)
 private val CatBlue = Color(0xFF3E86C9)
 
 /** The nine category detail pages the hub drills into. */
-private enum class SettingsPage { Monitoring, Alerts, Groups, Appearance, Display, Lock, Data, About, Cloud }
+private enum class SettingsPage { Monitoring, Alerts, Temperature, Groups, Appearance, Display, Lock, Data, About, Cloud }
 
 @Composable
 fun SettingsScreen(
@@ -113,6 +125,13 @@ fun SettingsScreen(
     onToggleThreshold: (Int) -> Unit,
     onSetCriticalThreshold: (Int) -> Unit,
     onResetAlerts: () -> Unit,
+    onSetTempAlertsEnabled: (Boolean) -> Unit,
+    onSetShowTempGauge: (Boolean) -> Unit,
+    onSetTempGaugeSide: (GaugeSide) -> Unit,
+    onSetTempThresholds: (String, TempThresholds) -> Unit,
+    onResetTempThresholds: (String) -> Unit,
+    onSetCloudSyncAlerts: (Boolean) -> Unit,
+    onToggleTempUnit: () -> Unit,
     onSetKeepScreenOn: (Boolean) -> Unit,
     onSetTempFahrenheit: (Boolean) -> Unit,
     onSetLogging: (Boolean) -> Unit,
@@ -143,6 +162,10 @@ fun SettingsScreen(
         }
         SettingsPage.Alerts -> DetailScaffold("Alerts", { page = null }) {
             AlertsContent(state, onSetAlertsOn, onToggleThreshold, onSetCriticalThreshold, onResetAlerts)
+        }
+        SettingsPage.Temperature -> DetailScaffold("Temperature", { page = null }) {
+            TemperatureContent(state, onSetTempAlertsEnabled, onSetShowTempGauge, onSetTempGaugeSide,
+                onSetTempThresholds, onResetTempThresholds, onSetCloudSyncAlerts, onToggleTempUnit)
         }
         SettingsPage.Groups -> DetailScaffold("Battery Groups", { page = null }) {
             GroupsContent(state, onSetDailyDriver, onAddScan)
@@ -211,6 +234,10 @@ private fun SettingsHub(
                 ) { onOpen(SettingsPage.Alerts) }
                 RowHairline()
                 CategoryRow(
+                    Icons.Filled.Thermostat, TempCool, "Temperature", tempValue(state),
+                ) { onOpen(SettingsPage.Temperature) }
+                RowHairline()
+                CategoryRow(
                     Icons.Filled.BatteryFull, RegenGreen, "Battery groups",
                     "$bases bases · driver ${state.dailyDriverId}",
                 ) { onOpen(SettingsPage.Groups) }
@@ -266,6 +293,9 @@ private fun alertsValue(state: UiState): String {
     if (!state.alertsOn || state.enabledThresholds.isEmpty()) return "Off"
     return "On · " + state.enabledThresholds.sortedDescending().joinToString("/") + "%"
 }
+
+private fun tempValue(state: UiState): String =
+    if (!state.tempAlertsEnabled) "Off" else "On · ${if (state.tempFahrenheit) "°F" else "°C"}"
 
 private fun lockValue(state: UiState): String {
     val parts = buildList {
@@ -665,6 +695,276 @@ private fun ColumnScope.AlertsContent(
         horizontalArrangement = Arrangement.Center,
     ) {
         PillButton("Reset to defaults", outlined = true, onClick = onResetAlerts)
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// 2b · Temperature › Battery Profile
+// ────────────────────────────────────────────────────────────────────────────
+
+@Composable
+private fun ColumnScope.TemperatureContent(
+    state: UiState,
+    onSetTempAlertsEnabled: (Boolean) -> Unit,
+    onSetShowTempGauge: (Boolean) -> Unit,
+    onSetTempGaugeSide: (GaugeSide) -> Unit,
+    onSetTempThresholds: (String, TempThresholds) -> Unit,
+    onResetTempThresholds: (String) -> Unit,
+    onSetCloudSyncAlerts: (Boolean) -> Unit,
+    onToggleTempUnit: () -> Unit,
+) {
+    val c = Bm.colors
+    val profile = state.stageProfile()
+    val env = profile.tempEnvelope
+    val t = state.tempThresholdsFor(profile.id)
+    val unit = state.tempUnit
+    fun alt(valueC: Int) = if (unit == TempUnit.F) "(${valueC}°C)" else "(${cToF(valueC.toFloat())}°F)"
+
+    // identity card
+    GroupedCard {
+        Row(Modifier.padding(15.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.size(44.dp).clip(RoundedCornerShape(10.dp)).background(c.inputBg)
+                    .border(1.dp, c.border, RoundedCornerShape(10.dp)),
+                contentAlignment = Alignment.Center,
+            ) { Text("G24", color = Bm.accent, fontSize = 14.sp, fontWeight = FontWeight.Bold, fontFamily = MonoFont) }
+            Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                Text("Redodo 12V 100Ah · Group 24 · BT", color = c.text, fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold)
+                Text(profile.id, color = c.text3, fontSize = 11.sp, fontFamily = MonoFont,
+                    modifier = Modifier.padding(top = 2.dp))
+            }
+        }
+        Row(Modifier.padding(start = 15.dp, end = 15.dp, bottom = 13.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            listOf("LiFePO4", "12.8V", "100Ah", "BT 5.0").forEach { chip ->
+                Text(chip, color = c.text2, fontSize = 10.sp, fontFamily = MonoFont,
+                    modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(c.inputBg)
+                        .border(1.dp, c.border, RoundedCornerShape(6.dp))
+                        .padding(horizontal = 8.dp, vertical = 3.dp))
+            }
+        }
+    }
+
+    // unit + master toggle
+    GroupedCard {
+        Row(Modifier.padding(15.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Units", color = c.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f))
+            Segmented2("°C", "°F", selectedRight = unit == TempUnit.F) { onToggleTempUnit() }
+        }
+    }
+    GroupedCard {
+        ToggleRow("Flash stage on temperature",
+            "Pulse the stage and require acknowledgement when a pack crosses a temperature limit.",
+            state.tempAlertsEnabled, onSetTempAlertsEnabled)
+    }
+
+    // main stage gauge
+    SectionLabel("Main stage")
+    GroupedCard {
+        ToggleRow("Show temperature gauge",
+            "Display the vertical thermometer next to the battery gauge on the main stage.",
+            state.showTempGauge, onSetShowTempGauge)
+        RowHairline()
+        Row(Modifier.padding(15.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                Text("Gauge position", color = c.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Text("Side of the battery gauge.", color = c.text2, fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 4.dp))
+            }
+            Segmented2("LEFT", "RIGHT", selectedRight = state.tempGaugeSide == GaugeSide.RIGHT) {
+                onSetTempGaugeSide(if (state.tempGaugeSide == GaugeSide.RIGHT) GaugeSide.LEFT else GaugeSide.RIGHT)
+            }
+        }
+    }
+
+    // caution thresholds
+    SectionLabel("Caution thresholds")
+    PlainCard {
+        ThresholdRow("Cold caution  ≤", TempCool, t.coldCautionC, 0, 15, unit, ::alt) {
+            onSetTempThresholds(profile.id, t.copy(coldCautionC = it))
+        }
+        Spacer(Modifier.height(18.dp))
+        ThresholdRow("Hot caution  ≥", AlertWarn, t.hotCautionC, 35, 55, unit, ::alt) {
+            onSetTempThresholds(profile.id, t.copy(hotCautionC = it))
+        }
+    }
+
+    // critical thresholds
+    SectionLabel("Critical thresholds")
+    PlainCard {
+        ThresholdRow("Cold critical  ≤", AlertCritical, t.coldCritC, -19, -2, unit, ::alt) {
+            onSetTempThresholds(profile.id, t.copy(coldCritC = it))
+        }
+        Spacer(Modifier.height(18.dp))
+        ThresholdRow("Hot critical  ≥", AlertCritical, t.hotCritC, 50, 59, unit, ::alt) {
+            onSetTempThresholds(profile.id, t.copy(hotCritC = it))
+        }
+        Spacer(Modifier.height(14.dp))
+        Text(
+            buildAnnotatedString {
+                append("Critical fires ")
+                withStyle(SpanStyle(color = AlertCritical, fontWeight = FontWeight.SemiBold)) { append("before") }
+                append(" the BMS cutoff so the chair warns you with power to spare.")
+            },
+            color = c.text2, fontSize = 12.sp, lineHeight = 17.sp,
+        )
+    }
+
+    // next-alert info
+    Box(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+            .background(AlertCritical.copy(alpha = 0.07f))
+            .border(1.dp, AlertCritical.copy(alpha = 0.25f), RoundedCornerShape(12.dp)).padding(14.dp),
+    ) {
+        Text(
+            "Stage will flash ${state.stageLabel} at ${formatTemp(t.coldCritC.toFloat(), unit)} " +
+                "(cold critical) — ${formatDelta(t.coldCritC - env.coldCutoffC, unit)} of margin before the " +
+                "${formatTemp(env.coldCutoffC.toFloat(), unit)} cutoff.",
+            color = c.text2, fontSize = 12.sp, lineHeight = 17.sp,
+        )
+    }
+
+    // fixed cutoffs
+    SectionLabel("BMS cutoffs · fixed")
+    GroupedCard {
+        Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            CutoffTile("COLD CUTOFF", formatTemp(env.coldCutoffC.toFloat(), unit), alt(env.coldCutoffC), Modifier.weight(1f))
+            CutoffTile("HOT CUTOFF", formatTemp(env.hotCutoffC.toFloat(), unit), alt(env.hotCutoffC), Modifier.weight(1f))
+        }
+        Text("Hardware limits from the battery profile — not adjustable.", color = c.text3,
+            fontSize = 11.sp, lineHeight = 16.sp, modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 14.dp))
+    }
+
+    // cloud sync
+    SectionLabel("Cloud sync")
+    GroupedCard {
+        ToggleRow("Push alert settings to cloud",
+            "Upload this profile's thresholds so the web dashboard alerts on exactly what the phone does.",
+            state.cloudSyncAlerts, onSetCloudSyncAlerts)
+        RowHairline()
+        Row(Modifier.padding(15.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("STATUS", color = c.text3, fontSize = 10.sp, fontFamily = MonoFont, letterSpacing = 1.sp)
+                Text(
+                    if (state.cloudSyncAlerts) "Web dashboard mirrors this phone"
+                    else "Web dashboard keeps its last values",
+                    color = c.text, fontSize = 13.sp, modifier = Modifier.padding(top = 3.dp),
+                )
+            }
+            val dot = if (state.cloudSyncAlerts) RegenGreen else c.text3
+            Box(Modifier.size(8.dp).clip(CircleShape).background(dot))
+            Text(if (state.cloudSyncAlerts) "Synced" else "Paused", color = dot, fontSize = 11.sp,
+                fontFamily = MonoFont, modifier = Modifier.padding(start = 7.dp))
+        }
+        RowHairline()
+        Row(Modifier.padding(15.dp), horizontalArrangement = Arrangement.spacedBy(7.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            SyncNode("PHONE", "SOURCE", source = true, modifier = Modifier.weight(1f))
+            Text("→", color = c.text3, fontSize = 14.sp)
+            SyncNode("CLOUD", "RELAY", source = false, modifier = Modifier.weight(1f))
+            Text("→", color = c.text3, fontSize = 14.sp)
+            SyncNode("WEB", "MIRROR", source = false,
+                modifier = Modifier.weight(1f).alpha(if (state.cloudSyncAlerts) 1f else 0.4f))
+        }
+    }
+
+    // reset
+    val isDefault = t == env.defaults
+    Box(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(11.dp))
+            .border(1.dp, Bm.accent, RoundedCornerShape(11.dp))
+            .clickable { onResetTempThresholds(profile.id) }.padding(13.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(if (isDefault) "✓ At Redodo factory defaults" else "Reset to Redodo factory defaults",
+            color = Bm.accent, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@Composable
+private fun ColumnScope.ThresholdRow(
+    label: String, color: Color, valueC: Int, minC: Int, maxC: Int, unit: TempUnit,
+    alt: (Int) -> String, onChange: (Int) -> Unit,
+) {
+    val c = Bm.colors
+    val frac = ((valueC - minC).toFloat() / (maxC - minC)).coerceIn(0f, 1f)
+    Column {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(8.dp).clip(CircleShape).background(color))
+            Text(label, color = c.text, fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(start = 8.dp).weight(1f))
+            Text(formatTemp(valueC.toFloat(), unit), color = color, fontSize = 14.sp,
+                fontWeight = FontWeight.Bold, fontFamily = MonoFont)
+            Text(alt(valueC), color = c.text3, fontSize = 11.sp, fontFamily = MonoFont,
+                modifier = Modifier.padding(start = 8.dp))
+            Stepper("−", Modifier.padding(start = 10.dp)) { onChange((valueC - 1).coerceIn(minC, maxC)) }
+            Stepper("+", Modifier.padding(start = 8.dp)) { onChange((valueC + 1).coerceIn(minC, maxC)) }
+        }
+        Box(Modifier.fillMaxWidth().padding(top = 9.dp).height(14.dp), contentAlignment = Alignment.CenterStart) {
+            Box(Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp)).background(c.inputBg))
+            Box(Modifier.fillMaxWidth(frac).height(5.dp).clip(RoundedCornerShape(3.dp)).background(color))
+            Row(Modifier.fillMaxWidth()) {
+                Spacer(Modifier.weight(frac.coerceIn(0.001f, 0.999f)))
+                Box(Modifier.size(14.dp).clip(CircleShape).background(Color.White).border(3.dp, color, CircleShape))
+                Spacer(Modifier.weight((1f - frac).coerceIn(0.001f, 0.999f)))
+            }
+        }
+    }
+}
+
+@Composable
+private fun Stepper(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val c = Bm.colors
+    Box(
+        modifier.size(28.dp).clip(RoundedCornerShape(7.dp)).background(c.inputBg)
+            .border(1.dp, c.inputBorder, RoundedCornerShape(7.dp)).clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) { Text(label, color = c.text, fontSize = 16.sp, fontFamily = MonoFont) }
+}
+
+@Composable
+private fun Segmented2(left: String, right: String, selectedRight: Boolean, onToggle: () -> Unit) {
+    val c = Bm.colors
+    Row(Modifier.clip(RoundedCornerShape(9.dp)).border(1.dp, c.inputBorder, RoundedCornerShape(9.dp))) {
+        listOf(left to false, right to true).forEach { (lbl, isRight) ->
+            val sel = selectedRight == isRight
+            Text(lbl, color = if (sel) Bm.accent else c.text2, fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold, fontFamily = MonoFont,
+                modifier = Modifier
+                    .background(if (sel) Bm.accent.copy(alpha = 0.16f) else Color.Transparent)
+                    .clickable { if (selectedRight != isRight) onToggle() }
+                    .padding(horizontal = 16.dp, vertical = 8.dp))
+        }
+    }
+}
+
+@Composable
+private fun CutoffTile(label: String, value: String, alt: String, modifier: Modifier = Modifier) {
+    val c = Bm.colors
+    Column(modifier.clip(RoundedCornerShape(9.dp)).background(c.inputBg)
+        .border(1.dp, c.border, RoundedCornerShape(9.dp)).padding(11.dp)) {
+        Text(label, color = c.text3, fontSize = 10.sp, fontFamily = MonoFont, letterSpacing = 1.sp)
+        Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.padding(top = 4.dp)) {
+            Text(value, color = c.text, fontSize = 18.sp, fontWeight = FontWeight.Bold, fontFamily = MonoFont)
+            Text(alt, color = c.text3, fontSize = 12.sp, fontFamily = MonoFont,
+                modifier = Modifier.padding(start = 4.dp))
+        }
+    }
+}
+
+@Composable
+private fun RowScope.SyncNode(title: String, sub: String, source: Boolean, modifier: Modifier = Modifier) {
+    val c = Bm.colors
+    val border = if (source) Bm.accent else c.border
+    val bg = if (source) Bm.accent.copy(alpha = 0.14f) else c.inputBg
+    val fg = if (source) Bm.accent else c.text2
+    Column(modifier.clip(RoundedCornerShape(9.dp)).background(bg).border(1.dp, border, RoundedCornerShape(9.dp))
+        .padding(vertical = 10.dp, horizontal = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(title, color = fg, fontSize = 10.5.sp, fontWeight = FontWeight.Bold, fontFamily = MonoFont)
+        Text(sub, color = if (source) Bm.accent else c.text3, fontSize = 8.sp, fontFamily = MonoFont,
+            modifier = Modifier.padding(top = 3.dp))
     }
 }
 

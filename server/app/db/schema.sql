@@ -47,3 +47,18 @@ CREATE INDEX IF NOT EXISTS samples_addr_ts ON samples (address, ts DESC);
 ALTER TABLE samples ADD COLUMN IF NOT EXISTS lat double precision;
 ALTER TABLE samples ADD COLUMN IF NOT EXISTS lon double precision;
 ALTER TABLE samples ADD COLUMN IF NOT EXISTS gps_accuracy_m real;
+
+-- One-way temperature-alert config pushed from the phone (latest-wins per device+profile). The
+-- webui reads these to alert on exactly what the phone does; there is no write path back from web.
+CREATE TABLE IF NOT EXISTS device_temp_config (
+  device_id uuid NOT NULL,
+  profile_id text NOT NULL,
+  cold_caution_c int NOT NULL,
+  hot_caution_c int NOT NULL,
+  cold_crit_c int NOT NULL,
+  hot_crit_c int NOT NULL,
+  unit text NOT NULL,
+  updated_at_ms bigint NOT NULL,
+  received_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (device_id, profile_id)
+);
