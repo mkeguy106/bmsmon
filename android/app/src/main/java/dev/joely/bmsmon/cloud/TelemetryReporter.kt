@@ -93,45 +93,50 @@ class TelemetryReporter(
         var backoff = 1000L
         var seq = 0
         while (true) {
-            val p = settings.load()
-            val base = p.apiBaseUrl
-            if (!p.cloudEnabled || !p.enrolled || p.deviceId == null || base == null) {
-                delay(2000)
-                continue
-            }
-            // Cap the outbox — drop oldest rows if over limit.
-            val depth = db.outbox().count()
-            if (depth > OUTBOX_MAX) db.outbox().dropOldest(depth - OUTBOX_MAX)
-            if (!conn.online.value || depth == 0) {
-                onStatus?.invoke(depth.toLong(), lastUploadMs)
-                delay(1500)
-                continue
-            }
-            val rows = db.outbox().peek(BATCH)
-            if (rows.isEmpty()) {
-                delay(1500)
-                continue
-            }
-            seq += 1
-            // The SAME body bytes are used for both signing and POSTing.
-            val body = CloudJson.encodeBatch(seq, rows.map { it.payload })
-            val ok = runCatching {
-                val token = Jwt.signEs256(
-                    DeviceKeys.privateKey(), p.deviceId, body, System.currentTimeMillis(),
-                )
-                val req = Request.Builder()
-                    .url(CloudConfig(base).ingestUrl)
-                    .header("Authorization", "Bearer $token")
-                    .post(body.toRequestBody("application/json".toMediaType()))
-                    .build()
-                http.newCall(req).execute().use { it.isSuccessful }
-            }.getOrDefault(false)
-            if (ok) {
-                db.outbox().deleteUpTo(rows.last().id)
-                lastUploadMs = System.currentTimeMillis()
-                onStatus?.invoke(db.outbox().count().toLong(), lastUploadMs)
-                backoff = 1000L
-            } else {
+            try {
+                val p = settings.load()
+                val base = p.apiBaseUrl
+                if (!p.cloudEnabled || !p.enrolled || p.deviceId == null || base == null) {
+                    delay(2000)
+                    continue
+                }
+                // Cap the outbox — drop oldest rows if over limit.
+                val depth = db.outbox().count()
+                if (depth > OUTBOX_MAX) db.outbox().dropOldest(depth - OUTBOX_MAX)
+                if (!conn.online.value || depth == 0) {
+                    onStatus?.invoke(depth.toLong(), lastUploadMs)
+                    delay(1500)
+                    continue
+                }
+                val rows = db.outbox().peek(BATCH)
+                if (rows.isEmpty()) {
+                    delay(1500)
+                    continue
+                }
+                seq += 1
+                // The SAME body bytes are used for both signing and POSTing.
+                val body = CloudJson.encodeBatch(seq, rows.map { it.payload })
+                val ok = runCatching {
+                    val token = Jwt.signEs256(
+                        DeviceKeys.privateKey(), p.deviceId, body, System.currentTimeMillis(),
+                    )
+                    val req = Request.Builder()
+                        .url(CloudConfig(base).ingestUrl)
+                        .header("Authorization", "Bearer $token")
+                        .post(body.toRequestBody("application/json".toMediaType()))
+                        .build()
+                    http.newCall(req).execute().use { it.isSuccessful }
+                }.getOrDefault(false)
+                if (ok) {
+                    db.outbox().deleteUpTo(rows.last().id)
+                    lastUploadMs = System.currentTimeMillis()
+                    onStatus?.invoke(db.outbox().count().toLong(), lastUploadMs)
+                    backoff = 1000L
+                } else {
+                    delay(backoff)
+                    backoff = (backoff * 2).coerceAtMost(60_000L)
+                }
+            } catch (e: Exception) {
                 delay(backoff)
                 backoff = (backoff * 2).coerceAtMost(60_000L)
             }
