@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { AdminDevices } from "./components/AdminDevices";
 import { AllBatteries } from "./components/AllBatteries";
 import { MainStage } from "./components/MainStage";
 import { connectLive } from "./ws";
@@ -46,6 +47,7 @@ export default function App() {
       <div style={{ display: "grid", gap: 24 }}>
         <MainStage items={stageItems} staleAddrs={staleAddrs} />
         <AllBatteries items={items} staleAddrs={staleAddrs} />
+        <AdminDevices />
       </div>
     </div>
   );
