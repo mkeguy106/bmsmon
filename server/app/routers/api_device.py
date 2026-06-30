@@ -1,5 +1,6 @@
 import base64
 import binascii
+import gzip
 import uuid
 from datetime import datetime, timezone
 
@@ -48,6 +49,13 @@ async def ingest(request: Request, pool=Depends(get_pool)):
         raise HTTPException(401, "missing bearer")
     token = auth[7:]
     raw = await request.body()
+    # The device may gzip the body to save bandwidth. Decompress before verifying/parsing: the
+    # JWT's body hash is over the plaintext JSON, so the hash matches the decompressed bytes.
+    if request.headers.get("content-encoding", "").lower() == "gzip":
+        try:
+            raw = gzip.decompress(raw)
+        except (OSError, EOFError):
+            raise HTTPException(400, "bad gzip")
     try:
         device_id = unverified_sub(token)
     except JwtError:

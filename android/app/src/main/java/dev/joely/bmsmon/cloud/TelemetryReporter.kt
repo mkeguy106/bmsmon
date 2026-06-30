@@ -1,6 +1,8 @@
 package dev.joely.bmsmon.cloud
 
 import android.content.Context
+import java.io.ByteArrayOutputStream
+import java.util.zip.GZIPOutputStream
 import dev.joely.bmsmon.data.SettingsStore
 import dev.joely.bmsmon.data.db.BmsDatabase
 import dev.joely.bmsmon.data.db.OutboxEntity
@@ -22,6 +24,13 @@ import okhttp3.RequestBody.Companion.toRequestBody
 private const val BATCH = 200
 private const val OUTBOX_MAX = 200_000
 private const val IMPORT_PAGE = 500
+
+/** gzip [data] into a standard gzip stream (decompressible by the server's gzip.decompress). */
+internal fun gzip(data: ByteArray): ByteArray {
+    val bos = ByteArrayOutputStream(maxOf(32, data.size / 2))
+    GZIPOutputStream(bos).use { it.write(data) }
+    return bos.toByteArray()
+}
 
 class TelemetryReporter(
     appContext: Context,
@@ -161,14 +170,17 @@ class TelemetryReporter(
         }
     }
 
-    /** Sign [body] with the device key and POST to [url]. Returns true on HTTP 2xx. */
+    /** Sign [body] with the device key and POST to [url], gzipped. Returns true on HTTP 2xx. */
     private fun postSigned(url: String, deviceId: String, body: ByteArray): Boolean =
         runCatching {
+            // Sign the PLAINTEXT body (the server's body-hash is over the decompressed JSON), then
+            // gzip it as a transport layer to cut upload bandwidth (~85% on this repetitive JSON).
             val token = Jwt.signEs256(DeviceKeys.privateKey(), deviceId, body, System.currentTimeMillis())
             val req = Request.Builder()
                 .url(url)
                 .header("Authorization", "Bearer $token")
-                .post(body.toRequestBody("application/json".toMediaType()))
+                .header("Content-Encoding", "gzip")
+                .post(gzip(body).toRequestBody("application/json".toMediaType()))
                 .build()
             http.newCall(req).execute().use { it.isSuccessful }
         }.getOrDefault(false)
