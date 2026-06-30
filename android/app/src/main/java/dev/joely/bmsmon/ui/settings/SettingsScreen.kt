@@ -111,6 +111,8 @@ fun SettingsScreen(
     onSetStageHold: (Int) -> Unit,
     onSetAlertsOn: (Boolean) -> Unit,
     onToggleThreshold: (Int) -> Unit,
+    onSetCriticalThreshold: (Int) -> Unit,
+    onResetAlerts: () -> Unit,
     onSetKeepScreenOn: (Boolean) -> Unit,
     onSetTempFahrenheit: (Boolean) -> Unit,
     onSetLogging: (Boolean) -> Unit,
@@ -139,7 +141,7 @@ fun SettingsScreen(
             MonitoringStageContent(state, onToggleMonitoring, onSetDynamicStage, onSetStageHold)
         }
         SettingsPage.Alerts -> DetailScaffold("Alerts", { page = null }) {
-            AlertsContent(state, onSetAlertsOn, onToggleThreshold)
+            AlertsContent(state, onSetAlertsOn, onToggleThreshold, onSetCriticalThreshold, onResetAlerts)
         }
         SettingsPage.Groups -> DetailScaffold("Battery Groups", { page = null }) {
             GroupsContent(state, onSetDailyDriver, onAddScan)
@@ -474,16 +476,32 @@ private fun BmSwitch(checked: Boolean, onCheckedChange: (Boolean) -> Unit, enabl
 }
 
 @Composable
-private fun SelectChip(label: String, selected: Boolean, mono: Boolean = false, onClick: () -> Unit) {
+private fun SelectChip(
+    label: String,
+    selected: Boolean,
+    mono: Boolean = false,
+    tint: Color? = null,
+    onClick: () -> Unit,
+) {
     val c = Bm.colors
-    val border = if (selected) Bm.accent else c.border
-    val bg = if (selected) Bm.accent.copy(alpha = 0.14f) else Color.Transparent
+    val accent = tint ?: Bm.accent
+    val border = when {
+        selected -> accent
+        tint != null -> tint.copy(alpha = 0.4f)
+        else -> c.border
+    }
+    val bg = if (selected) accent.copy(alpha = 0.14f) else Color.Transparent
+    val textColor = when {
+        selected -> accent
+        tint != null -> tint
+        else -> c.text2
+    }
     Box(
         Modifier.clip(RoundedCornerShape(20.dp)).background(bg).border(1.dp, border, RoundedCornerShape(20.dp))
             .clickable(onClick = onClick).padding(horizontal = 15.dp, vertical = 8.dp),
     ) {
         Text(
-            label, color = if (selected) Bm.accent else c.text2,
+            label, color = textColor,
             fontFamily = if (mono) MonoFont else null,
             fontSize = 13.sp, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
         )
@@ -577,6 +595,8 @@ private fun ColumnScope.AlertsContent(
     state: UiState,
     onSetAlertsOn: (Boolean) -> Unit,
     onToggleThreshold: (Int) -> Unit,
+    onSetCriticalThreshold: (Int) -> Unit,
+    onResetAlerts: () -> Unit,
 ) {
     val c = Bm.colors
     GroupedCard {
@@ -595,7 +615,29 @@ private fun ColumnScope.AlertsContent(
             for (row in ALERT_THRESHOLDS.chunked(3)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     row.forEach { t ->
-                        SelectChip("$t%", t in state.enabledThresholds, mono = true) { onToggleThreshold(t) }
+                        SelectChip(
+                            "$t%", t in state.enabledThresholds, mono = true,
+                            tint = if (t <= state.criticalThreshold) AlertCritical else null,
+                        ) { onToggleThreshold(t) }
+                    }
+                }
+            }
+        }
+    }
+
+    SectionLabel("Critical level")
+    PlainCard {
+        Text(
+            "Alerts at or below this level flash red and pulse faster.",
+            color = c.text2, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.padding(bottom = 12.dp),
+        )
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (row in ALERT_THRESHOLDS.chunked(3)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    row.forEach { t ->
+                        SelectChip("$t%", state.criticalThreshold == t, mono = true, tint = AlertCritical) {
+                            onSetCriticalThreshold(t)
+                        }
                     }
                 }
             }
@@ -614,6 +656,13 @@ private fun ColumnScope.AlertsContent(
             else "Low-battery alerts are off.",
             color = c.text2, fontSize = 12.sp, lineHeight = 17.sp,
         )
+    }
+
+    Row(
+        Modifier.fillMaxWidth().padding(top = 16.dp),
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        PillButton("Reset to defaults", outlined = true, onClick = onResetAlerts)
     }
 }
 
