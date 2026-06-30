@@ -271,6 +271,32 @@ row shows a **reconnect (link) icon**, and the All Batteries header toggles **Di
 Reconnect all**. "Disconnect all" is therefore distinct from *stopping monitoring* (the
 foreground-service Stop), which tears the engine down entirely.
 
+**Low-battery alerts (configurable ladder + critical tier).** `ALERT_THRESHOLDS`
+(BatteryViewModel.kt) is the full selectable 5% ladder **95%→5%**; `DEFAULT_THRESHOLDS`
+(`30/25/20/15/10/5`) is what a fresh install enables (high marks default OFF). The **critical**
+tier (red / faster pulse) is user-configurable via `criticalThreshold` (`UiState` +
+`DEFAULT_CRITICAL_THRESHOLD = 15`), replacing the old hardcoded `≤15`. The Alerts settings page
+shows the full ladder (chips ≤ critical tint red), a single-select **Critical level** picker, and
+a **Reset to defaults** button. `stageAlert()` resolves the alert from the lowest pack on stage;
+charging suppresses the flash; acknowledged thresholds silence until SOC drops to the next level.
+
+**GPS telemetry (cloud upload).** When cloud sync is enrolled, the app captures the phone's
+location (`location/LocationSource.kt`, fused provider) and attaches `lat`/`lon`/`gps_accuracy_m`
+to **every** uploaded telemetry sample — it rides the same offline-durable outbox, so offline
+driving is buffered and synced on reconnect. `gpsEnabled` defaults **on with cloud sync**
+(reducer `p.gpsEnabled ?: p.cloudEnabled`), toggled in Cloud sync settings ("Send GPS location").
+The engine's effective GPS-active = `monitoring && gpsEnabled && enrolled && cloudEnabled`.
+Needs `ACCESS_FINE/COARSE_LOCATION` + `ACCESS_BACKGROUND_LOCATION` + a `location` FGS type
+(`MonitoringService` ORs `FOREGROUND_SERVICE_TYPE_LOCATION` only when GPS-active AND location is
+granted — required to avoid an Android-14 SecurityException). Background-location was the
+explicit design choice for pocket/driving capture.
+
+**Main-stage upload indicator.** The Home top bar shows a small glanceable cloud-upload status
+next to the stage label, only when cloud sync is enrolled: `↑ X.X KB/s` (green) while uploading,
+`↑ synced` when caught up, `↑ N queued` (amber) when buffering/offline. The rate comes from
+`cloud/UploadRate.kt` (a pure, unit-tested 5 s rolling window of actual POST body bytes →
+smoothed KB/s) surfaced through the reporter's `onStatus` into `UiState.cloudUploadKbps`.
+
 ## Development
 
 ```bash
@@ -301,6 +327,14 @@ batches to `POST /api/v1/ingest`; the WebUI reads `GET /web/fleet` + a `/ws` liv
 idempotent SQL in `server/app/db/schema.sql` (`CREATE TABLE IF NOT EXISTS` + `ALTER TABLE ... ADD
 COLUMN IF NOT EXISTS`) run on pool creation — so **schema changes apply automatically on container
 start; there is no separate migration step**.
+
+The `samples` table mirrors the phone's telemetry (soc, current, power, voltage, temp, cells,
+cycles, regen, link_event, …) plus **GPS** columns `lat`/`lon` (`double precision`) and
+`gps_accuracy_m` (`real`), all nullable. The WebUI shows a header **"GPS" pill** (green when
+recent samples carry coordinates) and a browser-local **light/dark toggle** (sun/moon in the
+header; default dark; persisted in `localStorage["bmsmon-theme"]`; light mode is a
+`:root[data-theme="light"]` CSS-variable override in `web/src/theme.css`). The page declares
+`<meta name="darkreader-lock">` so the Dark Reader extension never alters it in either mode.
 
 **Local dev/test:** `docker compose -f server/docker-compose.dev.yml up -d` brings up a Postgres on
 `localhost:5432` (user/pw/db all `bmsmon`, matching the default `DATABASE_URL`). Run server tests

@@ -1,16 +1,20 @@
 # bmsmon Android app
 
 Kotlin / Jetpack Compose front-end for the Redodo/LiTime BLE BMS protocol — the GUI
-companion to the `bmsmon.py` reference tool one directory up. Monitors **two LiFePO4
-packs** (e.g. a power-wheelchair dual-battery setup) live over Bluetooth.
+companion to the `bmsmon.py` reference tool one directory up. Monitors a **fleet of LiFePO4
+packs** (tested with 8, e.g. a power-wheelchair multi-battery setup) live over Bluetooth, with
+optional cloud upload.
 
 ## Screens
-- **Home** — per pack: a dual-ring gauge (outer = 16-segment SOC donut, inner = wattage
-  arc) with centered SOC/watts, plus a 6-stat grid (Power, Current, Voltage, Capacity,
-  Cell V, Temp). Shows `DEMO DATA` (a drifting simulation) when disconnected, `CONNECTED`
-  when live.
-- **Settings** — two BMS addresses + Connect, accent/power color pickers, dark/light/system
-  appearance, About. Color, appearance and addresses persist via DataStore.
+- **Home** — a dynamic "main stage" shows the whole in-use base (dual-ring SOC/wattage gauge +
+  6-stat grid per pack); All Batteries lists the rest. Unreachable packs render as
+  **DISCONNECTED** (dimmed, no %), not synthetic data. The top bar shows the stage status, a
+  small cloud **upload indicator** (`↑ KB/s` / `synced` / `queued`) when enrolled, and flashes a
+  **low-battery alert** wash (amber/red) until acknowledged.
+- **Settings** — Monitoring & stage, **Alerts** (full 5% threshold ladder 95→5, configurable
+  critical level, reset to defaults), Battery groups, Appearance & color, Display & units, Lock
+  screen, Data & logging, **Cloud sync** (enroll via QR, Report to cloud, **Send GPS location**),
+  About. Everything persists via DataStore.
 
 ## Safety (critical)
 The app is **read-only by construction**. `ble/BmsProtocol.kt` frames ONLY the whitelisted
@@ -21,13 +25,16 @@ and a unit test (`BmsProtocolTest.commandWhitelistIsReadOnly`) enforces that. Se
 
 ## Architecture
 ```
-ble/   BmsProtocol (pure, testable: framing + parseTelemetry), BmsConnection
-       (persistent GATT poll loop, FFE1 notify / FFE2 write), BmsRepository, BlePermissions
-model/ Telemetry
-data/  SettingsStore (DataStore persistence)
-ui/    theme (BmColors tokens + Inter/JetBrains Mono), gauge/DualRingGauge (Canvas),
-       home/HomeScreen, settings/SettingsScreen, App
-BatteryViewModel  // UiState, demo sim, connect/disconnect, persistence
+ble/      BmsProtocol (pure, testable: framing + parseTelemetry), BmsConnection
+          (persistent GATT poll loop, FFE1 notify / FFE2 write), BmsRepository, BlePermissions
+model/    Telemetry, Roster/groups, stage resolution
+data/     SettingsStore (DataStore), Room DB (telemetry log + cloud outbox)
+monitor/  MonitorEngine (process-lifetime BLE/logging/GPS), MonitoringService (foreground service)
+cloud/    TelemetryReporter (signed batch upload + offline outbox), CloudJson, DeviceKeys (ES256),
+          EnrollClient, UploadRate (KB/s indicator)
+location/ LocationSource (fused provider → GPS attached to uploads)
+ui/       theme, gauge/DualRingGauge (Canvas), home/HomeScreen, settings/SettingsScreen, App
+BatteryViewModel  // UiState; delegates BLE work to MonitorEngine; alerts, stage, settings
 ```
 
 ## Build & run
@@ -46,8 +53,12 @@ adb -s <phone-ip>:5555 install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 - `minSdk 26`, `compileSdk`/`targetSdk 34`, AGP 8.2.2, Kotlin 1.9.22, Compose BOM 2024.02.02.
-- BLE needs `BLUETOOTH_SCAN` + `BLUETOOTH_CONNECT` (API 31+) granted at runtime.
+- BLE needs `BLUETOOTH_SCAN` + `BLUETOOTH_CONNECT` (API 31+) granted at runtime. Background
+  monitoring uses a foreground service (`connectedDevice`, plus `location` type when GPS is on).
+  GPS upload needs `ACCESS_FINE/COARSE_LOCATION` + `ACCESS_BACKGROUND_LOCATION`.
 
 ## Status
-Verified live against the 2024 test packs (read-only): telemetry matches `bmsmon.py`.
-Pending: bundled-font light/dark splash flash, optional background-service polling.
+Read-only by construction; verified live against the test packs (telemetry matches `bmsmon.py`).
+Background foreground-service monitoring, configurable low-battery alerts, signed cloud upload
+(offline-durable outbox), and GPS telemetry (phone → production DB) are all shipped. Cloud server
+build + QNAP NAS deploy are documented in `../CLAUDE.md` → "Cloud Server & Deployment".

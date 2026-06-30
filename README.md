@@ -70,6 +70,20 @@ python3 bmsmon.py -a C8:47:80:15:25:01 --json
   Cycles:             0
 ```
 
+## Android app & cloud dashboard
+
+Beyond the Python CLI, the repo includes a full monitoring stack:
+
+- **`android/`** — a Kotlin/Jetpack Compose app: live fleet monitoring with a dynamic "main
+  stage", configurable low-battery alerts, a background foreground-service, and optional **signed
+  cloud upload** with **GPS** location. Read-only by construction (same safety rules as the CLI).
+- **`server/`** — a FastAPI + Postgres backend (`POST /api/v1/ingest`, device-JWT auth) deployed
+  at `bmsmon.covert.life`.
+- **`web/`** — a React dashboard (live WebSocket feed, GPS indicator, light/dark toggle).
+
+See [`android/README.md`](android/README.md) and [CLAUDE.md](CLAUDE.md) → "Cloud Server &
+Deployment" for build/deploy details.
+
 ## Protocol
 
 See [CLAUDE.md](CLAUDE.md) for full protocol documentation including command format, response parsing offsets, and protection flag definitions.
