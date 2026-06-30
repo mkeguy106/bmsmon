@@ -6,7 +6,9 @@ import { connectLive } from "./ws";
 import { createStore } from "./store";
 import type { FleetItem } from "./types";
 
-const STALE_MS = 10_000;
+// The phone polls background packs slowly (a pack can go ~a minute between reports), so only
+// treat a pack as disconnected after a generous gap — otherwise cards flap to DISCONNECTED.
+const STALE_MS = 90_000;
 
 export default function App() {
   const store = useRef(createStore()).current;
@@ -29,9 +31,23 @@ export default function App() {
     () => new Set(items.filter((i) => now - i.ts_ms > STALE_MS).map((i) => i.address)),
     [items, now],
   );
-  // Main stage = discharging packs that are fresh; fall back to the most recently updated.
-  const stage = items.filter((i) => !staleAddrs.has(i.address) && (i.current_a ?? 0) < -0.1);
-  const stageItems = stage.length ? stage : items.slice().sort((a, b) => b.ts_ms - a.ts_ms).slice(0, 1);
+
+  // Main stage = the WHOLE active base (group), not a single pack. The lead pack is a fresh
+  // discharging pack, else the most-recently-updated pack; the stage then shows every pack in
+  // that pack's group, stably ordered, so it doesn't jump as packs poll in and out.
+  const stageItems = useMemo(() => {
+    const fresh = items.filter((i) => !staleAddrs.has(i.address));
+    const byRecent = (a: FleetItem, b: FleetItem) => b.ts_ms - a.ts_ms;
+    const lead =
+      fresh.find((i) => (i.current_a ?? 0) < -0.1) ??
+      fresh.slice().sort(byRecent)[0] ??
+      items.slice().sort(byRecent)[0];
+    if (!lead) return [];
+    const gid = lead.group_id;
+    if (!gid) return [lead];
+    return items.filter((i) => i.group_id === gid)
+      .sort((a, b) => (a.alias ?? "").localeCompare(b.alias ?? ""));
+  }, [items, staleAddrs]);
 
   return (
     <div style={{ maxWidth: 1400, margin: "0 auto", padding: 24 }}>
