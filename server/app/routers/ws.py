@@ -33,7 +33,7 @@ async def ws(sock: WebSocket):
     try:
         while True:
             event = await queue.get()
-            await sock.send_json(event)
+            await sock.send_json(_jsonable([event])[0])
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
     finally:
