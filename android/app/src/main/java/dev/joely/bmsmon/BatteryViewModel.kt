@@ -239,6 +239,8 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     lockShowTime = p.lockShowTime,
                     lockShowWifi = p.lockShowWifi,
                     lockShowBattery = p.lockShowBattery,
+                    // Per-battery disconnects persist across restarts.
+                    disabled = p.disabledAddrs ?: emptySet(),
                     sortKey = p.sortKey?.let { runCatching { SortKey.valueOf(it) }.getOrNull() } ?: s.sortKey,
                     filters = p.filters?.mapNotNull { runCatching { FilterKey.valueOf(it) }.getOrNull() }?.toSet()
                         ?: s.filters,
@@ -460,6 +462,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
         engine.setDisabled(_state.value.disabled)
+        persistDisabled()
         updateRoster { it.removeBattery(a) }
     }
 
@@ -513,6 +516,9 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // --- per-battery / all disconnect ---
+    /** Persist the current disconnect set so it survives an app restart. */
+    private fun persistDisabled() = viewModelScope.launch { store.setDisabled(_state.value.disabled) }
+
     fun disconnectBattery(address: String) {
         val a = address.uppercase()
         _state.update { st ->
@@ -522,12 +528,14 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
         engine.setDisabled(_state.value.disabled)
+        persistDisabled()
         refresh()
     }
     fun reconnectBattery(address: String) {
         val a = address.uppercase()
         _state.update { it.copy(disabled = it.disabled - a) }
         engine.setDisabled(_state.value.disabled)
+        persistDisabled()
         engine.kickAll()
         refresh()
     }
@@ -544,6 +552,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
         engine.setDisabled(_state.value.disabled)
+        persistDisabled()
         refresh()
     }
 
@@ -551,6 +560,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     fun reconnectAll() {
         _state.update { it.copy(disabled = emptySet()) }
         engine.setDisabled(emptySet())
+        persistDisabled()
         engine.kickAll()
         refresh()
     }

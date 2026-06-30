@@ -45,6 +45,7 @@ data class Persisted(
     val lockShowTime: Boolean,
     val lockShowWifi: Boolean,
     val lockShowBattery: Boolean,
+    val disabledAddrs: Set<String>?,
 )
 
 /** Persists user preferences (colors, appearance override, BMS addresses) via DataStore. */
@@ -76,6 +77,7 @@ class SettingsStore(private val context: Context) {
         val LOCK_SHOW_TIME = booleanPreferencesKey("lock_show_time")
         val LOCK_SHOW_WIFI = booleanPreferencesKey("lock_show_wifi")
         val LOCK_SHOW_BATTERY = booleanPreferencesKey("lock_show_battery")
+        val DISABLED = stringSetPreferencesKey("disabled_addrs")
     }
 
     suspend fun load(): Persisted {
@@ -106,6 +108,7 @@ class SettingsStore(private val context: Context) {
             lockShowTime = p[K.LOCK_SHOW_TIME] ?: true,
             lockShowWifi = p[K.LOCK_SHOW_WIFI] ?: true,
             lockShowBattery = p[K.LOCK_SHOW_BATTERY] ?: true,
+            disabledAddrs = p[K.DISABLED],
         )
     }
 
@@ -135,6 +138,7 @@ class SettingsStore(private val context: Context) {
     suspend fun setLockShowTime(on: Boolean) = context.dataStore.edit { it[K.LOCK_SHOW_TIME] = on }.let {}
     suspend fun setLockShowWifi(on: Boolean) = context.dataStore.edit { it[K.LOCK_SHOW_WIFI] = on }.let {}
     suspend fun setLockShowBattery(on: Boolean) = context.dataStore.edit { it[K.LOCK_SHOW_BATTERY] = on }.let {}
+    suspend fun setDisabled(addrs: Set<String>) = context.dataStore.edit { it[K.DISABLED] = addrs }.let {}
 }
 
 /** JSON forbids NaN/Infinity; coerce any non-finite reading to 0 before writing. */
