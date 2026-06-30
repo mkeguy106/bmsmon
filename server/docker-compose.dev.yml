@@ -1,0 +1,9 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: bmsmon
+      POSTGRES_PASSWORD: bmsmon
+      POSTGRES_DB: bmsmon
+    ports:
+      - "5432:5432"

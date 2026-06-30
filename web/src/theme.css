@@ -1,0 +1,9 @@
+:root {
+  --bg: #121212; --card: #161616; --border: #2a2a2a; --divider: #1f1f1f;
+  --input-bg: #1d1d1d; --input-border: #333; --text: #ececec; --text2: #8a8a8a;
+  --text3: #777; --accent: #e67e22; --power: #c85a1a; --regen: #2ecc71; --critical: #e5342b;
+  --sans: Inter, system-ui, sans-serif; --mono: "JetBrains Mono", monospace;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); }
+.mono { font-family: var(--mono); }
