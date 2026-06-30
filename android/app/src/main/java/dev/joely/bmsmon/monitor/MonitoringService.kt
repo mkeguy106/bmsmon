@@ -12,6 +12,7 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import dev.joely.bmsmon.BmsApp
+import dev.joely.bmsmon.location.LocationSource
 import dev.joely.bmsmon.MainActivity
 import dev.joely.bmsmon.R
 import kotlinx.coroutines.CoroutineScope
@@ -61,6 +62,8 @@ class MonitoringService : Service() {
                 .onEach { st ->
                     if (!st.monitoring) {
                         stopCleanly()
+                    } else if (Build.VERSION.SDK_INT >= 30 && fgsType() != appliedType) {
+                        startForegroundCompat(buildNotification())
                     } else {
                         NotificationManagerCompat.from(this).notify(NOTIF_ID, buildNotification())
                     }
@@ -89,11 +92,20 @@ class MonitoringService : Service() {
         super.onDestroy()
     }
 
+    private fun fgsType(): Int {
+        var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+        if (engine.state.value.gpsActive && LocationSource.hasLocationPermission(this)) {
+            type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+        }
+        return type
+    }
+
+    private var appliedType: Int = -1
     private fun startForegroundCompat(notification: Notification) {
-        // The connectedDevice FGS-type constant exists from API 30; targetSdk 34 makes the typed
-        // call mandatory on API 34+. Older devices read the type from the manifest.
         if (Build.VERSION.SDK_INT >= 30) {
-            startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+            val type = fgsType()
+            startForeground(NOTIF_ID, notification, type)
+            appliedType = type
         } else {
             startForeground(NOTIF_ID, notification)
         }

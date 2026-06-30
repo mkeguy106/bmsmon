@@ -72,6 +72,7 @@ dependencies {
     implementation("com.nimbusds:nimbus-jose-jwt:9.40")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
+    implementation("com.google.android.gms:play-services-location:21.3.0")
 
     testImplementation("junit:junit:4.13.2")
 }
