@@ -1,8 +1,14 @@
 <!doctype html>
 <html lang="en">
   <head><meta charset="utf-8" /><title>bmsmon</title>
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="light dark" />
     <meta name="darkreader-lock" />
+    <script>
+      try {
+        if (localStorage.getItem("bmsmon-theme") === "light")
+          document.documentElement.dataset.theme = "light";
+      } catch (e) {}
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
   </head>

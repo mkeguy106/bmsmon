@@ -15,6 +15,16 @@ export default function App() {
   const [v, force] = useState(0);
   const [live, setLive] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const [theme, setTheme] = useState<"dark" | "light">(
+    () => (document.documentElement.dataset.theme === "light" ? "light" : "dark"),
+  );
+  const toggleTheme = () =>
+    setTheme((t) => {
+      const next = t === "dark" ? "light" : "dark";
+      document.documentElement.dataset.theme = next;
+      try { localStorage.setItem("bmsmon-theme", next); } catch (e) { /* not persisted */ }
+      return next;
+    });
 
   useEffect(() => {
     const unsub = store.subscribe(() => force((n) => n + 1));
@@ -69,6 +79,15 @@ export default function App() {
             background: gpsActive ? "var(--regen)" : "var(--text3)" }} />
           GPS
         </span>
+        <button
+          onClick={toggleTheme}
+          title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+          aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+          style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text2)",
+            fontSize: 16, lineHeight: 1, padding: 4 }}
+        >
+          {theme === "dark" ? "☀" : "☾"}
+        </button>
       </header>
       <div style={{ display: "grid", gap: 24 }}>
         <MainStage items={stageItems} staleAddrs={staleAddrs} />
