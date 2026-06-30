@@ -1,8 +1,13 @@
 package dev.joely.bmsmon.ui.theme
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.AnimationSpec
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.Font
@@ -82,7 +87,9 @@ val PowerSwatches = listOf(
     0xFF6A3D8B, 0xFF7A7A1A, 0xFF1F8585, 0xFF9B1F52,
 ).map { Color(it) }
 
-val LocalBmColors = staticCompositionLocalOf { DarkBmColors }
+// Not static: color tokens change every frame during the theme crossfade, so only composables that
+// actually read them should recompose (not the whole tree).
+val LocalBmColors = compositionLocalOf { DarkBmColors }
 val LocalAccent = staticCompositionLocalOf { DefaultAccent }
 val LocalPower = staticCompositionLocalOf { DefaultPower }
 
@@ -107,6 +114,34 @@ object Bm {
     val power: Color @Composable get() = LocalPower.current
 }
 
+/** Duration of the light/dark theme crossfade. */
+const val ThemeTransitionMillis = 550
+
+@Composable
+private fun animColor(target: Color, spec: AnimationSpec<Color>): Color =
+    animateColorAsState(target, spec, label = "bmColor").value
+
+/**
+ * The active color tokens, each crossfading toward its dark/light target over
+ * [ThemeTransitionMillis] when the theme flips — so toggling glides instead of hard-cutting. On
+ * first composition each token starts at its target, so a cold launch shows no spurious fade.
+ */
+@Composable
+fun animatedBmColors(dark: Boolean): BmColors {
+    val target = if (dark) DarkBmColors else LightBmColors
+    val spec: AnimationSpec<Color> = tween(ThemeTransitionMillis, easing = FastOutSlowInEasing)
+    return BmColors(
+        bg = animColor(target.bg, spec), card = animColor(target.card, spec), card2 = animColor(target.card2, spec),
+        border = animColor(target.border, spec), inputBg = animColor(target.inputBg, spec),
+        inputBorder = animColor(target.inputBorder, spec),
+        text = animColor(target.text, spec), text2 = animColor(target.text2, spec), text3 = animColor(target.text3, spec),
+        name = animColor(target.name, spec), icon = animColor(target.icon, spec), divider = animColor(target.divider, spec),
+        segEmpty = animColor(target.segEmpty, spec), innerTrack = animColor(target.innerTrack, spec),
+        grid = animColor(target.grid, spec), regen = animColor(target.regen, spec),
+        warn = animColor(target.warn, spec), critical = animColor(target.critical, spec),
+    )
+}
+
 @Composable
 fun BmTheme(
     dark: Boolean,
@@ -115,7 +150,7 @@ fun BmTheme(
     content: @Composable () -> Unit,
 ) {
     CompositionLocalProvider(
-        LocalBmColors provides if (dark) DarkBmColors else LightBmColors,
+        LocalBmColors provides animatedBmColors(dark),
         LocalAccent provides accent,
         LocalPower provides power,
         // Default all text to Inter; mono readouts opt into MonoFont explicitly.
