@@ -39,6 +39,7 @@ internal fun ColumnScope.CloudSyncContent(
     onEnroll: (String, String) -> Unit,
     onSetCloudEnabled: (Boolean) -> Unit,
     onForget: () -> Unit,
+    onSetGpsEnabled: (Boolean) -> Unit,
 ) {
     val c = Bm.colors
     val host = state.apiBaseUrl
@@ -150,6 +151,24 @@ internal fun ColumnScope.CloudSyncContent(
             "Send live telemetry to your bmsmon server.",
             state.cloudEnabled,
             onSetCloudEnabled,
+        )
+    }
+
+    // --- GPS location toggle (enrolled only) ---
+    if (state.enrolled) {
+        GroupedCard {
+            ToggleRow(
+                "Send GPS location",
+                "Attach the phone's location to each upload. Needs location permission.",
+                state.gpsEnabled,
+                onSetGpsEnabled,
+            )
+        }
+        Text(
+            "Location is attached to each upload while permitted. Used later for mapping.",
+            color = c.text3,
+            fontSize = 11.sp,
+            modifier = Modifier.padding(top = 8.dp, start = 4.dp),
         )
     }
 

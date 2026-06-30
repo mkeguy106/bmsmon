@@ -132,6 +132,7 @@ data class UiState(
     val cloudEnabled: Boolean = false,
     val apiBaseUrl: String? = null,
     val enrolled: Boolean = false,
+    val gpsEnabled: Boolean = false,
     val cloudOutboxDepth: Int = 0,
     val cloudLastUploadMs: Long = 0,
     val importDone: Boolean = false,
@@ -259,6 +260,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     // Per-battery disconnects persist across restarts.
                     disabled = p.disabledAddrs ?: emptySet(),
                     cloudEnabled = p.cloudEnabled,
+                    gpsEnabled = p.gpsEnabled ?: p.cloudEnabled,
                     apiBaseUrl = p.apiBaseUrl,
                     enrolled = p.enrolled,
                     importDone = p.importDone,
@@ -596,6 +598,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         engine.start(roster = _state.value.roster, seed = _state.value.fleet, loggingEnabled = _state.value.logging)
         engine.setDisabled(_state.value.disabled)
         engine.setStage(currentStageAddrs())
+        engine.setGpsActive(_state.value.gpsEnabled && _state.value.enrolled)
         engine.importLegacyCsvIfNeeded(
             alreadyImported = _state.value.csvImported,
             markImported = { store.setCsvImported(true) },
@@ -647,6 +650,11 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(cloudEnabled = on) }
         if (on) getApplication<BmsApp>().reporter.start()
     }
+    fun setGpsEnabled(on: Boolean) {
+        viewModelScope.launch { store.setGpsEnabled(on) }
+        _state.update { it.copy(gpsEnabled = on) }
+        engine.setGpsActive(on && _state.value.enrolled && _state.value.monitoring)
+    }
     fun setApiBaseUrl(url: String) { viewModelScope.launch { store.setApiBaseUrl(url) }; _state.update { it.copy(apiBaseUrl = url) } }
 
     fun enroll(baseUrl: String, code: String) {
@@ -660,7 +668,8 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                 store.setDeviceId(id)
                 store.setEnrolled(true)
                 store.setCloudEnabled(true)
-                _state.update { it.copy(apiBaseUrl = baseUrl, enrolled = true, cloudEnabled = true) }
+                store.setGpsEnabled(true)
+                _state.update { it.copy(apiBaseUrl = baseUrl, enrolled = true, cloudEnabled = true, gpsEnabled = true) }
                 val app = getApplication<BmsApp>()
                 app.reporter.start()
                 app.reporter.startImportIfNeeded(_state.value.roster)
@@ -676,7 +685,9 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             store.setDeviceId("")
             store.setImportDone(false)
             store.setImportWatermark(0)
-            _state.update { it.copy(enrolled = false, cloudEnabled = false) }
+            store.setGpsEnabled(false)
+            _state.update { it.copy(enrolled = false, cloudEnabled = false, gpsEnabled = false) }
+            engine.setGpsActive(false)
         }
     }
 

@@ -141,6 +141,37 @@ fun App(vm: BatteryViewModel) {
         }
     }
 
+    val bgLocationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* result ignored; foreground GPS still works without background */ }
+    val locationPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { result ->
+        if (result.values.any { it } && Build.VERSION.SDK_INT >= 29 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_BACKGROUND_LOCATION) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            bgLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+        }
+    }
+    fun askLocationPermission() {
+        val fine = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!fine) {
+            locationPermLauncher.launch(arrayOf(
+                Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
+        } else if (Build.VERSION.SDK_INT >= 29 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_BACKGROUND_LOCATION) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            bgLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+        }
+    }
+    val onSetGps: (Boolean) -> Unit = { on ->
+        vm.setGpsEnabled(on)
+        if (on) askLocationPermission()
+    }
+
     var showScan by remember { mutableStateOf(false) }
     val scanPermLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -246,6 +277,7 @@ fun App(vm: BatteryViewModel) {
                         onEnroll = vm::enroll,
                         onSetCloudEnabled = vm::setCloudEnabled,
                         onForget = vm::forgetDevice,
+                        onSetGpsEnabled = onSetGps,
                     )
                     Screen.Detail -> {
                         val addr = state.detailAddress
