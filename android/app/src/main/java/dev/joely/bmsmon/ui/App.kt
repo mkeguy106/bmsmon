@@ -16,7 +16,9 @@ import androidx.core.view.WindowCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -144,7 +146,13 @@ fun App(vm: BatteryViewModel) {
 
     BmTheme(dark = state.isDark, accent = state.accent, power = state.power) {
         Box(Modifier.fillMaxSize().background(Bm.colors.bg)) {
-            Box(Modifier.fillMaxSize().systemBarsPadding()) {
+          Column(Modifier.fillMaxSize()) {
+            // While locked, screen pinning hides Android's status bar — replicate the chosen
+            // system-info items at the very top so battery/time/Wi‑Fi stay visible.
+            if (state.locked && (state.lockShowTime || state.lockShowWifi || state.lockShowBattery)) {
+                LockStatusBar(state.lockShowTime, state.lockShowWifi, state.lockShowBattery)
+            }
+            Box(Modifier.fillMaxWidth().weight(1f).systemBarsPadding()) {
                 when (state.screen) {
                     Screen.Home -> HomeScreen(
                         state = state,
@@ -215,6 +223,9 @@ fun App(vm: BatteryViewModel) {
                         onSetPower = vm::setPower,
                         onSetAppearance = vm::setAppearance,
                         onSetAutoLux = vm::setAutoLuxThreshold,
+                        onSetLockShowTime = vm::setLockShowTime,
+                        onSetLockShowWifi = vm::setLockShowWifi,
+                        onSetLockShowBattery = vm::setLockShowBattery,
                     )
                     Screen.Detail -> {
                         val addr = state.detailAddress
@@ -227,6 +238,7 @@ fun App(vm: BatteryViewModel) {
                     }
                 }
             }
+          }
             if (showScan) {
                 ScanSheet(
                     roster = state.roster,

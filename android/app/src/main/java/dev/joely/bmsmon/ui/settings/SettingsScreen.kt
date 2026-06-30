@@ -76,6 +76,9 @@ fun SettingsScreen(
     onSetPower: (Color) -> Unit,
     onSetAppearance: (Appearance) -> Unit,
     onSetAutoLux: (Float) -> Unit,
+    onSetLockShowTime: (Boolean) -> Unit,
+    onSetLockShowWifi: (Boolean) -> Unit,
+    onSetLockShowBattery: (Boolean) -> Unit,
 ) {
     val c = Bm.colors
     Column(Modifier.fillMaxSize().background(c.bg)) {
@@ -110,6 +113,7 @@ fun SettingsScreen(
             AppearanceCard(state, onSetAppearance, onSetAutoLux)
             TemperatureCard(state, onSetTempFahrenheit)
             KeepScreenOnCard(state, onSetKeepScreenOn)
+            LockedScreenCard(state, onSetLockShowTime, onSetLockShowWifi, onSetLockShowBattery)
             UsageLoggingCard(state, onSetLogging, onClearLog)
             AboutCard()
         }
@@ -493,6 +497,29 @@ private fun KeepScreenOnCard(state: UiState, onSetKeepScreenOn: (Boolean) -> Uni
                     uncheckedBorderColor = c.inputBorder,
                 ),
             )
+        }
+    }
+}
+
+@Composable
+private fun LockedScreenCard(
+    state: UiState,
+    onSetLockShowTime: (Boolean) -> Unit,
+    onSetLockShowWifi: (Boolean) -> Unit,
+    onSetLockShowBattery: (Boolean) -> Unit,
+) {
+    val c = Bm.colors
+    Card {
+        Text("Locked screen status", color = c.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            "Screen pinning hides Android's status bar while the app is locked. Pick which info to replicate at the top.",
+            color = c.text2, fontSize = 12.sp, lineHeight = 17.sp,
+            modifier = Modifier.padding(top = 4.dp, bottom = 14.dp),
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SelectChip("Time", state.lockShowTime) { onSetLockShowTime(!state.lockShowTime) }
+            SelectChip("Wi-Fi", state.lockShowWifi) { onSetLockShowWifi(!state.lockShowWifi) }
+            SelectChip("Battery", state.lockShowBattery) { onSetLockShowBattery(!state.lockShowBattery) }
         }
     }
 }
