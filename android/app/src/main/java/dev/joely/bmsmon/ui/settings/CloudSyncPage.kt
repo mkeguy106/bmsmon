@@ -21,12 +21,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import dev.joely.bmsmon.UiState
 import dev.joely.bmsmon.ui.theme.AlertCritical
 import dev.joely.bmsmon.ui.theme.Bm
+import org.json.JSONObject
 
 @Composable
 internal fun ColumnScope.CloudSyncContent(
@@ -68,8 +73,42 @@ internal fun ColumnScope.CloudSyncContent(
 
     // --- Connection (shown only before enrollment) ---
     if (!state.enrolled) {
+        val context = LocalContext.current
+        val scanToEnroll = {
+            val opts = GmsBarcodeScannerOptions.Builder()
+                .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                .build()
+            GmsBarcodeScanning.getClient(context, opts).startScan()
+                .addOnSuccessListener { bc ->
+                    bc.rawValue?.let { raw ->
+                        runCatching {
+                            val o = JSONObject(raw)
+                            onEnroll(o.getString("base"), o.getString("code"))
+                        }
+                    }
+                }
+        }
+
         SectionLabel("Connection")
         PlainCard {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Bm.accent)
+                    .clickable { scanToEnroll() }
+                    .padding(vertical = 12.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("Scan QR to enroll", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            }
+            Text(
+                "Open Cloud sync on the bmsmon web dashboard, tap Enroll device, and scan the QR.",
+                color = c.text3,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(top = 8.dp, bottom = 14.dp),
+            )
+            Text("Or enter manually", color = c.text2, fontSize = 12.sp, modifier = Modifier.padding(bottom = 8.dp))
             var serverUrl by remember { mutableStateOf("") }
             var enrollCode by remember { mutableStateOf("") }
             OutlinedTextField(
