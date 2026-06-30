@@ -244,6 +244,7 @@ private fun TopBar(
                 if (showPin) Icon(Icons.Filled.PushPin, null, Modifier.padding(start = 6.dp).size(13.dp), tint = Bm.accent)
                 Text(statusLabel, color = labelColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
                     letterSpacing = 0.9.sp, modifier = Modifier.padding(start = 7.dp))
+                if (state.cloudEnabled && state.enrolled) UploadBadge(state)
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 // While locked, hide appearance + settings; only the lock control remains (hold to unlock).
@@ -274,6 +275,23 @@ private fun TopBar(
         // Page dots centered on the top-bar row (hidden while locked — the stage is frozen on page 0).
         if (!locked) PageDots(currentPage, Modifier.align(Alignment.Center))
     }
+}
+
+/** Tiny cloud-upload status next to the stage label: live KB/s while uploading, else synced/queued. */
+@Composable
+private fun UploadBadge(state: UiState) {
+    val c = Bm.colors
+    val kbps = state.cloudUploadKbps
+    val (text, color) = when {
+        kbps > 0.05f -> "↑ %.1f KB/s".format(kbps) to RegenGreen
+        state.cloudOutboxDepth > 0 -> "↑ ${state.cloudOutboxDepth} queued" to AlertWarn
+        state.cloudLastUploadMs > 0L -> "↑ synced" to c.text3
+        else -> "↑ idle" to c.text3
+    }
+    Text(
+        text, color = color, fontSize = 9.5.sp, fontWeight = FontWeight.Medium,
+        letterSpacing = 0.6.sp, modifier = Modifier.padding(start = 10.dp),
+    )
 }
 
 @Composable

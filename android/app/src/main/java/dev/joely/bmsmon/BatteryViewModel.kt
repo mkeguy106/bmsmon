@@ -135,6 +135,7 @@ data class UiState(
     val gpsEnabled: Boolean = false,
     val cloudOutboxDepth: Int = 0,
     val cloudLastUploadMs: Long = 0,
+    val cloudUploadKbps: Float = 0f,
     val importDone: Boolean = false,
     val importTotal: Int = 0,
     val importSent: Int = 0,
@@ -322,8 +323,10 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         // Mirror reporter upload stats into UiState so the Cloud sync page can show them.
-        getApplication<BmsApp>().reporter.onStatus = { depth, ts ->
-            _state.update { it.copy(cloudOutboxDepth = depth.toInt(), cloudLastUploadMs = ts) }
+        getApplication<BmsApp>().reporter.onStatus = { depth, ts, kbps ->
+            _state.update {
+                it.copy(cloudOutboxDepth = depth.toInt(), cloudLastUploadMs = ts, cloudUploadKbps = kbps.toFloat())
+            }
         }
     }
 
