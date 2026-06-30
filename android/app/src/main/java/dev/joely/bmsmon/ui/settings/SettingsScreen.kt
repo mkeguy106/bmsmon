@@ -127,6 +127,7 @@ fun SettingsScreen(
     onEnroll: (String, String) -> Unit,
     onSetCloudEnabled: (Boolean) -> Unit,
     onForget: () -> Unit,
+    onSetGpsEnabled: (Boolean) -> Unit,
 ) {
     var page by remember { mutableStateOf<SettingsPage?>(null) }
 
@@ -160,7 +161,7 @@ fun SettingsScreen(
         }
         SettingsPage.About -> DetailScaffold("About", { page = null }) { AboutContent() }
         SettingsPage.Cloud -> DetailScaffold("Cloud sync", { page = null }) {
-            CloudSyncContent(state, onEnroll, onSetCloudEnabled, onForget)
+            CloudSyncContent(state, onEnroll, onSetCloudEnabled, onForget, onSetGpsEnabled)
         }
     }
 }

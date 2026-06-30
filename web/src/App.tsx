@@ -31,6 +31,10 @@ export default function App() {
     () => new Set(items.filter((i) => now - i.ts_ms > STALE_MS).map((i) => i.address)),
     [items, now],
   );
+  const gpsActive = useMemo(
+    () => items.some((i) => !staleAddrs.has(i.address) && i.lat != null),
+    [items, staleAddrs],
+  );
 
   // Main stage = the WHOLE active base (group), not a single pack. The lead pack is a fresh
   // discharging pack, else the most-recently-updated pack; the stage then shows every pack in
@@ -58,6 +62,12 @@ export default function App() {
           <span style={{ width: 9, height: 9, borderRadius: "50%",
             background: live ? "var(--regen)" : "var(--text3)" }} />
           {live ? "LIVE" : "RECONNECTING…"}
+        </span>
+        <span style={{ display: "flex", alignItems: "center", gap: 8,
+          color: gpsActive ? "var(--regen)" : "var(--text3)", fontSize: 13 }}>
+          <span style={{ width: 9, height: 9, borderRadius: "50%",
+            background: gpsActive ? "var(--regen)" : "var(--text3)" }} />
+          GPS
         </span>
       </header>
       <div style={{ display: "grid", gap: 24 }}>

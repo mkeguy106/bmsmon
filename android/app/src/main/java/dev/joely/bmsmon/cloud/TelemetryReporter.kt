@@ -57,6 +57,9 @@ class TelemetryReporter(
         t: Telemetry,
         tsMs: Long,
         regen: Boolean,
+        lat: Double? = null,
+        lon: Double? = null,
+        gpsAccuracyM: Float? = null,
     ) {
         if (!reportingEnabled) return
         val payload = CloudJson.sampleJson(
@@ -64,6 +67,7 @@ class TelemetryReporter(
             t.state.name, t.soc, t.current, t.powerW, t.voltage, t.temp, t.mosfetTemp,
             t.soh, t.fullChargeAh, t.capacityAh, t.cycles,
             t.cells.minOrNull(), t.cells.maxOrNull(), regen, null,
+            lat, lon, gpsAccuracyM,
         )
         enqueueChannel.trySend(OutboxEntity(payload = payload, enqueuedAt = tsMs))
     }

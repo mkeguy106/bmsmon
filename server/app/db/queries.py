@@ -7,7 +7,7 @@ from app.db.partitions import ensure_partitions_for_range
 
 _COLS = ["state", "soc", "current_a", "power_w", "voltage_v", "temp_c", "mosfet_temp_c",
          "soh", "full_charge_ah", "remaining_ah", "cycles", "cell_min_v", "cell_max_v",
-         "link_event"]
+         "link_event", "lat", "lon", "gps_accuracy_m"]
 
 
 def sample_row(device_id: str, address: str, s: dict) -> dict:
@@ -25,9 +25,10 @@ def sample_row(device_id: str, address: str, s: dict) -> dict:
 _INSERT = """
 INSERT INTO samples
   (device_id,address,ts_ms,ts,state,soc,current_a,power_w,voltage_v,temp_c,
-   mosfet_temp_c,soh,full_charge_ah,remaining_ah,cycles,cell_min_v,cell_max_v,cells,regen,link_event)
+   mosfet_temp_c,soh,full_charge_ah,remaining_ah,cycles,cell_min_v,cell_max_v,cells,regen,link_event,
+   lat,lon,gps_accuracy_m)
 VALUES
-  ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+  ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
 ON CONFLICT DO NOTHING
 """
 
@@ -41,7 +42,8 @@ async def insert_samples(conn: asyncpg.Connection, rows: list[dict]) -> int:
         (r["device_id"], r["address"], r["ts_ms"], r["ts"], r["state"], r["soc"],
          r["current_a"], r["power_w"], r["voltage_v"], r["temp_c"], r["mosfet_temp_c"],
          r["soh"], r["full_charge_ah"], r["remaining_ah"], r["cycles"], r["cell_min_v"],
-         r["cell_max_v"], r["cells"], r["regen"], r["link_event"])
+         r["cell_max_v"], r["cells"], r["regen"], r["link_event"],
+         r["lat"], r["lon"], r["gps_accuracy_m"])
         for r in rows
     ])
     return len(rows)
@@ -66,7 +68,8 @@ async def fleet_snapshot(conn) -> list[dict]:
         """SELECT DISTINCT ON (s.address)
               s.device_id, s.address, s.ts_ms, s.ts, s.state, s.soc, s.current_a, s.power_w,
               s.voltage_v, s.temp_c, s.mosfet_temp_c, s.soh, s.full_charge_ah, s.remaining_ah,
-              s.cycles, s.cell_min_v, s.cell_max_v, s.cells, s.regen, s.link_event, s.received_at,
+              s.cycles, s.cell_min_v, s.cell_max_v, s.cells, s.regen, s.link_event,
+              s.lat, s.lon, s.gps_accuracy_m, s.received_at,
               b.alias, b.group_id, b.advertised_name
            FROM samples s LEFT JOIN batteries b ON b.address = s.address
            ORDER BY s.address, s.ts DESC"""

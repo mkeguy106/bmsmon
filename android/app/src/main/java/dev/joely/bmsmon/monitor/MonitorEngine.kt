@@ -2,6 +2,7 @@ package dev.joely.bmsmon.monitor
 
 import android.content.Context
 import dev.joely.bmsmon.ble.BmsRepository
+import dev.joely.bmsmon.location.LocationSource
 import dev.joely.bmsmon.ble.profile.ProfileRegistry
 import dev.joely.bmsmon.ble.profile.RedodoBekenProfile
 import dev.joely.bmsmon.cloud.TelemetryReporter
@@ -41,6 +42,7 @@ data class MonitorState(
     val lastDischargeAt: Map<String, Long> = emptyMap(),
     val peakPowerW: Float = 0f,
     val peakCurrentA: Float = 0f,
+    val gpsActive: Boolean = false,
 )
 
 /**
@@ -62,6 +64,7 @@ class MonitorEngine(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val ble = BmsRepository(appContext)
+    private val locationSource = LocationSource(appContext)
     private val repository = TelemetryRepository(db)
 
     init {
@@ -117,6 +120,7 @@ class MonitorEngine(
         if (!_state.value.monitoring && _state.value.fleet.isEmpty()) return
         repository.finalizeOpenSessions()
         ble.stop()
+        locationSource.stop()
         _state.value = MonitorState()
     }
 
@@ -133,6 +137,12 @@ class MonitorEngine(
             repository.importCsvOnce(listOf(File(dir, "usage_log.csv"), File(dir, "usage_log.1.csv")))
             markImported()
         }
+    }
+
+    /** Start/stop GPS capture; cached fixes are attached to each upload while active. */
+    fun setGpsActive(active: Boolean) {
+        _state.update { it.copy(gpsActive = active) }
+        if (active) locationSource.start() else locationSource.stop()
     }
 
     fun setLogging(enabled: Boolean) {
@@ -176,9 +186,10 @@ class MonitorEngine(
                 peakCurrentA = peakC,
             )
         }
+        val fix = if (_state.value.gpsActive) locationSource.current() else null
         reporter?.report(
             addr, roster.batteryAt(addr)?.advertisedName, roster.batteryAt(addr)?.alias,
-            group?.id, t, now, regen,
+            group?.id, t, now, regen, fix?.lat, fix?.lon, fix?.accuracyM,
         )
         if (logging) {
             val header = (ProfileRegistry.profileFor(roster.batteryAt(addr)?.advertisedName)

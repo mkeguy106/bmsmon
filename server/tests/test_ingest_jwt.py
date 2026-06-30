@@ -121,3 +121,24 @@ async def test_ingest_rejects_non_uuid_sub(client):
     tok = _token(priv, "not-a-uuid", body)
     r = await client.post("/api/v1/ingest", content=body, headers={"Authorization": f"Bearer {tok}"})
     assert r.status_code == 401
+
+
+def _gps_payload():
+    return {"batch_seq": 8, "samples": [
+        {"ts_ms": 1719686400000, "address": A, "alias": "2012 · A", "group_id": "2012",
+         "soc": 87.0, "lat": 41.8781, "lon": -87.6298, "gps_accuracy_m": 7.5}]}
+
+
+async def test_ingest_stores_gps(app, client):
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    body = json.dumps(_gps_payload()).encode()
+    r = await client.post("/api/v1/ingest", content=body,
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
+    assert r.status_code == 200
+    assert r.json() == {"accepted": 1, "last_seq": 8}
+    async with app.state.pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT lat, lon, gps_accuracy_m FROM samples")
+    assert row["lat"] == 41.8781
+    assert row["lon"] == -87.6298
+    assert abs(row["gps_accuracy_m"] - 7.5) < 1e-4

@@ -293,6 +293,53 @@ python3 bmsmon.py -a C8:47:80:15:25:01 --watch
 python3 bmsmon.py -a C8:47:80:15:25:01 --json
 ```
 
+## Cloud Server & Deployment
+
+The cloud backend lives in `server/` (FastAPI + asyncpg + **Postgres 16**) and the dashboard in
+`web/` (React + Vite). The phone (`android/`) enrolls a device and uploads signed telemetry
+batches to `POST /api/v1/ingest`; the WebUI reads `GET /web/fleet` + a `/ws` live feed. Schema is
+idempotent SQL in `server/app/db/schema.sql` (`CREATE TABLE IF NOT EXISTS` + `ALTER TABLE ... ADD
+COLUMN IF NOT EXISTS`) run on pool creation — so **schema changes apply automatically on container
+start; there is no separate migration step**.
+
+**Local dev/test:** `docker compose -f server/docker-compose.dev.yml up -d` brings up a Postgres on
+`localhost:5432` (user/pw/db all `bmsmon`, matching the default `DATABASE_URL`). Run server tests
+with the venv: `cd server && .venv/bin/python -m pytest` (bare `python` lacks the deps).
+
+### Image build (GitHub Actions)
+
+`.github/workflows/build-server.yml` builds the multi-stage image (Node builds `web/dist` → Python
+serves API + static) and pushes `ghcr.io/mkeguy106/bmsmon-server:latest` (+ a `:<sha>` tag) on any
+push to `main` touching `server/**`, `web/**`, or that workflow. Watch a run with `gh run watch` or
+the Actions tab.
+
+### Production deploy (QNAP NAS)
+
+Production is `bmsmon.covert.life` on the QNAP NAS **`ddnas02`** (SSH: `ssh joely@ddnas02`), run from
+the **`~/qnap-nas-docker`** infra repo — see **`~/qnap-nas-docker/CLAUDE.md`** for NAS conventions
+(docker path, `${CONFDIR}`, the `--env-file ../.env` requirement, Traefik/Authentik). The bmsmon
+stack is `~/qnap-nas-docker/bmsmon/docker-compose.yml`: `bmsmon-api`
+(`image: ghcr.io/mkeguy106/bmsmon-server:latest`) + `bmsmon-db` (Postgres, data at
+`${CONFDIR}/bmsmon/database`). Traefik splits routing: `/api/` → device-JWT auth (no Authentik);
+everything else → Authentik SSO.
+
+**Deploying a new server build** (the NAS does **not** auto-pull `:latest` — watchtower is monthly,
+and the qnap-nas-docker deploy runner only fires on `docker-compose.yml`/`.env` changes, and
+`up -d` alone won't re-pull an unchanged tag). After the image build finishes, pull + recreate just
+the API container:
+
+```bash
+ssh joely@ddnas02 'bash -lc "cd /share/bsv/docker-compose && \
+  docker compose --env-file .env -f bmsmon/docker-compose.yml pull bmsmon-api && \
+  docker compose --env-file .env -f bmsmon/docker-compose.yml up -d bmsmon-api"'
+curl -fsS https://bmsmon.covert.life/api/v1/health   # expect {"status":"ok"}
+```
+
+On startup the new container re-runs `schema.sql`, so additive columns/tables land automatically.
+Changes to the **stack** itself (`bmsmon/docker-compose.yml` or the shared `.env`) deploy
+differently: push them to the `~/qnap-nas-docker` repo's `master` and its self-hosted runner
+(`.github/workflows/deploy.yml`) SSHes in and restarts the changed service.
+
 ## Related Projects
 
 - [aiobmsble](https://github.com/patman15/aiobmsble) — Python async BLE BMS library (has `redodo_bms.py`)
