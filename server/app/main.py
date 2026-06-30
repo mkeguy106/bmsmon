@@ -21,6 +21,10 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="bmsmon", lifespan=lifespan)
+    from app.auth.device_jwt import JtiCache
+    from app.live.bus import LiveBus
+    app.state.jti_cache = JtiCache()
+    app.state.bus = LiveBus()
     app.include_router(api_device.router)
     return app
 

@@ -1,14 +1,16 @@
 import base64
 import binascii
+import json
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from app.auth.device_jwt import JwtError, unverified_sub, verify
 from app.auth.enroll import hash_code
 from app.db import queries as q
 from app.db.pool import get_pool
-from app.models import EnrollBody, EnrollResponse
+from app.models import EnrollBody, EnrollResponse, IngestBody, IngestResponse
 
 router = APIRouter(prefix="/api/v1")
 
@@ -36,3 +38,35 @@ async def enroll(body: EnrollBody, pool=Depends(get_pool)):
             if claimed is None:
                 raise HTTPException(400, "invalid or expired code")
     return EnrollResponse(device_id=str(device_id))
+
+
+@router.post("/ingest", response_model=IngestResponse)
+async def ingest(request: Request, pool=Depends(get_pool)):
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("bearer "):
+        raise HTTPException(401, "missing bearer")
+    token = auth[7:]
+    raw = await request.body()
+    try:
+        device_id = unverified_sub(token)
+    except JwtError:
+        raise HTTPException(401, "bad token")
+    async with pool.acquire() as conn:
+        dev = await q.get_device(conn, device_id)
+        if dev is None or dev["revoked"]:
+            raise HTTPException(401, "unknown or revoked device")
+        try:
+            verify(token, bytes(dev["public_key_spki"]), raw, request.app.state.jti_cache)
+        except JwtError:
+            raise HTTPException(401, "bad signature")
+        body = IngestBody.model_validate_json(raw)
+        rows = [q.sample_row(device_id, s.address, s.model_dump()) for s in body.samples]
+        async with conn.transaction():
+            for s in body.samples:
+                await q.upsert_battery(conn, s.address, s.advertised_name, s.alias,
+                                       s.group_id, s.ts_ms)
+            accepted = await q.insert_samples(conn, rows)
+        await conn.execute("UPDATE devices SET last_seen_at=now() WHERE id=$1", device_id)
+    for s in body.samples:
+        await request.app.state.bus.publish({"type": "sample", **s.model_dump()})
+    return IngestResponse(accepted=accepted, last_seq=body.batch_seq)
