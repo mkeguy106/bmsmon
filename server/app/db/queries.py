@@ -7,7 +7,7 @@ from app.db.partitions import ensure_partitions_for_range
 
 _COLS = ["state", "soc", "current_a", "power_w", "voltage_v", "temp_c", "mosfet_temp_c",
          "soh", "full_charge_ah", "remaining_ah", "cycles", "cell_min_v", "cell_max_v",
-         "regen", "link_event"]
+         "link_event"]
 
 
 def sample_row(device_id: str, address: str, s: dict) -> dict:
@@ -63,7 +63,11 @@ async def upsert_battery(conn, address, advertised_name, alias, group_id, ts_ms:
 
 async def fleet_snapshot(conn) -> list[dict]:
     rows = await conn.fetch(
-        """SELECT DISTINCT ON (s.address) s.*, b.alias, b.group_id, b.advertised_name
+        """SELECT DISTINCT ON (s.address)
+              s.device_id, s.address, s.ts_ms, s.ts, s.state, s.soc, s.current_a, s.power_w,
+              s.voltage_v, s.temp_c, s.mosfet_temp_c, s.soh, s.full_charge_ah, s.remaining_ah,
+              s.cycles, s.cell_min_v, s.cell_max_v, s.cells, s.regen, s.link_event, s.received_at,
+              b.alias, b.group_id, b.advertised_name
            FROM samples s LEFT JOIN batteries b ON b.address = s.address
            ORDER BY s.address, s.ts DESC"""
     )
