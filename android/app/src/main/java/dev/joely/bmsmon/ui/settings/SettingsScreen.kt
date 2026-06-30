@@ -601,15 +601,15 @@ private fun ColumnScope.AlertsContent(
 ) {
     val c = Bm.colors
     GroupedCard {
-        ToggleRow("Flash stage when low", "Pulse the screen until acknowledged",
+        ToggleRow("Low-battery alerts", "Notify (sound/vibration) and flash the stage when a pack runs low",
             state.alertsOn, onSetAlertsOn)
     }
 
-    SectionLabel("Thresholds")
+    SectionLabel("Trigger levels")
     PlainCard {
         Text(
-            "Flash and require acknowledgement each time the lowest pack on the stage drops past one of " +
-                "these levels.",
+            "These are the triggers: you'll be alerted when the lowest pack on the stage drops to one of " +
+                "the levels you turn on here (at or below). Levels at or under the critical line are shown red.",
             color = c.text2, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.padding(bottom = 12.dp),
         )
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -629,7 +629,8 @@ private fun ColumnScope.AlertsContent(
     SectionLabel("Critical level")
     PlainCard {
         Text(
-            "Alerts at or below this level flash red and pulse faster.",
+            "At or below this level, alerts are loud — sound + vibration, red flash. Picking a level also " +
+                "turns it on as a trigger above, so it can't silently fail to fire.",
             color = c.text2, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.padding(bottom = 12.dp),
         )
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -653,7 +654,7 @@ private fun ColumnScope.AlertsContent(
             .padding(14.dp),
     ) {
         Text(
-            if (next != null) "Next alert will fire when a pack on stage reaches $next%."
+            if (next != null) "Next alert fires when a pack on stage drops to $next%."
             else "Low-battery alerts are off.",
             color = c.text2, fontSize = 12.sp, lineHeight = 17.sp,
         )

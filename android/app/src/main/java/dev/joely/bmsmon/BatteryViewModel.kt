@@ -12,6 +12,7 @@ import dev.joely.bmsmon.data.PackHealth
 import dev.joely.bmsmon.data.SettingsStore
 import dev.joely.bmsmon.data.buildPackHealth
 import dev.joely.bmsmon.data.peakPool
+import dev.joely.bmsmon.model.AlertConfig
 import dev.joely.bmsmon.model.BatteryGroup
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.BatteryStatus
@@ -20,6 +21,7 @@ import dev.joely.bmsmon.model.DEFAULT_ROSTER
 import dev.joely.bmsmon.model.DEFAULT_STAGE_HOLD_MIN
 import dev.joely.bmsmon.model.GroupActivity
 import dev.joely.bmsmon.model.PIN_HOLD_MS
+import dev.joely.bmsmon.model.PackSoc
 import dev.joely.bmsmon.model.Roster
 import dev.joely.bmsmon.model.StageInputs
 import dev.joely.bmsmon.model.StageItem
@@ -31,6 +33,7 @@ import dev.joely.bmsmon.model.addresses
 import dev.joely.bmsmon.model.allTargets
 import dev.joely.bmsmon.model.assignGroup
 import dev.joely.bmsmon.model.batteryAt
+import dev.joely.bmsmon.model.evalStageAlert
 import dev.joely.bmsmon.model.groupActivity
 import dev.joely.bmsmon.model.groupById
 import dev.joely.bmsmon.model.groupViews
@@ -185,20 +188,18 @@ data class UiState(
      * flashes; a charging low pack suppresses it; acks only count while still crossed.
      */
     fun stageAlert(): StageAlert {
-        val none = StageAlert(false, false, 100, null, emptySet())
-        if (!monitoring) return none
+        if (!monitoring) return StageAlert(false, false, 100, null, emptySet())
         val packs = stageTarget.addresses(roster)
             .mapNotNull { fleet[it]?.takeIf { s -> s.reachable }?.telemetry }
-        val lowPack = packs.minByOrNull { it.soc } ?: return none
-        val lowSoc = lowPack.soc
-        val lowCharging = lowPack.state == BatteryState.Charging
-        val crossed = enabledThresholds.filter { lowSoc < it }.toSet()
-        val activeThreshold = crossed.minOrNull()
-        val ackEffective = acknowledgedThresholds.intersect(crossed)
-        val flashing = alertsOn && !lowCharging &&
-            activeThreshold != null && activeThreshold !in ackEffective
-        val critical = activeThreshold != null && activeThreshold <= criticalThreshold
-        return StageAlert(flashing, critical, lowSoc.roundToInt(), activeThreshold, ackEffective)
+        // Shared with the headless engine notifier via evalStageAlert; the ack layer is UI-only.
+        val eval = evalStageAlert(
+            packs.map { PackSoc(it.soc, it.state == BatteryState.Charging) },
+            AlertConfig(alertsOn, enabledThresholds, criticalThreshold),
+        )
+        val ackEffective = acknowledgedThresholds.intersect(eval.crossed)
+        val flashing = !eval.charging &&
+            eval.activeThreshold != null && eval.activeThreshold !in ackEffective
+        return StageAlert(flashing, eval.critical, eval.lowSoc, eval.activeThreshold, ackEffective)
     }
 }
 
@@ -608,6 +609,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         engine.start(roster = _state.value.roster, seed = _state.value.fleet, loggingEnabled = _state.value.logging)
         engine.setDisabled(_state.value.disabled)
         engine.setStage(currentStageAddrs())
+        pushAlertConfig()
         engine.setGpsActive(_state.value.gpsEnabled && _state.value.enrolled && _state.value.cloudEnabled)
         engine.importLegacyCsvIfNeeded(
             alreadyImported = _state.value.csvImported,
@@ -717,9 +719,14 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // --- low-battery alerts ---
+    /** Mirror the current alert settings down to the headless engine so it can notify off-screen. */
+    private fun pushAlertConfig() = engine.setAlertConfig(
+        AlertConfig(_state.value.alertsOn, _state.value.enabledThresholds, _state.value.criticalThreshold),
+    )
     fun setAlertsOn(enabled: Boolean) {
         _state.update { it.copy(alertsOn = enabled) }
         viewModelScope.launch { store.setAlertsOn(enabled) }
+        pushAlertConfig()
     }
     fun toggleThreshold(t: Int) {
         _state.update {
@@ -727,10 +734,17 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(enabledThresholds = next)
         }
         viewModelScope.launch { store.setThresholds(_state.value.enabledThresholds) }
+        pushAlertConfig()
     }
     fun setCriticalThreshold(t: Int) {
-        _state.update { it.copy(criticalThreshold = t) }
-        viewModelScope.launch { store.setCriticalThreshold(t) }
+        // Auto-arm: choosing a critical level also enables that threshold, so it can't silently
+        // fail to trigger (the trap where "Critical level" looked like — but wasn't — a trigger).
+        _state.update { it.copy(criticalThreshold = t, enabledThresholds = it.enabledThresholds + t) }
+        viewModelScope.launch {
+            store.setCriticalThreshold(t)
+            store.setThresholds(_state.value.enabledThresholds)
+        }
+        pushAlertConfig()
     }
     /** Restore every alert setting (toggle, thresholds, critical level) to its default. */
     fun resetAlertsToDefaults() {
@@ -747,6 +761,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             store.setThresholds(DEFAULT_THRESHOLDS.toSet())
             store.setCriticalThreshold(DEFAULT_CRITICAL_THRESHOLD)
         }
+        pushAlertConfig()
     }
     fun setKeepScreenOn(enabled: Boolean) {
         _state.update { it.copy(keepScreenOn = enabled) }
