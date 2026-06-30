@@ -598,7 +598,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         engine.start(roster = _state.value.roster, seed = _state.value.fleet, loggingEnabled = _state.value.logging)
         engine.setDisabled(_state.value.disabled)
         engine.setStage(currentStageAddrs())
-        engine.setGpsActive(_state.value.gpsEnabled && _state.value.enrolled)
+        engine.setGpsActive(_state.value.gpsEnabled && _state.value.enrolled && _state.value.cloudEnabled)
         engine.importLegacyCsvIfNeeded(
             alreadyImported = _state.value.csvImported,
             markImported = { store.setCsvImported(true) },
@@ -648,12 +648,13 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     fun setCloudEnabled(on: Boolean) {
         viewModelScope.launch { store.setCloudEnabled(on) }
         _state.update { it.copy(cloudEnabled = on) }
+        engine.setGpsActive(_state.value.gpsEnabled && _state.value.enrolled && _state.value.monitoring && on)
         if (on) getApplication<BmsApp>().reporter.start()
     }
     fun setGpsEnabled(on: Boolean) {
         viewModelScope.launch { store.setGpsEnabled(on) }
         _state.update { it.copy(gpsEnabled = on) }
-        engine.setGpsActive(on && _state.value.enrolled && _state.value.monitoring)
+        engine.setGpsActive(on && _state.value.enrolled && _state.value.monitoring && _state.value.cloudEnabled)
     }
     fun setApiBaseUrl(url: String) { viewModelScope.launch { store.setApiBaseUrl(url) }; _state.update { it.copy(apiBaseUrl = url) } }
 
