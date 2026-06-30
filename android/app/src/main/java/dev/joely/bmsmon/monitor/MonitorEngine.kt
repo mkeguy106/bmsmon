@@ -4,6 +4,7 @@ import android.content.Context
 import dev.joely.bmsmon.ble.BmsRepository
 import dev.joely.bmsmon.ble.profile.ProfileRegistry
 import dev.joely.bmsmon.ble.profile.RedodoBekenProfile
+import dev.joely.bmsmon.cloud.TelemetryReporter
 import dev.joely.bmsmon.data.TelemetryRepository
 import dev.joely.bmsmon.data.classifyFrame
 import dev.joely.bmsmon.data.db.BmsDatabase
@@ -53,11 +54,19 @@ data class MonitorState(
  * runs headless. Stage resolution and all settings/appearance state stay in the ViewModel, which
  * pushes the resolved stage down via [setStage].
  */
-class MonitorEngine(appContext: Context) {
+class MonitorEngine(
+    appContext: Context,
+    db: BmsDatabase = BmsDatabase.create(appContext),
+    private val reporter: TelemetryReporter? = null,
+) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val ble = BmsRepository(appContext)
-    private val repository = TelemetryRepository(BmsDatabase.create(appContext))
+    private val repository = TelemetryRepository(db)
+
+    init {
+        reporter?.start()
+    }
 
     /** Exposed so the ViewModel can read session history for the graphs. */
     val history: TelemetryRepository get() = repository
@@ -67,6 +76,11 @@ class MonitorEngine(appContext: Context) {
     // The current roster drives the monitoring target set and group lookups (regen, last-discharge).
     // It's dynamic (the user can add/remove batteries) so the ViewModel pushes updates via setRoster.
     @Volatile private var roster: Roster = DEFAULT_ROSTER
+
+    init {
+        // roster is now initialized — fire import resume on every process start while enrolled && !importDone.
+        reporter?.startImportIfNeeded(roster)
+    }
 
     private val _state = MutableStateFlow(MonitorState())
     val state: StateFlow<MonitorState> = _state.asStateFlow()
@@ -162,6 +176,10 @@ class MonitorEngine(appContext: Context) {
                 peakCurrentA = peakC,
             )
         }
+        reporter?.report(
+            addr, roster.batteryAt(addr)?.advertisedName, roster.batteryAt(addr)?.alias,
+            group?.id, t, now, regen,
+        )
         if (logging) {
             val header = (ProfileRegistry.profileFor(roster.batteryAt(addr)?.advertisedName)
                 ?: RedodoBekenProfile).responseHeader
@@ -179,8 +197,10 @@ class MonitorEngine(appContext: Context) {
                 lastDischargeAt = recomputeLastDischarge(fleet, st.lastDischargeAt, now()),
             )
         }
-        if (reachable != was && logging) {
-            repository.logLink(addr, reachable, now())
+        if (reachable != was) {
+            val ts = now()
+            if (logging) repository.logLink(addr, reachable, ts)
+            reporter?.reportLink(addr, roster.batteryAt(addr)?.alias, roster.groupOf(addr)?.id, reachable, ts)
         }
     }
 

@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.BrightnessAuto
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DisplaySettings
 import androidx.compose.material.icons.filled.Info
@@ -96,8 +97,8 @@ private fun shortMac(addr: String): String = addr.removePrefix("C8:47:80:")
 private val CatPurple = Color(0xFF8B6BC9)
 private val CatBlue = Color(0xFF3E86C9)
 
-/** The eight category detail pages the hub drills into. */
-private enum class SettingsPage { Monitoring, Alerts, Groups, Appearance, Display, Lock, Data, About }
+/** The nine category detail pages the hub drills into. */
+private enum class SettingsPage { Monitoring, Alerts, Groups, Appearance, Display, Lock, Data, About, Cloud }
 
 @Composable
 fun SettingsScreen(
@@ -121,6 +122,9 @@ fun SettingsScreen(
     onSetLockShowTime: (Boolean) -> Unit,
     onSetLockShowWifi: (Boolean) -> Unit,
     onSetLockShowBattery: (Boolean) -> Unit,
+    onEnroll: (String, String) -> Unit,
+    onSetCloudEnabled: (Boolean) -> Unit,
+    onForget: () -> Unit,
 ) {
     var page by remember { mutableStateOf<SettingsPage?>(null) }
 
@@ -153,6 +157,9 @@ fun SettingsScreen(
             DataLoggingContent(state, onSetLogging, onClearLog)
         }
         SettingsPage.About -> DetailScaffold("About", { page = null }) { AboutContent() }
+        SettingsPage.Cloud -> DetailScaffold("Cloud sync", { page = null }) {
+            CloudSyncContent(state, onEnroll, onSetCloudEnabled, onForget)
+        }
     }
 }
 
@@ -234,6 +241,10 @@ private fun SettingsHub(
                 ) { onOpen(SettingsPage.Data) }
                 RowHairline()
                 CategoryRow(
+                    Icons.Filled.CloudUpload, CatBlue, "Cloud sync", cloudValue(state),
+                ) { onOpen(SettingsPage.Cloud) }
+                RowHairline()
+                CategoryRow(
                     Icons.Filled.Info, c.text3, "About", "v1.0",
                 ) { onOpen(SettingsPage.About) }
             }
@@ -261,6 +272,9 @@ private fun lockValue(state: UiState): String {
     }
     return if (parts.isEmpty()) "Off" else parts.joinToString(" · ")
 }
+
+private fun cloudValue(state: UiState): String =
+    if (state.enrolled) "Enrolled" else "Not set up"
 
 // ────────────────────────────────────────────────────────────────────────────
 // Shared primitives
@@ -337,7 +351,7 @@ private fun PillButton(label: String, outlined: Boolean, onClick: () -> Unit) {
 
 /** A grouped-list container: card background, hairline border, 13dp radius. */
 @Composable
-private fun GroupedCard(content: @Composable ColumnScope.() -> Unit) {
+internal fun GroupedCard(content: @Composable ColumnScope.() -> Unit) {
     val c = Bm.colors
     Column(
         Modifier.fillMaxWidth()
@@ -350,7 +364,7 @@ private fun GroupedCard(content: @Composable ColumnScope.() -> Unit) {
 
 /** Hairline divider between rows inside a grouped card, inset past the leading icon tile. */
 @Composable
-private fun RowHairline(inset: Dp = 58.dp) {
+internal fun RowHairline(inset: Dp = 58.dp) {
     Box(Modifier.fillMaxWidth().padding(start = inset)) {
         Box(Modifier.fillMaxWidth().height(1.dp).background(Bm.colors.border))
     }
@@ -423,7 +437,7 @@ private fun DetailScaffold(title: String, onBack: () -> Unit, content: @Composab
 }
 
 @Composable
-private fun SectionLabel(text: String, top: Dp = 8.dp) {
+internal fun SectionLabel(text: String, top: Dp = 8.dp) {
     Text(
         text.uppercase(), color = Bm.colors.text3, fontFamily = MonoFont,
         fontSize = 10.5.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.6.sp,
@@ -433,7 +447,7 @@ private fun SectionLabel(text: String, top: Dp = 8.dp) {
 
 /** A bordered card holding free-form detail content (18dp padding). */
 @Composable
-private fun PlainCard(content: @Composable ColumnScope.() -> Unit) {
+internal fun PlainCard(content: @Composable ColumnScope.() -> Unit) {
     val c = Bm.colors
     Column(
         Modifier.fillMaxWidth()
@@ -534,7 +548,7 @@ private fun ColumnScope.MonitoringStageContent(
 
 /** A grouped-list toggle row: title + subtitle on the left, a switch on the right. */
 @Composable
-private fun ToggleRow(
+internal fun ToggleRow(
     title: String,
     subtitle: String,
     checked: Boolean,

@@ -121,6 +121,14 @@ data class UiState(
     val lockShowTime: Boolean = true,
     val lockShowWifi: Boolean = true,
     val lockShowBattery: Boolean = true,
+    val cloudEnabled: Boolean = false,
+    val apiBaseUrl: String? = null,
+    val enrolled: Boolean = false,
+    val cloudOutboxDepth: Int = 0,
+    val cloudLastUploadMs: Long = 0,
+    val importDone: Boolean = false,
+    val importTotal: Int = 0,
+    val importSent: Int = 0,
 ) {
     val isDark get() = mode == Mode.Dark
     val dailyDriver: BatteryGroup
@@ -241,6 +249,10 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     lockShowBattery = p.lockShowBattery,
                     // Per-battery disconnects persist across restarts.
                     disabled = p.disabledAddrs ?: emptySet(),
+                    cloudEnabled = p.cloudEnabled,
+                    apiBaseUrl = p.apiBaseUrl,
+                    enrolled = p.enrolled,
+                    importDone = p.importDone,
                     sortKey = p.sortKey?.let { runCatching { SortKey.valueOf(it) }.getOrNull() } ?: s.sortKey,
                     filters = p.filters?.mapNotNull { runCatching { FilterKey.valueOf(it) }.getOrNull() }?.toSet()
                         ?: s.filters,
@@ -297,6 +309,10 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                 delay(30_000)
                 if (_state.value.monitoring) refresh()
             }
+        }
+        // Mirror reporter upload stats into UiState so the Cloud sync page can show them.
+        getApplication<BmsApp>().reporter.onStatus = { depth, ts ->
+            _state.update { it.copy(cloudOutboxDepth = depth.toInt(), cloudLastUploadMs = ts) }
         }
     }
 
@@ -614,6 +630,45 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         foreground = false
         updateSensor()
         persistLastTelemetry()
+    }
+
+    // --- cloud sync settings ---
+    fun setCloudEnabled(on: Boolean) {
+        viewModelScope.launch { store.setCloudEnabled(on) }
+        _state.update { it.copy(cloudEnabled = on) }
+        if (on) getApplication<BmsApp>().reporter.start()
+    }
+    fun setApiBaseUrl(url: String) { viewModelScope.launch { store.setApiBaseUrl(url) }; _state.update { it.copy(apiBaseUrl = url) } }
+
+    fun enroll(baseUrl: String, code: String) {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            dev.joely.bmsmon.cloud.DeviceKeys.ensureKeyPair()
+            val installUuid = store.installUuid()
+            val res = dev.joely.bmsmon.cloud.EnrollClient(okhttp3.OkHttpClient())
+                .enroll(baseUrl, code, installUuid, dev.joely.bmsmon.cloud.DeviceKeys.publicKeySpkiB64())
+            res.onSuccess { id ->
+                store.setApiBaseUrl(baseUrl)
+                store.setDeviceId(id)
+                store.setEnrolled(true)
+                store.setCloudEnabled(true)
+                _state.update { it.copy(apiBaseUrl = baseUrl, enrolled = true, cloudEnabled = true) }
+                val app = getApplication<BmsApp>()
+                app.reporter.start()
+                app.reporter.startImportIfNeeded(_state.value.roster)
+            }
+        }
+    }
+
+    fun forgetDevice() {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            dev.joely.bmsmon.cloud.DeviceKeys.deleteKey()
+            store.setEnrolled(false)
+            store.setCloudEnabled(false)
+            store.setDeviceId("")
+            store.setImportDone(false)
+            store.setImportWatermark(0)
+            _state.update { it.copy(enrolled = false, cloudEnabled = false) }
+        }
     }
 
     // --- usage logging (to calibrate the power ring) ---

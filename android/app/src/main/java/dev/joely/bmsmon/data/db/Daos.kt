@@ -23,6 +23,9 @@ interface SampleDao {
     @Query("SELECT COUNT(*) FROM samples") suspend fun count(): Long
 
     @Query("DELETE FROM samples") suspend fun clear()
+
+    @Query("SELECT * FROM samples WHERE id > :afterId ORDER BY id ASC LIMIT :limit")
+    suspend fun pageAfter(afterId: Long, limit: Int): List<SampleEntity>
 }
 
 @Dao
