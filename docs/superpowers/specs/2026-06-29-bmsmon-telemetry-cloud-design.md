@@ -30,15 +30,17 @@ Hard requirements from the user:
 | Server storage | **Postgres**, full history retained (declarative monthly partitioning for scale) |
 | Device auth | **ECDSA P-256 keypair**; phone self-signs each batch as an **ES256 JWT**; server stores only public keys |
 | WebUI framework | **React** (built to static assets, served by the API container) |
-| Offline behavior | Room **outbox** table on the phone; batched flush on reconnect; forward-going from enrollment (no bulk import of pre-enrollment history in v1) |
+| Offline behavior | Room **outbox** table on the phone; batched flush on reconnect. Plus a one-time **historical import** of the phone's existing on-device samples at enrollment |
 | Tenancy | **One fleet**; per-device keys so a replacement/second phone can enroll later. WebUI viewers = Authentik users |
+| Enrollment authority | Enrollment codes can be minted only by members of the Authentik group **`Covert.life - Full App Access - User Group`** |
 | Control surface | **Strictly read-only** — nothing ever flows server → phone → BMS |
 
 ### Non-goals (v1)
 
-- No bulk import of the phone's existing historical samples (only forward from
-  enrollment). Can be added later as a one-time import job.
-- No multi-tenant orgs/ACLs beyond "is an authenticated Authentik user."
+- The historical import is one-time and best-effort (resumable, idempotent); it is
+  not a continuous two-way sync.
+- No multi-tenant orgs/ACLs beyond "is an authenticated Authentik user in the
+  configured group."
 - No commands/control of any kind reaching the batteries from the server.
 - No downsampling/rollups in v1 (full-resolution rows + partition pruning is the
   scaling story; rollups are a later optimization).
@@ -95,9 +97,11 @@ Routes split by Traefik into two trust zones:
 - `GET /web/samples?address=&from=&to=&bucket=` — history for charts.
 - `GET /web/devices` — enrolled devices + last-seen.
 - `POST /web/enroll-codes` — mint a one-time enrollment code (admin action).
-  Authorized from Authentik forwardAuth headers (require membership in a
-  configured group, default any authenticated user).
-- `DELETE /web/devices/{id}` — revoke a device (stops accepting its JWTs).
+  Authorized from Authentik forwardAuth headers: the caller's `X-authentik-groups`
+  must include the configured admin group (`BMSMON_ADMIN_GROUP`, default
+  `Covert.life - Full App Access - User Group`). `403` otherwise.
+- `DELETE /web/devices/{id}` — revoke a device (stops accepting its JWTs). Same
+  admin-group gate as code minting.
 - `WS /ws` — on connect, send a full fleet snapshot, then stream each incoming
   sample/link-event as it is ingested.
 
@@ -162,11 +166,19 @@ DISCONNECTED treatment):
   `200` deletes acked rows. Failures are silent: exponential backoff (capped),
   then wait for the next connectivity/enqueue signal. Online cadence flushes
   promptly (small debounce) to stay "live"; offline it simply accumulates.
+- **Historical import** — a one-shot, resumable backfill that pages over the
+  existing on-device `samples` table (oldest-first) and POSTs them to
+  `/api/v1/ingest` under the enrolled device, separate from the live outbox so it
+  never blocks real-time reporting. Progress is a last-imported-`sampleId`
+  watermark in DataStore; server idempotency makes re-runs safe; it is throttled
+  below the live path and surfaced in the Cloud sync page (e.g. "Importing history
+  45k/96k"). Covers CSV-sourced history too, since the CSV import already lands in
+  the `samples` table.
 - **Identity & keys** — at first run generate a per-install UUID (DataStore). At
   enrollment generate an **ECDSA P-256 keypair in the Android Keystore** (alias
   `bmsmon_device`, private key non-exportable).
 - **Settings** — new DataStore keys: `cloud_enabled`, `api_base_url`, `device_id`,
-  `enrolled`. A new **"Cloud sync"** category in the Settings Hub (the structure
+  `enrolled`, `import_watermark`, `import_done`. A new **"Cloud sync"** category in the Settings Hub (the structure
   just shipped): status (Not enrolled / Enrolled to `<url>` / last upload), server
   URL + enrollment-code fields, **Enroll**, an enable toggle, outbox depth, and
   **Forget device**.
@@ -175,9 +187,11 @@ DISCONNECTED treatment):
 
 ## 4. Security — enrollment & key exchange
 
-1. **Mint code (admin, browser):** logged-in Authentik user hits "Enroll device"
-   → `POST /web/enroll-codes` → server stores `sha256(code)` with a 10-min TTL and
-   returns the plaintext code once (shown as text + QR).
+1. **Mint code (admin, browser):** an Authentik user in the
+   `Covert.life - Full App Access - User Group` hits "Enroll device" →
+   `POST /web/enroll-codes` (server checks `X-authentik-groups`) → server stores
+   `sha256(code)` with a 10-min TTL and returns the plaintext code once (shown as
+   text + QR).
 2. **Enroll (phone):** user enters server URL + code (or scans QR). Phone
    generates its Keystore keypair and calls `POST /api/v1/enroll` with
    `{ code, install_uuid, public_key_spki_b64 }`. Server verifies the code is
@@ -247,8 +261,12 @@ and pushes `ghcr.io/mkeguy106/bmsmon-server`. The NAS repo only gains the compos
 file; deploy pulls the image.
 
 **Secrets / env:** add `BMSMON_DB_PASSWORD` (and DB name/user) to the NAS `.env` /
-`.env.example`; the API reads DB creds from env. No app signing secret is needed
-(device auth uses public keys; UI auth is Authentik).
+`.env.example`; the API reads DB creds from env. Add `BMSMON_ADMIN_GROUP` (default
+`Covert.life - Full App Access - User Group`) gating enrollment-code minting and
+device revocation. Also bind the bmsmon Authentik Application to that group in
+Authentik so only its members can reach the WebUI at all — defense in depth with
+the server-side group check. No app signing secret is needed (device auth uses
+public keys; UI auth is Authentik).
 
 ## 6. Error handling & edge cases
 
@@ -266,6 +284,9 @@ file; deploy pulls the image.
   the server timeline shows an explicit hole rather than silently losing time.
 - **Revoked/unenrolled device:** persistent `401` pauses uploads and prompts
   re-enrollment; outbox is preserved.
+- **Historical import:** resumable via the watermark and idempotent on the server;
+  runs throttled in the background, survives app restarts, and becomes a no-op once
+  the watermark reaches the newest pre-enrollment sample.
 - **WebUI live drop:** `/ws` reconnects with backoff and re-snapshots; a stale
   pack renders DISCONNECTED.
 - **DB partition rollover:** monthly partitions created ahead of time by a small
@@ -275,13 +296,16 @@ file; deploy pulls the image.
 
 - **Server:** pytest — enrollment (valid/expired/reused code), JWT verification
   (good sig, wrong key, expired, replayed `jti`, tampered `bh`), idempotent
-  ingest, `/web/*` authorization via simulated Authentik headers, WS snapshot +
-  live broadcast. Run against a disposable Postgres (testcontainers or a CI
-  service).
+  ingest, `/web/*` authorization via simulated Authentik headers — including
+  `POST /web/enroll-codes` allowed for a member of `BMSMON_ADMIN_GROUP` and `403`
+  for a non-member — WS snapshot + live broadcast. Run against a disposable
+  Postgres (testcontainers or a CI service).
 - **Phone:** unit-test the outbox queue/flush state machine and the JWT signer
   (sign → verify with the public key) on the JVM; fake the HTTP transport to
-  assert batching, ack-then-delete, backoff, and gap-marking. Manual on-device
-  smoke: enroll, watch live, airplane-mode → buffer → re-enable → drain.
+  assert batching, ack-then-delete, backoff, and gap-marking; cover the historical
+  importer's watermark resumability and idempotent re-run. Manual on-device smoke:
+  enroll, watch live + history backfill, airplane-mode → buffer → re-enable →
+  drain.
 - **WebUI:** component tests for the live store reducer (snapshot + incoming
   sample → correct fleet state, DISCONNECTED on staleness); a mock WS feed for
   visual verification.
@@ -297,8 +321,8 @@ Each phase is its own spec→plan→build slice; this document is the shared des
    `/web/*`, `/ws`, React live dashboard, Dockerfile + GHCR build. Demonstrable
    live with the fake feeder.
 2. **Phone reporter** — outbox table, Keystore keypair + ES256 signer, uploader
-   state machine, `onPoll`/link-event taps, "Cloud sync" settings page,
-   `INTERNET` permission + HTTP deps.
+   state machine, `onPoll`/link-event taps, the one-time resumable historical
+   importer, "Cloud sync" settings page, `INTERNET` permission + HTTP deps.
 3. **NAS deployment** — `bmsmon/` compose + Traefik/Authentik/DNS labels, `.env`
    additions, Uptime Kuma monitors; verify cert issuance, Authentik gate on the
    UI, and `/api/` bypass end-to-end.
