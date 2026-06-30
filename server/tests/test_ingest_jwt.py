@@ -1,4 +1,5 @@
 import base64
+import gzip
 import hashlib
 import json
 import time
@@ -54,6 +55,34 @@ async def test_ingest_accepts_valid_signed_batch(app, client):
     assert r.json() == {"accepted": 1, "last_seq": 7}
     async with app.state.pool.acquire() as conn:
         assert await conn.fetchval("SELECT count(*) FROM samples") == 1
+
+
+async def test_ingest_accepts_gzipped_body(app, client):
+    # The signature's bh claim is over the PLAINTEXT body; the wire carries gzip. The server must
+    # decompress before verifying + parsing, so the hash still matches.
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    body = json.dumps(_payload()).encode()
+    gz = gzip.compress(body)
+    assert len(gz) < len(body)  # sanity: it actually compressed
+    r = await client.post("/api/v1/ingest", content=gz,
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body)}",
+                                   "Content-Type": "application/json",
+                                   "Content-Encoding": "gzip"})
+    assert r.status_code == 200
+    assert r.json() == {"accepted": 1, "last_seq": 7}
+    async with app.state.pool.acquire() as conn:
+        assert await conn.fetchval("SELECT count(*) FROM samples") == 1
+
+
+async def test_ingest_rejects_corrupt_gzip(app, client):
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    body = json.dumps(_payload()).encode()
+    r = await client.post("/api/v1/ingest", content=b"not-gzip-at-all",
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body)}",
+                                   "Content-Encoding": "gzip"})
+    assert r.status_code == 400
 
 
 async def test_ingest_rejects_wrong_key(app, client):
