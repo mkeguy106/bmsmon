@@ -654,7 +654,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update { it.copy(apiBaseUrl = baseUrl, enrolled = true, cloudEnabled = true) }
                 val app = getApplication<BmsApp>()
                 app.reporter.start()
-                app.reporter.runImport(_state.value.roster)
+                app.reporter.startImportIfNeeded(_state.value.roster)
             }
         }
     }

@@ -77,6 +77,11 @@ class MonitorEngine(
     // It's dynamic (the user can add/remove batteries) so the ViewModel pushes updates via setRoster.
     @Volatile private var roster: Roster = DEFAULT_ROSTER
 
+    init {
+        // roster is now initialized — fire import resume on every process start while enrolled && !importDone.
+        reporter?.startImportIfNeeded(roster)
+    }
+
     private val _state = MutableStateFlow(MonitorState())
     val state: StateFlow<MonitorState> = _state.asStateFlow()
 

@@ -34,6 +34,8 @@ class TelemetryReporter(
     private val enqueueChannel = Channel<OutboxEntity>(Channel.UNLIMITED)
     @Volatile private var started = false
     @Volatile var lastUploadMs = 0L
+    @Volatile private var reportingEnabled = false
+    @Volatile private var importStarted = false
     private var uploaderJob: Job? = null
     var onStatus: ((outboxCount: Long, lastUploadMs: Long) -> Unit)? = null
     var onImportProgress: ((Long) -> Unit)? = null
@@ -56,6 +58,7 @@ class TelemetryReporter(
         tsMs: Long,
         regen: Boolean,
     ) {
+        if (!reportingEnabled) return
         val payload = CloudJson.sampleJson(
             tsMs, addr, advertisedName, alias, groupId,
             t.state.name, t.soc, t.current, t.powerW, t.voltage, t.temp, t.mosfetTemp,
@@ -72,6 +75,7 @@ class TelemetryReporter(
         reachable: Boolean,
         tsMs: Long,
     ) {
+        if (!reportingEnabled) return
         val payload = CloudJson.sampleJson(
             tsMs, addr, null, alias, groupId,
             null, null, null, null, null, null, null, null, null, null, null,
@@ -137,6 +141,21 @@ class TelemetryReporter(
         }
     }
 
+    /**
+     * Launch [runImport] on the reporter's own process-lifetime scope if it hasn't been started yet
+     * this process and the persisted flags indicate it's needed. Safe to call multiple times —
+     * [importStarted] prevents a concurrent double-run within a process; the watermark + importDone
+     * flag make it resumable across process deaths.
+     */
+    fun startImportIfNeeded(roster: Roster) {
+        scope.launch {
+            val p = settings.load()
+            if (!p.enrolled || p.importDone || importStarted) return@launch
+            importStarted = true
+            try { runImport(roster) } finally { importStarted = false }
+        }
+    }
+
     /** Sign [body] with the device key and POST to [url]. Returns true on HTTP 2xx. */
     private fun postSigned(url: String, deviceId: String, body: ByteArray): Boolean =
         runCatching {
@@ -152,9 +171,11 @@ class TelemetryReporter(
     private suspend fun uploadLoop() {
         var backoff = 1000L
         var seq = 0
+        reportingEnabled = settings.load().let { it.cloudEnabled && it.enrolled && it.deviceId != null }
         while (true) {
             try {
                 val p = settings.load()
+                reportingEnabled = p.cloudEnabled && p.enrolled && p.deviceId != null
                 val base = p.apiBaseUrl
                 if (!p.cloudEnabled || !p.enrolled || p.deviceId == null || base == null) {
                     delay(2000)
