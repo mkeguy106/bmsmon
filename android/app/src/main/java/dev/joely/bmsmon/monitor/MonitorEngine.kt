@@ -9,8 +9,12 @@ import dev.joely.bmsmon.cloud.TelemetryReporter
 import dev.joely.bmsmon.data.TelemetryRepository
 import dev.joely.bmsmon.data.classifyFrame
 import dev.joely.bmsmon.data.db.BmsDatabase
+import dev.joely.bmsmon.model.AlertConfig
+import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.DEFAULT_ROSTER
+import dev.joely.bmsmon.model.PackSoc
+import dev.joely.bmsmon.model.evalStageAlert
 import dev.joely.bmsmon.model.batteryAt
 import dev.joely.bmsmon.model.GroupActivity
 import dev.joely.bmsmon.model.Roster
@@ -66,6 +70,11 @@ class MonitorEngine(
     private val ble = BmsRepository(appContext)
     private val locationSource = LocationSource(appContext)
     private val repository = TelemetryRepository(db)
+    private val alertNotifier = AlertNotifier(appContext)
+
+    // Stage addresses + alert config, mirrored from the ViewModel so alerts can fire headless.
+    @Volatile private var stageAddrs: Set<String> = emptySet()
+    @Volatile private var alertConfig: AlertConfig? = null
 
     init {
         reporter?.start()
@@ -121,12 +130,36 @@ class MonitorEngine(
         repository.finalizeOpenSessions()
         ble.stop()
         locationSource.stop()
+        alertNotifier.clear()
+        stageAddrs = emptySet()
         _state.value = MonitorState()
     }
 
-    fun setStage(addresses: Set<String>) = ble.setStage(addresses)
+    fun setStage(addresses: Set<String>) {
+        stageAddrs = addresses.map { it.uppercase() }.toSet()
+        ble.setStage(addresses)
+        evaluateAlerts()
+    }
     fun setDisabled(addresses: Set<String>) = ble.setDisabled(addresses)
     fun kickAll() = ble.kickAll()
+
+    /** Mirror the alert settings from the ViewModel; re-evaluate so changes take effect at once. */
+    fun setAlertConfig(cfg: AlertConfig) {
+        alertConfig = cfg
+        evaluateAlerts()
+    }
+
+    /** Evaluate the stage against the alert config and drive headless notifications. */
+    private fun evaluateAlerts() {
+        val cfg = alertConfig ?: return
+        if (!_state.value.monitoring) return
+        val fleet = _state.value.fleet
+        val packs = stageAddrs
+            .mapNotNull { fleet[it]?.takeIf { s -> s.reachable }?.telemetry }
+            .map { PackSoc(it.soc, it.state == BatteryState.Charging) }
+        val label = stageAddrs.firstNotNullOfOrNull { roster.groupOf(it)?.id }
+        alertNotifier.update(evalStageAlert(packs, cfg), label)
+    }
 
     /** Backfill the legacy CSVs into the DB exactly once (guarded by a persisted flag). */
     fun importLegacyCsvIfNeeded(alreadyImported: Boolean, markImported: suspend () -> Unit, filesDir: File?) {
@@ -196,6 +229,7 @@ class MonitorEngine(
                 ?: RedodoBekenProfile).responseHeader
             repository.ingest(addr, t, raw, classifyFrame(raw, parsedOk = true, header), regen, now)
         }
+        if (addr.uppercase() in stageAddrs) evaluateAlerts()
     }
 
     private fun onReachable(addr: String, reachable: Boolean) {
@@ -213,6 +247,7 @@ class MonitorEngine(
             if (logging) repository.logLink(addr, reachable, ts)
             reporter?.reportLink(addr, roster.batteryAt(addr)?.alias, roster.groupOf(addr)?.id, reachable, ts)
         }
+        if (addr.uppercase() in stageAddrs) evaluateAlerts()
     }
 
     /** Stamp each base's last-discharge time to [now] while it reads as discharging. */

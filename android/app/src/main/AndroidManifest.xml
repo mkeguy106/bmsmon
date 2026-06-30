@@ -28,6 +28,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <!-- Android 13+: runtime-granted, for the ongoing foreground-service notification. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Vibration for critical low-battery alert notifications. Install-time, auto-granted. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
     <!-- Read connectivity (Wi-Fi vs cellular) for the locked-screen status strip. Install-time. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Network access for telemetry upload. Install-time. -->
