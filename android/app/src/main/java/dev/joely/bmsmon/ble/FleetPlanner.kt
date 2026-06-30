@@ -16,6 +16,11 @@ data class FleetPlan(val toConnect: List<String>, val toDisconnect: List<String>
  * Decide this tick's connect/disconnect actions. Pure: no BLE, no clock beyond [now].
  * Holds up to [maxHeld] links; stage packs get slots first; backed-off packs wait; non-desired
  * packs are dropped; true overflow rotates the oldest-held non-stage pack out to admit a waiter.
+ *
+ * When [stageFirst] is set (the launch priority barrier), only stage packs are admitted to connect
+ * this tick — every background pack waits until the stage packs are all up. The engine arms this on
+ * start and releases it once the stage is connected (or a grace window expires), so the restored
+ * main stage connects and starts polling before anything else.
  */
 fun planFleet(
     desired: Set<String>,
@@ -26,12 +31,14 @@ fun planFleet(
     heldSince: Map<String, Long>,
     maxHeld: Int,
     now: Long,
+    stageFirst: Boolean = false,
 ): FleetPlan {
     val toDisconnect = (held + connecting).filter { it !in desired }.toMutableList()
     val activeAfterDrop = (held + connecting).filter { it in desired }
     val eligible = desired
         .filter { it !in held && it !in connecting }
         .filter { (backoffUntil[it] ?: 0L) <= now }
+        .filter { !stageFirst || it in stage }  // launch barrier: stage packs only
         .sortedWith(compareByDescending<String> { it in stage }.thenBy { it })
     val toConnect = mutableListOf<String>()
     var free = maxHeld - activeAfterDrop.size

@@ -27,7 +27,8 @@ class FleetPlannerPlanTest {
         desired: Set<String>, stage: Set<String> = emptySet(), held: Set<String> = emptySet(),
         connecting: Set<String> = emptySet(), backoffUntil: Map<String, Long> = emptyMap(),
         heldSince: Map<String, Long> = emptyMap(), maxHeld: Int = 8, now: Long = 1000,
-    ) = planFleet(desired, stage, held, connecting, backoffUntil, heldSince, maxHeld, now)
+        stageFirst: Boolean = false,
+    ) = planFleet(desired, stage, held, connecting, backoffUntil, heldSince, maxHeld, now, stageFirst)
 
     @org.junit.Test fun connectsAllDesiredWithinBudget() {
         val p = plan(desired = setOf("A", "B", "C"))
@@ -66,5 +67,35 @@ class FleetPlannerPlanTest {
             held = setOf("A", "B"), heldSince = mapOf("A" to 1, "B" to 5), maxHeld = 2)
         org.junit.Assert.assertEquals(listOf("A"), p.toDisconnect)
         org.junit.Assert.assertEquals(listOf("C"), p.toConnect)
+    }
+
+    // --- stage-first launch barrier: only stage packs connect until they're all up ---
+
+    @org.junit.Test fun stageFirstAdmitsOnlyStagePacks() {
+        // Nothing held yet, plenty of budget, but the barrier is armed: only the stage pack connects;
+        // every background pack waits.
+        val p = plan(desired = setOf("A", "B", "C"), stage = setOf("C"), stageFirst = true)
+        org.junit.Assert.assertEquals(listOf("C"), p.toConnect)
+    }
+
+    @org.junit.Test fun stageFirstConnectsAllStagePacksTogether() {
+        // A 2-pack base (the chair): both stage packs admitted, background pack still waits.
+        val p = plan(desired = setOf("A", "B", "C"), stage = setOf("B", "C"), stageFirst = true)
+        org.junit.Assert.assertEquals(setOf("B", "C"), p.toConnect.toSet())
+        org.junit.Assert.assertFalse("A" in p.toConnect)
+    }
+
+    @org.junit.Test fun stageFirstAdmitsNothingWhenStageBackedOff() {
+        // Stage pack is backing off (flaky establishment) — admit nothing rather than letting
+        // background packs jump the queue.
+        val p = plan(desired = setOf("A", "B", "C"), stage = setOf("C"),
+            backoffUntil = mapOf("C" to 5000), now = 1000, stageFirst = true)
+        org.junit.Assert.assertEquals(emptyList<String>(), p.toConnect)
+    }
+
+    @org.junit.Test fun stageFirstWithEmptyStageAdmitsNothing() {
+        // Barrier armed but stage not yet known (setStage hasn't landed): hold everyone for the tick.
+        val p = plan(desired = setOf("A", "B"), stage = emptySet(), stageFirst = true)
+        org.junit.Assert.assertEquals(emptyList<String>(), p.toConnect)
     }
 }

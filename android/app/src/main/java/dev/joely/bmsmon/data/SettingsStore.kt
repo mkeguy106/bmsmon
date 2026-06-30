@@ -13,6 +13,7 @@ import dev.joely.bmsmon.model.Battery
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.Group
 import dev.joely.bmsmon.model.Roster
+import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.Telemetry
 import kotlinx.coroutines.flow.first
 import org.json.JSONArray
@@ -26,6 +27,7 @@ data class Persisted(
     val manualMode: Boolean,
     val darkMode: Boolean,
     val dailyDriverId: String?,
+    val lastStage: StageTarget?,
     val dynamicStage: Boolean?,
     val stageHoldMinutes: Int?,
     val monitoring: Boolean,
@@ -66,6 +68,7 @@ class SettingsStore(private val context: Context) {
         val MANUAL = booleanPreferencesKey("manual_mode")
         val DARK = booleanPreferencesKey("dark_mode")
         val DAILY_DRIVER = stringPreferencesKey("daily_driver")
+        val LAST_STAGE = stringPreferencesKey("last_stage")
         val DYNAMIC_STAGE = booleanPreferencesKey("dynamic_stage")
         val STAGE_HOLD = intPreferencesKey("stage_hold_min")
         val MONITORING = booleanPreferencesKey("monitoring")
@@ -106,6 +109,7 @@ class SettingsStore(private val context: Context) {
             manualMode = p[K.MANUAL] ?: false,
             darkMode = p[K.DARK] ?: false,
             dailyDriverId = p[K.DAILY_DRIVER],
+            lastStage = decodeStage(p[K.LAST_STAGE]),
             dynamicStage = p[K.DYNAMIC_STAGE],
             stageHoldMinutes = p[K.STAGE_HOLD],
             monitoring = p[K.MONITORING] ?: false,
@@ -143,6 +147,8 @@ class SettingsStore(private val context: Context) {
     suspend fun setAppearance(name: String) = context.dataStore.edit { it[K.APPEARANCE] = name }.let {}
     suspend fun setAutoLuxThreshold(lux: Float) = context.dataStore.edit { it[K.AUTO_LUX] = lux }.let {}
     suspend fun setDailyDriver(id: String) = context.dataStore.edit { it[K.DAILY_DRIVER] = id }.let {}
+    suspend fun setLastStage(target: StageTarget) =
+        context.dataStore.edit { it[K.LAST_STAGE] = encodeStage(target) }.let {}
     suspend fun setDynamicStage(enabled: Boolean) = context.dataStore.edit { it[K.DYNAMIC_STAGE] = enabled }.let {}
     suspend fun setStageHold(minutes: Int) = context.dataStore.edit { it[K.STAGE_HOLD] = minutes }.let {}
     suspend fun setMonitoring(on: Boolean) = context.dataStore.edit { it[K.MONITORING] = on }.let {}
@@ -182,6 +188,19 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { it[K.INSTALL_UUID] = fresh }
         return fresh
     }
+}
+
+/** Persist the last main-stage target so the next launch can restore + prioritize it. */
+private fun encodeStage(target: StageTarget): String = when (target) {
+    is StageTarget.Base -> "base:${target.groupId}"
+    is StageTarget.Single -> "single:${target.address}"
+}
+
+private fun decodeStage(s: String?): StageTarget? = when {
+    s == null -> null
+    s.startsWith("base:") -> StageTarget.Base(s.removePrefix("base:"))
+    s.startsWith("single:") -> StageTarget.Single(s.removePrefix("single:"))
+    else -> null
 }
 
 /** JSON forbids NaN/Infinity; coerce any non-finite reading to 0 before writing. */
