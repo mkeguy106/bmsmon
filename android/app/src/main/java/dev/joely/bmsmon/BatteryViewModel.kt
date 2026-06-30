@@ -55,8 +55,15 @@ enum class Mode { Dark, Light }
 enum class SortKey { Activity, Soc, Base }
 enum class FilterKey { ReachableOnly, ActiveOnly, ByBase, DailyDriverOnly }
 
-/** All low-battery alert thresholds, most severe last (matches the prototype + handoff). */
-val ALERT_THRESHOLDS = listOf(30, 25, 20, 15, 10, 5)
+/** Every selectable low-battery alert level, most severe last (full 5% ladder). */
+val ALERT_THRESHOLDS =
+    listOf(95, 90, 85, 80, 75, 70, 65, 60, 55, 50, 45, 40, 35, 30, 25, 20, 15, 10, 5)
+
+/** Levels enabled on a fresh install (the original low set; high marks default OFF). */
+val DEFAULT_THRESHOLDS = listOf(30, 25, 20, 15, 10, 5)
+
+/** Default critical tier (red / fast pulse). User-configurable. */
+const val DEFAULT_CRITICAL_THRESHOLD = 15
 
 /** Throttle for writing the last-known telemetry snapshot to disk while monitoring. */
 private const val TELE_SAVE_INTERVAL_MS = 15_000L
@@ -104,8 +111,9 @@ data class UiState(
     val dbSize: String = "",
     // low-battery alerts
     val alertsOn: Boolean = true,
-    val enabledThresholds: Set<Int> = ALERT_THRESHOLDS.toSet(),
+    val enabledThresholds: Set<Int> = DEFAULT_THRESHOLDS.toSet(),
     val acknowledgedThresholds: Set<Int> = emptySet(),
+    val criticalThreshold: Int = DEFAULT_CRITICAL_THRESHOLD,
     val keepScreenOn: Boolean = true,
     val tempFahrenheit: Boolean = true,
     val detailAddress: String? = null,
@@ -187,7 +195,7 @@ data class UiState(
         val ackEffective = acknowledgedThresholds.intersect(crossed)
         val flashing = alertsOn && !lowCharging &&
             activeThreshold != null && activeThreshold !in ackEffective
-        val critical = activeThreshold != null && activeThreshold <= 15
+        val critical = activeThreshold != null && activeThreshold <= criticalThreshold
         return StageAlert(flashing, critical, lowSoc.roundToInt(), activeThreshold, ackEffective)
     }
 }
