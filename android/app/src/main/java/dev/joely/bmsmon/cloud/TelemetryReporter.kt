@@ -37,7 +37,8 @@ class TelemetryReporter(
     @Volatile private var reportingEnabled = false
     @Volatile private var importStarted = false
     private var uploaderJob: Job? = null
-    var onStatus: ((outboxCount: Long, lastUploadMs: Long) -> Unit)? = null
+    private val uploadRate = UploadRate()
+    var onStatus: ((outboxCount: Long, lastUploadMs: Long, kbps: Double) -> Unit)? = null
     var onImportProgress: ((Long) -> Unit)? = null
 
     init {
@@ -189,7 +190,7 @@ class TelemetryReporter(
                 val depth = db.outbox().count()
                 if (depth > OUTBOX_MAX) db.outbox().dropOldest(depth - OUTBOX_MAX)
                 if (!conn.online.value || depth == 0) {
-                    onStatus?.invoke(depth.toLong(), lastUploadMs)
+                    onStatus?.invoke(depth.toLong(), lastUploadMs, uploadRate.kbps(System.currentTimeMillis()))
                     delay(1500)
                     continue
                 }
@@ -204,8 +205,10 @@ class TelemetryReporter(
                 val ok = postSigned(CloudConfig(base).ingestUrl, p.deviceId, body)
                 if (ok) {
                     db.outbox().deleteUpTo(rows.last().id)
-                    lastUploadMs = System.currentTimeMillis()
-                    onStatus?.invoke(db.outbox().count().toLong(), lastUploadMs)
+                    val now = System.currentTimeMillis()
+                    lastUploadMs = now
+                    uploadRate.record(now, body.size)
+                    onStatus?.invoke(db.outbox().count().toLong(), lastUploadMs, uploadRate.kbps(now))
                     backoff = 1000L
                 } else {
                     delay(backoff)
