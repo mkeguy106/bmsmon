@@ -5,6 +5,8 @@ import time
 import jwt
 from cryptography.hazmat.primitives.serialization import load_der_public_key
 
+LEEWAY_SECONDS = 60
+
 
 class JwtError(Exception):
     pass
@@ -38,11 +40,12 @@ def verify(token: str, public_key_spki: bytes, body: bytes, jti_cache: JtiCache)
     try:
         pub = load_der_public_key(public_key_spki)
         claims = jwt.decode(token, pub, algorithms=["ES256"],
-                            options={"require": ["exp", "sub", "jti"]}, leeway=120)
+                            options={"require": ["exp", "sub", "jti", "bh", "iat"]},
+                            leeway=LEEWAY_SECONDS)
     except Exception as e:
         raise JwtError(str(e)) from e
     if claims.get("bh") != body_hash(body):
         raise JwtError("body hash mismatch")
-    if jti_cache.seen(claims["jti"], int(claims["exp"])):
+    if jti_cache.seen(claims["jti"], int(claims["exp"]) + LEEWAY_SECONDS):
         raise JwtError("replay")
     return claims

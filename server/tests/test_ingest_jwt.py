@@ -85,3 +85,31 @@ async def test_ingest_rejects_replayed_jti(app, client):
     h = {"Authorization": f"Bearer {token}"}
     assert (await client.post("/api/v1/ingest", content=body, headers=h)).status_code == 200
     assert (await client.post("/api/v1/ingest", content=body, headers=h)).status_code == 401
+
+
+async def test_ingest_rejects_expired_token(app, client):
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    body = json.dumps(_payload()).encode()
+    r = await client.post("/api/v1/ingest", content=body,
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body, exp_in=-3600)}"})
+    assert r.status_code == 401
+
+
+async def test_ingest_rejects_unknown_device(client):
+    priv, _ = _keypair()
+    body = json.dumps(_payload()).encode()
+    tok = _token(priv, str(uuid.uuid4()), body)
+    r = await client.post("/api/v1/ingest", content=body, headers={"Authorization": f"Bearer {tok}"})
+    assert r.status_code == 401
+
+
+async def test_ingest_rejects_revoked_device(app, client):
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    async with app.state.pool.acquire() as conn:
+        await conn.execute("UPDATE devices SET revoked=true WHERE id=$1", device_id)
+    body = json.dumps(_payload()).encode()
+    r = await client.post("/api/v1/ingest", content=body,
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
+    assert r.status_code == 401

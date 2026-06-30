@@ -1,10 +1,10 @@
 import base64
 import binascii
-import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from app.auth.device_jwt import JwtError, unverified_sub, verify
 from app.auth.enroll import hash_code
@@ -59,7 +59,10 @@ async def ingest(request: Request, pool=Depends(get_pool)):
             verify(token, bytes(dev["public_key_spki"]), raw, request.app.state.jti_cache)
         except JwtError:
             raise HTTPException(401, "bad signature")
-        body = IngestBody.model_validate_json(raw)
+        try:
+            body = IngestBody.model_validate_json(raw)
+        except ValidationError:
+            raise HTTPException(422, "invalid body")
         rows = [q.sample_row(device_id, s.address, s.model_dump()) for s in body.samples]
         async with conn.transaction():
             for s in body.samples:
