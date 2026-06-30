@@ -112,6 +112,7 @@ fun SettingsScreen(
     onSetAlertsOn: (Boolean) -> Unit,
     onToggleThreshold: (Int) -> Unit,
     onSetCriticalThreshold: (Int) -> Unit,
+    onResetAlerts: () -> Unit,
     onSetKeepScreenOn: (Boolean) -> Unit,
     onSetTempFahrenheit: (Boolean) -> Unit,
     onSetLogging: (Boolean) -> Unit,
@@ -140,7 +141,7 @@ fun SettingsScreen(
             MonitoringStageContent(state, onToggleMonitoring, onSetDynamicStage, onSetStageHold)
         }
         SettingsPage.Alerts -> DetailScaffold("Alerts", { page = null }) {
-            AlertsContent(state, onSetAlertsOn, onToggleThreshold, onSetCriticalThreshold)
+            AlertsContent(state, onSetAlertsOn, onToggleThreshold, onSetCriticalThreshold, onResetAlerts)
         }
         SettingsPage.Groups -> DetailScaffold("Battery Groups", { page = null }) {
             GroupsContent(state, onSetDailyDriver, onAddScan)
@@ -595,6 +596,7 @@ private fun ColumnScope.AlertsContent(
     onSetAlertsOn: (Boolean) -> Unit,
     onToggleThreshold: (Int) -> Unit,
     onSetCriticalThreshold: (Int) -> Unit,
+    onResetAlerts: () -> Unit,
 ) {
     val c = Bm.colors
     GroupedCard {
@@ -654,6 +656,13 @@ private fun ColumnScope.AlertsContent(
             else "Low-battery alerts are off.",
             color = c.text2, fontSize = 12.sp, lineHeight = 17.sp,
         )
+    }
+
+    Row(
+        Modifier.fillMaxWidth().padding(top = 16.dp),
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        PillButton("Reset to defaults", outlined = true, onClick = onResetAlerts)
     }
 }
 

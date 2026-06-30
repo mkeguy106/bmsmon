@@ -710,6 +710,22 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(criticalThreshold = t) }
         viewModelScope.launch { store.setCriticalThreshold(t) }
     }
+    /** Restore every alert setting (toggle, thresholds, critical level) to its default. */
+    fun resetAlertsToDefaults() {
+        _state.update {
+            it.copy(
+                alertsOn = true,
+                enabledThresholds = DEFAULT_THRESHOLDS.toSet(),
+                criticalThreshold = DEFAULT_CRITICAL_THRESHOLD,
+                acknowledgedThresholds = emptySet(),
+            )
+        }
+        viewModelScope.launch {
+            store.setAlertsOn(true)
+            store.setThresholds(DEFAULT_THRESHOLDS.toSet())
+            store.setCriticalThreshold(DEFAULT_CRITICAL_THRESHOLD)
+        }
+    }
     fun setKeepScreenOn(enabled: Boolean) {
         _state.update { it.copy(keepScreenOn = enabled) }
         viewModelScope.launch { store.setKeepScreenOn(enabled) }
