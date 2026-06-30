@@ -1056,8 +1056,14 @@ git commit -m "feat(server): ES256-signed idempotent ingest with replay+body bin
 
 - [ ] **Step 1: Write the failing test `server/tests/test_ws_live.py`**
 
+This test is intentionally **synchronous** and HTTP-only: the sync `TestClient`
+runs its own event loop and the app lifespan (which creates the pool), so it must
+NOT use the async `app`/`client` fixtures (nesting a sync client inside an async
+test deadlocks the loop). It enrolls a device and drives the WS over real HTTP.
+
 ```python
 import base64
+import hashlib
 import json
 import time
 import uuid
@@ -1067,34 +1073,39 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from starlette.testclient import TestClient
 
-from app.db import queries as q
+from app.main import create_app
+
+ADMIN = "Covert.life - Full App Access - User Group"
+A = "C8:47:80:15:67:44"
 
 
 def _kp():
     priv = ec.generate_private_key(ec.SECP256R1())
     spki = priv.public_key().public_bytes(
         serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
-    return priv, spki
+    return priv, base64.b64encode(spki).decode()
 
 
-async def test_ws_sends_snapshot_then_live_sample(app):
-    priv, spki = _kp()
-    async with app.state.pool.acquire() as conn:
-        device_id = str(await q.create_device(conn, "inst-ws", spki, "dev"))
-    # TestClient drives the same ASGI app (sync) for the websocket leg.
-    with TestClient(app) as tc:
+def _bh(body: bytes) -> str:
+    return base64.urlsafe_b64encode(hashlib.sha256(body).digest()).rstrip(b"=").decode()
+
+
+def test_ws_snapshot_then_live_sample():
+    with TestClient(create_app()) as tc:
+        code = tc.post("/web/enroll-codes", headers={
+            "X-authentik-username": "t", "X-authentik-groups": ADMIN}).json()["code"]
+        priv, pub_b64 = _kp()
+        device_id = tc.post("/api/v1/enroll", json={
+            "code": code, "install_uuid": f"ws-{uuid.uuid4().hex}",
+            "public_key_spki_b64": pub_b64}).json()["device_id"]
         with tc.websocket_connect("/ws") as ws:
-            first = ws.receive_json()
-            assert first["type"] == "snapshot"
+            assert ws.receive_json()["type"] == "snapshot"
             body = json.dumps({"batch_seq": 1, "samples": [
-                {"ts_ms": int(time.time() * 1000), "address": "C8:47:80:15:67:44",
-                 "soc": 55.0, "alias": "2012 · A"}]}).encode()
-            import hashlib
-            bh = base64.urlsafe_b64encode(hashlib.sha256(body).digest()).rstrip(b"=").decode()
-            tok = jwt.encode({"sub": device_id, "iat": int(time.time()),
-                              "exp": int(time.time()) + 60, "jti": uuid.uuid4().hex, "bh": bh},
-                             priv, algorithm="ES256")
-            tc.post("/api/v1/ingest", content=body, headers={"Authorization": f"Bearer {tok}"})
+                {"ts_ms": int(time.time() * 1000), "address": A, "soc": 55.0, "alias": "2012 · A"}]}).encode()
+            tok = jwt.encode({"sub": device_id, "iat": int(time.time()), "exp": int(time.time()) + 60,
+                              "jti": uuid.uuid4().hex, "bh": _bh(body)}, priv, algorithm="ES256")
+            r = tc.post("/api/v1/ingest", content=body, headers={"Authorization": f"Bearer {tok}"})
+            assert r.status_code == 200
             evt = ws.receive_json()
             assert evt["type"] == "sample"
             assert evt["soc"] == 55.0
@@ -1109,6 +1120,7 @@ Expected: FAIL (no `/ws` route).
 
 ```python
 import asyncio
+import uuid as _uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -1124,6 +1136,8 @@ def _jsonable(rows: list[dict]) -> list[dict]:
         for k, v in list(d.items()):
             if hasattr(v, "isoformat"):
                 d[k] = v.isoformat()
+            elif isinstance(v, _uuid.UUID):
+                d[k] = str(v)
         out.append(d)
     return out
 
