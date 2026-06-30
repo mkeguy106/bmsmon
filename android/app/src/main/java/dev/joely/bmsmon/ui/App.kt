@@ -18,8 +18,13 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -146,13 +151,22 @@ fun App(vm: BatteryViewModel) {
 
     BmTheme(dark = state.isDark, accent = state.accent, power = state.power) {
         Box(Modifier.fillMaxSize().background(Bm.colors.bg)) {
+          val lockStrip = state.locked && (state.lockShowTime || state.lockShowWifi || state.lockShowBattery)
           Column(Modifier.fillMaxSize()) {
             // While locked, screen pinning hides Android's status bar — replicate the chosen
             // system-info items at the very top so battery/time/Wi‑Fi stay visible.
-            if (state.locked && (state.lockShowTime || state.lockShowWifi || state.lockShowBattery)) {
+            if (lockStrip) {
                 LockStatusBar(state.lockShowTime, state.lockShowWifi, state.lockShowBattery)
             }
-            Box(Modifier.fillMaxWidth().weight(1f).systemBarsPadding()) {
+            // When the strip is showing it already occupies the status-bar area, so pad only the
+            // bottom (nav bar) here — otherwise the top inset is applied twice and content sinks.
+            Box(
+                Modifier.fillMaxWidth().weight(1f).then(
+                    // Strip handles the top; pad only the bottom (nav bar) so content doesn't sink.
+                    if (lockStrip) Modifier.windowInsetsPadding(WindowInsets.systemBars.only(WindowInsetsSides.Bottom))
+                    else Modifier.systemBarsPadding(),
+                ),
+            ) {
                 when (state.screen) {
                     Screen.Home -> HomeScreen(
                         state = state,
