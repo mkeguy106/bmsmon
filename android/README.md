@@ -25,7 +25,7 @@ and a unit test (`BmsProtocolTest.commandWhitelistIsReadOnly`) enforces that. Se
 
 ## Architecture
 ```
-ble/      BmsProtocol (pure, testable: framing + parseTelemetry), BmsConnection
+ble/      BmsProtocol (pure, testable: framing + parseTelemetry), BleSession
           (persistent GATT poll loop, FFE1 notify / FFE2 write), BmsRepository, BlePermissions
 model/    Telemetry, Roster/groups, stage resolution
 data/     SettingsStore (DataStore), Room DB (telemetry log + cloud outbox)

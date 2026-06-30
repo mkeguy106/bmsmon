@@ -191,16 +191,18 @@ and the capture/decode commands are in `docs/ble-connectivity-investigation.md`.
 
 ## Hardware Context
 
-Tested with 6x Redodo 12V 100Ah LiFePO4 batteries:
+Tested with 8x Redodo 12V 100Ah LiFePO4 batteries (grouped into bases; see `BATTERY_ALIASES` in `bmsmon.py`):
 
-| MAC Address | Name | Notes |
-|-------------|------|-------|
-| C8:47:80:15:67:44 | R-12100BNNA70-A02214 | |
-| C8:47:80:15:25:9A | R-12100BNNA70-A03727 | |
-| C8:47:80:15:DB:13 | R-12100BNNA70-A03902 | |
-| C8:47:80:15:07:DE | R-12100BNNA70-A02285 | |
-| C8:47:80:15:62:1B | R-12100BNNA70-A02345 | |
-| C8:47:80:15:25:01 | R-12100BNNA70-A02402 | Primary test unit |
+| MAC Address | Name | Group / alias |
+|-------------|------|---------------|
+| C8:47:80:15:67:44 | R-12100BNNA70-A02214 | 2012-A (current daily driver) |
+| C8:47:80:15:62:1B | R-12100BNNA70-A02345 | 2012-B (current daily driver) |
+| C8:47:80:15:DB:13 | R-12100BNNA70-A03902 | 2016-A |
+| C8:47:80:15:25:9A | R-12100BNNA70-A03727 | 2016-B |
+| C8:47:80:46:0A:D6 | R-12100BNNA70-B02371 | 2023-A |
+| C8:47:80:45:90:FB | R-12100BNNA70-B02375 | 2023-B |
+| C8:47:80:15:07:DE | R-12100BNNA70-A02285 | 2024-A |
+| C8:47:80:15:25:01 | R-12100BNNA70-A02402 | 2024-B (primary test unit) |
 
 OUI `C8:47:80` = Beken Corporation. All batteries share the same firmware (BK-BLE-1.0, FW 6.1.2, SW 6.3.0).
 
@@ -235,7 +237,7 @@ running. Needs `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_CONNECTED_DEVICE` + ru
 **Usage logging is intentionally ON right now — do not turn it off.** It records every
 telemetry sample to `…/Android/data/dev.joely.bmsmon/files/usage_log.csv` (columns incl.
 `current_a`, `power_w`, `regen`) so we can collect **real-world data to calibrate the UI later**:
-- the inner power ring's full scale `POWER_RING_FULL_W` (Fleet.kt, currently an 80 W placeholder),
+- the inner power ring's full scale `POWER_RING_FULL_W` (Fleet.kt; since **calibrated to 300 W** — see below),
 - the regen detection thresholds `REGEN_EPS` / `REGEN_WINDOW_MS` (Fleet.kt).
 
 Steady charging is being captured now as a baseline (`regen=0`); regen bursts while driving
@@ -312,8 +314,8 @@ python3 bmsmon.py --address C8:47:80:15:25:01
 # Query all known batteries
 python3 bmsmon.py --all
 
-# Live monitoring (default 1s poll interval)
-python3 bmsmon.py -a C8:47:80:15:25:01 --watch
+# Live monitoring (--watch takes the poll interval in seconds)
+python3 bmsmon.py -a C8:47:80:15:25:01 --watch 1
 
 # JSON output
 python3 bmsmon.py -a C8:47:80:15:25:01 --json
@@ -323,7 +325,9 @@ python3 bmsmon.py -a C8:47:80:15:25:01 --json
 
 The cloud backend lives in `server/` (FastAPI + asyncpg + **Postgres 16**) and the dashboard in
 `web/` (React + Vite). The phone (`android/`) enrolls a device and uploads signed telemetry
-batches to `POST /api/v1/ingest`; the WebUI reads `GET /web/fleet` + a `/ws` live feed. Schema is
+batches to `POST /api/v1/ingest`; the WebUI reads `GET /web/fleet` + a `/ws` live feed (plus
+admin-gated `GET /web/samples`, `GET /web/devices`, `POST /web/enroll-codes`,
+`DELETE /web/devices/{id}`). Schema is
 idempotent SQL in `server/app/db/schema.sql` (`CREATE TABLE IF NOT EXISTS` + `ALTER TABLE ... ADD
 COLUMN IF NOT EXISTS`) run on pool creation — so **schema changes apply automatically on container
 start; there is no separate migration step**.
