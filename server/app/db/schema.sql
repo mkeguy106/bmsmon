@@ -43,3 +43,7 @@ CREATE TABLE IF NOT EXISTS samples (
 ) PARTITION BY RANGE (ts);
 
 CREATE INDEX IF NOT EXISTS samples_addr_ts ON samples (address, ts DESC);
+
+ALTER TABLE samples ADD COLUMN IF NOT EXISTS lat double precision;
+ALTER TABLE samples ADD COLUMN IF NOT EXISTS lon double precision;
+ALTER TABLE samples ADD COLUMN IF NOT EXISTS gps_accuracy_m real;

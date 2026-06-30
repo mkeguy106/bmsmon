@@ -34,6 +34,9 @@ class SampleIn(BaseModel):
     cells: list[float] | None = None
     regen: bool = False
     link_event: str | None = None
+    lat: float | None = None
+    lon: float | None = None
+    gps_accuracy_m: float | None = None
 
 
 class IngestBody(BaseModel):
