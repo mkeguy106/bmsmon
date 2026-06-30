@@ -140,6 +140,13 @@ fun HomeScreen(
                 }
             }
         }
+        // Cloud-upload status tucked into the stage's bottom-right corner (stage page only).
+        if (pager.currentPage == 0 && state.cloudEnabled && state.enrolled) {
+            UploadBadge(
+                state,
+                Modifier.align(Alignment.BottomEnd).padding(end = 18.dp, bottom = 12.dp),
+            )
+        }
         // Alerts are evaluated only while the stage (page 0) is foregrounded.
         if (alert.flashing && pager.currentPage == 0) {
             DangerOverlay(alert, onAcknowledge)
@@ -244,7 +251,6 @@ private fun TopBar(
                 if (showPin) Icon(Icons.Filled.PushPin, null, Modifier.padding(start = 6.dp).size(13.dp), tint = Bm.accent)
                 Text(statusLabel, color = labelColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
                     letterSpacing = 0.9.sp, modifier = Modifier.padding(start = 7.dp))
-                if (state.cloudEnabled && state.enrolled) UploadBadge(state)
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 // While locked, hide appearance + settings; only the lock control remains (hold to unlock).
@@ -277,9 +283,9 @@ private fun TopBar(
     }
 }
 
-/** Tiny cloud-upload status next to the stage label: live KB/s while uploading, else synced/queued. */
+/** Tiny cloud-upload status in the stage's bottom-right: live KB/s while uploading, else synced/queued. */
 @Composable
-private fun UploadBadge(state: UiState) {
+private fun UploadBadge(state: UiState, modifier: Modifier = Modifier) {
     val c = Bm.colors
     val kbps = state.cloudUploadKbps
     val (text, color) = when {
@@ -290,7 +296,7 @@ private fun UploadBadge(state: UiState) {
     }
     Text(
         text, color = color, fontSize = 9.5.sp, fontWeight = FontWeight.Medium,
-        letterSpacing = 0.6.sp, modifier = Modifier.padding(start = 10.dp),
+        letterSpacing = 0.6.sp, modifier = modifier,
     )
 }
 
