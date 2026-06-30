@@ -1,5 +1,6 @@
 import base64
 import binascii
+import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -50,6 +51,10 @@ async def ingest(request: Request, pool=Depends(get_pool)):
     try:
         device_id = unverified_sub(token)
     except JwtError:
+        raise HTTPException(401, "bad token")
+    try:
+        uuid.UUID(device_id)
+    except (ValueError, TypeError):
         raise HTTPException(401, "bad token")
     async with pool.acquire() as conn:
         dev = await q.get_device(conn, device_id)

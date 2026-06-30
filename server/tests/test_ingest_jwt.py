@@ -113,3 +113,11 @@ async def test_ingest_rejects_revoked_device(app, client):
     r = await client.post("/api/v1/ingest", content=body,
                           headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
     assert r.status_code == 401
+
+
+async def test_ingest_rejects_non_uuid_sub(client):
+    priv, _ = _keypair()
+    body = json.dumps(_payload()).encode()
+    tok = _token(priv, "not-a-uuid", body)
+    r = await client.post("/api/v1/ingest", content=body, headers={"Authorization": f"Bearer {tok}"})
+    assert r.status_code == 401

@@ -10,7 +10,7 @@ const STALE_MS = 10_000;
 
 export default function App() {
   const store = useRef(createStore()).current;
-  const [, force] = useState(0);
+  const [v, force] = useState(0);
   const [live, setLive] = useState(false);
   const [now, setNow] = useState(Date.now());
 
@@ -23,7 +23,7 @@ export default function App() {
 
   const items: FleetItem[] = useMemo(
     () => Object.values(store.getFleet()).sort((a, b) => (a.alias ?? "").localeCompare(b.alias ?? "")),
-    [store, now],
+    [store, now, v],
   );
   const staleAddrs = useMemo(
     () => new Set(items.filter((i) => now - i.ts_ms > STALE_MS).map((i) => i.address)),
