@@ -249,6 +249,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     csvImported = p.csvImported,
                     alertsOn = p.alertsOn,
                     enabledThresholds = p.enabledThresholds ?: s.enabledThresholds,
+                    criticalThreshold = p.criticalThreshold ?: s.criticalThreshold,
                     keepScreenOn = p.keepScreenOn,
                     tempFahrenheit = p.tempFahrenheit,
                     locked = p.locked,
@@ -704,6 +705,10 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(enabledThresholds = next)
         }
         viewModelScope.launch { store.setThresholds(_state.value.enabledThresholds) }
+    }
+    fun setCriticalThreshold(t: Int) {
+        _state.update { it.copy(criticalThreshold = t) }
+        viewModelScope.launch { store.setCriticalThreshold(t) }
     }
     fun setKeepScreenOn(enabled: Boolean) {
         _state.update { it.copy(keepScreenOn = enabled) }
