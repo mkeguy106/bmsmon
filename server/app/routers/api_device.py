@@ -1,4 +1,5 @@
 import base64
+import binascii
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -22,15 +23,16 @@ async def health(pool=Depends(get_pool)):
 @router.post("/enroll", response_model=EnrollResponse)
 async def enroll(body: EnrollBody, pool=Depends(get_pool)):
     try:
-        spki = base64.b64decode(body.public_key_spki_b64)
-    except Exception:
+        spki = base64.b64decode(body.public_key_spki_b64, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(400, "bad public key")
+    if not spki:
         raise HTTPException(400, "bad public key")
     now = datetime.now(timezone.utc)
     async with pool.acquire() as conn:
         async with conn.transaction():
-            code = await q.take_valid_code(conn, hash_code(body.code), now)
-            if code is None:
-                raise HTTPException(400, "invalid or expired code")
             device_id = await q.create_device(conn, body.install_uuid, spki, body.device_label)
-            await q.mark_code_used(conn, code["code_hash"], device_id, now)
+            claimed = await q.claim_code(conn, hash_code(body.code), device_id, now)
+            if claimed is None:
+                raise HTTPException(400, "invalid or expired code")
     return EnrollResponse(device_id=str(device_id))

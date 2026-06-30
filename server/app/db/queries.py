@@ -89,10 +89,12 @@ async def create_enrollment_code(conn, code_hash, created_by, expires_at) -> Non
         code_hash, created_by, expires_at)
 
 
-async def take_valid_code(conn, code_hash, now):
+async def claim_code(conn, code_hash, device_id, now):
     return await conn.fetchrow(
-        "SELECT * FROM enrollment_codes WHERE code_hash=$1 AND used_at IS NULL AND expires_at > $2",
-        code_hash, now)
+        """UPDATE enrollment_codes SET used_at=$2, device_id=$3
+           WHERE code_hash=$1 AND used_at IS NULL AND expires_at > $2
+           RETURNING code_hash""",
+        code_hash, now, device_id)
 
 
 async def create_device(conn, install_uuid, public_key_spki: bytes, label) -> str:
@@ -102,12 +104,6 @@ async def create_device(conn, install_uuid, public_key_spki: bytes, label) -> st
              label=EXCLUDED.label, revoked=false
            RETURNING id""",
         install_uuid, public_key_spki, label)
-
-
-async def mark_code_used(conn, code_hash, device_id, now) -> None:
-    await conn.execute(
-        "UPDATE enrollment_codes SET used_at=$2, device_id=$3 WHERE code_hash=$1",
-        code_hash, now, device_id)
 
 
 async def get_device(conn, device_id):

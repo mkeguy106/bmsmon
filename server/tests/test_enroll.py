@@ -41,3 +41,17 @@ async def test_code_is_single_use(app, client):
     body = {"code": "ONCE", "install_uuid": "inst-3", "public_key_spki_b64": _pub_b64()}
     assert (await client.post("/api/v1/enroll", json=body)).status_code == 200
     assert (await client.post("/api/v1/enroll", json=body)).status_code == 400
+
+
+async def test_enroll_rejects_bad_pubkey(app, client):
+    await _seed_code(app, "KEYBAD")
+    r = await client.post("/api/v1/enroll", json={
+        "code": "KEYBAD", "install_uuid": "inst-bad", "public_key_spki_b64": "not-valid-b64!!!"})
+    assert r.status_code == 400
+
+
+async def test_enroll_rejects_expired_code(app, client):
+    await _seed_code(app, "OLD", minutes=-1)
+    r = await client.post("/api/v1/enroll", json={
+        "code": "OLD", "install_uuid": "inst-old", "public_key_spki_b64": _pub_b64()})
+    assert r.status_code == 400
