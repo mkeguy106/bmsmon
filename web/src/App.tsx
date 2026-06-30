@@ -18,13 +18,12 @@ export default function App() {
   const [theme, setTheme] = useState<"dark" | "light">(
     () => (document.documentElement.dataset.theme === "light" ? "light" : "dark"),
   );
-  const toggleTheme = () =>
-    setTheme((t) => {
-      const next = t === "dark" ? "light" : "dark";
-      document.documentElement.dataset.theme = next;
-      try { localStorage.setItem("bmsmon-theme", next); } catch (e) { /* not persisted */ }
-      return next;
-    });
+  const toggleTheme = () => {
+    const next = theme === "dark" ? "light" : "dark";
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem("bmsmon-theme", next); } catch (e) { /* not persisted */ }
+    setTheme(next);
+  };
 
   useEffect(() => {
     const unsub = store.subscribe(() => force((n) => n + 1));
