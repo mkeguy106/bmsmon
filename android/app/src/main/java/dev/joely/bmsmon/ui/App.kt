@@ -44,6 +44,8 @@ import dev.joely.bmsmon.ui.scan.ScanSheet
 import dev.joely.bmsmon.ui.settings.SettingsScreen
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.BmTheme
+import dev.joely.bmsmon.ui.theme.ThemeTransitionMillis
+import kotlinx.coroutines.delay
 
 @Composable
 fun App(vm: BatteryViewModel) {
@@ -79,13 +81,15 @@ fun App(vm: BatteryViewModel) {
     // Match the system-bar icon contrast to the resolved theme. With edge-to-edge the bars are
     // transparent and the app background shows through, so in Light mode the icons (clock, signal,
     // *battery*) must switch to dark — otherwise they're white-on-white and unreadable.
-    DisposableEffect(window, state.isDark) {
+    LaunchedEffect(window, state.isDark) {
+        // Land the status-bar icon contrast flip mid-crossfade (~halfway through the theme fade), so
+        // the icons stay readable against the blending background instead of flipping up front.
+        delay(ThemeTransitionMillis / 2L)
         if (window != null) {
             val controller = WindowCompat.getInsetsController(window, window.decorView)
             controller.isAppearanceLightStatusBars = !state.isDark
             controller.isAppearanceLightNavigationBars = !state.isDark
         }
-        onDispose {}
     }
 
     // Enter/exit Android Lock Task Mode to pin the app while locked. Device-owner-aware:
