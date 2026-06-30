@@ -81,3 +81,34 @@ async def samples_range(conn, address: str, from_ms: int, to_ms: int) -> list[di
         "SELECT * FROM samples WHERE address=$1 AND ts>=$2 AND ts<=$3 ORDER BY ts", address, a, b
     )
     return [dict(r) for r in rows]
+
+
+async def create_enrollment_code(conn, code_hash, created_by, expires_at) -> None:
+    await conn.execute(
+        "INSERT INTO enrollment_codes (code_hash, created_by, expires_at) VALUES ($1,$2,$3)",
+        code_hash, created_by, expires_at)
+
+
+async def take_valid_code(conn, code_hash, now):
+    return await conn.fetchrow(
+        "SELECT * FROM enrollment_codes WHERE code_hash=$1 AND used_at IS NULL AND expires_at > $2",
+        code_hash, now)
+
+
+async def create_device(conn, install_uuid, public_key_spki: bytes, label) -> str:
+    return await conn.fetchval(
+        """INSERT INTO devices (install_uuid, public_key_spki, label) VALUES ($1,$2,$3)
+           ON CONFLICT (install_uuid) DO UPDATE SET public_key_spki=EXCLUDED.public_key_spki,
+             label=EXCLUDED.label, revoked=false
+           RETURNING id""",
+        install_uuid, public_key_spki, label)
+
+
+async def mark_code_used(conn, code_hash, device_id, now) -> None:
+    await conn.execute(
+        "UPDATE enrollment_codes SET used_at=$2, device_id=$3 WHERE code_hash=$1",
+        code_hash, now, device_id)
+
+
+async def get_device(conn, device_id):
+    return await conn.fetchrow("SELECT * FROM devices WHERE id=$1", device_id)
