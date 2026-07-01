@@ -6,20 +6,27 @@ import dev.joely.bmsmon.location.LocationSource
 import dev.joely.bmsmon.ble.profile.ProfileRegistry
 import dev.joely.bmsmon.ble.profile.RedodoBekenProfile
 import dev.joely.bmsmon.cloud.TelemetryReporter
+import dev.joely.bmsmon.data.SettingsStore
 import dev.joely.bmsmon.data.TelemetryRepository
 import dev.joely.bmsmon.data.classifyFrame
 import dev.joely.bmsmon.data.db.BmsDatabase
 import dev.joely.bmsmon.model.AlertConfig
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.BatteryStatus
+import dev.joely.bmsmon.model.ChargeSample
 import dev.joely.bmsmon.model.DEFAULT_ROSTER
 import dev.joely.bmsmon.model.PackSoc
+import dev.joely.bmsmon.model.SEED_TAIL_MIN
+import dev.joely.bmsmon.model.TARGET_SOC
 import dev.joely.bmsmon.model.TempRank
 import dev.joely.bmsmon.model.TempSide
 import dev.joely.bmsmon.model.TempThresholds
 import dev.joely.bmsmon.model.TempUnit
+import dev.joely.bmsmon.model.estimateChargeMinutes
 import dev.joely.bmsmon.model.evalStageAlert
+import dev.joely.bmsmon.model.foldTailEma
 import dev.joely.bmsmon.model.formatDelta
+import dev.joely.bmsmon.model.observedChargeTailMinutes
 import dev.joely.bmsmon.model.tempMarginToCutoffC
 import dev.joely.bmsmon.model.tempZone
 import dev.joely.bmsmon.model.batteryAt
@@ -54,6 +61,7 @@ data class MonitorState(
     val peakPowerW: Float = 0f,
     val peakCurrentA: Float = 0f,
     val gpsActive: Boolean = false,
+    val tailMinByAddress: Map<String, Float> = emptyMap(),
 )
 
 /**
@@ -71,6 +79,7 @@ class MonitorEngine(
     appContext: Context,
     db: BmsDatabase = BmsDatabase.create(appContext),
     private val reporter: TelemetryReporter? = null,
+    private val settings: SettingsStore,
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -84,6 +93,7 @@ class MonitorEngine(
     @Volatile private var alertConfig: AlertConfig? = null
     @Volatile private var tempAlertsEnabled: Boolean = true
     @Volatile private var tempThresholdsByProfile: Map<String, TempThresholds> = emptyMap()
+    private val lastTailLearnAt = HashMap<String, Long>()
 
     init {
         reporter?.start()
@@ -125,6 +135,10 @@ class MonitorEngine(
             onPoll = ::onPoll,
             onReachable = ::onReachable,
         )
+        scope.launch {
+            val saved = settings.load().chargeTailMinByAddress
+            if (saved.isNotEmpty()) _state.update { it.copy(tailMinByAddress = saved) }
+        }
     }
 
     /** Roster edited while monitoring: update the live target set and group lookups. */
@@ -264,9 +278,13 @@ class MonitorEngine(
             )
         }
         val fix = if (_state.value.gpsActive) locationSource.current() else null
+        val tailMin = st0.tailMinByAddress[addr] ?: SEED_TAIL_MIN
+        val etaFullMin = estimateChargeMinutes(
+            t.state, t.soc, t.current, t.fullChargeAh, t.capacityAh, regen, tailMin,
+        )
         reporter?.report(
             addr, roster.batteryAt(addr)?.advertisedName, roster.batteryAt(addr)?.alias,
-            group?.id, t, now, regen, fix?.lat, fix?.lon, fix?.accuracyM,
+            group?.id, t, now, regen, fix?.lat, fix?.lon, fix?.accuracyM, etaFullMin,
         )
         if (logging) {
             val header = (ProfileRegistry.profileFor(roster.batteryAt(addr)?.advertisedName)
@@ -274,6 +292,12 @@ class MonitorEngine(
             repository.ingest(addr, t, raw, classifyFrame(raw, parsedOk = true, header), regen, now)
         }
         if (addr.uppercase() in stageAddrs) evaluateAlerts()
+        if (t.state == BatteryState.Charging && t.soc >= TARGET_SOC &&
+            now - (lastTailLearnAt[addr] ?: 0L) > 30 * 60_000L
+        ) {
+            lastTailLearnAt[addr] = now
+            scope.launch { learnTail(addr, now) }
+        }
     }
 
     private fun onReachable(addr: String, reachable: Boolean) {
@@ -292,6 +316,19 @@ class MonitorEngine(
             reporter?.reportLink(addr, roster.batteryAt(addr)?.alias, roster.groupOf(addr)?.id, reachable, ts)
         }
         if (addr.uppercase() in stageAddrs) evaluateAlerts()
+    }
+
+    /** Fold the just-completed charge's observed 98->100 tail into the per-pack EMA and persist it. */
+    private suspend fun learnTail(addr: String, now: Long) {
+        val since = now - 6 * 60 * 60_000L   // look back 6h for the completed run
+        val samples = repository.recentSamples(addr, since).map {
+            ChargeSample(it.tsMs, it.soc ?: -1f, it.state == "Charging")
+        }
+        val observed = observedChargeTailMinutes(samples) ?: return
+        val prev = _state.value.tailMinByAddress[addr] ?: SEED_TAIL_MIN
+        val next = foldTailEma(prev, observed)
+        _state.update { it.copy(tailMinByAddress = it.tailMinByAddress + (addr to next)) }
+        settings.setChargeTailMin(addr, next)
     }
 
     /** Stamp each base's last-discharge time to [now] while it reads as discharging. */
