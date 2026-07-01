@@ -41,7 +41,8 @@ export function TempGauge({ tempC, thr, unit }:
           bottom: `${fill}%`, transform: "translateY(2px)", background: color, boxShadow: markerShadow }} />
       </div>
       <div style={{ position: "relative", width: 74, height: 236 }}>
-        {ticks.map((tk, i) => (
+        {/* Hide any tick the live reading chip is sitting on, so labels don't overlap the chip. */}
+        {ticks.filter((tk) => Math.abs(tk.t + 30 - fill) >= 8).map((tk, i) => (
           <div key={i} style={{ position: "absolute", left: 0, right: 0, bottom: `${tk.t + 30}%`,
             transform: "translateY(50%)", display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ width: 6, height: 1, background: "var(--input-border)" }} />

@@ -111,8 +111,8 @@ fun TempGauge(
         }
         // tick labels + reading chip in a fixed-height column to the right
         Box(Modifier.height(GAUGE_H).width(56.dp).padding(start = 8.dp)) {
-            CutoffTick(0.90f)   // hot cutoff (+60°C → 90%)
-            CutoffTick(0.10f)   // cold cutoff (−20°C → 10%)
+            CutoffTick(0.90f, fillFrac)   // hot cutoff (+60°C → 90%)
+            CutoffTick(0.10f, fillFrac)   // cold cutoff (−20°C → 10%)
             // live reading chip centered on the fill line
             Box(
                 Modifier
@@ -131,7 +131,10 @@ fun TempGauge(
 }
 
 @Composable
-private fun BoxScope.CutoffTick(bottomFrac: Float) {
+private fun BoxScope.CutoffTick(bottomFrac: Float, fillFrac: Float) {
+    // Hide the tick when the live reading chip is right on top of it (avoids label/chip overlap
+    // at extreme readings, e.g. a cold pack near the −20°C cutoff tick).
+    if (kotlin.math.abs(bottomFrac - fillFrac) < 0.09f) return
     Text(
         "CUTOFF",
         color = Bm.colors.critical, fontSize = 8.sp, fontFamily = MonoFont,
