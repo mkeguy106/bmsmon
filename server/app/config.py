@@ -38,6 +38,11 @@ class Settings:
     ingest_ts_max_future_ms: int = int(os.environ.get(
         "BMSMON_INGEST_TS_MAX_FUTURE_MS", str(48 * 3600 * 1000)  # server now + 48h
     ))
+    # GPS retention (SEC-12): samples older than this many days get their location columns
+    # (lat/lon/gps_accuracy_m) set to NULL by a daily background scrub. Telemetry rows are
+    # NEVER deleted — battery history is kept forever; only location data expires. Default
+    # 1095 days (3 years). Set <= 0 to disable scrubbing entirely (keep GPS forever).
+    gps_retention_days: int = int(os.environ.get("BMSMON_GPS_RETENTION_DAYS", "1095"))
     # In local dev (no Authentik in front), trust a synthetic identity so /web/* works.
     dev_trust_headers: bool = os.environ.get("BMSMON_DEV_TRUST_HEADERS", "0") == "1"
     dev_user: str = os.environ.get("BMSMON_DEV_USER", "dev@covert.life")

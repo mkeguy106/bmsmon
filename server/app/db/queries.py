@@ -123,6 +123,27 @@ async def fleet_snapshot(conn) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def scrub_expired_gps(conn, retention_days: int) -> int:
+    """GPS retention scrub (SEC-12): NULL out the location columns on samples older than
+    the retention window. Telemetry rows are NEVER deleted — the battery history is kept
+    forever; only lat/lon/gps_accuracy_m are cleared. Returns the number of rows scrubbed.
+
+    retention_days <= 0 means retention is disabled (keep GPS forever) — no-op.
+
+    The ts predicate prunes the monthly RANGE(ts) partitions, and the IS NOT NULL guard
+    makes re-runs idempotent and cheap (already-scrubbed rows are never rewritten)."""
+    if retention_days <= 0:
+        return 0
+    status = await conn.execute(
+        """UPDATE samples
+           SET lat = NULL, lon = NULL, gps_accuracy_m = NULL
+           WHERE ts < now() - ($1 * interval '1 day')
+             AND (lat IS NOT NULL OR lon IS NOT NULL OR gps_accuracy_m IS NOT NULL)""",
+        float(retention_days),
+    )
+    return int(status.rsplit(" ", 1)[-1])  # asyncpg status tag, e.g. "UPDATE 3"
+
+
 async def samples_range(conn, address: str, from_ms: int, to_ms: int) -> list[dict]:
     a = datetime.fromtimestamp(from_ms / 1000, tz=timezone.utc)
     b = datetime.fromtimestamp(to_ms / 1000, tz=timezone.utc)
