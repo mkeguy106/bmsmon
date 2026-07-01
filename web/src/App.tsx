@@ -74,7 +74,23 @@ export default function App() {
   // Main stage = the WHOLE active base (group), not a single pack. The lead pack is a fresh
   // discharging pack, else the most-recently-updated pack; the stage then shows every pack in
   // that pack's group, stably ordered, so it doesn't jump as packs poll in and out.
+  // Pinned packs (by address, persisted). If any are pinned, the main stage shows exactly those;
+  // otherwise it falls back to automatic base selection.
+  const [pinned, setPinned] = useState<Set<string>>(() => {
+    try { return new Set(JSON.parse(localStorage.getItem("bmsmon-pins") || "[]") as string[]); }
+    catch (e) { return new Set(); }
+  });
+  const togglePin = (addr: string) => setPinned((prev) => {
+    const next = new Set(prev);
+    if (next.has(addr)) next.delete(addr); else next.add(addr);
+    try { localStorage.setItem("bmsmon-pins", JSON.stringify([...next])); } catch (e) { /* not persisted */ }
+    return next;
+  });
+
   const stageItems = useMemo(() => {
+    const byAlias = (a: FleetItem, b: FleetItem) => (a.alias ?? "").localeCompare(b.alias ?? "");
+    const pins = items.filter((i) => pinned.has(i.address));
+    if (pins.length > 0) return pins.slice().sort(byAlias);
     const fresh = items.filter((i) => !staleAddrs.has(i.address));
     const byRecent = (a: FleetItem, b: FleetItem) => b.ts_ms - a.ts_ms;
     const lead =
@@ -84,9 +100,10 @@ export default function App() {
     if (!lead) return [];
     const gid = lead.group_id;
     if (!gid) return [lead];
-    return items.filter((i) => i.group_id === gid)
-      .sort((a, b) => (a.alias ?? "").localeCompare(b.alias ?? ""));
-  }, [items, staleAddrs]);
+    return items.filter((i) => i.group_id === gid).sort(byAlias);
+  }, [items, staleAddrs, pinned]);
+
+  const [view, setView] = useState<"dashboard" | "settings">("dashboard");
 
   return (
     <div style={{ maxWidth: 1400, margin: "0 auto", padding: 24 }}>
@@ -122,14 +139,34 @@ export default function App() {
         >
           {theme === "dark" ? "☀" : "☾"}
         </button>
+        <button
+          onClick={() => setView((v) => (v === "settings" ? "dashboard" : "settings"))}
+          title={view === "settings" ? "Back to dashboard" : "Settings"}
+          aria-label={view === "settings" ? "Back to dashboard" : "Settings"}
+          style={{ background: "none", border: "none", cursor: "pointer",
+            color: view === "settings" ? "var(--accent)" : "var(--text2)",
+            fontSize: 17, lineHeight: 1, padding: 4 }}
+        >
+          {view === "settings" ? "←" : "⚙"}
+        </button>
       </header>
+      {view === "settings" ? (
+        <div style={{ display: "grid", gap: 24 }}>
+          <div className="mono" style={{ color: "var(--text3)", fontSize: 11, letterSpacing: 2, margin: "0 4px" }}>
+            SETTINGS
+          </div>
+          <BatteryProfilePanel thr={thr} unit={unit} />
+          <AdminDevices />
+        </div>
+      ) : (
       <div style={{ display: "grid", gap: 24 }}>
         <MainStage items={stageItems} staleAddrs={staleAddrs}
-          thr={thr} unit={unit} config={tempConfig} now={now} />
-        <BatteryProfilePanel thr={thr} unit={unit} />
-        <AllBatteries items={items} staleAddrs={staleAddrs} thr={thr} unit={unit} />
-        <AdminDevices />
+          thr={thr} unit={unit} config={tempConfig} now={now}
+          pinned={pinned} onTogglePin={togglePin} />
+        <AllBatteries items={items} staleAddrs={staleAddrs} thr={thr} unit={unit}
+          now={now} pinned={pinned} onTogglePin={togglePin} />
       </div>
+      )}
     </div>
   );
 }
