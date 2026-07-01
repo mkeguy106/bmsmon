@@ -234,6 +234,27 @@ never leaves a zombie connection blocking the phone app. Just backgrounding (Hom
 running. Needs `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_CONNECTED_DEVICE` + runtime
 `POST_NOTIFICATIONS` (requested opportunistically; never gates monitoring).
 
+**Alerts (capacity + temperature):** the stage flashes a `DangerOverlay` that *names* the alert
+type (`BATTERY CAPACITY` / `TEMPERATURE`) and fires headless notifications via `AlertNotifier`
+(critical channel = sound+vibration). Pure logic in `model/Alerts.kt` (SOC bands; a threshold of
+N% fires **at** N%, `<=`) and `model/TempAlerts.kt` (cold→hot zone ladder: caution/warning/
+critical/cutoff, **critical fires before the BMS cutoff**). The unified `stageAlert()` shows the
+**worst** of the two. Capacity/temperature settings live in `Settings › Alerts` and
+`Settings › Temperature`; the stage's worst pack drives the overlay + `AlertNotifier` dedup.
+
+**Temperature monitoring:** a vertical temperature gauge (`ui/gauge/TempGauge.kt`) sits beside the
+SOC ring on the stage (toggle + L/R position in settings), plus a `TEMP` stat tile. Thresholds are
+**per battery profile** (`BatteryProfile.tempEnvelope`; Redodo defaults cold-caution 5 / hot-caution
+45 / cold-crit −12 / hot-crit 53 °C, fixed cutoffs −20/60), stored in `SettingsStore` keyed by
+`profileId`, tunable in `Settings › Temperature` with reset-to-defaults. Unit is the app-wide
+`tempFahrenheit` pref (°F default; thresholds stored in °C). Debug-only `TempPreviewActivity`
+(`app/src/debug/`) renders the gauge/overlay with synthetic packs for emulator screenshots.
+
+**Cloud config push (one-way):** when temp thresholds change (and cloud sync is on), the phone
+uploads the profile's threshold config — signed + gzipped like telemetry, durable/latest-wins — to
+`POST /api/v1/config`; the WebUI mirrors it read-only. Telemetry uploads are **gzip-compressed**
+(`Content-Encoding: gzip`; server decompresses before the JWT body-hash verify).
+
 **Usage logging is intentionally ON right now — do not turn it off.** It records every
 telemetry sample to `…/Android/data/dev.joely.bmsmon/files/usage_log.csv` (columns incl.
 `current_a`, `power_w`, `regen`) so we can collect **real-world data to calibrate the UI later**:
@@ -325,9 +346,12 @@ python3 bmsmon.py -a C8:47:80:15:25:01 --json
 
 The cloud backend lives in `server/` (FastAPI + asyncpg + **Postgres 16**) and the dashboard in
 `web/` (React + Vite). The phone (`android/`) enrolls a device and uploads signed telemetry
-batches to `POST /api/v1/ingest`; the WebUI reads `GET /web/fleet` + a `/ws` live feed (plus
-admin-gated `GET /web/samples`, `GET /web/devices`, `POST /web/enroll-codes`,
-`DELETE /web/devices/{id}`). Schema is
+batches to `POST /api/v1/ingest` (gzipped) + threshold config to `POST /api/v1/config`; the WebUI
+reads `GET /web/fleet` + a `/ws` live feed + `GET /web/temp-config` (the read-only temperature
+mirror), plus admin-gated `GET /web/samples`, `GET /web/devices`, `POST /web/enroll-codes`,
+`DELETE /web/devices/{id}`). The temperature config lives in the `device_temp_config` table
+(per device+profile, latest-wins); the WebUI mirror (`web/src/temp.ts` + `TempGauge`/`TempBanner`/
+`TempOverlay`/`BatteryProfilePanel`) re-evaluates the same zone ladder read-only. Schema is
 idempotent SQL in `server/app/db/schema.sql` (`CREATE TABLE IF NOT EXISTS` + `ALTER TABLE ... ADD
 COLUMN IF NOT EXISTS`) run on pool creation — so **schema changes apply automatically on container
 start; there is no separate migration step**.
