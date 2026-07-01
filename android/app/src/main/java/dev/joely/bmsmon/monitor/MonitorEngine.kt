@@ -136,8 +136,10 @@ class MonitorEngine(
             onReachable = ::onReachable,
         )
         scope.launch {
-            val saved = settings.load().chargeTailMinByAddress
-            if (saved.isNotEmpty()) _state.update { it.copy(tailMinByAddress = saved) }
+            runCatching {
+                val saved = settings.load().chargeTailMinByAddress
+                if (saved.isNotEmpty()) _state.update { it.copy(tailMinByAddress = saved) }
+            }
         }
     }
 
@@ -296,7 +298,7 @@ class MonitorEngine(
             now - (lastTailLearnAt[addr] ?: 0L) > 30 * 60_000L
         ) {
             lastTailLearnAt[addr] = now
-            scope.launch { learnTail(addr, now) }
+            scope.launch { runCatching { learnTail(addr, now) } }
         }
     }
 
