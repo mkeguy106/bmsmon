@@ -37,6 +37,7 @@ class SampleIn(BaseModel):
     lat: float | None = None
     lon: float | None = None
     gps_accuracy_m: float | None = None
+    eta_full_min: float | None = None
 
 
 class IngestBody(BaseModel):
