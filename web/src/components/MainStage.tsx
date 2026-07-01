@@ -4,7 +4,7 @@ import {
   tempZone, worstOf, zoneColorVar, zoneLabel,
   type TempConfig, type TempThresholds, type TempUnit, type Zone,
 } from "../temp";
-import { relAgo } from "../util";
+import { fmtEta, relAgo } from "../util";
 import { Ring } from "./Ring";
 import { TempGauge } from "./TempGauge";
 import { TempBanner, type PackTemp } from "./TempBanner";
@@ -89,9 +89,16 @@ export function MainStage({ items, staleAddrs, thr, unit, config, now, pinned, o
                 </div>
                 <div style={{ minHeight: 40, marginTop: 12 }}>
                   {connected ? (
-                    <span className="mono" style={{ color: flowColor, fontSize: 18 }}>
-                      {`${(it.power_w ?? 0).toFixed(0)} W · ${cur.toFixed(1)} A`}
-                    </span>
+                    <>
+                      <span className="mono" style={{ color: flowColor, fontSize: 18 }}>
+                        {`${(it.power_w ?? 0).toFixed(0)} W · ${cur.toFixed(1)} A`}
+                      </span>
+                      {it.eta_full_min != null && (
+                        <div className="mono" style={{ color: "var(--text2)", fontSize: 12, marginTop: 2 }}>
+                          ~{fmtEta(it.eta_full_min)} to full
+                        </div>
+                      )}
+                    </>
                   ) : (
                     <>
                       <div className="mono" style={{ color: "var(--text3)", fontSize: 17 }}>

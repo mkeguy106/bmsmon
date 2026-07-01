@@ -8,3 +8,11 @@ export function relAgo(ms: number, now: number): string {
   if (h < 24) return `${h}h ago`;
   return `${Math.round(h / 24)}d ago`;
 }
+
+/** Compact "2h 14m" / "45m" for a minutes estimate (clamped at 0). */
+export function fmtEta(minutes: number): string {
+  const t = Math.max(0, Math.round(minutes));
+  const h = Math.floor(t / 60);
+  const m = t % 60;
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}

@@ -4,6 +4,7 @@ export interface Sample {
   voltage_v?: number | null; temp_c?: number | null; soh?: number | null;
   cycles?: number | null; regen?: boolean; link_event?: string | null;
   lat?: number | null; lon?: number | null; gps_accuracy_m?: number | null;
+  eta_full_min?: number | null;
 }
 export type FleetItem = Sample & { alias?: string | null; group_id?: string | null };
 export interface DeviceRow {
