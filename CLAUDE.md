@@ -276,6 +276,17 @@ transient disconnect is distinguishable from a real low/idle reading. `REGEN_EPS
 ~297 W) — cleanly separated from the noise floor, so the 0.1 A threshold / 30 s window are
 left as-is.
 
+**Accuracy check-in — due 2026-07-15** (set 2026-07-01): with ~2 more weeks of accumulated
+data, re-verify against fresh telemetry (phone Room DB `bms.db` or cloud Postgres) and adjust
+constants if the larger dataset has moved them:
+- **Charge-time ETA** — the self-learning time-to-full estimate (physics coulomb for the CC bulk
+  ≤98%; a learned per-pack `tailMin` EMA for the 98→100% CV tail, seeded ~45 min). At design time
+  only **2 full-arc charge sessions** existed, so the tail prior was weak — confirm whether more
+  completed full charges (SOC reaches 100) have tightened it, and re-backtest the CC region
+  (was ±4–7 min).
+- **Discharge + regen gauge calibration** — re-check `POWER_RING_FULL_W` (300 W) and
+  `REGEN_EPS` (0.1 A) / `REGEN_WINDOW_MS` (30 s) in `Fleet.kt` against the larger real-world set.
+
 Garbage-frame guard: `parseTelemetry` realigns to the `01 93 55 AA` status header (BLE
 notification fragments can prepend stale bytes, which previously decoded as soc=0/37.6 V and
 tripped a false critical alarm) and rejects implausible readings (SOC 0–100, voltage 4–70 V).
