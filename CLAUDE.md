@@ -364,6 +364,17 @@ header; default dark; persisted in `localStorage["bmsmon-theme"]`; light mode is
 `:root[data-theme="light"]` CSS-variable override in `web/src/theme.css`). The page declares
 `<meta name="darkreader-lock">` so the Dark Reader extension never alters it in either mode.
 
+**WebUI layout (`web/src/App.tsx`):** the dashboard is the **main stage** + **All Batteries**; a
+header **⚙ toggle** opens a **Settings** view (battery-profile panel + device admin — kept off the
+main page). Header also has a **°C/°F** unit toggle (`localStorage["bmsmon-temp-unit"]`, default the
+phone's synced unit). **Pin to stage:** a pin icon on every card/stage pack; pinned packs (by
+address, `localStorage["bmsmon-pins"]`) become the main stage, else it auto-selects the active base
+(the header shows `PINNED · AUTO OFF` vs `AUTO`). **Disconnected packs keep their last-known
+telemetry, muted** (dimmed ring/gauge + muted stats + `DISCONNECTED · updated <ago>`), and stop
+driving live temperature alerts — like the Android All-Batteries view. A dev-only preview harness
+(`web/preview.html` → `src/preview.tsx`) renders the components with mock data for Playwright
+screenshots; it is **not** in the production bundle (`vite build` emits only `index.html`).
+
 **Local dev/test:** `docker compose -f server/docker-compose.dev.yml up -d` brings up a Postgres on
 `localhost:5432` (user/pw/db all `bmsmon`, matching the default `DATABASE_URL`). Run server tests
 with the venv: `cd server && .venv/bin/python -m pytest` (bare `python` lacks the deps).
