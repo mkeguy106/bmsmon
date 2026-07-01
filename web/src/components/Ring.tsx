@@ -16,7 +16,8 @@ export function Ring({ soc, current, power, connected, size = 120 }: {
   const sw = Math.max(5, size * 0.05);
   const swi = Math.max(4, size * 0.042);
 
-  const pct = connected && soc != null ? Math.max(0, Math.min(100, soc)) : 0;
+  // Keep drawing the last-known SOC when disconnected (muted), so we still see the last good state.
+  const pct = soc != null ? Math.max(0, Math.min(100, soc)) : 0;
   const socColor = !connected ? "var(--text3)"
     : pct < 15 ? "var(--critical)" : pct < 30 ? "#e2b01e" : "var(--accent)";
 
@@ -29,7 +30,7 @@ export function Ring({ soc, current, power, connected, size = 120 }: {
   const innerColor = charging ? "var(--regen)" : discharging ? "var(--power)" : "var(--input-border)";
 
   return (
-    <svg width={size} height={size} style={{ opacity: connected ? 1 : 0.4 }}>
+    <svg width={size} height={size} style={{ opacity: connected ? 1 : 0.5 }}>
       {/* outer: state of charge */}
       <circle cx={c} cy={c} r={rOuter} fill="none" stroke="var(--input-bg)" strokeWidth={sw} />
       <circle cx={c} cy={c} r={rOuter} fill="none" stroke={socColor} strokeWidth={sw}
@@ -43,8 +44,8 @@ export function Ring({ soc, current, power, connected, size = 120 }: {
           transform={`rotate(-90 ${c} ${c})`} />
       )}
       <text x="50%" y="50%" textAnchor="middle" dy="0.35em" className="mono"
-        fill="var(--text)" fontSize={size * 0.2} fontWeight={700}>
-        {connected && soc != null ? `${Math.round(soc)}%` : "—"}
+        fill={connected ? "var(--text)" : "var(--text3)"} fontSize={size * 0.2} fontWeight={700}>
+        {soc != null ? `${Math.round(soc)}%` : "—"}
       </text>
     </svg>
   );

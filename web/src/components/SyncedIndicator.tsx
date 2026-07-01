@@ -1,14 +1,5 @@
 import type { TempConfig } from "../temp";
-
-function relTime(ms: number, now: number): string {
-  const s = Math.max(0, Math.round((now - ms) / 1000));
-  if (s < 45) return "just now";
-  const m = Math.round(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.round(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.round(h / 24)}d ago`;
-}
+import { relAgo } from "../util";
 
 /** Read-only indicator: thresholds come from the phone; the web dashboard only mirrors them. */
 export function SyncedIndicator({ config, now }: { config: TempConfig | null; now: number }) {
@@ -21,7 +12,7 @@ export function SyncedIndicator({ config, now }: { config: TempConfig | null; no
       <span style={{ fontSize: 13, color: "var(--text2)" }}>
         {synced ? (
           <>Alert thresholds <strong style={{ color: "var(--text)", fontWeight: 600 }}>synced from Android</strong>
-            {" · updated "}{relTime(config!.updated_at_ms, now)}</>
+            {" · updated "}{relAgo(config!.updated_at_ms, now)}</>
         ) : (
           <>Waiting for the phone to sync alert thresholds — showing profile defaults.</>
         )}
