@@ -64,6 +64,30 @@ fun estimateInternalResistanceMohm(dischargeSamples: List<SampleEntity>): IrEsti
 }
 
 /**
+ * What the startup finalize-sweep should do with one orphaned session stub — a `sampleCount = 0`
+ * row left behind when the process died before the session was finalized. Such stubs are invisible
+ * to the history DAOs (`sampleCount > 0` filters) and their samples eventually retention-prune, so
+ * the run would silently vanish. Pure decision (unit-testable): if the stub has real telemetry
+ * samples, finalize it with proper rollups; if it only ever got link-event rows (or nothing), the
+ * stub carries no run and is deleted.
+ */
+sealed interface OrphanedSessionAction {
+    data class Finalize(val rollup: SessionEntity) : OrphanedSessionAction
+    object Delete : OrphanedSessionAction
+}
+
+fun orphanedSessionAction(
+    address: String,
+    sessionId: Long,
+    samples: List<SampleEntity>,
+): OrphanedSessionAction =
+    if (samples.any { it.linkEvent == null }) {
+        OrphanedSessionAction.Finalize(computeRollup(address, sessionId, samples))
+    } else {
+        OrphanedSessionAction.Delete
+    }
+
+/**
  * Compute a [SessionEntity] (rollups) from a session's [samples]. Link-event rows are ignored.
  * Discharge stats use samples with `currentA < -DISCHARGE_EPS`. Energy integrates each interval's
  * leading-sample power over its duration (gaps are already bounded by session segmentation).

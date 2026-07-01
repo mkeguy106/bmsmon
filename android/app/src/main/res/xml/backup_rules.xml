@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Legacy Auto Backup rules for API 30 and below (SEC-7); API 31+ devices use
+  data_extraction_rules.xml instead. Same exclusions: the GPS-tagged Room DB and the DataStore
+  (device identity) must not reach cloud backup. Pre-31 has no separate device-transfer channel,
+  so these exclusions apply to legacy transfers too — the privacy exclusion wins there.
+-->
+<full-backup-content>
+    <exclude domain="database" path="." />
+    <exclude domain="file" path="datastore/" />
+</full-backup-content>

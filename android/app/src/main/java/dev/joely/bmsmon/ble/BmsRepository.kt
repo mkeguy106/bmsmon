@@ -241,6 +241,18 @@ class BmsRepository(private val context: Context) {
             when (event) {
                 is LoopEvent.ConnectSuccess -> {
                     connecting -= event.addr
+                    // Disabled (or removed from the roster) while the connect was in flight:
+                    // the user expects a disconnected pack to be FREE for the Redodo phone app
+                    // (single-client Beken module), so close the fresh link right here instead of
+                    // holding + polling it until the next plan tick, and don't report it
+                    // reachable. Reads the same @Volatile fields the control loop's plan step
+                    // uses; this runs on the control-loop coroutine (single-writer preserved).
+                    val wanted = event.addr !in disabledAddrs &&
+                        allTargets.any { it.address == event.addr }
+                    if (!wanted) {
+                        event.session.close()
+                        continue
+                    }
                     held[event.addr] = event.session
                     heldSince[event.addr] = now
                     failCount[event.addr] = 0

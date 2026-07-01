@@ -51,13 +51,18 @@ class BleSession(
         return withTimeoutOrNull(timeoutMs) { ready.await() } ?: false
     }
 
-    /** Send STATUS and collect the response (>= 80 bytes), or null on timeout. */
+    /** Send STATUS and collect the complete response frame, or null on timeout. */
     suspend fun poll(timeoutMs: Long): ByteArray? {
         val g = gatt ?: return null
         val ch = ffe2 ?: return null
         val resp = CompletableDeferred<ByteArray>()
-        response = resp
-        synchronized(buffer) { buffer.clear() }
+        // Swap the deferred and clear leftovers atomically under the buffer lock: a late fragment
+        // from the PREVIOUS response arriving between the two steps would otherwise be seen by
+        // append() with the new deferred armed and could complete this poll with stale bytes.
+        synchronized(buffer) {
+            response = resp
+            buffer.clear()
+        }
         writeStatus(g, ch)
         return withTimeoutOrNull(timeoutMs) { resp.await() }
     }
@@ -144,7 +149,17 @@ class BleSession(
     private fun append(value: ByteArray) {
         synchronized(buffer) {
             value.forEach { buffer.add(it) }
-            if (buffer.size >= 80) response?.complete(buffer.toByteArray())
+            // Length-driven completion: the response header's payload-length byte tells us the
+            // full frame size (~105 bytes across several notification fragments, possibly with
+            // stale garbage prepended — statusFrameComplete realigns just like the parser). A
+            // fixed byte threshold below the real length (the old >= 80) completed truncated
+            // buffers on stacks chunking at 20-byte ATT fragments → permanent decode_fail on a
+            // healthy link. A buffer that never completes is bounded by the poll timeout.
+            // `response` is read under the same buffer lock poll() swaps it under.
+            val snapshot = buffer.toByteArray()
+            if (BmsProtocol.statusFrameComplete(snapshot, profile.responseHeader)) {
+                response?.complete(snapshot)
+            }
         }
     }
 

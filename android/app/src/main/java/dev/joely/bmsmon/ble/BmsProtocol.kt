@@ -70,6 +70,41 @@ object BmsProtocol {
         statusFrameStart(raw, header)
 
     /**
+     * Generous cap on the reassembly buffer: no realignable status frame (garbage prefix + the
+     * ~105-byte frame) should ever need this many bytes. Reaching it completes the poll anyway so
+     * the buffer is handed to the parser (which will reject it) instead of growing until the poll
+     * timeout.
+     */
+    const val STATUS_RESPONSE_MAX_BYTES = 512
+
+    /**
+     * Expected total size of [buffer] once the status response is fully assembled — the garbage
+     * prefix (if any) plus the complete frame — or null while no status header is visible yet.
+     * Frame format is `00 00 <payload_len> 01 93 55 AA ...` with the length byte at frame offset 2;
+     * the total frame is `payload_len + 4` bytes (verified against real captures: payload_len
+     * 0x65 = 101 → 105-byte frame whose last byte is the checksum). Realigns exactly like
+     * [parseTelemetry] so completion and parsing always agree on the frame start.
+     */
+    fun expectedStatusResponseLen(buffer: ByteArray, header: ByteArray = RedodoBekenProfile.responseHeader): Int? {
+        val start = statusFrameStart(buffer, header) ?: return null
+        // statusFrameStart matched the marker at start+3, so start+2 is always in range.
+        return start + (buffer[start + 2].toInt() and 0xFF) + 4
+    }
+
+    /**
+     * True once [buffer] holds a complete status response frame (length-driven, from the header's
+     * payload-length byte — NOT a fixed byte count: the frame is ~105 bytes and arrives as multiple
+     * notification fragments, so any fixed threshold below the real length hands the parser a
+     * truncated frame). A buffer with no status header never completes here (the poll timeout
+     * covers it) unless it exceeds [STATUS_RESPONSE_MAX_BYTES].
+     */
+    fun statusFrameComplete(buffer: ByteArray, header: ByteArray = RedodoBekenProfile.responseHeader): Boolean {
+        if (buffer.size >= STATUS_RESPONSE_MAX_BYTES) return true
+        val expected = expectedStatusResponseLen(buffer, header) ?: return false
+        return buffer.size >= expected
+    }
+
+    /**
      * Offset of the status frame start (the leading `00` of the realigned response frame), or null if
      * no status-response header is present. The marker sits at frame offset 3, so the frame begins 3
      * bytes before it. We scan because stale notification fragments can prepend bytes; the first match

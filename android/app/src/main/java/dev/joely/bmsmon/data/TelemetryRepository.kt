@@ -31,6 +31,22 @@ class TelemetryRepository(private val db: BmsDatabase) {
     private var sinceLastPrune = 0
 
     init {
+        // Startup finalize-sweep for sessions orphaned by process death (DATA-2): rows inserted as
+        // emptySession (sampleCount = 0) whose finalize never ran are invisible to the history DAOs
+        // and their samples retention-prune away. Safe to finalize ALL zero-count stubs here:
+        // nothing is open at construction (openSessionId starts empty) and every new run opens a
+        // NEW session row (advanceSession: no lastSampleTs → isNewSession → insert). Enqueued as
+        // the FIRST op on the serialized channel — before the consumer starts — so it always runs
+        // ahead of any new ingest and never blocks the constructing caller. (importCsvOnce bypasses
+        // the channel, but it's a one-time legacy backfill triggered later by the engine.)
+        ops.trySend {
+            for (stub in db.sessions().zeroCountStubs()) {
+                when (val action = orphanedSessionAction(stub.address, stub.id, db.samples().forSession(stub.id))) {
+                    is OrphanedSessionAction.Finalize -> db.sessions().update(action.rollup)
+                    OrphanedSessionAction.Delete -> db.sessions().deleteById(stub.id)
+                }
+            }
+        }
         scope.launch { for (op in ops) runCatching { op() } }
     }
 

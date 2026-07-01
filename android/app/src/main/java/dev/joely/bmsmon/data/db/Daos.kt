@@ -44,6 +44,13 @@ interface SessionDao {
 
     @Query("SELECT * FROM sessions WHERE id = :id") suspend fun byId(id: Long): SessionEntity?
 
+    /** Never-finalized stubs (inserted as emptySession, process died before rollup). */
+    @Query("SELECT * FROM sessions WHERE sampleCount = 0")
+    suspend fun zeroCountStubs(): List<SessionEntity>
+
+    @Query("DELETE FROM sessions WHERE id = :id")
+    suspend fun deleteById(id: Long)
+
     @Query("DELETE FROM sessions") suspend fun clear()
 }
 

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  API 31+ backup rules (SEC-7). Privacy: the Room DB (bms.db) carries GPS-tagged telemetry —
+  a location history of the user's mobility device — and the DataStore holds the cloud identity
+  (device_id, api_base_url). Neither may leave the device via CLOUD backup.
+
+  Device-to-device transfer is intentionally NOT restricted: no <device-transfer> element means
+  the platform default (transfer everything) applies, so migrating to a new phone keeps the full
+  telemetry history and settings. D2D moves data directly between the user's own devices over an
+  encrypted channel and never lands on a server, which is why it is acceptable where cloud
+  backup is not.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <!-- Room databases: bms.db + its -wal/-shm journals ("." = the whole domain). -->
+        <exclude domain="database" path="." />
+        <!-- Preferences DataStore: files/datastore/bms_settings.preferences_pb (deviceId, apiBaseUrl, …). -->
+        <exclude domain="file" path="datastore/" />
+    </cloud-backup>
+</data-extraction-rules>
