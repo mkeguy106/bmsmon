@@ -2,8 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AdminDevices } from "./components/AdminDevices";
 import { AllBatteries } from "./components/AllBatteries";
 import { MainStage } from "./components/MainStage";
+import { BatteryProfilePanel } from "./components/BatteryProfilePanel";
+import { getTempConfig } from "./api";
 import { connectLive } from "./ws";
 import { createStore } from "./store";
+import { thresholdsFromConfig, type TempConfig, type TempUnit } from "./temp";
 import type { FleetItem } from "./types";
 
 // The phone polls background packs slowly (a pack can go ~a minute between reports), so only
@@ -23,6 +26,29 @@ export default function App() {
     document.documentElement.dataset.theme = next;
     try { localStorage.setItem("bmsmon-theme", next); } catch (e) { /* not persisted */ }
     setTheme(next);
+  };
+
+  // Temperature alert config synced from the phone (read-only). Poll periodically.
+  const [tempConfig, setTempConfig] = useState<TempConfig | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const load = () => getTempConfig()
+      .then((r) => { if (alive) setTempConfig(r.configs[0] ?? null); })
+      .catch(() => { /* keep last */ });
+    load();
+    const t = setInterval(load, 60_000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
+  const thr = useMemo(() => thresholdsFromConfig(tempConfig), [tempConfig]);
+
+  const [unit, setUnit] = useState<TempUnit>(
+    () => (localStorage.getItem("bmsmon-temp-unit") as TempUnit) ||
+      (tempConfig?.unit === "C" ? "C" : "F"),
+  );
+  const toggleUnit = () => {
+    const next: TempUnit = unit === "F" ? "C" : "F";
+    try { localStorage.setItem("bmsmon-temp-unit", next); } catch (e) { /* not persisted */ }
+    setUnit(next);
   };
 
   useEffect(() => {
@@ -79,6 +105,15 @@ export default function App() {
           GPS
         </span>
         <button
+          onClick={toggleUnit}
+          title="Toggle temperature unit"
+          className="mono"
+          style={{ background: "var(--input-bg)", border: "1px solid var(--input-border)", cursor: "pointer",
+            color: "var(--text2)", fontSize: 12, letterSpacing: 1, padding: "6px 12px", borderRadius: 8 }}
+        >
+          °{unit}
+        </button>
+        <button
           onClick={toggleTheme}
           title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
           aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
@@ -89,8 +124,10 @@ export default function App() {
         </button>
       </header>
       <div style={{ display: "grid", gap: 24 }}>
-        <MainStage items={stageItems} staleAddrs={staleAddrs} />
-        <AllBatteries items={items} staleAddrs={staleAddrs} />
+        <MainStage items={stageItems} staleAddrs={staleAddrs}
+          thr={thr} unit={unit} config={tempConfig} now={now} />
+        <BatteryProfilePanel thr={thr} unit={unit} />
+        <AllBatteries items={items} staleAddrs={staleAddrs} thr={thr} unit={unit} />
         <AdminDevices />
       </div>
     </div>

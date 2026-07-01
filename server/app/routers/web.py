@@ -18,6 +18,13 @@ async def fleet(user: AuthUser = Depends(current_user), pool=Depends(get_pool)):
         return {"fleet": _jsonable(await q.fleet_snapshot(conn))}
 
 
+@router.get("/temp-config")
+async def temp_config(user: AuthUser = Depends(current_user), pool=Depends(get_pool)):
+    """Read-only mirror of the temperature-alert thresholds the phone pushed (one-way)."""
+    async with pool.acquire() as conn:
+        return {"configs": _jsonable(await q.get_temp_config_all(conn))}
+
+
 @router.get("/samples")
 async def samples(address: str, from_ms: int = Query(...), to_ms: int = Query(...),
                   user: AuthUser = Depends(current_user), pool=Depends(get_pool)):

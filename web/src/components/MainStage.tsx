@@ -1,42 +1,107 @@
+import { useState } from "react";
 import type { FleetItem } from "../types";
+import {
+  tempZone, worstOf, zoneColorVar, zoneLabel,
+  type TempConfig, type TempThresholds, type TempUnit, type Zone,
+} from "../temp";
 import { Ring } from "./Ring";
+import { TempGauge } from "./TempGauge";
+import { TempBanner, type PackTemp } from "./TempBanner";
+import { TempOverlay } from "./TempOverlay";
+import { SyncedIndicator } from "./SyncedIndicator";
+import { ConditionsSimulator } from "./ConditionsSimulator";
 
-export function MainStage({ items, staleAddrs }:
-  { items: FleetItem[]; staleAddrs: Set<string> }) {
+export function MainStage({ items, staleAddrs, thr, unit, config, now }: {
+  items: FleetItem[]; staleAddrs: Set<string>;
+  thr: TempThresholds; unit: TempUnit; config: TempConfig | null; now: number;
+}) {
   const group = items[0]?.group_id;
+  const featuredAddr = items[0]?.address;
+  const [simTemp, setSimTemp] = useState<number | null>(null);
+  const [ackedKey, setAckedKey] = useState<string | null>(null);
+
+  // Per-pack temperature evaluation. The featured pack can be driven by the simulator (preview).
+  const rows = items.map((it) => {
+    const connected = !staleAddrs.has(it.address);
+    const sim = it.address === featuredAddr && simTemp != null;
+    const tempC: number | null = sim ? simTemp : (connected ? (it.temp_c ?? null) : null);
+    const zone: Zone | null = tempC != null ? tempZone(tempC, thr) : null;
+    return { it, connected, sim, tempC, zone };
+  });
+
+  const worst: (PackTemp & { key: string }) | null = (() => {
+    const withTemp = rows.filter((r): r is typeof r & { tempC: number; zone: Zone } => r.zone != null);
+    const w = worstOf(withTemp.map((r) => ({
+      name: r.it.alias ?? r.it.address, tempC: r.tempC, zone: r.zone, rank: r.zone.rank,
+    })));
+    return w ? { name: w.name, tempC: w.tempC, zone: w.zone, key: w.zone.key } : null;
+  })();
+
+  const flashing = worst != null && worst.zone.rank >= 3 && ackedKey !== worst.key;
+  const bannerColor = worst && worst.zone.rank > 0 ? zoneColorVar(worst.zone.key) : "var(--safe)";
+
   return (
-    <div style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 16, padding: 24 }}>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 16 }}>
-        <span className="mono" style={{ color: "var(--text3)", fontSize: 11, letterSpacing: 2 }}>MAIN STAGE</span>
-        {group && <span style={{ color: "var(--text2)", fontSize: 13 }}>Base {group}</span>}
-      </div>
-      <div style={{ display: "flex", gap: 40, justifyContent: "center", flexWrap: "wrap", minHeight: 280 }}>
-        {items.length === 0 && (
-          <div style={{ color: "var(--text3)", alignSelf: "center" }}>No active base</div>
-        )}
-        {items.map((it) => {
-          const connected = !staleAddrs.has(it.address);
-          const cur = it.current_a ?? 0;
-          const flowColor = cur > 0.1 ? "var(--regen)" : cur < -0.1 ? "var(--power)" : "var(--text2)";
-          return (
-            <div key={it.address} style={{ textAlign: "center", minWidth: 220 }}>
-              <div style={{ color: "var(--text)", fontWeight: 700, fontSize: 20, marginBottom: 12 }}>{it.alias ?? it.address}</div>
-              <Ring soc={it.soc ?? null} current={it.current_a ?? null} power={it.power_w ?? null}
-                connected={connected} size={200} />
-              {/* Fixed-height readout slot so DISCONNECTED never shifts the layout. */}
-              <div style={{ height: 24, marginTop: 12 }}>
-                {connected ? (
-                  <span className="mono" style={{ color: flowColor, fontSize: 18 }}>
-                    {`${(it.power_w ?? 0).toFixed(0)} W · ${cur.toFixed(1)} A`}
-                  </span>
-                ) : (
-                  <span className="mono" style={{ color: "var(--text3)", fontSize: 13, letterSpacing: 2 }}>DISCONNECTED</span>
+    <div style={{ display: "grid", gap: 16 }}>
+      <SyncedIndicator config={config} now={now} />
+      <TempBanner worst={worst} thr={thr} unit={unit} />
+
+      <div style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 16, padding: 24 }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 16 }}>
+          <span className="mono" style={{ color: "var(--text3)", fontSize: 11, letterSpacing: 2 }}>MAIN STAGE</span>
+          {group && <span style={{ color: "var(--text2)", fontSize: 13 }}>Base {group}</span>}
+        </div>
+        <div style={{ display: "flex", gap: 40, justifyContent: "center", flexWrap: "wrap", minHeight: 280 }}>
+          {rows.length === 0 && <div style={{ color: "var(--text3)", alignSelf: "center" }}>No active base</div>}
+          {rows.map(({ it, connected, sim, tempC, zone }) => {
+            const cur = it.current_a ?? 0;
+            const flowColor = cur > 0.1 ? "var(--regen)" : cur < -0.1 ? "var(--power)" : "var(--text2)";
+            const zColor = zone ? zoneColorVar(zone.key) : "var(--text3)";
+            return (
+              <div key={it.address} style={{ textAlign: "center", minWidth: 260 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 12 }}>
+                  <span style={{ color: "var(--text)", fontWeight: 700, fontSize: 20 }}>{it.alias ?? it.address}</span>
+                  {sim && (
+                    <span className="mono" style={{ fontSize: 9, letterSpacing: 1, color: "var(--accent)",
+                      border: "1px solid var(--accent)", borderRadius: 4, padding: "2px 5px" }}>SIM</span>
+                  )}
+                </div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 22 }}>
+                  <Ring soc={it.soc ?? null} current={it.current_a ?? null} power={it.power_w ?? null}
+                    connected={connected} size={168} />
+                  {zone && tempC != null && <TempGauge tempC={tempC} thr={thr} unit={unit} />}
+                </div>
+                <div style={{ height: 24, marginTop: 12 }}>
+                  {connected ? (
+                    <span className="mono" style={{ color: flowColor, fontSize: 18 }}>
+                      {`${(it.power_w ?? 0).toFixed(0)} W · ${cur.toFixed(1)} A`}
+                    </span>
+                  ) : (
+                    <span className="mono" style={{ color: "var(--text3)", fontSize: 13, letterSpacing: 2 }}>DISCONNECTED</span>
+                  )}
+                </div>
+                {zone && (
+                  <div style={{ display: "inline-flex", alignItems: "center", gap: 7, marginTop: 8,
+                    padding: "4px 10px", borderRadius: 7, background: "var(--input-bg)" }}>
+                    <span style={{ width: 7, height: 7, borderRadius: "50%", background: zColor }} />
+                    <span className="mono" style={{ fontSize: 11, letterSpacing: 1, color: zColor }}>{zoneLabel(zone.key)}</span>
+                  </div>
                 )}
               </div>
-            </div>
-          );
-        })}
+            );
+          })}
+        </div>
+
+        {featuredAddr && (
+          <ConditionsSimulator
+            value={simTemp ?? items[0]?.temp_c ?? 24} active={simTemp != null}
+            onChange={setSimTemp} onReset={() => setSimTemp(null)}
+            unit={unit} featuredName={items[0]?.alias ?? "the featured pack"} readoutColor={bannerColor} />
+        )}
       </div>
+
+      {flashing && worst && (
+        <TempOverlay worst={worst} unit={unit} onAck={() => setAckedKey(worst.key)} />
+      )}
     </div>
   );
 }
