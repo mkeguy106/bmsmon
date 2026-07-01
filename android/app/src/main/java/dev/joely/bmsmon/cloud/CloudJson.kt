@@ -29,6 +29,7 @@ data class SampleJson(
     val lat: Double? = null,
     val lon: Double? = null,
     val gps_accuracy_m: Float? = null,
+    val eta_full_min: Float? = null,
 )
 
 object CloudJson {
@@ -41,11 +42,12 @@ object CloudJson {
         mosfetTempC: Int?, soh: Int?, fullChargeAh: Float?, remainingAh: Float?, cycles: Int?,
         cellMinV: Float?, cellMaxV: Float?, regen: Boolean, linkEvent: String?,
         lat: Double? = null, lon: Double? = null, gpsAccuracyM: Float? = null,
+        etaFullMin: Float? = null,
     ): String = json.encodeToString(
         SampleJson.serializer(),
         SampleJson(tsMs, address, advertisedName, alias, groupId, state, soc, currentA, powerW,
             voltageV, tempC, mosfetTempC, soh, fullChargeAh, remainingAh, cycles, cellMinV, cellMaxV,
-            regen, linkEvent, lat, lon, gpsAccuracyM),
+            regen, linkEvent, lat, lon, gpsAccuracyM, etaFullMin),
     )
 
     /** Wrap pre-serialized sample JSON object strings into the ingest batch body bytes. */
