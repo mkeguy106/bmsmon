@@ -287,3 +287,8 @@ direct-access-only); NAS `.env` secret strength; prod uvicorn staying single-pro
   `bmsmon-api` and adds the `bmsmon-proxy-secret` Traefik middleware
   (customRequestHeaders, UI-zone router only) — direct-container requests to `/web/*`
   and `/ws` now 401 without the header.
+- 2026-07-01 — GPS-retention image deployed to ddnas02; proxy secret live and verified:
+  `/api/v1/health` ok, `/web/*` 302s to Authentik, logged-in dashboard traffic flows
+  (temp-config 200s via the full chain), and direct-container requests with spoofed
+  `X-Authentik-*` admin headers now get **401** (SRV-3 attack path closed). GPS scrub
+  task running (0 rows scrubbed — no data older than 3 years yet).
