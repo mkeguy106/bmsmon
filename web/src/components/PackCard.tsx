@@ -1,16 +1,21 @@
+import { formatTemp, tempZone, zoneColorVar, type TempThresholds, type TempUnit } from "../temp";
 import type { FleetItem } from "../types";
 import { Ring } from "./Ring";
 
-const Stat = ({ label, value }: { label: string; value: string }) => (
+const Stat = ({ label, value, color }: { label: string; value: string; color?: string }) => (
   <div style={{ background: "var(--input-bg)", borderRadius: 8, padding: "8px 10px" }}>
     <div style={{ color: "var(--text3)", fontSize: 10, letterSpacing: 1 }} className="mono">{label}</div>
-    <div className="mono" style={{ color: "var(--text)", fontSize: 15, fontWeight: 600 }}>{value}</div>
+    <div className="mono" style={{ color: color ?? "var(--text)", fontSize: 15, fontWeight: 600 }}>{value}</div>
   </div>
 );
 
-export function PackCard({ item, stale }: { item: FleetItem; stale: boolean }) {
+export function PackCard({ item, stale, thr, unit }:
+  { item: FleetItem; stale: boolean; thr: TempThresholds; unit: TempUnit }) {
   const connected = !stale;
   const n = (v: number | null | undefined, d = 1) => (v == null ? "—" : v.toFixed(d));
+  const tempZoneColor = connected && item.temp_c != null && tempZone(item.temp_c, thr).rank >= 3
+    ? "var(--critical)" : undefined;
+  const tempValue = connected && item.temp_c != null ? formatTemp(item.temp_c, unit) : "—";
   return (
     <div style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 14,
       padding: 16, display: "flex", flexDirection: "column", alignItems: "center", gap: 10,
@@ -30,7 +35,7 @@ export function PackCard({ item, stale }: { item: FleetItem; stale: boolean }) {
         <Stat label="POWER" value={connected ? `${n(item.power_w, 0)} W` : "—"} />
         <Stat label="CURRENT" value={connected ? `${n(item.current_a)} A` : "—"} />
         <Stat label="VOLTAGE" value={connected ? `${n(item.voltage_v, 2)} V` : "—"} />
-        <Stat label="TEMP" value={connected ? `${n(item.temp_c, 0)}°C` : "—"} />
+        <Stat label="TEMP" value={tempValue} color={tempZoneColor} />
       </div>
     </div>
   );

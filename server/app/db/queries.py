@@ -84,6 +84,16 @@ async def upsert_temp_config(conn, device_id, cfg: dict) -> None:
     )
 
 
+async def get_temp_config_all(conn) -> list[dict]:
+    """Latest temperature-alert config per device+profile, newest first (for the read-only webui)."""
+    rows = await conn.fetch(
+        """SELECT device_id, profile_id, cold_caution_c, hot_caution_c, cold_crit_c, hot_crit_c,
+                  unit, updated_at_ms, received_at
+           FROM device_temp_config ORDER BY updated_at_ms DESC"""
+    )
+    return [dict(r) for r in rows]
+
+
 async def fleet_snapshot(conn) -> list[dict]:
     rows = await conn.fetch(
         """SELECT DISTINCT ON (s.address)
