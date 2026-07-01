@@ -37,6 +37,7 @@ import dev.joely.bmsmon.model.TempRank
 import dev.joely.bmsmon.model.TempThresholds
 import dev.joely.bmsmon.model.TempUnit
 import dev.joely.bmsmon.model.cToF
+import dev.joely.bmsmon.model.formatEtaMinutes
 import dev.joely.bmsmon.model.formatTemp
 import dev.joely.bmsmon.model.tempZone
 import dev.joely.bmsmon.ui.ChargingBolt
@@ -178,6 +179,14 @@ private fun StageRingBox(item: StageItem, c: dev.joely.bmsmon.ui.theme.BmColors)
                         fontSize = 14.sp,
                         fontWeight = if (item.regen) FontWeight.SemiBold else FontWeight.Normal,
                     )
+                    item.etaFullMin?.let { eta ->
+                        Text(
+                            "~${formatEtaMinutes(eta)} to full",
+                            color = c.text2,
+                            fontFamily = MonoFont,
+                            fontSize = 12.sp,
+                        )
+                    }
                 }
             } else {
                 DisconnectedReadout()
