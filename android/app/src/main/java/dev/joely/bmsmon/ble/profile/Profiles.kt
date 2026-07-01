@@ -30,6 +30,9 @@ val RedodoBekenProfile = BatteryProfile(
     maxHeldConnections = 8,
     connectTimeoutMs = 10_000L,
     failThreshold = 3,
+    // Tolerate up to 2 missed status frames (retry in place); only drop the link on the 3rd. A single
+    // slow/missed notification on the 1.5s-polled stage used to tear the link down and reconnect.
+    maxPollMisses = 3,
     backoff = BackoffSpec(baseMs = 5_000L, factor = 2, capMs = 120_000L),
     // Verified Redodo LiFePO4 envelope: BMS cutoffs -20/60°C, charge lock 0°C (resume 5°C) / hot 50°C,
     // factory alert defaults cold caution 5 / hot 45 / cold crit -12 / hot crit 53 (fire before cutoff).

@@ -52,6 +52,8 @@ data class BatteryProfile(
     val maxHeldConnections: Int,
     val connectTimeoutMs: Long,
     val failThreshold: Int,
+    /** Consecutive poll timeouts tolerated (retried in place) before the link is torn down. */
+    val maxPollMisses: Int = 3,
     val backoff: BackoffSpec,
     val tempEnvelope: TempEnvelope = TempEnvelope(),
 ) {

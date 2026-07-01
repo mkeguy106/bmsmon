@@ -25,7 +25,10 @@ import kotlinx.coroutines.withTimeoutOrNull
 class BleSession(
     private val context: Context,
     private val address: String,
-    private val profile: BatteryProfile = RedodoBekenProfile
+    private val profile: BatteryProfile = RedodoBekenProfile,
+    /** Stage packs poll every ~1.5s; a BALANCED connection interval keeps the round-trip clear of the
+     *  poll timeout. Background packs stay LOW_POWER to spare the radio across many held links. */
+    private val highPriority: Boolean = false,
 ) {
 
     private var gatt: BluetoothGatt? = null
@@ -102,7 +105,9 @@ class BleSession(
                 return
             }
             g.setCharacteristicNotification(ffe1, true)
-            runCatching { g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER) }
+            val priority = if (highPriority) BluetoothGatt.CONNECTION_PRIORITY_BALANCED
+                           else BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER
+            runCatching { g.requestConnectionPriority(priority) }
             val cccd = ffe1.getDescriptor(profile.cccdUuid)
             if (cccd == null) {
                 connectReady?.complete(false)

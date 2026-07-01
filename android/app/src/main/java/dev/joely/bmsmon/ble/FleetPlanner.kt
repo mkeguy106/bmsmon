@@ -12,6 +12,34 @@ fun BackoffSpec.delayFor(failCount: Int): Long {
 
 data class FleetPlan(val toConnect: List<String>, val toDisconnect: List<String>)
 
+/** Outcome of one poll attempt, fed to [pollAction]. */
+enum class PollOutcome { FRAME, TIMEOUT, ERROR }
+
+/** What the poll loop does with one [PollOutcome]. */
+enum class PollAction { DELIVER, RETRY, DROP }
+
+/**
+ * Decide what a persistent poll loop does after one poll, given how many *consecutive* timeouts
+ * have already happened and the profile's tolerance. Pure so the retry-before-drop policy is
+ * unit-testable without BLE.
+ *
+ * A single missed status frame ([PollOutcome.TIMEOUT]) does NOT mean the link is dead — the Beken
+ * module just skipped/slowed one notification. On the fast-polled stage this happens routinely, and
+ * tearing the GATT link down + reconnecting on the first miss is what produced the "occasional stage
+ * disconnect". So a timeout only drops once [maxMisses] consecutive misses accumulate; before that we
+ * [RETRY] in place and keep the link. A hard [PollOutcome.ERROR] (e.g. STATE_DISCONNECTED) means the
+ * link really is gone → [DROP] immediately. A [PollOutcome.FRAME] resets the streak → [DELIVER].
+ *
+ * @param priorConsecutiveTimeouts timeouts seen since the last delivered frame (before this outcome).
+ */
+fun pollAction(outcome: PollOutcome, priorConsecutiveTimeouts: Int, maxMisses: Int): PollAction =
+    when (outcome) {
+        PollOutcome.FRAME -> PollAction.DELIVER
+        PollOutcome.ERROR -> PollAction.DROP
+        PollOutcome.TIMEOUT ->
+            if (priorConsecutiveTimeouts + 1 >= maxMisses) PollAction.DROP else PollAction.RETRY
+    }
+
 /**
  * Decide this tick's connect/disconnect actions. Pure: no BLE, no clock beyond [now].
  * Holds up to [maxHeld] links; stage packs get slots first; backed-off packs wait; non-desired

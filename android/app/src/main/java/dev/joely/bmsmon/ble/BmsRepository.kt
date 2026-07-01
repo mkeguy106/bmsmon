@@ -194,8 +194,9 @@ class BmsRepository(private val context: Context) {
                     connecting += addr
                     val profile = ProfileRegistry.profileFor(target.name) ?: RedodoBekenProfile
                     val ch = resultChannel
+                    val highPriority = addr in stageAddrs
                     childScope.launch {
-                        val session = BleSession(context, addr, profile)
+                        val session = BleSession(context, addr, profile, highPriority = highPriority)
                         var handed = false
                         try {
                             val ok = gate.withPermit { session.connect(profile.connectTimeoutMs) }
@@ -287,29 +288,47 @@ class BmsRepository(private val context: Context) {
         }
     }
 
-    /** Per-session poll loop: poll immediately, then delay between iterations. Exits on null (session dropped). */
+    /**
+     * Per-session poll loop: poll immediately, then delay between iterations. A single missed status
+     * frame (timeout) is NOT fatal — the Beken module routinely skips/slows one notification on the
+     * fast-polled stage, and tearing the link down + reconnecting on the first miss is what caused the
+     * "occasional stage disconnect". So a timeout retries in place up to [BatteryProfile.maxPollMisses]
+     * consecutive misses before dropping; a hard error (link actually gone) drops immediately.
+     */
     private suspend fun pollLoop(
         addr: String,
         session: BleSession,
         profile: BatteryProfile,
         ch: Channel<LoopEvent>,
     ) {
+        var consecutiveTimeouts = 0
         while (true) {
-            val raw = try {
-                session.poll(POLL_TIMEOUT_MS)
+            var raw: ByteArray? = null
+            val outcome = try {
+                raw = session.poll(POLL_TIMEOUT_MS)
+                if (raw != null) PollOutcome.FRAME else PollOutcome.TIMEOUT
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.d(TAG, "poll $addr: ${e.message}")
-                null
+                PollOutcome.ERROR
             }
-            if (raw == null) {
-                ch.trySend(LoopEvent.PollDrop(addr))
-                return
+            when (pollAction(outcome, consecutiveTimeouts, profile.maxPollMisses)) {
+                PollAction.DELIVER -> {
+                    consecutiveTimeouts = 0
+                    ch.trySend(LoopEvent.PollFrame(addr, raw!!))
+                    val pollMs = if (addr in stageAddrs) profile.stagePollMs else profile.slowPollMs
+                    delay(pollMs)
+                }
+                PollAction.RETRY -> {
+                    consecutiveTimeouts++
+                    delay(POLL_RETRY_DELAY_MS)  // brief breather; keep the link open and re-poll
+                }
+                PollAction.DROP -> {
+                    ch.trySend(LoopEvent.PollDrop(addr))
+                    return
+                }
             }
-            ch.trySend(LoopEvent.PollFrame(addr, raw))
-            val pollMs = if (addr in stageAddrs) profile.stagePollMs else profile.slowPollMs
-            delay(pollMs)
         }
     }
 
@@ -317,6 +336,7 @@ class BmsRepository(private val context: Context) {
         const val TAG = "BmsRepository"
         const val CONTROL_TICK_MS      = 1_000L
         const val POLL_TIMEOUT_MS      = 4_000L
+        const val POLL_RETRY_DELAY_MS  = 500L
         const val RECONNECT_BACKOFF_MS = 2_000L
         // Launch window during which the stage connects/polls before any background pack. Releases
         // early once the stage is fully connected; this is just the safety cap so an unreachable
