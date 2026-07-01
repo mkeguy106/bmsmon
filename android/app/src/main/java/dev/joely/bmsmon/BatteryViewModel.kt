@@ -24,6 +24,8 @@ import dev.joely.bmsmon.model.GaugeSide
 import dev.joely.bmsmon.model.TempRank
 import dev.joely.bmsmon.model.TempSide
 import dev.joely.bmsmon.model.TempThresholds
+import dev.joely.bmsmon.model.TempZone
+import dev.joely.bmsmon.model.pickStageAlert
 import dev.joely.bmsmon.model.TempUnit
 import dev.joely.bmsmon.model.formatDelta
 import dev.joely.bmsmon.model.tempMarginToCutoffC
@@ -169,6 +171,7 @@ data class UiState(
     val cloudOutboxDepth: Int = 0,
     val cloudLastUploadMs: Long = 0,
     val cloudUploadKbps: Float = 0f,
+    val cloudAuthFailed: Boolean = false,
     val importDone: Boolean = false,
     val importTotal: Int = 0,
     val importSent: Int = 0,
@@ -240,8 +243,7 @@ data class UiState(
     fun stageAlert(): StageAlert {
         val none = StageAlert(false, false, 100, null, emptySet())
         if (!monitoring) return none
-        val packs = stageTarget.addresses(roster)
-            .mapNotNull { a -> fleet[a]?.takeIf { it.reachable }?.telemetry?.let { a to it } }
+        val packs = stagePacks()
         if (packs.isEmpty()) return none
 
         // --- capacity (existing low-battery behavior) ---
@@ -259,34 +261,34 @@ data class UiState(
         }
 
         // --- temperature (worst reachable stage pack; flashes only at rank >= CRITICAL) ---
-        val profile = stageProfile()
-        val thr = tempThresholdsFor(profile.id)
-        val env = profile.tempEnvelope
-        val worst = packs
-            .map { (addr, t) -> Triple(addr, t, tempZone(t.temp, thr, env)) }
-            .maxByOrNull { it.third.rank.ordinal }
+        val worst = stageWorstTemp()
         val tempRank = worst?.third?.rank ?: TempRank.SAFE
         val tempPresent = tempAlertsEnabled && tempRank.ordinal >= TempRank.CRITICAL.ordinal
-        val tempSeverity = if (tempPresent) tempRank.ordinal else -1
+        val tempSide = if (worst?.third?.side == TempSide.COLD) "COLD" else "HOT"
+        val tempRankStr = if (tempRank == TempRank.CUTOFF) "CUTOFF" else "CRITICAL"
+        val tempAckKey = "temp:$tempSide:$tempRankStr"
+        val tempFlashing = tempPresent && tempAckKey !in acknowledgedTempKeys
 
-        // Worst alert wins; on a tie temperature takes the stage (it warns before the BMS cutoff).
-        if (tempPresent && tempSeverity >= capSeverity && worst != null) {
+        // Worst *un-acked* alert wins (a flashing alert beats an acked one, so an acked temp
+        // CRITICAL can't suppress an un-acked capacity flash); ties go to temperature.
+        val pick = pickStageAlert(
+            capSeverity, capFlashing,
+            if (tempPresent) tempRank.ordinal else -1, tempFlashing,
+        )
+        if (pick == AlertKind.TEMPERATURE && worst != null) {
             val (addr, tel, zone) = worst
             val name = roster.batteryAt(addr)?.alias ?: tel.name
-            val side = if (zone.side == TempSide.COLD) "COLD" else "HOT"
-            val rankStr = if (zone.rank == TempRank.CUTOFF) "CUTOFF" else "CRITICAL"
             val detail = if (zone.rank == TempRank.CUTOFF) {
-                "$rankStr · $side · $name · LOAD DISCONNECTED"
+                "$tempRankStr · $tempSide · $name · LOAD DISCONNECTED"
             } else {
-                val margin = tempMarginToCutoffC(tel.temp, zone.side, env)
-                "$rankStr · $side · $name · ${formatDelta(margin, tempUnit)} TO CUTOFF"
+                val margin = tempMarginToCutoffC(tel.temp, zone.side, stageProfile().tempEnvelope)
+                "$tempRankStr · $tempSide · $name · ${formatDelta(margin, tempUnit)} TO CUTOFF"
             }
-            val ackKey = "temp:$side:$rankStr"
             return StageAlert(
-                flashing = ackKey !in acknowledgedTempKeys, critical = true,
+                flashing = tempFlashing, critical = true,
                 lowSoc = tel.soc.roundToInt(), activeThreshold = null, ackEffective = emptySet(),
                 kind = AlertKind.TEMPERATURE, headline = "TEMPERATURE", detail = detail,
-                tempAckKey = ackKey, tempActive = true, present = true,
+                tempAckKey = tempAckKey, tempActive = true, present = true,
             )
         }
 
@@ -297,6 +299,33 @@ data class UiState(
             detail = "LOW BATTERY · ${capEval.lowSoc}% · BELOW ${capEval.activeThreshold ?: 0}%",
             present = capEval.activeThreshold != null && !capEval.charging,
         )
+    }
+
+    /** Reachable stage packs that have reported telemetry, with their addresses. */
+    private fun stagePacks(): List<Pair<String, Telemetry>> =
+        stageTarget.addresses(roster)
+            .mapNotNull { a -> fleet[a]?.takeIf { it.reachable }?.telemetry?.let { a to it } }
+
+    /** Worst temperature zone among the reachable stage packs (null when none are reporting). */
+    fun stageWorstTemp(): Triple<String, Telemetry, TempZone>? {
+        val profile = stageProfile()
+        val thr = tempThresholdsFor(profile.id)
+        return stagePacks()
+            .map { (addr, t) -> Triple(addr, t, tempZone(t.temp, thr, profile.tempEnvelope)) }
+            .maxByOrNull { it.third.rank.ordinal }
+    }
+
+    /**
+     * Re-arm temperature acks: once the stage's worst reachable pack recovers below CRITICAL, any
+     * acknowledged temp keys are cleared so the same condition flashes again if it recurs later
+     * (mirrors the headless AlertNotifier, which resets its dedup key when the rank drops below
+     * CRITICAL). Requires a live reading — a transient BLE dropout does not clear acks.
+     */
+    fun withTempAcksPruned(): UiState {
+        if (acknowledgedTempKeys.isEmpty()) return this
+        val worst = stageWorstTemp() ?: return this
+        return if (worst.third.rank.ordinal < TempRank.CRITICAL.ordinal)
+            copy(acknowledgedTempKeys = emptySet()) else this
     }
 }
 
@@ -435,9 +464,12 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         // Mirror reporter upload stats into UiState so the Cloud sync page can show them.
-        getApplication<BmsApp>().reporter.onStatus = { depth, ts, kbps ->
+        getApplication<BmsApp>().reporter.onStatus = { depth, ts, kbps, authFailed ->
             _state.update {
-                it.copy(cloudOutboxDepth = depth.toInt(), cloudLastUploadMs = ts, cloudUploadKbps = kbps.toFloat())
+                it.copy(
+                    cloudOutboxDepth = depth.toInt(), cloudLastUploadMs = ts,
+                    cloudUploadKbps = kbps.toFloat(), cloudAuthFailed = authFailed,
+                )
             }
         }
     }
@@ -972,7 +1004,9 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             )
             val isPinned = st.manualStage != null && resolved == st.manualStage &&
                 (!st.dynamicStage || now - st.manualPinnedAt < PIN_HOLD_MS)
-            st.copy(stageTarget = resolved, pinned = isPinned)
+            // Re-arm temp acks whenever the stage's worst pack has recovered below CRITICAL, so
+            // a recurring condition flashes again (refresh runs on every engine update + timer).
+            st.copy(stageTarget = resolved, pinned = isPinned).withTempAcksPruned()
         }
         // Persist the resolved stage whenever it changes, so the next launch restores + prioritizes it.
         val newTarget = _state.value.stageTarget

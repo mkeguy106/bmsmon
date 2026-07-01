@@ -334,6 +334,7 @@ private fun UploadBadge(state: UiState, modifier: Modifier = Modifier) {
     val c = Bm.colors
     val kbps = state.cloudUploadKbps
     val (text, color) = when {
+        state.cloudAuthFailed -> "↑ auth failed" to AlertCritical
         kbps > 0.05f -> "↑ %.1f KB/s".format(kbps) to RegenGreen
         state.cloudOutboxDepth > 0 -> "↑ ${state.cloudOutboxDepth} queued" to AlertWarn
         state.cloudLastUploadMs > 0L -> "↑ synced" to c.text3

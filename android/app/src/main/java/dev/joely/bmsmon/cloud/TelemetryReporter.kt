@@ -1,6 +1,7 @@
 package dev.joely.bmsmon.cloud
 
 import android.content.Context
+import android.util.Log
 import java.io.ByteArrayOutputStream
 import java.util.zip.GZIPOutputStream
 import dev.joely.bmsmon.data.SettingsStore
@@ -9,6 +10,7 @@ import dev.joely.bmsmon.data.db.OutboxEntity
 import dev.joely.bmsmon.model.Roster
 import dev.joely.bmsmon.model.Telemetry
 import dev.joely.bmsmon.model.batteryAt
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -21,6 +23,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
+private const val TAG = "TelemetryReporter"
 private const val BATCH = 200
 private const val OUTBOX_MAX = 200_000
 private const val IMPORT_PAGE = 500
@@ -47,7 +50,8 @@ class TelemetryReporter(
     @Volatile private var importStarted = false
     private var uploaderJob: Job? = null
     private val uploadRate = UploadRate()
-    var onStatus: ((outboxCount: Long, lastUploadMs: Long, kbps: Double) -> Unit)? = null
+    @Volatile private var authFailed = false
+    var onStatus: ((outboxCount: Long, lastUploadMs: Long, kbps: Double, authFailed: Boolean) -> Unit)? = null
     var onImportProgress: ((Long) -> Unit)? = null
 
     init {
@@ -141,15 +145,23 @@ class TelemetryReporter(
                 }
                 // seq = -1 marks this as an import batch; the server ignores seq ordering for imports.
                 val body = CloudJson.encodeBatch(seq = -1, rows = rows)
-                val ok = postSigned(ingestUrl, p.deviceId, body)
-                if (!ok) {
-                    delay(5000)
-                    continue
+                when (postSigned(ingestUrl, p.deviceId, body)) {
+                    PostResult.Ok -> {}
+                    PostResult.Poison ->
+                        // Permanently rejected page: skip it so the import can't stall forever.
+                        // The rows themselves stay in the local Room samples table.
+                        Log.w(TAG, "import: server permanently rejected page after id=$after (${page.size} rows) — skipping")
+                    else -> {
+                        delay(5000)
+                        continue
+                    }
                 }
                 after = page.last().id
                 settings.setImportWatermark(after)
                 onImportProgress?.invoke(after)
                 delay(750)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 delay(5000)
             }
@@ -171,9 +183,9 @@ class TelemetryReporter(
         }
     }
 
-    /** Sign [body] with the device key and POST to [url], gzipped. Returns true on HTTP 2xx. */
-    private fun postSigned(url: String, deviceId: String, body: ByteArray): Boolean =
-        runCatching {
+    /** Sign [body] with the device key and POST to [url], gzipped. Classified by HTTP status. */
+    private fun postSigned(url: String, deviceId: String, body: ByteArray): PostResult =
+        try {
             // Sign the PLAINTEXT body (the server's body-hash is over the decompressed JSON), then
             // gzip it as a transport layer to cut upload bandwidth (~85% on this repetitive JSON).
             val token = Jwt.signEs256(DeviceKeys.privateKey(), deviceId, body, System.currentTimeMillis())
@@ -183,8 +195,12 @@ class TelemetryReporter(
                 .header("Content-Encoding", "gzip")
                 .post(gzip(body).toRequestBody("application/json".toMediaType()))
                 .build()
-            http.newCall(req).execute().use { it.isSuccessful }
-        }.getOrDefault(false)
+            http.newCall(req).execute().use { classifyPost(it.code) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            PostResult.Transient // network/IO — retry with backoff
+        }
 
     private suspend fun uploadLoop() {
         var backoff = 1000L
@@ -203,7 +219,7 @@ class TelemetryReporter(
                 // sign the plaintext + gzip like ingest, and clear only on success.
                 if (conn.online.value) {
                     p.pendingTempConfig?.let { cfg ->
-                        if (postSigned(CloudConfig(base).configUrl, p.deviceId, cfg.toByteArray())) {
+                        if (postSigned(CloudConfig(base).configUrl, p.deviceId, cfg.toByteArray()) == PostResult.Ok) {
                             settings.clearPendingTempConfig()
                         }
                     }
@@ -212,7 +228,7 @@ class TelemetryReporter(
                 val depth = db.outbox().count()
                 if (depth > OUTBOX_MAX) db.outbox().dropOldest(depth - OUTBOX_MAX)
                 if (!conn.online.value || depth == 0) {
-                    onStatus?.invoke(depth.toLong(), lastUploadMs, uploadRate.kbps(System.currentTimeMillis()))
+                    onStatus?.invoke(depth.toLong(), lastUploadMs, uploadRate.kbps(System.currentTimeMillis()), authFailed)
                     delay(1500)
                     continue
                 }
@@ -224,18 +240,53 @@ class TelemetryReporter(
                 seq += 1
                 // The SAME body bytes are used for both signing and POSTing.
                 val body = CloudJson.encodeBatch(seq, rows.map { it.payload })
-                val ok = postSigned(CloudConfig(base).ingestUrl, p.deviceId, body)
-                if (ok) {
-                    db.outbox().deleteUpTo(rows.last().id)
-                    val now = System.currentTimeMillis()
-                    lastUploadMs = now
-                    uploadRate.record(now, body.size)
-                    onStatus?.invoke(db.outbox().count().toLong(), lastUploadMs, uploadRate.kbps(now))
-                    backoff = 1000L
-                } else {
-                    delay(backoff)
-                    backoff = (backoff * 2).coerceAtMost(60_000L)
+                when (postSigned(CloudConfig(base).ingestUrl, p.deviceId, body)) {
+                    PostResult.Ok -> {
+                        authFailed = false
+                        db.outbox().deleteUpTo(rows.last().id)
+                        val now = System.currentTimeMillis()
+                        lastUploadMs = now
+                        uploadRate.record(now, body.size)
+                        onStatus?.invoke(db.outbox().count().toLong(), lastUploadMs, uploadRate.kbps(now), authFailed)
+                        backoff = 1000L
+                    }
+                    PostResult.Poison -> {
+                        // The server permanently rejects this batch (4xx validation) — retrying it
+                        // forever would head-of-line block every later sample. Skip past it so the
+                        // queue drains; when logging is on the telemetry still lives in the Room
+                        // samples table and can be re-sent via the historical import.
+                        authFailed = false // a validation reject means auth itself passed
+                        Log.w(
+                            TAG,
+                            "upload: server permanently rejected batch seq=$seq " +
+                                "(${rows.size} rows, outbox ids ${rows.first().id}..${rows.last().id}) — skipping past it",
+                        )
+                        db.outbox().deleteUpTo(rows.last().id)
+                        onStatus?.invoke(
+                            db.outbox().count().toLong(), lastUploadMs,
+                            uploadRate.kbps(System.currentTimeMillis()), authFailed,
+                        )
+                        backoff = 1000L
+                    }
+                    PostResult.AuthFailed -> {
+                        // Revoked device or >60 s clock skew: NEVER drop the rows — keep buffering
+                        // and backing off, but surface the auth state so the UI can show it
+                        // instead of "queued" forever.
+                        authFailed = true
+                        onStatus?.invoke(
+                            db.outbox().count().toLong(), lastUploadMs,
+                            uploadRate.kbps(System.currentTimeMillis()), authFailed,
+                        )
+                        delay(backoff)
+                        backoff = (backoff * 2).coerceAtMost(60_000L)
+                    }
+                    PostResult.Transient -> {
+                        delay(backoff)
+                        backoff = (backoff * 2).coerceAtMost(60_000L)
+                    }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 delay(backoff)
                 backoff = (backoff * 2).coerceAtMost(60_000L)

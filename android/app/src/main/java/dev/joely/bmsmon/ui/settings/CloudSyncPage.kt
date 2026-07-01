@@ -63,6 +63,14 @@ internal fun ColumnScope.CloudSyncContent(
                 fontSize = 12.sp,
                 modifier = Modifier.padding(top = 6.dp),
             )
+            if (state.cloudAuthFailed) {
+                Text(
+                    "Upload auth failed — device revoked or phone clock skewed. Data is buffered locally.",
+                    color = AlertCritical,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
             Text(
                 if (!state.importDone) "Importing history…" else "History imported",
                 color = c.text2,

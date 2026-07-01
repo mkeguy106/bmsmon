@@ -41,6 +41,32 @@ fun evalStageAlert(packs: List<PackSoc>, cfg: AlertConfig): AlertEval {
     return AlertEval(active, critical, lowSoc, low.charging, crossed)
 }
 
+/**
+ * Worst-of arbitration between the capacity and temperature stage alerts. Severities: -1 = no
+ * alert present; capacity warning = 2 / capacity critical = 3; temperature = its [TempRank]
+ * ordinal (CRITICAL = 3, CUTOFF = 4). Flashing = present AND not acknowledged.
+ *
+ * An alert that would flash always beats one that is present but acknowledged — an acked temp
+ * CRITICAL must not mask an un-acked capacity alert (or vice versa), or a flash the user never
+ * silenced would be suppressed. When both (or neither) flash, the higher raw severity wins, and
+ * temperature takes a tie (it warns before the BMS cutoff). With neither alert present the
+ * capacity kind carries the "no alert" fields.
+ */
+fun pickStageAlert(
+    capSeverity: Int,
+    capFlashing: Boolean,
+    tempSeverity: Int,
+    tempFlashing: Boolean,
+): AlertKind {
+    val capPresent = capSeverity >= 0
+    val tempPresent = tempSeverity >= 0
+    return when {
+        !capPresent || !tempPresent -> if (tempPresent) AlertKind.TEMPERATURE else AlertKind.CAPACITY
+        tempFlashing != capFlashing -> if (tempFlashing) AlertKind.TEMPERATURE else AlertKind.CAPACITY
+        else -> if (tempSeverity >= capSeverity) AlertKind.TEMPERATURE else AlertKind.CAPACITY
+    }
+}
+
 /** Outcome of the notification dedup logic. */
 data class NotifyDecision(val notify: Boolean, val cancel: Boolean, val newLastNotified: Int?)
 
