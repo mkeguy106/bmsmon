@@ -17,6 +17,9 @@ interface SampleDao {
     @Query("SELECT * FROM samples WHERE address = :address AND linkEvent IS NULL ORDER BY tsMs ASC")
     suspend fun telemetryFor(address: String): List<SampleEntity>
 
+    @Query("SELECT * FROM samples WHERE address = :address AND tsMs >= :sinceMs AND linkEvent IS NULL ORDER BY tsMs ASC")
+    suspend fun since(address: String, sinceMs: Long): List<SampleEntity>
+
     @Query("DELETE FROM samples WHERE tsMs < :cutoffMs")
     suspend fun deleteOlderThan(cutoffMs: Long): Int
 

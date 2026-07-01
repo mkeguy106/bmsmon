@@ -59,6 +59,7 @@ data class Persisted(
     val importWatermark: Long,
     val importDone: Boolean,
     val tempThresholdsByProfile: Map<String, TempThresholds>,
+    val chargeTailMinByAddress: Map<String, Float> = emptyMap(),
     val tempAlertsEnabled: Boolean,
     val showTempGauge: Boolean,
     val tempGaugeSide: String?,
@@ -107,6 +108,7 @@ class SettingsStore(private val context: Context) {
         val IMPORT_DONE = booleanPreferencesKey("import_done")
         val INSTALL_UUID = stringPreferencesKey("install_uuid")
         val TEMP_THRESHOLDS = stringPreferencesKey("temp_thresholds_by_profile")
+        val CHARGE_TAIL_MIN = stringPreferencesKey("charge_tail_min_by_address")
         val TEMP_ALERTS_ENABLED = booleanPreferencesKey("temp_alerts_enabled")
         val SHOW_TEMP_GAUGE = booleanPreferencesKey("show_temp_gauge")
         val TEMP_GAUGE_SIDE = stringPreferencesKey("temp_gauge_side")
@@ -153,6 +155,7 @@ class SettingsStore(private val context: Context) {
             importWatermark = p[K.IMPORT_WATERMARK] ?: 0L,
             importDone = p[K.IMPORT_DONE] ?: false,
             tempThresholdsByProfile = p[K.TEMP_THRESHOLDS]?.let(::decodeTempThresholds) ?: emptyMap(),
+            chargeTailMinByAddress = p[K.CHARGE_TAIL_MIN]?.let(::decodeChargeTail) ?: emptyMap(),
             tempAlertsEnabled = p[K.TEMP_ALERTS_ENABLED] ?: true,
             showTempGauge = p[K.SHOW_TEMP_GAUGE] ?: true,
             tempGaugeSide = p[K.TEMP_GAUGE_SIDE],
@@ -201,6 +204,11 @@ class SettingsStore(private val context: Context) {
     suspend fun setImportDone(on: Boolean) = context.dataStore.edit { it[K.IMPORT_DONE] = on }.let {}
     suspend fun setTempThresholds(map: Map<String, TempThresholds>) =
         context.dataStore.edit { it[K.TEMP_THRESHOLDS] = encodeTempThresholds(map) }.let {}
+    suspend fun setChargeTailMin(address: String, minutes: Float) =
+        context.dataStore.edit { prefs ->
+            val cur = prefs[K.CHARGE_TAIL_MIN]?.let(::decodeChargeTail) ?: emptyMap()
+            prefs[K.CHARGE_TAIL_MIN] = encodeChargeTail(cur + (address to minutes))
+        }.let {}
     suspend fun setTempAlertsEnabled(on: Boolean) = context.dataStore.edit { it[K.TEMP_ALERTS_ENABLED] = on }.let {}
     suspend fun setShowTempGauge(on: Boolean) = context.dataStore.edit { it[K.SHOW_TEMP_GAUGE] = on }.let {}
     suspend fun setTempGaugeSide(side: String) = context.dataStore.edit { it[K.TEMP_GAUGE_SIDE] = side }.let {}
@@ -255,6 +263,20 @@ private fun decodeTempThresholds(json: String): Map<String, TempThresholds> = ru
                 hotCritC = o.optInt("hotCritC", 53),
             ))
         }
+    }
+}.getOrDefault(emptyMap())
+
+/** Per-pack learned charge tail-time (address -> minutes), for the time-to-full estimator. */
+private fun encodeChargeTail(map: Map<String, Float>): String {
+    val root = JSONObject()
+    map.forEach { (addr, m) -> root.put(addr, m.toDouble()) }
+    return root.toString()
+}
+
+private fun decodeChargeTail(json: String): Map<String, Float> = runCatching {
+    val root = JSONObject(json)
+    buildMap {
+        root.keys().forEach { addr -> put(addr, root.getDouble(addr).toFloat()) }
     }
 }.getOrDefault(emptyMap())
 

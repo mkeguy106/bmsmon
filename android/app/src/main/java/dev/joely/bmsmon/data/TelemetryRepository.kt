@@ -127,6 +127,10 @@ class TelemetryRepository(private val db: BmsDatabase) {
      *  the V–I cloud and cell-imbalance analysis. */
     suspend fun telemetry(address: String): List<SampleEntity> = db.samples().telemetryFor(address)
 
+    /** Telemetry rows for one pack since [sinceMs] (link rows excluded), oldest first — for tail learning. */
+    suspend fun recentSamples(address: String, sinceMs: Long): List<SampleEntity> =
+        db.samples().since(address, sinceMs)
+
     /** All rows (telemetry + link events) for one session, oldest first — for the timeline pooler. */
     suspend fun samplesForSession(sessionId: Long): List<SampleEntity> = db.samples().forSession(sessionId)
 
