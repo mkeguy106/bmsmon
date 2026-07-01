@@ -8,6 +8,23 @@ export function createStore() {
   const merge = (s: Sample, meta?: Partial<FleetItem>) => {
     const cur = fleet[s.address];
     if (cur && cur.ts_ms >= s.ts_ms && !meta) return false;
+    if (cur && s.link_event != null) {
+      // Link-event samples ("Connected"/"Disconnected") carry no telemetry —
+      // the server rematerializes every omitted field as an explicit null, and
+      // spreading those would wipe the pack's last-known soc/voltage/temp.
+      // Merge only what a link event legitimately carries: the timestamp (so
+      // staleness tracking works), the event itself, and any alias/group meta.
+      fleet[s.address] = {
+        ...cur,
+        ...(meta && "alias" in meta ? { alias: meta.alias } : null),
+        ...(meta && "group_id" in meta ? { group_id: meta.group_id } : null),
+        ts_ms: s.ts_ms,
+        link_event: s.link_event,
+      };
+      return true;
+    }
+    // Normal samples keep the full spread: explicit nulls are load-bearing
+    // (e.g. eta_full_min: null must clear the ETA when charging stops).
     fleet[s.address] = { ...cur, ...meta, ...s };
     return true;
   };

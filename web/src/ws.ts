@@ -36,7 +36,7 @@ export function connectLive(
       lastMsg = performance.now();
       const msg = JSON.parse(e.data);
       if (msg.type === "snapshot") onSnapshot(msg.fleet);
-      else if (msg.type === "sample") onSample(msg);
+      else if (msg.type === "sample") { const { type: _t, ...s } = msg; onSample(s); }
       // {type:"ping"} keepalives just refresh lastMsg above.
     };
     ws.onclose = () => { onStatus(false); scheduleReconnect(); };
