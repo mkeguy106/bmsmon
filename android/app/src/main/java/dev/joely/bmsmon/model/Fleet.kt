@@ -121,7 +121,12 @@ fun isRegen(t: Telemetry, groupLastDischargeAt: Long?, now: Long): Boolean =
  * currently reachable over BLE (or has never reported) — the stage then shows it as DISCONNECTED
  * instead of a misleading 0%/low-battery state. [telemetry] is the last-known reading when present.
  */
-data class StageItem(val telemetry: Telemetry, val regen: Boolean, val connected: Boolean = true)
+data class StageItem(
+    val telemetry: Telemetry,
+    val regen: Boolean,
+    val connected: Boolean = true,
+    val etaFullMin: Float? = null,
+)
 
 fun hasReachable(group: BatteryGroup, fleet: Map<String, BatteryStatus>): Boolean =
     group.targets.any { fleet[it.address]?.reachable == true }

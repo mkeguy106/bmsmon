@@ -36,6 +36,7 @@ import dev.joely.bmsmon.model.GroupActivity
 import dev.joely.bmsmon.model.PIN_HOLD_MS
 import dev.joely.bmsmon.model.PackSoc
 import dev.joely.bmsmon.model.Roster
+import dev.joely.bmsmon.model.SEED_TAIL_MIN
 import dev.joely.bmsmon.model.StageInputs
 import dev.joely.bmsmon.model.StageItem
 import dev.joely.bmsmon.model.StageTarget
@@ -46,6 +47,7 @@ import dev.joely.bmsmon.model.addresses
 import dev.joely.bmsmon.model.allTargets
 import dev.joely.bmsmon.model.assignGroup
 import dev.joely.bmsmon.model.batteryAt
+import dev.joely.bmsmon.model.estimateChargeMinutes
 import dev.joely.bmsmon.model.evalStageAlert
 import dev.joely.bmsmon.model.groupActivity
 import dev.joely.bmsmon.model.groupById
@@ -124,6 +126,7 @@ data class UiState(
     val stageTarget: StageTarget = StageTarget.Base(DEFAULT_GROUP_ID),
     val pinned: Boolean = false,
     val regenAddrs: Set<String> = emptySet(),
+    val tailMinByAddress: Map<String, Float> = emptyMap(),
     val disabled: Set<String> = emptySet(),
     val sortKey: SortKey = SortKey.Activity,
     val filters: Set<FilterKey> = emptySet(),
@@ -203,7 +206,12 @@ data class UiState(
             val connected = status?.reachable == true && status.telemetry != null
             val tel = status?.telemetry?.copy(name = tg.name)
                 ?: Telemetry(tg.name, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
-            StageItem(tel, regen = connected && tg.address in regenAddrs, connected = connected)
+            val regenFlag = connected && tg.address in regenAddrs
+            val eta = if (connected) estimateChargeMinutes(
+                tel.state, tel.soc, tel.current, tel.fullChargeAh, tel.capacityAh,
+                regenFlag, tailMinByAddress[tg.address] ?: SEED_TAIL_MIN,
+            ) else null
+            StageItem(tel, regen = regenFlag, connected = connected, etaFullMin = eta)
         }
     }
 
@@ -393,6 +401,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                             monitoring = true,
                             fleet = es.fleet,
                             regenAddrs = es.regenAddrs,
+                            tailMinByAddress = es.tailMinByAddress,
                             lastDischargeAt = es.lastDischargeAt,
                             peakPowerW = es.peakPowerW,
                             peakCurrentA = es.peakCurrentA,
