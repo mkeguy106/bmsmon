@@ -18,9 +18,28 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // Release signing: reads the keystore path/credentials from ~/.gradle/gradle.properties
+    // (BMSMON_RELEASE_STORE_FILE / _STORE_PASSWORD / _KEY_ALIAS / _KEY_PASSWORD). When the
+    // properties are absent (CI, other machines) release falls back to unsigned so debug
+    // builds and tests are unaffected.
+    val releaseStoreFile = findProperty("BMSMON_RELEASE_STORE_FILE") as String?
+    if (releaseStoreFile != null) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(releaseStoreFile)
+                storePassword = findProperty("BMSMON_RELEASE_STORE_PASSWORD") as String?
+                keyAlias = findProperty("BMSMON_RELEASE_KEY_ALIAS") as String?
+                keyPassword = findProperty("BMSMON_RELEASE_KEY_PASSWORD") as String?
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (releaseStoreFile != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
