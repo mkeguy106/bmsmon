@@ -1,7 +1,7 @@
 import base64
 import binascii
-import gzip
 import uuid
+import zlib
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from app.auth.device_jwt import JwtError, unverified_sub, verify
 from app.auth.enroll import hash_code
+from app.config import settings
 from app.db import queries as q
 from app.db.pool import get_pool
 from app.models import (
@@ -17,6 +18,54 @@ from app.models import (
 )
 
 router = APIRouter(prefix="/api/v1")
+
+
+def _gunzip_capped(data: bytes, limit: int) -> bytes:
+    """Incrementally gunzip with a hard decompressed-size ceiling (anti gzip-bomb).
+
+    413 if the plaintext would exceed `limit`; 400 on corrupt/truncated gzip
+    (matching the old gzip.decompress behavior).
+    """
+    d = zlib.decompressobj(wbits=31)  # 31 = gzip container
+    try:
+        out = d.decompress(data, limit + 1)
+    except zlib.error:
+        raise HTTPException(400, "bad gzip")
+    if len(out) > limit:
+        raise HTTPException(413, "decompressed body too large")
+    if not d.eof:
+        raise HTTPException(400, "bad gzip")
+    return out
+
+
+async def _read_body(request: Request) -> bytes:
+    """Read the request body with size caps, BEFORE any signature verification.
+
+    Rejects declared Content-Length > max_body_bytes with 413 without reading;
+    also enforces the cap while streaming (absent/lying Content-Length). If the
+    body is gzipped, decompresses with a hard ceiling (see _gunzip_capped) —
+    the device JWT's body hash is over the plaintext JSON, so callers get the
+    decompressed bytes.
+    """
+    max_body = settings.max_body_bytes
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > max_body:
+                raise HTTPException(413, "body too large")
+        except ValueError:
+            pass  # malformed header; the streaming cap below still protects us
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > max_body:
+            raise HTTPException(413, "body too large")
+        chunks.append(chunk)
+    raw = b"".join(chunks)
+    if request.headers.get("content-encoding", "").lower() == "gzip":
+        raw = _gunzip_capped(raw, settings.max_gunzip_bytes)
+    return raw
 
 
 @router.get("/health")
@@ -50,14 +99,9 @@ async def ingest(request: Request, pool=Depends(get_pool)):
     if not auth.lower().startswith("bearer "):
         raise HTTPException(401, "missing bearer")
     token = auth[7:]
-    raw = await request.body()
-    # The device may gzip the body to save bandwidth. Decompress before verifying/parsing: the
-    # JWT's body hash is over the plaintext JSON, so the hash matches the decompressed bytes.
-    if request.headers.get("content-encoding", "").lower() == "gzip":
-        try:
-            raw = gzip.decompress(raw)
-        except (OSError, EOFError):
-            raise HTTPException(400, "bad gzip")
+    # The device may gzip the body to save bandwidth; _read_body caps the wire and
+    # decompressed sizes and returns the plaintext the JWT's body hash is over.
+    raw = await _read_body(request)
     try:
         device_id = unverified_sub(token)
     except JwtError:
@@ -97,12 +141,7 @@ async def config(request: Request, pool=Depends(get_pool)):
     if not auth.lower().startswith("bearer "):
         raise HTTPException(401, "missing bearer")
     token = auth[7:]
-    raw = await request.body()
-    if request.headers.get("content-encoding", "").lower() == "gzip":
-        try:
-            raw = gzip.decompress(raw)
-        except (OSError, EOFError):
-            raise HTTPException(400, "bad gzip")
+    raw = await _read_body(request)
     try:
         device_id = unverified_sub(token)
         uuid.UUID(device_id)

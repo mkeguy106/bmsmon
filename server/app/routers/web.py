@@ -27,13 +27,14 @@ async def temp_config(user: AuthUser = Depends(current_user), pool=Depends(get_p
 
 @router.get("/samples")
 async def samples(address: str, from_ms: int = Query(...), to_ms: int = Query(...),
-                  user: AuthUser = Depends(current_user), pool=Depends(get_pool)):
+                  user: AuthUser = Depends(require_admin), pool=Depends(get_pool)):
+    """Admin-only: full sample history includes GPS coordinates."""
     async with pool.acquire() as conn:
         return {"samples": _jsonable(await q.samples_range(conn, address, from_ms, to_ms))}
 
 
 @router.get("/devices")
-async def devices(user: AuthUser = Depends(current_user), pool=Depends(get_pool)):
+async def devices(user: AuthUser = Depends(require_admin), pool=Depends(get_pool)):
     async with pool.acquire() as conn:
         return {"devices": _jsonable(await q.list_devices(conn))}
 

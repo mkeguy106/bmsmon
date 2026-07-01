@@ -95,6 +95,9 @@ async def get_temp_config_all(conn) -> list[dict]:
 
 
 async def fleet_snapshot(conn) -> list[dict]:
+    """Latest REAL telemetry row per pack. Link-event rows (BLE Connected/Disconnected
+    transitions, all telemetry fields null) are skipped so a disconnect doesn't wipe the
+    pack's last-known telemetry off the dashboard/WS snapshot."""
     rows = await conn.fetch(
         """SELECT DISTINCT ON (s.address)
               s.device_id, s.address, s.ts_ms, s.ts, s.state, s.soc, s.current_a, s.power_w,
@@ -103,6 +106,7 @@ async def fleet_snapshot(conn) -> list[dict]:
               s.lat, s.lon, s.gps_accuracy_m, s.eta_full_min, s.received_at,
               b.alias, b.group_id, b.advertised_name
            FROM samples s LEFT JOIN batteries b ON b.address = s.address
+           WHERE s.link_event IS NULL
            ORDER BY s.address, s.ts DESC"""
     )
     return [dict(r) for r in rows]

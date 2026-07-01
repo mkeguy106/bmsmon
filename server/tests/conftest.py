@@ -9,6 +9,21 @@ from app.config import settings
 from app.main import create_app
 
 
+@pytest.fixture
+def set_setting():
+    """Temporarily override a field on the frozen Settings singleton (restored after the test)."""
+    saved: dict[str, object] = {}
+
+    def _set(name: str, value):
+        if name not in saved:
+            saved[name] = getattr(settings, name)
+        object.__setattr__(settings, name, value)
+
+    yield _set
+    for name, value in saved.items():
+        object.__setattr__(settings, name, value)
+
+
 @pytest_asyncio.fixture
 async def app():
     application = create_app()

@@ -41,3 +41,22 @@ async def test_insert_is_idempotent_and_snapshot_returns_latest(app):
 
         total = await conn.fetchval("SELECT count(*) FROM samples")
         assert total == 2                        # idempotent
+
+
+async def test_snapshot_skips_link_event_rows(app):
+    # A BLE link transition uploads as a sample with ALL telemetry null and only
+    # link_event set. The snapshot must return the latest REAL telemetry row, not
+    # the null link row — "disconnected packs keep their last-known telemetry".
+    pool = app.state.pool
+    async with pool.acquire() as conn:
+        await _device(conn)
+        base = int(datetime(2026, 6, 30, tzinfo=timezone.utc).timestamp() * 1000)
+        telemetry = q.sample_row(DEV, A, _sample(base, 81.0))
+        link_row = q.sample_row(DEV, A, {"ts_ms": base + 5000, "link_event": "Disconnected"})
+        assert await q.insert_samples(conn, [telemetry, link_row]) == 2
+
+        snap = await q.fleet_snapshot(conn)
+        assert len(snap) == 1
+        assert snap[0]["soc"] == 81.0            # the real telemetry, not the null link row
+        assert snap[0]["voltage_v"] == 51.0
+        assert snap[0]["ts_ms"] == base          # the telemetry row's timestamp
