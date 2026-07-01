@@ -97,17 +97,28 @@ async def get_temp_config_all(conn) -> list[dict]:
 async def fleet_snapshot(conn) -> list[dict]:
     """Latest REAL telemetry row per pack. Link-event rows (BLE Connected/Disconnected
     transitions, all telemetry fields null) are skipped so a disconnect doesn't wipe the
-    pack's last-known telemetry off the dashboard/WS snapshot."""
+    pack's last-known telemetry off the dashboard/WS snapshot.
+
+    Driven by the small `batteries` registry with a LATERAL latest-row probe per pack
+    (T2.5/SRV-6) so each call is a handful of index descents on samples_addr_ts instead
+    of a DISTINCT ON scan across every monthly partition ever created. The INNER lateral
+    join keeps the old semantics: a battery row with no real telemetry yet (or a pack
+    with only link-event rows) does not appear."""
     rows = await conn.fetch(
-        """SELECT DISTINCT ON (s.address)
+        """SELECT
               s.device_id, s.address, s.ts_ms, s.ts, s.state, s.soc, s.current_a, s.power_w,
               s.voltage_v, s.temp_c, s.mosfet_temp_c, s.soh, s.full_charge_ah, s.remaining_ah,
               s.cycles, s.cell_min_v, s.cell_max_v, s.cells, s.regen, s.link_event,
               s.lat, s.lon, s.gps_accuracy_m, s.eta_full_min, s.received_at,
               b.alias, b.group_id, b.advertised_name
-           FROM samples s LEFT JOIN batteries b ON b.address = s.address
-           WHERE s.link_event IS NULL
-           ORDER BY s.address, s.ts DESC"""
+           FROM batteries b
+           JOIN LATERAL (
+              SELECT * FROM samples s
+              WHERE s.address = b.address AND s.link_event IS NULL
+              ORDER BY s.ts DESC
+              LIMIT 1
+           ) s ON true
+           ORDER BY b.address"""
     )
     return [dict(r) for r in rows]
 
@@ -135,11 +146,16 @@ async def claim_code(conn, code_hash, device_id, now):
         code_hash, now, device_id)
 
 
-async def create_device(conn, install_uuid, public_key_spki: bytes, label) -> str:
+async def create_device(conn, install_uuid, public_key_spki: bytes, label) -> str | None:
+    """Insert a new device, or re-key an existing NON-revoked one (legit re-enroll of the
+    same phone). Revocation is durable (T2.4/SRV-7): the DO UPDATE's WHERE guard makes the
+    upsert a no-op for a revoked install_uuid — nothing is written, the key is untouched,
+    and None is returned so the caller can refuse the enrollment."""
     return await conn.fetchval(
         """INSERT INTO devices (install_uuid, public_key_spki, label) VALUES ($1,$2,$3)
            ON CONFLICT (install_uuid) DO UPDATE SET public_key_spki=EXCLUDED.public_key_spki,
-             label=EXCLUDED.label, revoked=false
+             label=EXCLUDED.label
+           WHERE devices.revoked = false
            RETURNING id""",
         install_uuid, public_key_spki, label)
 

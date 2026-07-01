@@ -152,6 +152,59 @@ async def test_ingest_rejects_non_uuid_sub(client):
     assert r.status_code == 401
 
 
+async def _partition_count(app) -> int:
+    async with app.state.pool.acquire() as conn:
+        return await conn.fetchval(
+            """SELECT count(*) FROM pg_inherits i
+               JOIN pg_class p ON p.oid = i.inhparent WHERE p.relname = 'samples'""")
+
+
+async def test_ingest_drops_out_of_window_ts_and_keeps_valid(app, client):
+    # T2.3/SRV-5: broken-clock timestamps (epoch 0, year 3000, absurd values that would
+    # crash datetime.fromtimestamp) are silently DROPPED — not a 4xx, which the phone
+    # would treat as a poison batch — while the valid samples in the batch are stored.
+    # And no partition explosion: at most one new monthly partition (the valid month).
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    parts_before = await _partition_count(app)
+    now_ms = int(time.time() * 1000)
+    payload = {"batch_seq": 11, "samples": [
+        {"ts_ms": 0, "address": A, "soc": 1.0},                    # epoch 0 → ~678 partitions
+        {"ts_ms": 32503680000000, "address": A, "soc": 2.0},       # year 3000
+        {"ts_ms": 999999999999999999, "address": A, "soc": 3.0},   # datetime overflow
+        {"ts_ms": -1, "address": A, "soc": 4.0},                   # negative
+        {"ts_ms": now_ms, "address": A, "soc": 87.0},              # valid
+    ]}
+    body = json.dumps(payload).encode()
+    r = await client.post("/api/v1/ingest", content=body,
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
+    assert r.status_code == 200
+    assert r.json() == {"accepted": 1, "last_seq": 11}
+    async with app.state.pool.acquire() as conn:
+        stored = await conn.fetch("SELECT ts_ms, soc FROM samples")
+    assert [(x["ts_ms"], x["soc"]) for x in stored] == [(now_ms, 87.0)]
+    assert await _partition_count(app) <= parts_before + 1
+
+
+async def test_ingest_all_invalid_ts_batch_is_200_accepted_0(app, client):
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    parts_before = await _partition_count(app)
+    payload = {"batch_seq": 12, "samples": [
+        {"ts_ms": 0, "address": A, "soc": 1.0},
+        {"ts_ms": 999999999999999999, "address": A, "soc": 2.0},
+    ]}
+    body = json.dumps(payload).encode()
+    r = await client.post("/api/v1/ingest", content=body,
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
+    assert r.status_code == 200
+    assert r.json() == {"accepted": 0, "last_seq": 12}
+    async with app.state.pool.acquire() as conn:
+        assert await conn.fetchval("SELECT count(*) FROM samples") == 0
+        assert await conn.fetchval("SELECT count(*) FROM batteries") == 0
+    assert await _partition_count(app) == parts_before
+
+
 def _gps_payload():
     return {"batch_seq": 8, "samples": [
         {"ts_ms": 1719686400000, "address": A, "alias": "2012 · A", "group_id": "2012",

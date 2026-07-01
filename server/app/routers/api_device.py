@@ -1,5 +1,6 @@
 import base64
 import binascii
+import logging
 import uuid
 import zlib
 from datetime import datetime, timezone
@@ -18,6 +19,14 @@ from app.models import (
 )
 
 router = APIRouter(prefix="/api/v1")
+
+logger = logging.getLogger(__name__)
+
+
+def _partition_ts_window() -> tuple[int, int]:
+    """Sane ts_ms window for ingested samples (see Settings.ingest_ts_min_ms)."""
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    return settings.ingest_ts_min_ms, now_ms + settings.ingest_ts_max_future_ms
 
 
 def _gunzip_capped(data: bytes, limit: int) -> bytes:
@@ -87,6 +96,11 @@ async def enroll(body: EnrollBody, pool=Depends(get_pool)):
     async with pool.acquire() as conn:
         async with conn.transaction():
             device_id = await q.create_device(conn, body.install_uuid, spki, body.device_label)
+            if device_id is None:
+                # Revoked install_uuid (T2.4/SRV-7): refuse enrollment BEFORE claiming the
+                # code, so the code is not burned and stays usable for another device. The
+                # upsert was a no-op (WHERE revoked=false), so key/revoked are untouched.
+                raise HTTPException(403, "device revoked; delete it first")
             claimed = await q.claim_code(conn, hash_code(body.code), device_id, now)
             if claimed is None:
                 raise HTTPException(400, "invalid or expired code")
@@ -122,14 +136,23 @@ async def ingest(request: Request, pool=Depends(get_pool)):
             body = IngestBody.model_validate_json(raw)
         except ValidationError:
             raise HTTPException(422, "invalid body")
-        rows = [q.sample_row(device_id, s.address, s.model_dump()) for s in body.samples]
+        # T2.3/SRV-5: drop (don't 4xx) samples whose device-supplied ts_ms is outside a
+        # sane window — ts_ms drives partition CREATE TABLEs and datetime conversion.
+        ts_min, ts_max = _partition_ts_window()
+        samples = [s for s in body.samples if ts_min <= s.ts_ms <= ts_max]
+        if len(samples) != len(body.samples):
+            bad = [s.ts_ms for s in body.samples if not (ts_min <= s.ts_ms <= ts_max)]
+            logger.warning(
+                "ingest: dropped %d/%d sample(s) with out-of-range ts_ms from device %s: %s",
+                len(bad), len(body.samples), device_id, bad[:10])
+        rows = [q.sample_row(device_id, s.address, s.model_dump()) for s in samples]
         async with conn.transaction():
-            for s in body.samples:
+            for s in samples:
                 await q.upsert_battery(conn, s.address, s.advertised_name, s.alias,
                                        s.group_id, s.ts_ms)
             accepted = await q.insert_samples(conn, rows)
         await conn.execute("UPDATE devices SET last_seen_at=now() WHERE id=$1", device_id)
-    for s in body.samples:
+    for s in samples:
         await request.app.state.bus.publish({"type": "sample", **s.model_dump()})
     return IngestResponse(accepted=accepted, last_seq=body.batch_seq)
 

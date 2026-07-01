@@ -24,10 +24,20 @@ def _months_in_range(min_ms: int, max_ms: int) -> set[tuple[int, int]]:
 
 async def ensure_partition(conn: asyncpg.Connection, year: int, month: int) -> None:
     name, start, end = _month_bounds(year, month)
-    await conn.execute(
-        f"CREATE TABLE IF NOT EXISTS {name} PARTITION OF samples "
-        f"FOR VALUES FROM ('{start}') TO ('{end}')"
-    )
+    try:
+        # Nested conn.transaction() = a SAVEPOINT when we're already inside the ingest
+        # transaction, so a failed CREATE doesn't abort the whole batch insert.
+        async with conn.transaction():
+            await conn.execute(
+                f"CREATE TABLE IF NOT EXISTS {name} PARTITION OF samples "
+                f"FOR VALUES FROM ('{start}') TO ('{end}')"
+            )
+    except (asyncpg.exceptions.UniqueViolationError, asyncpg.exceptions.DuplicateTableError,
+            asyncpg.exceptions.DuplicateObjectError):
+        # Known Postgres catalog race: two connections running CREATE TABLE IF NOT EXISTS
+        # for the same partition concurrently can still raise unique_violation /
+        # duplicate_table. The loser can safely proceed — the partition exists.
+        pass
 
 
 async def ensure_partitions_for_range(conn: asyncpg.Connection, min_ms: int, max_ms: int) -> None:
