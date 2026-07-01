@@ -7,6 +7,11 @@ from app.db import queries as q
 
 router = APIRouter()
 
+# Push a keepalive frame when no telemetry has flowed for this long, so the
+# client can tell a healthy-but-idle fleet from a dead socket (and so idle
+# WebSockets aren't torn down by proxy idle timeouts, e.g. Traefik's 180s).
+KEEPALIVE_S = 25
+
 
 def _jsonable(rows: list[dict]) -> list[dict]:
     out = []
@@ -32,7 +37,11 @@ async def ws(sock: WebSocket):
     queue = bus.subscribe()
     try:
         while True:
-            event = await queue.get()
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=KEEPALIVE_S)
+            except asyncio.TimeoutError:
+                await sock.send_json({"type": "ping"})
+                continue
             await sock.send_json(_jsonable([event])[0])
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
