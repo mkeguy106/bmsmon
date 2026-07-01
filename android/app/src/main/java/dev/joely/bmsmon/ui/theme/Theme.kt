@@ -72,6 +72,10 @@ val RegenGreen = Color(0xFF2ECC71)
 val AlertWarn = Color(0xFFE2B01E)
 val AlertCritical = Color(0xFFE5342B)
 
+/** Temperature gauge/zone marker colors: cold caution (cool) and cold warning (charge-lock blue). */
+val TempCool = Color(0xFF46B3C9)
+val TempCold = Color(0xFF3D86D6)
+
 /** SOC / capacity severity ramp: <15% critical, <30% warning, else accent. */
 fun socSeverity(soc: Float, accent: Color): Color =
     if (soc < 15f) AlertCritical else if (soc < 30f) AlertWarn else accent

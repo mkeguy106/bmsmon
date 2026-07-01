@@ -1,6 +1,8 @@
 package dev.joely.bmsmon.ble.profile
 
 import dev.joely.bmsmon.ble.BmsProtocol
+import dev.joely.bmsmon.model.TempEnvelope
+import dev.joely.bmsmon.model.TempThresholds
 import java.util.UUID
 
 /** The one validated profile today: Redodo/LiTime/PowerQueen/Starry-Sea on the Beken BK-BLE-1.0. */
@@ -29,6 +31,13 @@ val RedodoBekenProfile = BatteryProfile(
     connectTimeoutMs = 10_000L,
     failThreshold = 3,
     backoff = BackoffSpec(baseMs = 5_000L, factor = 2, capMs = 120_000L),
+    // Verified Redodo LiFePO4 envelope: BMS cutoffs -20/60°C, charge lock 0°C (resume 5°C) / hot 50°C,
+    // factory alert defaults cold caution 5 / hot 45 / cold crit -12 / hot crit 53 (fire before cutoff).
+    tempEnvelope = TempEnvelope(
+        coldCutoffC = -20, hotCutoffC = 60,
+        chargeLockColdC = 0, chargeResumeColdC = 5, chargeLockHotC = 50,
+        defaults = TempThresholds(coldCautionC = 5, hotCautionC = 45, coldCritC = -12, hotCritC = 53),
+    ),
 )
 
 /** Selects a profile from a device's advertised name (by prefix). */

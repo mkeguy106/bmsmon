@@ -198,6 +198,15 @@ class TelemetryReporter(
                     delay(2000)
                     continue
                 }
+                // One-way temperature-alert config push (latest-wins, durable across restarts):
+                // sign the plaintext + gzip like ingest, and clear only on success.
+                if (conn.online.value) {
+                    p.pendingTempConfig?.let { cfg ->
+                        if (postSigned(CloudConfig(base).configUrl, p.deviceId, cfg.toByteArray())) {
+                            settings.clearPendingTempConfig()
+                        }
+                    }
+                }
                 // Cap the outbox — drop oldest rows if over limit.
                 val depth = db.outbox().count()
                 if (depth > OUTBOX_MAX) db.outbox().dropOldest(depth - OUTBOX_MAX)

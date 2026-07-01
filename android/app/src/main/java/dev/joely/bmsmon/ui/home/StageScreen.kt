@@ -29,10 +29,20 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.joely.bmsmon.model.BatteryState
+import dev.joely.bmsmon.model.GaugeSide
 import dev.joely.bmsmon.model.StageItem
 import dev.joely.bmsmon.model.Telemetry
+import dev.joely.bmsmon.model.TempEnvelope
+import dev.joely.bmsmon.model.TempRank
+import dev.joely.bmsmon.model.TempThresholds
+import dev.joely.bmsmon.model.TempUnit
+import dev.joely.bmsmon.model.cToF
+import dev.joely.bmsmon.model.formatTemp
+import dev.joely.bmsmon.model.tempZone
 import dev.joely.bmsmon.ui.ChargingBolt
 import dev.joely.bmsmon.ui.gauge.DualRingGauge
+import dev.joely.bmsmon.ui.gauge.TempGauge
+import dev.joely.bmsmon.ui.gauge.tempZoneColor
 import dev.joely.bmsmon.ui.rememberBoltAlpha
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
@@ -46,6 +56,10 @@ fun StageScreen(
     tempInF: Boolean,
     isEmpty: Boolean,
     onAddScan: () -> Unit,
+    showTempGauge: Boolean,
+    tempGaugeSide: GaugeSide,
+    thresholds: TempThresholds,
+    envelope: TempEnvelope,
     modifier: Modifier = Modifier,
 ) {
     if (isEmpty) {
@@ -68,21 +82,37 @@ fun StageScreen(
         Row(modifier.fillMaxSize().horizontalScroll(rememberScrollState()),
             verticalAlignment = Alignment.CenterVertically) {
             items.forEach { item ->
-                BatteryBlock(item, tempInF, Modifier.width(320.dp))
+                BatteryBlock(item, tempInF, showTempGauge, tempGaugeSide, thresholds, envelope,
+                    Modifier.width(320.dp))
             }
         }
     } else {
         // Sit the packs up near the top bar rather than vertically centered in the page.
         Column(modifier.fillMaxSize().padding(top = 6.dp)) {
-            items.forEach { item -> BatteryBlock(item, tempInF, Modifier.weight(1f)) }
+            items.forEach { item ->
+                BatteryBlock(item, tempInF, showTempGauge, tempGaugeSide, thresholds, envelope,
+                    Modifier.weight(1f))
+            }
         }
     }
 }
 
 @Composable
-private fun BatteryBlock(item: StageItem, tempInF: Boolean, modifier: Modifier = Modifier) {
+private fun BatteryBlock(
+    item: StageItem,
+    tempInF: Boolean,
+    showTempGauge: Boolean,
+    tempGaugeSide: GaugeSide,
+    thresholds: TempThresholds,
+    envelope: TempEnvelope,
+    modifier: Modifier = Modifier,
+) {
     val c = Bm.colors
     val b = item.telemetry
+    val unit = if (tempInF) TempUnit.F else TempUnit.C
+    val zone = if (item.connected) tempZone(b.temp, thresholds, envelope) else null
+    val tempCritical = zone != null && zone.rank.ordinal >= TempRank.CRITICAL.ordinal
+    val showGauge = showTempGauge && zone != null
     Column(
         modifier
             .fillMaxWidth()
@@ -90,8 +120,33 @@ private fun BatteryBlock(item: StageItem, tempInF: Boolean, modifier: Modifier =
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Top,
     ) {
-        Box(Modifier.size(170.dp), contentAlignment = Alignment.Center) {
-            DualRingGauge(
+        Row(verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+            if (showGauge && tempGaugeSide == GaugeSide.LEFT) {
+                TempGauge(b.temp, tempZoneColor(zone!!), formatTemp(b.temp, unit), tempCritical)
+            }
+            StageRingBox(item, c)
+            if (showGauge && tempGaugeSide == GaugeSide.RIGHT) {
+                TempGauge(b.temp, tempZoneColor(zone!!), formatTemp(b.temp, unit), tempCritical)
+            }
+        }
+        Text(
+            b.name.uppercase(),
+            color = if (item.connected) c.name else c.text3,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+            letterSpacing = 2.2.sp,
+            modifier = Modifier.padding(top = 10.dp),
+        )
+        StatGrid(b, tempInF, item.connected, tempCritical, Modifier.padding(top = 12.dp))
+    }
+}
+
+@Composable
+private fun StageRingBox(item: StageItem, c: dev.joely.bmsmon.ui.theme.BmColors) {
+    val b = item.telemetry
+    Box(Modifier.size(170.dp), contentAlignment = Alignment.Center) {
+        DualRingGauge(
                 // When disconnected we have no trustworthy SOC/power — draw an empty, dimmed ring
                 // rather than a real-looking 0% that would imply a flat battery.
                 soc = if (item.connected) b.soc else 0f,
@@ -128,17 +183,7 @@ private fun BatteryBlock(item: StageItem, tempInF: Boolean, modifier: Modifier =
                 DisconnectedReadout()
             }
         }
-        Text(
-            b.name.uppercase(),
-            color = if (item.connected) c.name else c.text3,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Medium,
-            letterSpacing = 2.2.sp,
-            modifier = Modifier.padding(top = 10.dp),
-        )
-        StatGrid(b, tempInF, item.connected, Modifier.padding(top = 12.dp))
     }
-}
 
 /** Center readout for a stage pack that isn't reachable: a dash and a DISCONNECTED tag, no %. */
 @Composable
@@ -179,20 +224,26 @@ private fun ChargingBoltIcon() {
     )
 }
 
-private data class Stat(val label: String, val value: String, val unit: String)
+private data class Stat(val label: String, val value: String, val unit: String, val critical: Boolean = false)
 
 @Composable
-private fun StatGrid(b: Telemetry, tempInF: Boolean, connected: Boolean, modifier: Modifier = Modifier) {
-    val temp = if (tempInF) b.temp * 9f / 5f + 32f else b.temp
+private fun StatGrid(
+    b: Telemetry,
+    tempInF: Boolean,
+    connected: Boolean,
+    tempCritical: Boolean,
+    modifier: Modifier = Modifier,
+) {
     // While disconnected we have no live values — show dashes instead of stale/zero numbers.
     fun v(value: String) = if (connected) value else "—"
+    val tempValue = if (tempInF) cToF(b.temp).toString() else "%.1f".format(b.temp)
     val stats = listOf(
         Stat("Power", v("%.1f".format(b.powerW)), "W"),
         Stat("Current", v("%.2f".format(b.current)), "A"),
         Stat("Voltage", v("%.1f".format(b.voltage)), "V"),
         Stat("Capacity", v(b.capacityAh.roundToInt().toString()), "Ah"),
         Stat("Cell V", v("%.2f".format(b.cellV)), "V"),
-        Stat("Temp", v("%.1f".format(temp)), if (tempInF) "°F" else "°C"),
+        Stat("Temp", v(tempValue), if (tempInF) "°F" else "°C", critical = connected && tempCritical),
     )
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         for (row in stats.chunked(3)) {
@@ -206,6 +257,11 @@ private fun StatGrid(b: Telemetry, tempInF: Boolean, connected: Boolean, modifie
 @Composable
 private fun StatCell(s: Stat, connected: Boolean, modifier: Modifier = Modifier) {
     val c = Bm.colors
+    val valueColor = when {
+        !connected -> c.text3
+        s.critical -> c.critical
+        else -> Bm.accent
+    }
     Column(
         modifier
             .clip(RoundedCornerShape(8.dp))
@@ -221,7 +277,7 @@ private fun StatCell(s: Stat, connected: Boolean, modifier: Modifier = Modifier)
             modifier = Modifier.padding(bottom = 4.dp),
         )
         Row(verticalAlignment = Alignment.Bottom) {
-            Text(s.value, color = if (connected) Bm.accent else c.text3, fontFamily = MonoFont,
+            Text(s.value, color = valueColor, fontFamily = MonoFont,
                 fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             if (connected) {
                 Text(s.unit, color = c.text2, fontSize = 11.sp, modifier = Modifier.padding(start = 3.dp))

@@ -63,6 +63,27 @@ async def upsert_battery(conn, address, advertised_name, alias, group_id, ts_ms:
     )
 
 
+async def upsert_temp_config(conn, device_id, cfg: dict) -> None:
+    """Store the latest temperature-alert config for a device+profile (one-way phone push)."""
+    await conn.execute(
+        """INSERT INTO device_temp_config
+             (device_id, profile_id, cold_caution_c, hot_caution_c, cold_crit_c, hot_crit_c,
+              unit, updated_at_ms, received_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now())
+           ON CONFLICT (device_id, profile_id) DO UPDATE SET
+             cold_caution_c = EXCLUDED.cold_caution_c,
+             hot_caution_c = EXCLUDED.hot_caution_c,
+             cold_crit_c = EXCLUDED.cold_crit_c,
+             hot_crit_c = EXCLUDED.hot_crit_c,
+             unit = EXCLUDED.unit,
+             updated_at_ms = EXCLUDED.updated_at_ms,
+             received_at = now()
+           WHERE EXCLUDED.updated_at_ms >= device_temp_config.updated_at_ms""",
+        device_id, cfg["profile_id"], cfg["cold_caution_c"], cfg["hot_caution_c"],
+        cfg["cold_crit_c"], cfg["hot_crit_c"], cfg["unit"], cfg["updated_at_ms"],
+    )
+
+
 async def fleet_snapshot(conn) -> list[dict]:
     rows = await conn.fetch(
         """SELECT DISTINCT ON (s.address)
