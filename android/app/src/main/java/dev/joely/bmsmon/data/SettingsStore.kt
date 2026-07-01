@@ -269,7 +269,7 @@ private fun decodeTempThresholds(json: String): Map<String, TempThresholds> = ru
 /** Per-pack learned charge tail-time (address -> minutes), for the time-to-full estimator. */
 private fun encodeChargeTail(map: Map<String, Float>): String {
     val root = JSONObject()
-    map.forEach { (addr, m) -> root.put(addr, m.toDouble()) }
+    map.forEach { (addr, m) -> root.put(addr, m.jsonSafe()) }
     return root.toString()
 }
 
