@@ -30,14 +30,14 @@ Status legend: `OPEN` · `IN PROGRESS` · `FIXED` · `WONTFIX`
 
 | # | Item | Findings | Status |
 |---|------|----------|--------|
-| T2.1 | Length-driven BLE frame completion (80 < minBytes 100) + atomic buffer swap | BLE-1, BLE-2 | OPEN |
-| T2.2 | Disabled-while-connecting hole (pack held/polled after user disconnect) | BLE-3 | OPEN |
-| T2.3 | Validate device-supplied `ts_ms` (unbounded partition DDL / 500s) | SRV-5 | OPEN |
-| T2.4 | Re-enrollment silently un-revokes a device | SRV-7 | OPEN |
-| T2.5 | Bound `fleet_snapshot` (full-partition scan per page load / WS connect) | SRV-6 | OPEN |
-| T2.6 | Crash orphans open-session rollups (startup finalize-sweep) | DATA-2 | OPEN |
-| T2.7 | Web WS client socket leak on visibility recovery | WEB-2 | OPEN |
-| T2.8 | Android privacy: `allowBackup`, cleartext, release signing; server GPS retention | SEC-7, SEC-8, SEC-9, SEC-12 | OPEN |
+| T2.1 | Length-driven BLE frame completion (80 < minBytes 100) + atomic buffer swap | BLE-1, BLE-2 | FIXED |
+| T2.2 | Disabled-while-connecting hole (pack held/polled after user disconnect) | BLE-3 | FIXED |
+| T2.3 | Validate device-supplied `ts_ms` (unbounded partition DDL / 500s) | SRV-5 | FIXED |
+| T2.4 | Re-enrollment silently un-revokes a device | SRV-7 | FIXED |
+| T2.5 | Bound `fleet_snapshot` (full-partition scan per page load / WS connect) | SRV-6 | FIXED |
+| T2.6 | Crash orphans open-session rollups (startup finalize-sweep) | DATA-2 | FIXED |
+| T2.7 | Web WS client socket leak on visibility recovery | WEB-2 | FIXED |
+| T2.8 | Android privacy: `allowBackup`, cleartext, release signing; server GPS retention | SEC-7, SEC-8, SEC-9, SEC-12 | FIXED |
 
 ### Tier 3 — hygiene batch
 
@@ -216,3 +216,74 @@ direct-access-only); NAS `.env` secret strength; prod uvicorn staying single-pro
     skipped with log, queue unblocked — data recoverable from Room via historical
     import). Same treatment applied to `runImport`. `CancellationException` now rethrown
     in the touched catch blocks (partial DATA-4). New `PostResultTest` (6 tests).
+- 2026-07-01 — Tier 1 committed per subsystem (081306e android, 878edb9 server,
+  6ca5cf0 web, 1702c48 docs) and pushed; image build green; deployed to ddnas02
+  (pull + recreate bmsmon-api). Prod verified: `/api/v1/health` ok, unauthenticated
+  ingest → 401, 1.5 MB body → 413, `/web/*` still 302s to Authentik.
+  `BMSMON_PROXY_SECRET` intentionally NOT set yet (needs the Traefik middleware +
+  `.env` change in ~/qnap-nas-docker — see deploy notes above).
+- 2026-07-01 — Tier 2 work started: T2.1/T2.2/T2.6 + SEC-7/SEC-8 (Android),
+  T2.3/T2.4/T2.5 (server), T2.7 (web). SEC-9 (release signing) and SEC-12 (GPS
+  retention) deferred pending user decisions.
+- 2026-07-01 — T2.7 fixed: `ws.ts` uses per-socket handler guards (`if (ws !== sock)
+  return`), detach-then-close on replacement, simplified visibility recovery, hardened
+  teardown; watchdog reviewed (no change needed). New `ws.test.ts` (5 fake-timer tests,
+  fail-before verified on the pre-fix code). 20/20 vitest, `tsc --noEmit` clean.
+- 2026-07-01 — T2.3 + T2.4 + T2.5 fixed (server; 56/56 pytest vs real Postgres):
+  - T2.3: ingest filters samples to `BMSMON_INGEST_TS_MIN_MS` (2020-01-01Z default) ≤
+    ts_ms ≤ now + `BMSMON_INGEST_TS_MAX_FUTURE_MS` (48 h default) before row-building,
+    battery upsert, partition DDL, and WS publish; drops logged at WARNING with device
+    id. Never a 4xx (would poison-skip on the phone) — all-invalid batch → 200
+    `accepted: 0`. Partition `CREATE TABLE IF NOT EXISTS` wrapped in a savepoint +
+    catches the concurrent-create catalog race.
+  - T2.4: `create_device` upsert no-ops (`WHERE devices.revoked = false`, no more
+    `revoked=false` reset) → enroll of a revoked install_uuid returns 403 "device
+    revoked; delete it first" BEFORE the code is claimed (code stays usable elsewhere).
+    Admin must DELETE the device row before that phone can re-enroll.
+  - T2.5: `fleet_snapshot` rewritten as batteries-driven `JOIN LATERAL ... ORDER BY ts
+    DESC LIMIT 1` — EXPLAIN-verified per-pack index descents instead of all-partition
+    scans; identical output shape; link-event filter kept; packs with no real telemetry
+    still absent (no ghost packs).
+  - Ops notes: no schema change; new env knobs optional; watch container logs for
+    `ingest: dropped N/M sample(s) with out-of-range ts_ms`.
+- 2026-07-01 — T2.1 + T2.2 + T2.6 + SEC-7/SEC-8 fixed (Android; 176/176 tests, 10
+  added; command bytes verified byte-identical — only response assembly + connection
+  management changed):
+  - T2.1: pure `BmsProtocol.expectedStatusResponseLen()`/`statusFrameComplete()` —
+    completion realigns to the `01 93 55 AA` header exactly like the parser and uses
+    the header payload-length byte (verified 105 on the real capture; 512-byte safety
+    cap). `BleSession.append()` uses it instead of `size >= 80`; `poll()` now swaps the
+    deferred + clears the buffer atomically in one `synchronized` block (stale-frame
+    race closed).
+  - T2.2: `drainEvents` `ConnectSuccess` guard — a no-longer-desired pack's session is
+    closed immediately, never held/polled/marked reachable.
+  - T2.6: startup sweep (first op on the serialized ops channel) finalizes zero-count
+    session stubs via pure `orphanedSessionAction()` (rollup if telemetry samples
+    exist, delete if empty); new `SessionSweepTest`.
+  - SEC-7: `dataExtractionRules` + legacy `fullBackupContent` exclude bms.db + DataStore
+    from **cloud backup** while keeping device-to-device transfer complete (API 31+;
+    on API ≤30 legacy transfers also lose the exclusions — unavoidable). `allowBackup`
+    stays true — no migration data loss.
+  - SEC-8: `usesCleartextTraffic="false"` — no http/emulator endpoints existed, so no
+    debug carve-out needed.
+- Tier 2 committed per subsystem (8ab30b2 android, d29acf2 server, a52f405 web).
+- 2026-07-01 — SEC-12 fixed (user chose **3-year** GPS retention; 60/60 pytest):
+  `BMSMON_GPS_RETENTION_DAYS` (default 1095, <=0 disables); daily background task +
+  startup pass NULLs `lat`/`lon`/`gps_accuracy_m` on samples older than the window.
+  Telemetry rows are NEVER deleted — UPDATE-only by construction, asserted in tests.
+- 2026-07-01 — SEC-9 fixed (user chose dedicated release keystore):
+  `~/.android-keys/bmsmon-release.jks` (RSA-4096, 30 y validity, CN=bmsmon); credentials
+  in `~/.gradle/gradle.properties` (never committed); conditional `signingConfig` in
+  `app/build.gradle.kts` (absent properties → unsigned release, debug/tests unaffected).
+  `assembleRelease` verified signed via apksigner (cert SHA-256 7fee951f…).
+  **BACK UP** the keystore + gradle.properties — losing them means future release
+  builds can't update an installed release app. **Transition caveat:** the currently
+  installed app is debug-signed; a release-signed APK will NOT install over it
+  (signature mismatch). Day-to-day debug `adb install -r` keeps working; switching the
+  phone to release builds requires a one-time reinstall (history is recoverable from
+  the cloud DB / historical import).
+- 2026-07-01 — Proxy secret ROLLED OUT (user approved): `BMSMON_PROXY_SECRET` added to
+  the NAS master `.env`; `~/qnap-nas-docker/bmsmon/docker-compose.yml` passes it to
+  `bmsmon-api` and adds the `bmsmon-proxy-secret` Traefik middleware
+  (customRequestHeaders, UI-zone router only) — direct-container requests to `/web/*`
+  and `/ws` now 401 without the header.
