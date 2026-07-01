@@ -29,18 +29,37 @@ export function connectLive(
   const open = () => {
     if (stop) return;
     clearReconnect();
+    // Replacing an existing socket: detach its handlers before closing so its
+    // async onclose can't schedule a spurious reconnect (which would orphan the
+    // new socket) and its onmessage can't keep feeding the store.
+    if (ws) {
+      const old = ws;
+      ws = null;
+      old.onopen = null; old.onmessage = null; old.onclose = null; old.onerror = null;
+      old.close();
+    }
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    ws = new WebSocket(`${proto}://${location.host}/ws`);
-    ws.onopen = () => { lastMsg = performance.now(); onStatus(true); };
-    ws.onmessage = (e) => {
+    const sock = new WebSocket(`${proto}://${location.host}/ws`);
+    ws = sock;
+    // Every handler bails if this socket is no longer the current one — events
+    // from a replaced socket (in-flight close/message) must never touch state.
+    sock.onopen = () => {
+      if (ws !== sock) return;
+      lastMsg = performance.now(); onStatus(true);
+    };
+    sock.onmessage = (e) => {
+      if (ws !== sock) return;
       lastMsg = performance.now();
       const msg = JSON.parse(e.data);
       if (msg.type === "snapshot") onSnapshot(msg.fleet);
       else if (msg.type === "sample") { const { type: _t, ...s } = msg; onSample(s); }
       // {type:"ping"} keepalives just refresh lastMsg above.
     };
-    ws.onclose = () => { onStatus(false); scheduleReconnect(); };
-    ws.onerror = () => ws?.close();
+    sock.onclose = () => {
+      if (ws !== sock) return;
+      onStatus(false); scheduleReconnect();
+    };
+    sock.onerror = () => { if (ws === sock) sock.close(); };
   };
 
   // Watchdog: if we've heard nothing (not even a keepalive) for STALE_MS, the
@@ -56,7 +75,9 @@ export function connectLive(
     if (stop || document.visibilityState !== "visible") return;
     const dead = !ws || ws.readyState !== WebSocket.OPEN
       || performance.now() - lastMsg > STALE_MS;
-    if (dead) { clearReconnect(); ws?.close(); open(); }
+    // open() detaches + closes the old socket itself, so this can't race the
+    // old socket's async onclose against the fresh connection.
+    if (dead) open();
   };
   document.addEventListener("visibilitychange", onVisible);
 
@@ -66,6 +87,11 @@ export function connectLive(
     clearReconnect();
     if (watchdog) clearInterval(watchdog);
     document.removeEventListener("visibilitychange", onVisible);
-    ws?.close();
+    if (ws) {
+      const old = ws;
+      ws = null;
+      old.onopen = null; old.onmessage = null; old.onclose = null; old.onerror = null;
+      old.close();
+    }
   };
 }
