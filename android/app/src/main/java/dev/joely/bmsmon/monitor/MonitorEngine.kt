@@ -1,7 +1,12 @@
 package dev.joely.bmsmon.monitor
 
+import android.bluetooth.BluetoothAdapter
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import dev.joely.bmsmon.ble.BmsRepository
+import dev.joely.bmsmon.ble.hasBlePermissions
 import dev.joely.bmsmon.location.LocationSource
 import dev.joely.bmsmon.ble.profile.ProfileRegistry
 import dev.joely.bmsmon.ble.profile.RedodoBekenProfile
@@ -34,6 +39,7 @@ import dev.joely.bmsmon.model.GroupActivity
 import dev.joely.bmsmon.model.Roster
 import dev.joely.bmsmon.model.Telemetry
 import dev.joely.bmsmon.model.allTargets
+import dev.joely.bmsmon.model.applyDisabled
 import dev.joely.bmsmon.model.groupActivity
 import dev.joely.bmsmon.model.groupOf
 import dev.joely.bmsmon.model.groupViews
@@ -62,6 +68,13 @@ data class MonitorState(
     val peakCurrentA: Float = 0f,
     val gpsActive: Boolean = false,
     val tailMinByAddress: Map<String, Float> = emptyMap(),
+    // Cloud upload status, mirrored from the TelemetryReporter's onStatus hook. The engine owns
+    // that process-lifetime hook (it already owns the reporter), so no ViewModel is ever captured
+    // by it — the VM just mirrors these fields like the rest of the state.
+    val cloudOutboxDepth: Int = 0,
+    val cloudLastUploadMs: Long = 0,
+    val cloudUploadKbps: Float = 0f,
+    val cloudAuthFailed: Boolean = false,
 )
 
 /**
@@ -76,8 +89,11 @@ data class MonitorState(
  * pushes the resolved stage down via [setStage].
  */
 class MonitorEngine(
-    appContext: Context,
-    db: BmsDatabase = BmsDatabase.create(appContext),
+    private val appContext: Context,
+    // No default on purpose (DATA-9): a defaulted BmsDatabase.create(...) here silently opened a
+    // second Room instance on bms.db whenever a caller forgot the argument. The shared instance
+    // must be passed in (BmsApp owns it).
+    db: BmsDatabase,
     private val reporter: TelemetryReporter? = null,
     private val settings: SettingsStore,
 ) {
@@ -88,14 +104,56 @@ class MonitorEngine(
     private val repository = TelemetryRepository(db)
     private val alertNotifier = AlertNotifier(appContext)
 
+    private val _state = MutableStateFlow(MonitorState())
+    val state: StateFlow<MonitorState> = _state.asStateFlow()
+
     // Stage addresses + alert config, mirrored from the ViewModel so alerts can fire headless.
     @Volatile private var stageAddrs: Set<String> = emptySet()
     @Volatile private var alertConfig: AlertConfig? = null
     @Volatile private var tempAlertsEnabled: Boolean = true
     @Volatile private var tempThresholdsByProfile: Map<String, TempThresholds> = emptyMap()
+    @Volatile private var tempUnit: TempUnit = TempUnit.F
     private val lastTailLearnAt = HashMap<String, Long>()
 
+    // BLE-10: react to Bluetooth off→on. Without this, a BT toggle leaves every pack sitting out
+    // its climbed backoff (up to 2 min each) before reconnecting — bad while backgrounded, where
+    // nothing else calls kickAll(). ACTION_STATE_CHANGED is a protected system broadcast, so a
+    // plain context-registered receiver is fine on all supported API levels.
+    private val btStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
+            val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+            if (state == BluetoothAdapter.STATE_ON) ble.kickAll()
+        }
+    }
+    @Volatile private var btReceiverRegistered = false
+
+    private fun registerBtReceiver() {
+        if (btReceiverRegistered) return
+        runCatching {
+            appContext.registerReceiver(btStateReceiver, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED))
+            btReceiverRegistered = true
+        }
+    }
+
+    private fun unregisterBtReceiver() {
+        if (!btReceiverRegistered) return
+        btReceiverRegistered = false
+        // runCatching: unregistering an already-unregistered receiver throws IllegalArgumentException.
+        runCatching { appContext.unregisterReceiver(btStateReceiver) }
+    }
+
     init {
+        // Surface upload status through MonitorState (UI-3). Registered before start() so the
+        // uploader can never fire into an unset hook, and never re-registered by UI lifecycles.
+        reporter?.onStatus = { depth, ts, kbps, authFailed ->
+            _state.update {
+                it.copy(
+                    cloudOutboxDepth = depth.toInt(), cloudLastUploadMs = ts,
+                    cloudUploadKbps = kbps.toFloat(), cloudAuthFailed = authFailed,
+                )
+            }
+        }
         reporter?.start()
     }
 
@@ -113,9 +171,6 @@ class MonitorEngine(
         reporter?.startImportIfNeeded(roster)
     }
 
-    private val _state = MutableStateFlow(MonitorState())
-    val state: StateFlow<MonitorState> = _state.asStateFlow()
-
     private fun now() = System.currentTimeMillis()
 
     /** Begin monitoring every pack in [roster]. [seed] pre-populates the fleet (dimmed until live). */
@@ -123,10 +178,16 @@ class MonitorEngine(
         if (_state.value.monitoring) return
         this.roster = roster
         logging = loggingEnabled
-        _state.update {
-            MonitorState(
+        _state.update { st ->
+            st.copy(
                 monitoring = true,
                 fleet = seed.mapValues { (_, s) -> s.copy(reachable = false) },
+                regenAddrs = emptySet(),
+                lastDischargeAt = emptyMap(),
+                peakPowerW = 0f,
+                peakCurrentA = 0f,
+                gpsActive = false,
+                tailMinByAddress = emptyMap(),
             )
         }
         ble.start(
@@ -135,6 +196,7 @@ class MonitorEngine(
             onPoll = ::onPoll,
             onReachable = ::onReachable,
         )
+        registerBtReceiver()  // BLE-10: BT off→on clears every backoff via kickAll
         scope.launch {
             runCatching {
                 val saved = settings.load().chargeTailMinByAddress
@@ -143,21 +205,57 @@ class MonitorEngine(
         }
     }
 
+    /**
+     * Sticky-restart restore (BLE-11): the OS killed the process while monitoring was on and
+     * restarted [MonitoringService] with a null intent — there is no ViewModel to drive us, so
+     * resume headlessly from the persisted settings. Returns true when monitoring is (now)
+     * running: already-running (raced with a normal in-app start — [start] is a no-op then, and
+     * we must not clobber the ViewModel's config pushes) or freshly restored. Returns false when
+     * monitoring was off at death or BLE permissions were revoked — nothing to restore.
+     */
+    suspend fun restoreFromPersisted(): Boolean {
+        if (_state.value.monitoring) return true
+        val plan = runCatching { settings.load() }.getOrNull()?.let(::restorePlan) ?: return false
+        if (!hasBlePermissions(appContext)) return false
+        if (_state.value.monitoring) return true  // raced with a normal start; leave it be
+        start(plan.roster, plan.seed, plan.logging)
+        setDisabled(plan.disabled)
+        setStage(plan.stageAddrs)
+        setAlertConfig(plan.alertConfig)
+        setTempAlertConfig(plan.tempAlertsEnabled, plan.tempThresholdsByProfile, plan.tempUnit)
+        setGpsActive(plan.gpsActive)
+        return true
+    }
+
     /** Roster edited while monitoring: update the live target set and group lookups. */
     fun setRoster(roster: Roster) {
         this.roster = roster
         ble.setTargets(roster.allTargets())
     }
 
-    /** Stop monitoring: cancels all BLE jobs (each session closes its GATT cleanly) and clears state. */
+    /**
+     * Stop monitoring: cancels all BLE jobs (each session closes its GATT cleanly). The last-known
+     * fleet is kept, marked unreachable — the engine's state is the single source of "monitoring
+     * off → everything DISCONNECTED" and the ViewModel only mirrors it. Cloud upload status is
+     * preserved (the reporter keeps running independently of monitoring).
+     */
     fun stop() {
         if (!_state.value.monitoring && _state.value.fleet.isEmpty()) return
         repository.finalizeOpenSessions()
+        unregisterBtReceiver()
         ble.stop()
         locationSource.stop()
         alertNotifier.clear()
         stageAddrs = emptySet()
-        _state.value = MonitorState()
+        _state.update { st ->
+            MonitorState(
+                fleet = st.fleet.mapValues { (_, s) -> s.copy(reachable = false) },
+                cloudOutboxDepth = st.cloudOutboxDepth,
+                cloudLastUploadMs = st.cloudLastUploadMs,
+                cloudUploadKbps = st.cloudUploadKbps,
+                cloudAuthFailed = st.cloudAuthFailed,
+            )
+        }
     }
 
     fun setStage(addresses: Set<String>) {
@@ -165,7 +263,17 @@ class MonitorEngine(
         ble.setStage(addresses)
         evaluateAlerts()
     }
-    fun setDisabled(addresses: Set<String>) = ble.setDisabled(addresses)
+
+    /** Disable packs: mark them unreachable in the state FIRST (synchronously — reachability has a
+     *  single writer, so a just-disconnected pack can never flash back to "connected" while its
+     *  worker tears down), then cancel their BLE workers. */
+    fun setDisabled(addresses: Set<String>) {
+        _state.update { st ->
+            val (fleet, regen) = applyDisabled(st.fleet, st.regenAddrs, addresses)
+            st.copy(fleet = fleet, regenAddrs = regen)
+        }
+        ble.setDisabled(addresses)
+    }
     fun kickAll() = ble.kickAll()
 
     /** Mirror the alert settings from the ViewModel; re-evaluate so changes take effect at once. */
@@ -174,10 +282,12 @@ class MonitorEngine(
         evaluateAlerts()
     }
 
-    /** Mirror the temperature-alert settings from the ViewModel. */
-    fun setTempAlertConfig(enabled: Boolean, thresholdsByProfile: Map<String, TempThresholds>) {
+    /** Mirror the temperature-alert settings from the ViewModel. [unit] is the app-wide °C/°F
+     *  preference, so headless notifications show margins in the user's unit (UI-4). */
+    fun setTempAlertConfig(enabled: Boolean, thresholdsByProfile: Map<String, TempThresholds>, unit: TempUnit) {
         tempAlertsEnabled = enabled
         tempThresholdsByProfile = thresholdsByProfile
+        tempUnit = unit
         evaluateAlerts()
     }
 
@@ -215,8 +325,8 @@ class MonitorEngine(
         val detail = if (zone.rank == TempRank.CUTOFF) {
             "$side · $name · load disconnected"
         } else {
-            // Headless notification text uses °F (the app-wide default unit).
-            "$side · $name · ${formatDelta(tempMarginToCutoffC(tel.temp, zone.side, env), TempUnit.F)} to cutoff"
+            // Margin formatted in the user's °C/°F preference (mirrored via setTempAlertConfig).
+            "$side · $name · ${formatDelta(tempMarginToCutoffC(tel.temp, zone.side, env), tempUnit)} to cutoff"
         }
         alertNotifier.updateTemp(zone.rank, zone.side, label, detail)
     }
@@ -262,9 +372,15 @@ class MonitorEngine(
         val group = roster.groupOf(addr)
         // Regen is judged against the group's last-discharge time BEFORE this sample updates it.
         val regen = isRegen(t, group?.let { st0.lastDischargeAt[it.id] }, now)
+        // Charge ETA is computed ONCE per pack per poll and carried on BatteryStatus — the same
+        // value is uploaded (eta_full_min) and displayed on the stage, so they can never diverge.
+        val tailMin = st0.tailMinByAddress[addr] ?: SEED_TAIL_MIN
+        val etaFullMin = estimateChargeMinutes(
+            t.state, t.soc, t.current, t.fullChargeAh, t.capacityAh, regen, tailMin,
+        )
         _state.update { st ->
             val fleet = st.fleet + (addr to (st.fleet[addr] ?: BatteryStatus())
-                .copy(telemetry = t, reachable = true))
+                .copy(telemetry = t, reachable = true, etaFullMin = etaFullMin))
             var peakP = st.peakPowerW
             var peakC = st.peakCurrentA
             if (logging && t.current < -0.05f) {  // discharging — track peak draw
@@ -280,10 +396,6 @@ class MonitorEngine(
             )
         }
         val fix = if (_state.value.gpsActive) locationSource.current() else null
-        val tailMin = st0.tailMinByAddress[addr] ?: SEED_TAIL_MIN
-        val etaFullMin = estimateChargeMinutes(
-            t.state, t.soc, t.current, t.fullChargeAh, t.capacityAh, regen, tailMin,
-        )
         reporter?.report(
             addr, roster.batteryAt(addr)?.advertisedName, roster.batteryAt(addr)?.alias,
             group?.id, t, now, regen, fix?.lat, fix?.lon, fix?.accuracyM, etaFullMin,

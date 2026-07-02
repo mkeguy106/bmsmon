@@ -20,10 +20,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.launchIn
-import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
-import kotlin.math.roundToInt
 
 /**
  * Foreground service that keeps the [MonitorEngine] alive while the app is backgrounded, so BLE
@@ -50,27 +49,48 @@ class MonitoringService : Service() {
         createChannel()
     }
 
+    /** The parts of engine state the notification layer reacts to — anything else changing
+     *  (~every 1.5 s poll) must NOT re-post the ongoing notification (BLE-11). */
+    private data class NotifState(val monitoring: Boolean, val text: String, val fgsType: Int)
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             engine.stop()  // Notification "Stop" tapped: drop BLE links cleanly, then exit.
             stopCleanly()
             return START_NOT_STICKY
         }
-        startForegroundCompat(buildNotification())
+        startForegroundCompat(buildNotification(monitoringNotificationText(engine.state.value)))
         if (collectorJob == null) {
-            collectorJob = engine.state
-                .onEach { st ->
-                    if (!st.monitoring) {
-                        stopCleanly()
-                    } else if (Build.VERSION.SDK_INT >= 30 && fgsType() != appliedType) {
-                        startForegroundCompat(buildNotification())
-                    } else {
-                        NotificationManagerCompat.from(this).notify(NOTIF_ID, buildNotification())
-                    }
+            // A null intent means a START_STICKY restart: the OS killed the process while
+            // monitoring was on and brought the service back — the fresh engine is idle, so
+            // restore monitoring headlessly from the persisted settings. If monitoring wasn't
+            // actually on (or BLE permission is gone), exit quietly instead of collecting.
+            val stickyRestart = intent == null
+            collectorJob = scope.launch {
+                if (stickyRestart && !engine.restoreFromPersisted()) {
+                    stopCleanly()
+                    return@launch
                 }
-                .launchIn(scope)
+                engine.state
+                    // Derive the notification-relevant fields first, then de-duplicate: the engine
+                    // emits on every poll (~1.5 s) but the text/type change rarely (BLE-11).
+                    .map { st -> NotifState(st.monitoring, monitoringNotificationText(st), fgsType(st.gpsActive)) }
+                    .distinctUntilChanged()
+                    .collect { ns ->
+                        if (!ns.monitoring) {
+                            stopCleanly()
+                        } else if (Build.VERSION.SDK_INT >= 30 && ns.fgsType != appliedType) {
+                            startForegroundCompat(buildNotification(ns.text))
+                        } else {
+                            NotificationManagerCompat.from(this@MonitoringService)
+                                .notify(NOTIF_ID, buildNotification(ns.text))
+                        }
+                    }
+            }
         }
-        return START_NOT_STICKY
+        // STICKY (BLE-11): this is a safety monitor — if the OS reclaims the process, it must be
+        // restarted (with a null intent, handled above) rather than silently ending monitoring.
+        return START_STICKY
     }
 
     /** App removed from Recents: drop every BLE link cleanly, then exit. */
@@ -92,9 +112,9 @@ class MonitoringService : Service() {
         super.onDestroy()
     }
 
-    private fun fgsType(): Int {
+    private fun fgsType(gpsActive: Boolean = engine.state.value.gpsActive): Int {
         var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-        if (engine.state.value.gpsActive && LocationSource.hasLocationPermission(this)) {
+        if (gpsActive && LocationSource.hasLocationPermission(this)) {
             type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
         }
         return type
@@ -111,17 +131,7 @@ class MonitoringService : Service() {
         }
     }
 
-    private fun buildNotification(): Notification {
-        val st = engine.state.value
-        val reachable = st.fleet.values.filter { it.reachable && it.telemetry != null }
-        val text = when {
-            reachable.isEmpty() -> "Connecting…"
-            else -> {
-                val low = reachable.minOf { it.telemetry!!.soc }.roundToInt()
-                val n = reachable.size
-                "$n ${if (n == 1) "pack" else "packs"} connected · lowest $low%"
-            }
-        }
+    private fun buildNotification(text: String): Notification {
         val open = PendingIntent.getActivity(
             this, 0,
             Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),

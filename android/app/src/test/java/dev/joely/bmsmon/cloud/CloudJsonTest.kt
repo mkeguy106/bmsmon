@@ -42,6 +42,27 @@ class CloudJsonTest {
         assertTrue(s.contains("\"gps_accuracy_m\":7.5"))
     }
 
+    @Test fun sampleJson_sanitizes_non_finite_floats_without_throwing() {
+        // kotlinx JSON forbids NaN/Infinity; a garbage reading must not kill the poll path.
+        val s = CloudJson.sampleJson(
+            tsMs = 1L, address = "A", advertisedName = null, alias = null, groupId = null,
+            state = "Charging", soc = Float.NaN, currentA = 1.2f,
+            powerW = Float.POSITIVE_INFINITY, voltageV = 13.2f, tempC = Float.NEGATIVE_INFINITY,
+            mosfetTempC = null, soh = null, fullChargeAh = null, remainingAh = null, cycles = null,
+            cellMinV = null, cellMaxV = null, regen = false, linkEvent = null,
+            lat = Double.NaN, lon = -87.6298, gpsAccuracyM = null, etaFullMin = Float.NaN)
+        // Non-finite fields are dropped (mapped to null; explicitNulls=false omits them)…
+        assertTrue(!s.contains("\"soc\""))
+        assertTrue(!s.contains("\"power_w\""))
+        assertTrue(!s.contains("\"temp_c\""))
+        assertTrue(!s.contains("\"lat\""))
+        assertTrue(!s.contains("\"eta_full_min\""))
+        // …while finite fields survive untouched.
+        assertTrue(s.contains("\"current_a\":1.2"))
+        assertTrue(s.contains("\"voltage_v\":13.2"))
+        assertTrue(s.contains("\"lon\":-87.6298"))
+    }
+
     @Test fun sampleJson_omits_gps_when_null() {
         val s = CloudJson.sampleJson(
             tsMs = 1L, address = "A", advertisedName = null, alias = null, groupId = null,

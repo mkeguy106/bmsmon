@@ -68,6 +68,7 @@ import dev.joely.bmsmon.UiState
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.BmsTarget
+import dev.joely.bmsmon.model.Roster
 import dev.joely.bmsmon.model.Telemetry
 import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.ui.ChargingBolt
@@ -92,6 +93,34 @@ private fun activityRank(t: Telemetry?): Int = when (t?.state) {
     else -> 3
 }
 
+/** The full join → filter → sort pipeline, extracted so the screen can memoize it on its inputs. */
+private fun buildRows(
+    roster: Roster,
+    fleet: Map<String, BatteryStatus>,
+    filters: Set<FilterKey>,
+    filterBaseId: String,
+    dailyDriverId: String,
+    sortKey: SortKey,
+): List<Row> {
+    val grouped = roster.groupViews().flatMap { g ->
+        g.targets.map { t -> Row(RowGroup(g.id, g.label), t, fleet[t.address]) }
+    }
+    val ungrouped = roster.batteries.filter { it.groupId == null }
+        .map { b -> Row(null, BmsTarget(b.address, b.alias), fleet[b.address]) }
+    var rows = grouped + ungrouped
+
+    if (FilterKey.ReachableOnly in filters) rows = rows.filter { it.reachable }
+    if (FilterKey.ActiveOnly in filters) rows = rows.filter { activityRank(it.tele) <= 1 }
+    if (FilterKey.ByBase in filters) rows = rows.filter { it.group?.id == filterBaseId }
+    if (FilterKey.DailyDriverOnly in filters) rows = rows.filter { it.group?.id == dailyDriverId }
+
+    return when (sortKey) {
+        SortKey.Activity -> rows.sortedWith(compareBy({ activityRank(it.tele) }, { -(it.tele?.soc ?: -1f) }))
+        SortKey.Soc -> rows.sortedByDescending { it.tele?.soc ?: -1f }
+        SortKey.Base -> rows
+    }
+}
+
 @Composable
 fun AllBatteriesScreen(
     state: UiState,
@@ -114,23 +143,16 @@ fun AllBatteriesScreen(
     modifier: Modifier = Modifier,
 ) {
     val c = Bm.colors
-    val groupViews = state.roster.groupViews()
-    val grouped = groupViews.flatMap { g ->
-        g.targets.map { t -> Row(RowGroup(g.id, g.label), t, state.fleet[t.address]) }
-    }
-    val ungrouped = state.roster.batteries.filter { it.groupId == null }
-        .map { b -> Row(null, BmsTarget(b.address, b.alias), state.fleet[b.address]) }
-    var rows = grouped + ungrouped
-
-    if (FilterKey.ReachableOnly in state.filters) rows = rows.filter { it.reachable }
-    if (FilterKey.ActiveOnly in state.filters) rows = rows.filter { activityRank(it.tele) <= 1 }
-    if (FilterKey.ByBase in state.filters) rows = rows.filter { it.group?.id == state.filterBaseId }
-    if (FilterKey.DailyDriverOnly in state.filters) rows = rows.filter { it.group?.id == state.dailyDriverId }
-
-    rows = when (state.sortKey) {
-        SortKey.Activity -> rows.sortedWith(compareBy({ activityRank(it.tele) }, { -(it.tele?.soc ?: -1f) }))
-        SortKey.Soc -> rows.sortedByDescending { it.tele?.soc ?: -1f }
-        SortKey.Base -> rows
+    val groupViews = remember(state.roster) { state.roster.groupViews() }
+    // Memoized on its actual inputs so the join/filter/sort pipeline doesn't re-run on every
+    // recomposition (frame-rate animations like the charging bolt recompose this screen far more
+    // often than the ~1.5 s poll actually changes the data).
+    val rows = remember(
+        state.roster, state.fleet, state.filters, state.filterBaseId,
+        state.dailyDriverId, state.sortKey,
+    ) {
+        buildRows(state.roster, state.fleet, state.filters, state.filterBaseId,
+            state.dailyDriverId, state.sortKey)
     }
 
     // Fill the page height so content is top-aligned (the HorizontalPager centers wrap-height pages).

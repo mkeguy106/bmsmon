@@ -5,6 +5,7 @@ import dev.joely.bmsmon.data.db.RawFrameEntity
 import dev.joely.bmsmon.data.db.SampleEntity
 import dev.joely.bmsmon.data.db.SessionEntity
 import dev.joely.bmsmon.model.Telemetry
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -47,7 +48,17 @@ class TelemetryRepository(private val db: BmsDatabase) {
                 }
             }
         }
-        scope.launch { for (op in ops) runCatching { op() } }
+        scope.launch {
+            for (op in ops) {
+                try {
+                    op()
+                } catch (e: CancellationException) {
+                    throw e   // never swallow cancellation — the consumer must die with its scope
+                } catch (_: Exception) {
+                    // one failed op (e.g. transient DB error) must not kill the writer loop
+                }
+            }
+        }
     }
 
     private fun hex(raw: ByteArray): String = raw.joinToString("") { "%02x".format(it) }

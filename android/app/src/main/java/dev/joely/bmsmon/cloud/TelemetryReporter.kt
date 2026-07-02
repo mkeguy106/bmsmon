@@ -58,7 +58,13 @@ class TelemetryReporter(
         // Single-writer drain from the channel into the outbox — never blocks callers.
         scope.launch {
             for (row in enqueueChannel) {
-                runCatching { db.outbox().insert(listOf(row)) }
+                try {
+                    db.outbox().insert(listOf(row))
+                } catch (e: CancellationException) {
+                    throw e   // never swallow cancellation
+                } catch (_: Exception) {
+                    // drop this row rather than kill the drain loop
+                }
             }
         }
     }

@@ -6,6 +6,7 @@ import dev.joely.bmsmon.model.StageInputs
 import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.Telemetry
 import dev.joely.bmsmon.model.DEFAULT_ROSTER
+import dev.joely.bmsmon.model.applyDisabled
 import dev.joely.bmsmon.model.groupById
 import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.model.isRegen
@@ -82,5 +83,63 @@ class FleetLogicTest {
         val fleet = fleetWith("2016" to BatteryState.Idle, "2023" to BatteryState.Idle)
         val r = resolveStage(inputs(fleet, emptyMap(), StageTarget.Base("2024")))
         assertEquals(StageTarget.Base("2024"), r)
+    }
+
+    // --- applyDisabled: single-writer reachability (a just-disconnected pack is unreachable
+    // --- immediately, synchronously with the disable — never a transient "connected" flip) ---
+
+    @Test fun applyDisabledMarksPackUnreachableAndKeepsTelemetry() {
+        val fleet = fleetWith("2012" to BatteryState.Discharging)
+        val addr = roster.groupById("2012")!!.targets.first().address
+        val (next, _) = applyDisabled(fleet, emptySet(), setOf(addr))
+        assertFalse(next[addr]!!.reachable)
+        assertTrue(next[addr]!!.telemetry != null)   // last-known reading kept (renders dimmed)
+    }
+
+    @Test fun applyDisabledIsCaseInsensitiveOnAddresses() {
+        val fleet = fleetWith("2012" to BatteryState.Discharging)
+        val addr = roster.groupById("2012")!!.targets.first().address
+        val (next, _) = applyDisabled(fleet, emptySet(), setOf(addr.lowercase()))
+        assertFalse(next[addr]!!.reachable)
+    }
+
+    @Test fun applyDisabledLeavesOtherPacksReachable() {
+        val fleet = fleetWith("2012" to BatteryState.Discharging, "2016" to BatteryState.Idle)
+        val disabled = roster.groupById("2012")!!.targets.map { it.address }.toSet()
+        val (next, _) = applyDisabled(fleet, emptySet(), disabled)
+        roster.groupById("2016")!!.targets.forEach { assertTrue(next[it.address]!!.reachable) }
+        roster.groupById("2012")!!.targets.forEach { assertFalse(next[it.address]!!.reachable) }
+    }
+
+    @Test fun applyDisabledClearsRegenFlagsForDisabledPacksOnly() {
+        val fleet = fleetWith("2012" to BatteryState.Charging, "2016" to BatteryState.Charging)
+        val a2012 = roster.groupById("2012")!!.targets.first().address
+        val a2016 = roster.groupById("2016")!!.targets.first().address
+        val (_, regen) = applyDisabled(fleet, setOf(a2012, a2016), setOf(a2012))
+        assertEquals(setOf(a2016), regen)
+    }
+
+    // --- stage ETA comes from the engine-carried BatteryStatus (computed once per poll) ---
+
+    private fun stageState(fleet: Map<String, BatteryStatus>) = UiState(
+        monitoring = true, roster = roster, fleet = fleet, stageTarget = StageTarget.Base("2012"),
+    )
+
+    @Test fun stageItemsReadEngineComputedEta() {
+        val fleet = roster.groupById("2012")!!.targets.associate {
+            it.address to BatteryStatus(tel(BatteryState.Charging), reachable = true, etaFullMin = 42f)
+        }
+        val items = stageState(fleet).stageItems()
+        assertEquals(2, items.size)
+        assertTrue(items.all { it.connected && it.etaFullMin == 42f })
+    }
+
+    @Test fun stageItemsNullEtaWhenPackDisconnected() {
+        val fleet = roster.groupById("2012")!!.targets.associate {
+            // Stale status still carries the last ETA, but the pack is out of reach.
+            it.address to BatteryStatus(tel(BatteryState.Charging), reachable = false, etaFullMin = 42f)
+        }
+        val items = stageState(fleet).stageItems()
+        assertTrue(items.all { !it.connected && it.etaFullMin == null })
     }
 }

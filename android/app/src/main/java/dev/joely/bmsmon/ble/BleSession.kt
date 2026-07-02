@@ -28,11 +28,17 @@ class BleSession(
     private val profile: BatteryProfile = RedodoBekenProfile,
     /** Stage packs poll every ~1.5s; a BALANCED connection interval keeps the round-trip clear of the
      *  poll timeout. Background packs stay LOW_POWER to spare the radio across many held links. */
-    private val highPriority: Boolean = false,
+    highPriority: Boolean = false,
 ) {
 
-    private var gatt: BluetoothGatt? = null
-    private var ffe2: BluetoothGattCharacteristic? = null
+    // Live so a held link can be re-tiered when its stage membership changes (see setHighPriority).
+    // @Volatile: written by the repository's control loop, read on the binder callback thread.
+    @Volatile private var highPriority: Boolean = highPriority
+
+    // @Volatile: written on the binder callback thread / close(), read by poll() and
+    // setHighPriority() on repository coroutine threads.
+    @Volatile private var gatt: BluetoothGatt? = null
+    @Volatile private var ffe2: BluetoothGattCharacteristic? = null
     private val buffer = ArrayList<Byte>()
 
     @Volatile private var connectReady: CompletableDeferred<Boolean>? = null
@@ -65,6 +71,23 @@ class BleSession(
         }
         writeStatus(g, ch)
         return withTimeoutOrNull(timeoutMs) { resp.await() }
+    }
+
+    /**
+     * Re-tier a held link when its stage membership changes (BLE-4): the poll cadence follows the
+     * stage live, but the connection interval was only requested once at connect time — a pack
+     * pinned to the stage would keep polling at 1.5 s over a LOW_POWER interval and miss.
+     * Idempotent (no-op when unchanged) and safe on a closed/null gatt; if services aren't
+     * discovered yet, onServicesDiscovered picks up the new value instead.
+     */
+    fun setHighPriority(high: Boolean) {
+        if (high == highPriority) return
+        highPriority = high
+        val g = gatt ?: return
+        if (ffe2 == null) return  // pre-discovery: onServicesDiscovered applies the updated value
+        val priority = if (high) BluetoothGatt.CONNECTION_PRIORITY_BALANCED
+                       else BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER
+        runCatching { g.requestConnectionPriority(priority) }
     }
 
     fun close() {

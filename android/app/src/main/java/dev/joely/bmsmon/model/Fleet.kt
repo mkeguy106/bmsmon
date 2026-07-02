@@ -90,11 +90,36 @@ fun resolveStage(i: StageInputs): StageTarget {
     return i.current
 }
 
-/** Per-battery fleet status, keyed by address in the ViewModel. */
+/**
+ * Per-battery fleet status, keyed by address in the ViewModel. [etaFullMin] is the engine-computed
+ * time-to-full estimate for this pack's latest sample — computed ONCE per poll in MonitorEngine
+ * (the same value that is uploaded to the cloud) and only displayed by the UI, so the stage and
+ * the telemetry stream can never diverge.
+ */
 data class BatteryStatus(
     val telemetry: Telemetry? = null,
     val reachable: Boolean = false,
+    val etaFullMin: Float? = null,
 )
+
+/**
+ * Mark [disabled] packs unreachable (and clear their regen flags) in one synchronous step, so
+ * reachability has a single writer: a just-disconnected pack can never transiently render as
+ * connected while its BLE worker is still tearing down. Address comparison is case-insensitive.
+ * Last-known telemetry is kept so the pack still renders (dimmed) as DISCONNECTED.
+ */
+fun applyDisabled(
+    fleet: Map<String, BatteryStatus>,
+    regenAddrs: Set<String>,
+    disabled: Set<String>,
+): Pair<Map<String, BatteryStatus>, Set<String>> {
+    val norm = disabled.map { it.uppercase() }.toSet()
+    val nextFleet = fleet.mapValues { (addr, s) ->
+        if (s.reachable && addr.uppercase() in norm) s.copy(reachable = false) else s
+    }
+    val nextRegen = regenAddrs.filterNot { it.uppercase() in norm }.toSet()
+    return nextFleet to nextRegen
+}
 
 enum class GroupActivity { Discharging, Charging, Idle, Unknown }
 

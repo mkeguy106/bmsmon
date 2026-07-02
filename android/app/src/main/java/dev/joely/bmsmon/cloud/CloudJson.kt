@@ -35,6 +35,12 @@ data class SampleJson(
 object CloudJson {
     val json = Json { encodeDefaults = true; explicitNulls = false }
 
+    // kotlinx JSON forbids NaN/Infinity (throws at encode time), and sampleJson runs synchronously
+    // on the poll path — one garbage reading must not kill a pack's poller. Non-finite values are
+    // mapped to null, which explicitNulls=false then omits from the payload entirely.
+    private fun Float?.finiteOrNull(): Float? = this?.takeIf { it.isFinite() }
+    private fun Double?.finiteOrNull(): Double? = this?.takeIf { it.isFinite() }
+
     @Suppress("LongParameterList")
     fun sampleJson(
         tsMs: Long, address: String, advertisedName: String?, alias: String?, groupId: String?,
@@ -45,9 +51,13 @@ object CloudJson {
         etaFullMin: Float? = null,
     ): String = json.encodeToString(
         SampleJson.serializer(),
-        SampleJson(tsMs, address, advertisedName, alias, groupId, state, soc, currentA, powerW,
-            voltageV, tempC, mosfetTempC, soh, fullChargeAh, remainingAh, cycles, cellMinV, cellMaxV,
-            regen, linkEvent, lat, lon, gpsAccuracyM, etaFullMin),
+        SampleJson(tsMs, address, advertisedName, alias, groupId, state,
+            soc.finiteOrNull(), currentA.finiteOrNull(), powerW.finiteOrNull(),
+            voltageV.finiteOrNull(), tempC.finiteOrNull(), mosfetTempC, soh,
+            fullChargeAh.finiteOrNull(), remainingAh.finiteOrNull(), cycles,
+            cellMinV.finiteOrNull(), cellMaxV.finiteOrNull(), regen, linkEvent,
+            lat.finiteOrNull(), lon.finiteOrNull(), gpsAccuracyM.finiteOrNull(),
+            etaFullMin.finiteOrNull()),
     )
 
     /** Wrap pre-serialized sample JSON object strings into the ingest batch body bytes. */

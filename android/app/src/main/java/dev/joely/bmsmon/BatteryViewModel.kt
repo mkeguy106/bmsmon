@@ -38,7 +38,6 @@ import dev.joely.bmsmon.model.GroupActivity
 import dev.joely.bmsmon.model.PIN_HOLD_MS
 import dev.joely.bmsmon.model.PackSoc
 import dev.joely.bmsmon.model.Roster
-import dev.joely.bmsmon.model.SEED_TAIL_MIN
 import dev.joely.bmsmon.model.StageInputs
 import dev.joely.bmsmon.model.StageItem
 import dev.joely.bmsmon.model.StageTarget
@@ -49,7 +48,6 @@ import dev.joely.bmsmon.model.addresses
 import dev.joely.bmsmon.model.allTargets
 import dev.joely.bmsmon.model.assignGroup
 import dev.joely.bmsmon.model.batteryAt
-import dev.joely.bmsmon.model.estimateChargeMinutes
 import dev.joely.bmsmon.model.evalStageAlert
 import dev.joely.bmsmon.model.groupActivity
 import dev.joely.bmsmon.model.groupById
@@ -128,7 +126,6 @@ data class UiState(
     val stageTarget: StageTarget = StageTarget.Base(DEFAULT_GROUP_ID),
     val pinned: Boolean = false,
     val regenAddrs: Set<String> = emptySet(),
-    val tailMinByAddress: Map<String, Float> = emptyMap(),
     val disabled: Set<String> = emptySet(),
     val sortKey: SortKey = SortKey.Activity,
     val filters: Set<FilterKey> = emptySet(),
@@ -210,10 +207,9 @@ data class UiState(
             val tel = status?.telemetry?.copy(name = tg.name)
                 ?: Telemetry(tg.name, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
             val regenFlag = connected && tg.address in regenAddrs
-            val eta = if (connected) estimateChargeMinutes(
-                tel.state, tel.soc, tel.current, tel.fullChargeAh, tel.capacityAh,
-                regenFlag, tailMinByAddress[tg.address] ?: SEED_TAIL_MIN,
-            ) else null
+            // The ETA is computed by the engine (once per poll — the exact value that is uploaded)
+            // and carried on BatteryStatus; the stage only displays it.
+            val eta = if (connected) status?.etaFullMin else null
             StageItem(tel, regen = regenFlag, connected = connected, etaFullMin = eta)
         }
     }
@@ -419,39 +415,42 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             if (p.monitoring && hasBlePermissions(getApplication())) startMonitoring()
             updateSensor()
         }
-        // Mirror the engine's BLE-derived state into the UI while we're alive, and re-resolve the
-        // stage off each update. When monitoring stops, keep the last-known fleet but mark every
-        // pack unreachable, so the stage/list shows them dimmed as DISCONNECTED (no demo data).
+        // Mirror the engine's state into the UI while we're alive — the engine is the single
+        // source of truth for the fleet (reachability included) and the cloud upload status; the
+        // VM never mutates the fleet itself. While monitoring is off the engine keeps the
+        // last-known fleet marked unreachable, so packs render dimmed as DISCONNECTED (no demo
+        // data); on a fresh launch (engine fleet empty) the VM's persisted seed is kept instead.
         viewModelScope.launch {
             engine.state.collect { es ->
-                if (es.monitoring) {
-                    _state.update {
-                        it.copy(
-                            monitoring = true,
+                _state.update { s ->
+                    val mirrored = s.copy(
+                        monitoring = es.monitoring,
+                        cloudOutboxDepth = es.cloudOutboxDepth,
+                        cloudLastUploadMs = es.cloudLastUploadMs,
+                        cloudUploadKbps = es.cloudUploadKbps,
+                        cloudAuthFailed = es.cloudAuthFailed,
+                    )
+                    if (es.monitoring) {
+                        mirrored.copy(
                             fleet = es.fleet,
                             regenAddrs = es.regenAddrs,
-                            tailMinByAddress = es.tailMinByAddress,
                             lastDischargeAt = es.lastDischargeAt,
                             peakPowerW = es.peakPowerW,
                             peakCurrentA = es.peakCurrentA,
                         )
+                    } else if (es.fleet.isNotEmpty()) {
+                        mirrored.copy(fleet = es.fleet, regenAddrs = es.regenAddrs)
+                    } else {
+                        // Engine has no fleet (fresh process): keep the persisted seed, dimmed.
+                        mirrored.copy(fleet = s.fleet.mapValues { (_, st) -> st.copy(reachable = false) })
                     }
+                }
+                if (es.monitoring) {
                     refresh()
                     val now = clockMs()
                     if (now - lastTeleSaveAt > TELE_SAVE_INTERVAL_MS) {
                         lastTeleSaveAt = now
                         persistLastTelemetry()
-                    }
-                } else {
-                    _state.update {
-                        if (it.monitoring) {
-                            it.copy(
-                                monitoring = false,
-                                fleet = it.fleet.mapValues { (_, s) -> s.copy(reachable = false) },
-                            )
-                        } else {
-                            it
-                        }
                     }
                 }
             }
@@ -461,15 +460,6 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             while (true) {
                 delay(30_000)
                 if (_state.value.monitoring) refresh()
-            }
-        }
-        // Mirror reporter upload stats into UiState so the Cloud sync page can show them.
-        getApplication<BmsApp>().reporter.onStatus = { depth, ts, kbps, authFailed ->
-            _state.update {
-                it.copy(
-                    cloudOutboxDepth = depth.toInt(), cloudLastUploadMs = ts,
-                    cloudUploadKbps = kbps.toFloat(), cloudAuthFailed = authFailed,
-                )
             }
         }
     }
@@ -695,12 +685,9 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
 
     fun disconnectBattery(address: String) {
         val a = address.uppercase()
-        _state.update { st ->
-            st.copy(
-                disabled = st.disabled + a,
-                fleet = st.fleet + (a to (st.fleet[a] ?: BatteryStatus()).copy(reachable = false)),
-            )
-        }
+        _state.update { it.copy(disabled = it.disabled + a) }
+        // The engine synchronously marks the pack unreachable in its state (the single fleet
+        // writer) before tearing the worker down; we only mirror the result.
         engine.setDisabled(_state.value.disabled)
         persistDisabled()
         refresh()
@@ -717,14 +704,8 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
      *  row shows DISCONNECTED with a reconnect icon — distinct from stopping monitoring entirely. */
     fun disconnectAll() {
         val all = _state.value.roster.allTargets().map { it.address.uppercase() }.toSet()
-        _state.update { st ->
-            st.copy(
-                disabled = st.disabled + all,
-                fleet = st.fleet + all.associateWith { a ->
-                    (st.fleet[a] ?: BatteryStatus()).copy(reachable = false)
-                },
-            )
-        }
+        _state.update { it.copy(disabled = it.disabled + all) }
+        // As in disconnectBattery: the engine marks them unreachable, the VM only mirrors.
         engine.setDisabled(_state.value.disabled)
         persistDisabled()
         refresh()
@@ -759,11 +740,10 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
 
     fun stopMonitoring() {
         persistLastTelemetry()  // keep the latest readings for next launch
-        engine.stop()           // cancels BLE jobs -> each session closes its GATT cleanly
+        // Cancels BLE jobs (each session closes its GATT cleanly) and marks the engine's fleet
+        // unreachable — the state mirror renders every pack DISCONNECTED; no VM-side fleet write.
+        engine.stop()
         MonitoringService.stop(getApplication())
-        _state.update {
-            it.copy(monitoring = false, fleet = it.fleet.mapValues { (_, s) -> s.copy(reachable = false) })
-        }
         viewModelScope.launch { store.setMonitoring(false) }
     }
 
@@ -907,13 +887,15 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     fun setTempFahrenheit(enabled: Boolean) {
         _state.update { it.copy(tempFahrenheit = enabled) }
         viewModelScope.launch { store.setTempFahrenheit(enabled) }
+        pushTempConfig()   // headless temp notifications format margins in the user's unit
     }
     fun toggleTempUnit() = setTempFahrenheit(!_state.value.tempFahrenheit)
 
     // --- temperature alerts ---
     /** Mirror temp settings to the headless engine so it can flash/notify off-screen. */
-    private fun pushTempConfig() =
-        engine.setTempAlertConfig(_state.value.tempAlertsEnabled, _state.value.tempThresholdsByProfile)
+    private fun pushTempConfig() = engine.setTempAlertConfig(
+        _state.value.tempAlertsEnabled, _state.value.tempThresholdsByProfile, _state.value.tempUnit,
+    )
 
     fun setTempAlertsEnabled(on: Boolean) {
         _state.update { it.copy(tempAlertsEnabled = on) }

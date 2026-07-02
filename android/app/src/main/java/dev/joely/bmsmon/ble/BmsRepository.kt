@@ -1,6 +1,7 @@
 package dev.joely.bmsmon.ble
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import dev.joely.bmsmon.ble.profile.BatteryProfile
 import dev.joely.bmsmon.ble.profile.ProfileRegistry
@@ -31,7 +32,13 @@ import kotlinx.coroutines.withTimeoutOrNull
  * (Channel.UNLIMITED, so [trySend] never blocks/suspends), which the control loop drains at the
  * top of every tick.  No shared mutable state is touched outside that coroutine.
  */
-class BmsRepository(private val context: Context) {
+class BmsRepository(
+    private val context: Context,
+    /** Scheduling clock (BLE-9): backoff/rotation/priority timers use a MONOTONIC source so a
+     *  wall-clock step (NTP correction, user change) can't distort them. Injectable for tests.
+     *  Persisted/user-visible timestamps stay wall-clock — this is repository-internal only. */
+    private val now: () -> Long = { SystemClock.elapsedRealtime() },
+) {
 
     // Cap on simultaneous *connection attempts* (the LE initiator can't pursue many).
     private val gate = Semaphore(2)
@@ -77,7 +84,7 @@ class BmsRepository(private val context: Context) {
         this.onReachable = onReachable
         resultChannel = Channel(Channel.UNLIMITED)
         // Arm the launch barrier: prioritize the stage's connect/poll for a grace window.
-        stagePriorityUntil = System.currentTimeMillis() + STAGE_PRIORITY_GRACE_MS
+        stagePriorityUntil = now() + STAGE_PRIORITY_GRACE_MS
         stageInitialized = false
         running = true
         // SupervisorJob: a failing worker doesn't tear down siblings or the control loop.
@@ -154,7 +161,7 @@ class BmsRepository(private val context: Context) {
 
         try {
             while (running) {
-                val now = System.currentTimeMillis()
+                val now = now()
 
                 // 1. Consume outcomes posted by workers since the last tick.
                 drainEvents(held, pollJobs, connecting, failCount, backoffUntil, heldSince, childScope, now)
@@ -215,6 +222,15 @@ class BmsRepository(private val context: Context) {
                         }
                     }
                 }
+
+                // 5. Re-assert connection priority on held links whose stage membership changed
+                // (BLE-4). Poll cadence follows stageAddrs live, but the connection interval was
+                // only requested at connect time — without this, a pack pinned to the stage keeps
+                // its LOW_POWER interval and misses 1.5 s polls. setHighPriority is idempotent
+                // (no-op when unchanged), so calling it every tick is cheap. Runs on the control
+                // loop, preserving the single-writer discipline for held-session management.
+                val stageNow = stageAddrs
+                for ((addr, session) in held) session.setHighPriority(addr in stageNow)
 
                 waitOrWake(CONTROL_TICK_MS)
             }
