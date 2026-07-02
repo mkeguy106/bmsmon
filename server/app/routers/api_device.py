@@ -17,6 +17,7 @@ from app.db.pool import get_pool
 from app.models import (
     EnrollBody, EnrollResponse, IngestBody, IngestResponse, OkResponse, TempConfigBody,
 )
+from app.ratelimit import client_key
 
 router = APIRouter(prefix="/api/v1")
 
@@ -27,6 +28,24 @@ def _partition_ts_window() -> tuple[int, int]:
     """Sane ts_ms window for ingested samples (see Settings.ingest_ts_min_ms)."""
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     return settings.ingest_ts_min_ms, now_ms + settings.ingest_ts_max_future_ms
+
+
+# SRV-13: max accepted sample-address length. BLE MACs are 17 chars; the headroom is
+# forward compat (e.g. iOS CoreBluetooth surfaces UUID-ish identifiers, not MACs).
+ADDRESS_MAX_LEN = 32
+
+
+def _address_ok(address: str) -> bool:
+    """SRV-13 sample-address sanity rule: every ingested address becomes a PERMANENT
+    `batteries` registry row, so junk must not get through. The rule (deliberately one
+    simple documented predicate, not a strict MAC regex): non-empty, at most
+    ADDRESS_MAX_LEN chars, printable non-space ASCII only (0x21-0x7E). Real BLE MACs
+    (`C8:47:80:15:25:01`, any case) trivially pass; empty strings, whitespace,
+    control bytes, non-ASCII garbage and oversized blobs are dropped — never 4xx'd,
+    because the phone poison-skips 4xx batches (same policy as the ts_ms filter).
+    """
+    return (0 < len(address) <= ADDRESS_MAX_LEN
+            and all(0x21 <= ord(c) <= 0x7E for c in address))
 
 
 def _gunzip_capped(data: bytes, limit: int) -> bytes:
@@ -85,7 +104,14 @@ async def health(pool=Depends(get_pool)):
 
 
 @router.post("/enroll", response_model=EnrollResponse)
-async def enroll(body: EnrollBody, pool=Depends(get_pool)):
+async def enroll(body: EnrollBody, request: Request, pool=Depends(get_pool)):
+    # SEC-4: /enroll is the only unauthenticated (code-gated) endpoint — per-IP
+    # rate limit before doing any work. Key resolution + process-local caveats
+    # are documented in app/ratelimit.py.
+    key = client_key(request.client.host if request.client else None, request.headers)
+    if not request.app.state.enroll_limiter.allow(key):
+        logger.warning("enroll: rate limit exceeded for %s", key)
+        raise HTTPException(429, "too many enrollment attempts; try again later")
     try:
         spki = base64.b64decode(body.public_key_spki_b64, validate=True)
     except (binascii.Error, ValueError):
@@ -145,6 +171,16 @@ async def ingest(request: Request, pool=Depends(get_pool)):
             logger.warning(
                 "ingest: dropped %d/%d sample(s) with out-of-range ts_ms from device %s: %s",
                 len(bad), len(body.samples), device_id, bad[:10])
+        # SRV-13: same drop-don't-4xx policy for junk addresses, which would otherwise
+        # create permanent `batteries` registry rows (rule documented on _address_ok).
+        kept = [s for s in samples if _address_ok(s.address)]
+        if len(kept) != len(samples):
+            bad_addr = [s.address for s in samples if not _address_ok(s.address)]
+            logger.warning(
+                "ingest: dropped %d/%d sample(s) with invalid address from device %s: %s",
+                len(bad_addr), len(samples), device_id,
+                [a[:40].encode("ascii", "backslashreplace").decode() for a in bad_addr[:10]])
+        samples = kept
         rows = [q.sample_row(device_id, s.address, s.model_dump()) for s in samples]
         # SRV-13: one registry upsert per unique address per batch (not per sample).
         # Dict insertion order keeps the LAST-seen sample's alias/group per address.

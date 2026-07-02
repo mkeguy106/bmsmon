@@ -19,31 +19,42 @@ def sample_row(device_id: str, address: str, s: dict) -> dict:
     return row
 
 
+# SRV-9: single set-based insert over unnest'd typed arrays so RETURNING can report
+# the number of rows ACTUALLY inserted — ON CONFLICT DO NOTHING dedups (samples PK)
+# no longer count as accepted. Array types mirror the samples column types.
 _INSERT = """
-INSERT INTO samples
-  (device_id,address,ts_ms,ts,state,soc,current_a,power_w,voltage_v,temp_c,
-   mosfet_temp_c,soh,full_charge_ah,remaining_ah,cycles,cell_min_v,cell_max_v,regen,link_event,
-   lat,lon,gps_accuracy_m,eta_full_min)
-VALUES
-  ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
-ON CONFLICT DO NOTHING
+WITH ins AS (
+  INSERT INTO samples
+    (device_id,address,ts_ms,ts,state,soc,current_a,power_w,voltage_v,temp_c,
+     mosfet_temp_c,soh,full_charge_ah,remaining_ah,cycles,cell_min_v,cell_max_v,regen,link_event,
+     lat,lon,gps_accuracy_m,eta_full_min)
+  SELECT * FROM unnest(
+    $1::uuid[], $2::text[], $3::bigint[], $4::timestamptz[], $5::text[],
+    $6::real[], $7::real[], $8::real[], $9::real[], $10::real[],
+    $11::int[], $12::int[], $13::real[], $14::real[], $15::int[],
+    $16::real[], $17::real[], $18::boolean[], $19::text[],
+    $20::float8[], $21::float8[], $22::real[], $23::real[])
+  ON CONFLICT DO NOTHING
+  RETURNING 1
+)
+SELECT count(*) FROM ins
 """
+
+_INSERT_FIELDS = ["device_id", "address", "ts_ms", "ts", "state", "soc", "current_a",
+                  "power_w", "voltage_v", "temp_c", "mosfet_temp_c", "soh",
+                  "full_charge_ah", "remaining_ah", "cycles", "cell_min_v", "cell_max_v",
+                  "regen", "link_event", "lat", "lon", "gps_accuracy_m", "eta_full_min"]
 
 
 async def insert_samples(conn: asyncpg.Connection, rows: list[dict]) -> int:
+    """Insert sample rows; returns the count of rows actually inserted (duplicates
+    already present under the samples PK are skipped and NOT counted)."""
     if not rows:
         return 0
     ts_all = [r["ts_ms"] for r in rows]
     await ensure_partitions_for_range(conn, min(ts_all), max(ts_all))
-    await conn.executemany(_INSERT, [
-        (r["device_id"], r["address"], r["ts_ms"], r["ts"], r["state"], r["soc"],
-         r["current_a"], r["power_w"], r["voltage_v"], r["temp_c"], r["mosfet_temp_c"],
-         r["soh"], r["full_charge_ah"], r["remaining_ah"], r["cycles"], r["cell_min_v"],
-         r["cell_max_v"], r["regen"], r["link_event"],
-         r["lat"], r["lon"], r["gps_accuracy_m"], r["eta_full_min"])
-        for r in rows
-    ])
-    return len(rows)
+    cols = [[r[f] for r in rows] for f in _INSERT_FIELDS]
+    return await conn.fetchval(_INSERT, *cols)
 
 
 async def upsert_battery(conn, address, advertised_name, alias, group_id, ts_ms: int) -> None:
@@ -61,12 +72,18 @@ async def upsert_battery(conn, address, advertised_name, alias, group_id, ts_ms:
 
 
 async def upsert_temp_config(conn, device_id, cfg: dict) -> None:
-    """Store the latest temperature-alert config for a device+profile (one-way phone push)."""
+    """Store the latest temperature-alert config for a device+profile (one-way phone push).
+
+    The envelope fields (cutoff_*/charge_*, WEB-6c) are optional in the push body and
+    stored as NULL when absent — an old-app push overwrites them to NULL too, which is
+    correct latest-wins semantics (the row always mirrors the most recent push whole)."""
     await conn.execute(
         """INSERT INTO device_temp_config
              (device_id, profile_id, cold_caution_c, hot_caution_c, cold_crit_c, hot_crit_c,
-              unit, updated_at_ms, received_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now())
+              unit, updated_at_ms,
+              cutoff_cold_c, cutoff_hot_c, charge_lock_cold_c, charge_lock_hot_c,
+              charge_resume_cold_c, received_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())
            ON CONFLICT (device_id, profile_id) DO UPDATE SET
              cold_caution_c = EXCLUDED.cold_caution_c,
              hot_caution_c = EXCLUDED.hot_caution_c,
@@ -74,10 +91,17 @@ async def upsert_temp_config(conn, device_id, cfg: dict) -> None:
              hot_crit_c = EXCLUDED.hot_crit_c,
              unit = EXCLUDED.unit,
              updated_at_ms = EXCLUDED.updated_at_ms,
+             cutoff_cold_c = EXCLUDED.cutoff_cold_c,
+             cutoff_hot_c = EXCLUDED.cutoff_hot_c,
+             charge_lock_cold_c = EXCLUDED.charge_lock_cold_c,
+             charge_lock_hot_c = EXCLUDED.charge_lock_hot_c,
+             charge_resume_cold_c = EXCLUDED.charge_resume_cold_c,
              received_at = now()
            WHERE EXCLUDED.updated_at_ms >= device_temp_config.updated_at_ms""",
         device_id, cfg["profile_id"], cfg["cold_caution_c"], cfg["hot_caution_c"],
         cfg["cold_crit_c"], cfg["hot_crit_c"], cfg["unit"], cfg["updated_at_ms"],
+        cfg.get("cutoff_cold_c"), cfg.get("cutoff_hot_c"), cfg.get("charge_lock_cold_c"),
+        cfg.get("charge_lock_hot_c"), cfg.get("charge_resume_cold_c"),
     )
 
 
@@ -85,7 +109,9 @@ async def get_temp_config_all(conn) -> list[dict]:
     """Latest temperature-alert config per device+profile, newest first (for the read-only webui)."""
     rows = await conn.fetch(
         """SELECT device_id, profile_id, cold_caution_c, hot_caution_c, cold_crit_c, hot_crit_c,
-                  unit, updated_at_ms, received_at
+                  unit, updated_at_ms, received_at,
+                  cutoff_cold_c, cutoff_hot_c, charge_lock_cold_c, charge_lock_hot_c,
+                  charge_resume_cold_c
            FROM device_temp_config ORDER BY updated_at_ms DESC"""
     )
     return [dict(r) for r in rows]

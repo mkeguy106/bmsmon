@@ -69,8 +69,11 @@ def create_app() -> FastAPI:
     app = FastAPI(title="bmsmon", lifespan=lifespan)
     from app.auth.device_jwt import JtiCache
     from app.live.bus import LiveBus
+    from app.ratelimit import RateLimiter
     app.state.jti_cache = JtiCache()
     app.state.bus = LiveBus()
+    # SEC-4: per-IP limiter for the unauthenticated /api/v1/enroll (see app/ratelimit.py).
+    app.state.enroll_limiter = RateLimiter()
     app.include_router(api_device.router)
     app.include_router(web.router)
     app.include_router(ws.router)

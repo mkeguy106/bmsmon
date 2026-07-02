@@ -68,3 +68,11 @@ CREATE TABLE IF NOT EXISTS device_temp_config (
   received_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (device_id, profile_id)
 );
+
+-- WEB-6c: optional profile envelope (BMS cutoffs + charge lock/resume) pushed by newer
+-- app builds; NULL when an older app pushed the config. Mirrored read-only by the web.
+ALTER TABLE device_temp_config ADD COLUMN IF NOT EXISTS cutoff_cold_c real;
+ALTER TABLE device_temp_config ADD COLUMN IF NOT EXISTS cutoff_hot_c real;
+ALTER TABLE device_temp_config ADD COLUMN IF NOT EXISTS charge_lock_cold_c real;
+ALTER TABLE device_temp_config ADD COLUMN IF NOT EXISTS charge_lock_hot_c real;
+ALTER TABLE device_temp_config ADD COLUMN IF NOT EXISTS charge_resume_cold_c real;

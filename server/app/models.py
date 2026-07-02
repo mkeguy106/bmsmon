@@ -49,6 +49,10 @@ class IngestBody(BaseModel):
 
 
 class IngestResponse(BaseModel):
+    # accepted = rows actually inserted this batch (SRV-9): samples that failed server
+    # validation (ts_ms window, address rule) are dropped before insert, and re-uploads
+    # already present under the samples PK dedup to 0. Diagnostics only — the phone
+    # keys retry/poison handling off the HTTP status, never off this count.
     accepted: int
     last_seq: int
 
@@ -61,6 +65,16 @@ class TempConfigBody(BaseModel):
     hot_crit_c: int
     unit: str
     updated_at_ms: int
+    # WEB-6c: optional profile envelope (BMS cutoffs + charge lock/resume points) so the
+    # web mirror can render the exact envelope the phone alerts on instead of hardcoding
+    # it. Optional (None when an older app pushes without them) — which also retro-fixes
+    # the WEB-6b hazard for these fields: an old-shape body must keep validating, never
+    # turn into a 422 the phone would re-POST forever.
+    cutoff_cold_c: float | None = None
+    cutoff_hot_c: float | None = None
+    charge_lock_cold_c: float | None = None
+    charge_lock_hot_c: float | None = None
+    charge_resume_cold_c: float | None = None
 
 
 class OkResponse(BaseModel):

@@ -73,6 +73,70 @@ async def test_config_upserts_latest(app, client):
     assert crit == -15       # latest wins
 
 
+ENVELOPE = {"cutoff_cold_c": -20.0, "cutoff_hot_c": 60.0, "charge_lock_cold_c": 0.0,
+            "charge_lock_hot_c": 50.0, "charge_resume_cold_c": 5.0}
+
+USER = {"X-authentik-username": "joel",
+        "X-authentik-groups": "Covert.life - Full App Access - User Group"}
+
+
+async def test_config_with_envelope_is_mirrored_in_web_get(app, client):
+    # WEB-6c: newer app builds push the profile envelope; GET /web/temp-config mirrors it.
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    body = json.dumps({**_cfg(), **ENVELOPE}).encode()
+    r = await client.post("/api/v1/config", content=body,
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
+    assert r.status_code == 200
+    r = await client.get("/web/temp-config", headers=USER)
+    assert r.status_code == 200
+    c = r.json()["configs"][0]
+    assert c["cutoff_cold_c"] == -20.0
+    assert c["cutoff_hot_c"] == 60.0
+    assert c["charge_lock_cold_c"] == 0.0
+    assert c["charge_lock_hot_c"] == 50.0
+    assert c["charge_resume_cold_c"] == 5.0
+
+
+async def test_config_old_shape_body_accepted_and_envelope_null(app, client):
+    # Backward compat: an old-app push WITHOUT envelope fields must validate (never 422,
+    # which the phone would re-POST forever) and mirror as nulls.
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    body = json.dumps(_cfg()).encode()  # old shape, no envelope keys at all
+    r = await client.post("/api/v1/config", content=body,
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
+    assert r.status_code == 200
+    r = await client.get("/web/temp-config", headers=USER)
+    c = r.json()["configs"][0]
+    for k in ENVELOPE:
+        assert c[k] is None
+
+
+async def test_config_envelope_latest_wins_upsert(app, client):
+    # Latest-wins upsert semantics unchanged: a newer push replaces the envelope whole
+    # (a newer old-shape push nulls it — the row mirrors the most recent push).
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    body1 = json.dumps({**_cfg(updated_at_ms=1000), **ENVELOPE}).encode()
+    r = await client.post("/api/v1/config", content=body1,
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body1)}"})
+    assert r.status_code == 200
+    body2 = json.dumps(_cfg(updated_at_ms=2000)).encode()
+    r = await client.post("/api/v1/config", content=body2,
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body2)}"})
+    assert r.status_code == 200
+    async with app.state.pool.acquire() as conn:
+        n = await conn.fetchval("SELECT count(*) FROM device_temp_config WHERE device_id=$1",
+                                device_id)
+        row = await conn.fetchrow(
+            "SELECT cutoff_cold_c, updated_at_ms FROM device_temp_config WHERE device_id=$1",
+            device_id)
+    assert n == 1
+    assert row["updated_at_ms"] == 2000
+    assert row["cutoff_cold_c"] is None
+
+
 async def test_config_rejects_wrong_key(app, client):
     priv, spki = _keypair()
     other, _ = _keypair()

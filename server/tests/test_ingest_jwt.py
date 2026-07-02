@@ -25,11 +25,13 @@ def _bh(body: bytes) -> str:
     return base64.urlsafe_b64encode(hashlib.sha256(body).digest()).rstrip(b"=").decode()
 
 
-def _token(priv, device_id, body: bytes, exp_in=60, jti=None):
+def _token(priv, device_id, body: bytes, exp_in=60, jti=None, aud=None):
     now = int(time.time())
-    return jwt.encode({"sub": device_id, "iat": now, "exp": now + exp_in,
-                       "jti": jti or uuid.uuid4().hex, "bh": _bh(body)},
-                      priv, algorithm="ES256")
+    claims = {"sub": device_id, "iat": now, "exp": now + exp_in,
+              "jti": jti or uuid.uuid4().hex, "bh": _bh(body)}
+    if aud is not None:
+        claims["aud"] = aud
+    return jwt.encode(claims, priv, algorithm="ES256")
 
 
 async def _enroll_device(app, spki):
@@ -245,6 +247,98 @@ async def test_ingest_upserts_battery_last_values_per_address(app, client):
         row = await conn.fetchrow("SELECT alias, group_id FROM batteries WHERE address=$1", A)
     assert row["alias"] == "2012 · A"
     assert row["group_id"] == "2012"
+
+
+async def test_ingest_accepts_correct_aud_claim(app, client):
+    # DATA-11: newer app builds send aud="bmsmon-api"; the server must accept it.
+    # (The existing tests above all send NO aud, proving older tokens stay valid.)
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    body = json.dumps(_payload()).encode()
+    r = await client.post("/api/v1/ingest", content=body,
+                          headers={"Authorization":
+                                   f"Bearer {_token(priv, device_id, body, aud='bmsmon-api')}"})
+    assert r.status_code == 200
+    assert r.json() == {"accepted": 1, "last_seq": 7}
+
+
+async def test_ingest_rejects_wrong_aud_claim(app, client):
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    body = json.dumps(_payload()).encode()
+    r = await client.post("/api/v1/ingest", content=body,
+                          headers={"Authorization":
+                                   f"Bearer {_token(priv, device_id, body, aud='evil-api')}"})
+    assert r.status_code == 401
+
+
+async def test_ingest_accepts_aud_list_containing_expected(app, client):
+    # RFC 7519: aud may be an array of strings.
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    body = json.dumps(_payload()).encode()
+    tok = _token(priv, device_id, body, aud=["other", "bmsmon-api"])
+    r = await client.post("/api/v1/ingest", content=body,
+                          headers={"Authorization": f"Bearer {tok}"})
+    assert r.status_code == 200
+
+
+async def test_ingest_drops_junk_addresses_and_keeps_valid(app, client):
+    # SRV-13: junk addresses would create PERMANENT batteries rows — dropped (never
+    # 4xx, same poison-batch policy as the ts_ms filter) while valid samples land.
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    now_ms = int(time.time() * 1000)
+    payload = {"batch_seq": 14, "samples": [
+        {"ts_ms": now_ms, "address": "", "soc": 1.0},                       # empty
+        {"ts_ms": now_ms, "address": "A" * 33, "soc": 2.0},                 # too long
+        {"ts_ms": now_ms, "address": "C8:47:80:15:67:44\n", "soc": 3.0},    # control char
+        {"ts_ms": now_ms, "address": "junk addr", "soc": 4.0},              # space
+        {"ts_ms": now_ms, "address": "C8:47:80:ÿ5:67:44", "soc": 5.0}, # non-ASCII
+        {"ts_ms": now_ms, "address": A, "soc": 87.0},                       # valid MAC
+        {"ts_ms": now_ms - 1, "address": "c8:47:80:15:67:44", "soc": 86.0}, # lowercase ok
+    ]}
+    body = json.dumps(payload).encode()
+    r = await client.post("/api/v1/ingest", content=body,
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
+    assert r.status_code == 200
+    assert r.json() == {"accepted": 2, "last_seq": 14}
+    async with app.state.pool.acquire() as conn:
+        addrs = [x["address"] for x in await conn.fetch("SELECT address FROM batteries")]
+        n = await conn.fetchval("SELECT count(*) FROM samples")
+    assert sorted(addrs) == [A, "c8:47:80:15:67:44"]
+    assert n == 2
+
+
+async def test_ingest_all_junk_addresses_is_200_accepted_0(app, client):
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    now_ms = int(time.time() * 1000)
+    payload = {"batch_seq": 15, "samples": [{"ts_ms": now_ms, "address": "\x00\x01", "soc": 1.0}]}
+    body = json.dumps(payload).encode()
+    r = await client.post("/api/v1/ingest", content=body,
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
+    assert r.status_code == 200
+    assert r.json() == {"accepted": 0, "last_seq": 15}
+    async with app.state.pool.acquire() as conn:
+        assert await conn.fetchval("SELECT count(*) FROM batteries") == 0
+
+
+async def test_ingest_accepted_excludes_db_duplicates(app, client):
+    # SRV-9: `accepted` is the count of rows ACTUALLY inserted. Re-uploading the same
+    # samples (same device/address/ts PK) dedups via ON CONFLICT DO NOTHING → 0.
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    body = json.dumps(_payload()).encode()
+    h1 = {"Authorization": f"Bearer {_token(priv, device_id, body)}"}
+    r = await client.post("/api/v1/ingest", content=body, headers=h1)
+    assert r.status_code == 200 and r.json()["accepted"] == 1
+    h2 = {"Authorization": f"Bearer {_token(priv, device_id, body)}"}  # fresh jti
+    r = await client.post("/api/v1/ingest", content=body, headers=h2)
+    assert r.status_code == 200
+    assert r.json() == {"accepted": 0, "last_seq": 7}
+    async with app.state.pool.acquire() as conn:
+        assert await conn.fetchval("SELECT count(*) FROM samples") == 1
 
 
 async def test_ingest_stores_gps(app, client):
