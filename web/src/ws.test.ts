@@ -185,6 +185,31 @@ describe("connectLive", () => {
     stop();
   });
 
+  it("malformed frames and garbage payloads are dropped without killing the socket (WEB-4)", () => {
+    const { snapshots, samples, stop } = setup();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const sock = sockets()[0];
+    sock.fireOpen();
+
+    sock.onmessage?.({ data: "{not json" });                            // unparseable frame
+    sock.fireMessage(42);                                               // non-object frame
+    sock.fireMessage({ type: "sample", ts_ms: 5, soc: 10 });            // missing address
+    sock.fireMessage({ type: "sample", address: "A", ts_ms: "x" });     // non-finite ts_ms
+    sock.fireMessage({ type: "snapshot", fleet: { address: "A" } });    // fleet not an array
+    expect(samples).toHaveLength(0);
+    expect(snapshots).toHaveLength(0);
+
+    // The socket survived and still dispatches good frames (unknown keys stripped).
+    sock.fireMessage({ type: "sample", address: "A", ts_ms: 2, soc: 51, bogus: 1 });
+    expect(samples).toEqual([{ address: "A", ts_ms: 2, soc: 51 }]);
+    sock.fireMessage({ type: "snapshot", fleet: [{ address: "A", ts_ms: 3, soc: 52, alias: "2012 · A" }] });
+    expect(snapshots).toEqual([[{ address: "A", ts_ms: 3, soc: 52, alias: "2012 · A" }]]);
+
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+    stop();
+  });
+
   it("stop() closes the socket and prevents any further reconnects", () => {
     const { statuses, stop } = setup();
     const sock = sockets()[0];

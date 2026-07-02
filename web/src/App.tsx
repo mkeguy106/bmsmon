@@ -13,6 +13,14 @@ import type { FleetItem } from "./types";
 // treat a pack as disconnected after a generous gap — otherwise cards flap to DISCONNECTED.
 const STALE_MS = 90_000;
 
+// The user's explicit unit choice, if any. Garbage values are treated as absent.
+const storedUnit = (): TempUnit | null => {
+  try {
+    const v = localStorage.getItem("bmsmon-temp-unit");
+    return v === "C" || v === "F" ? v : null;
+  } catch (e) { return null; }
+};
+
 export default function App() {
   const store = useRef(createStore()).current;
   const [v, force] = useState(0);
@@ -41,10 +49,14 @@ export default function App() {
   }, []);
   const thr = useMemo(() => thresholdsFromConfig(tempConfig), [tempConfig]);
 
-  const [unit, setUnit] = useState<TempUnit>(
-    () => (localStorage.getItem("bmsmon-temp-unit") as TempUnit) ||
-      (tempConfig?.unit === "C" ? "C" : "F"),
-  );
+  const [unit, setUnit] = useState<TempUnit>(() => storedUnit() ?? "F");
+  // WEB-3: default to the phone's synced unit. The lazy initializer above runs
+  // before tempConfig has loaded, so apply the synced unit when it arrives —
+  // but only while the user hasn't chosen one (a stored choice always wins).
+  useEffect(() => {
+    if (tempConfig == null || storedUnit() != null) return;
+    setUnit(tempConfig.unit === "C" ? "C" : "F");
+  }, [tempConfig]);
   const toggleUnit = () => {
     const next: TempUnit = unit === "F" ? "C" : "F";
     try { localStorage.setItem("bmsmon-temp-unit", next); } catch (e) { /* not persisted */ }

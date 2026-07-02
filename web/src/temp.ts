@@ -64,6 +64,20 @@ export const marginToCutoffC = (tempC: number, side: TempSide): number =>
 export const worstOf = <T extends { rank: TempRank }>(items: T[]): T | undefined =>
   items.reduce<T | undefined>((a, b) => (a === undefined || b.rank > a.rank ? b : a), undefined);
 
+/** Zone rank at or above which the full-screen overlay flashes. */
+export const OVERLAY_RANK: TempRank = 3;
+
+/**
+ * Overlay acknowledgement with recovery re-arm (mirrors the Android fix): an
+ * ack survives only while the worst condition is still at overlay severity.
+ * Once it recovers (no worst, or rank below OVERLAY_RANK) the ack clears, so
+ * re-entering the SAME zone later flashes the overlay again.
+ */
+export const nextAckedKey = (
+  acked: string | null,
+  worst: { key: string; rank: TempRank } | null,
+): string | null => (worst != null && worst.rank >= OVERLAY_RANK ? acked : null);
+
 /** CSS custom property for a zone's marker/label color. */
 export function zoneColorVar(key: ZoneKey): string {
   switch (key) {

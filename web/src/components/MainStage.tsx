@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { FleetItem } from "../types";
 import {
-  tempZone, worstOf, zoneColorVar, zoneLabel,
+  OVERLAY_RANK, nextAckedKey, tempZone, worstOf, zoneColorVar, zoneLabel,
   type TempConfig, type TempThresholds, type TempUnit, type Zone,
 } from "../temp";
 import { fmtEta, relAgo } from "../util";
@@ -12,6 +12,12 @@ import { TempOverlay } from "./TempOverlay";
 import { SyncedIndicator } from "./SyncedIndicator";
 import { ConditionsSimulator } from "./ConditionsSimulator";
 import { PinButton } from "./PinButton";
+
+// WEB-7: the drag-to-fake-temperature simulator can trigger the full CRITICAL
+// overlay, so keep it out of the production dashboard. Dev builds keep it;
+// production requires an explicit ?sim=1 (deliberate testing). Checked once.
+const SIM_ENABLED: boolean =
+  import.meta.env.DEV || new URLSearchParams(location.search).get("sim") === "1";
 
 export function MainStage({ items, staleAddrs, thr, unit, config, now, pinned, onTogglePin }: {
   items: FleetItem[]; staleAddrs: Set<string>;
@@ -44,7 +50,15 @@ export function MainStage({ items, staleAddrs, thr, unit, config, now, pinned, o
     return w ? { name: w.name, tempC: w.tempC, zone: w.zone, key: w.zone.key } : null;
   })();
 
-  const flashing = worst != null && worst.zone.rank >= 3 && ackedKey !== worst.key;
+  // WEB-7: recovery re-arms the ack (mirror of the Android fix) — once the
+  // worst condition drops below overlay severity, a later recurrence of the
+  // SAME zone must flash again. Render-phase adjustment of state (React's
+  // documented "adjust state when props change" pattern; strictly conditional,
+  // so it cannot loop).
+  const effectiveAck = nextAckedKey(ackedKey, worst && { key: worst.key, rank: worst.zone.rank });
+  if (effectiveAck !== ackedKey) setAckedKey(effectiveAck);
+
+  const flashing = worst != null && worst.zone.rank >= OVERLAY_RANK && effectiveAck !== worst.key;
   const bannerColor = worst && worst.zone.rank > 0 ? zoneColorVar(worst.zone.key) : "var(--safe)";
 
   return (
@@ -122,7 +136,7 @@ export function MainStage({ items, staleAddrs, thr, unit, config, now, pinned, o
           })}
         </div>
 
-        {featuredAddr && (
+        {SIM_ENABLED && featuredAddr && (
           <ConditionsSimulator
             value={simTemp ?? items[0]?.temp_c ?? 24} active={simTemp != null}
             onChange={setSimTemp} onReset={() => setSimTemp(null)}

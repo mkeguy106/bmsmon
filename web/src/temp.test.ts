@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   REDODO_DEFAULTS, tempZone, tempFillPct, cToF, formatTemp, formatDelta,
-  marginToCutoffC, worstOf,
+  marginToCutoffC, nextAckedKey, worstOf,
 } from "./temp";
 
 const T = REDODO_DEFAULTS;
@@ -59,5 +59,30 @@ describe("margin + worst", () => {
     const a = { rank: 1 as const }, b = { rank: 3 as const }, c = { rank: 0 as const };
     expect(worstOf([a, b, c])).toBe(b);
     expect(worstOf([])).toBeUndefined();
+  });
+});
+
+// WEB-7: overlay ack with recovery re-arm (pure decision used by MainStage —
+// there is no component test harness, so the extracted function is tested).
+describe("nextAckedKey (overlay ack re-arm)", () => {
+  it("holds the ack while the condition persists at overlay severity", () => {
+    expect(nextAckedKey("critHot", { key: "critHot", rank: 3 })).toBe("critHot");
+    // Escalation keeps the old ack; the overlay flashes anyway because the key changed.
+    expect(nextAckedKey("critHot", { key: "cutoffHot", rank: 4 })).toBe("critHot");
+  });
+  it("recovery re-arms: clears when worst is null or below overlay rank", () => {
+    expect(nextAckedKey("critHot", null)).toBeNull();
+    expect(nextAckedKey("critHot", { key: "warnHot", rank: 2 })).toBeNull();
+    expect(nextAckedKey("critHot", { key: "safe", rank: 0 })).toBeNull();
+  });
+  it("re-entering the SAME zone after recovery is no longer suppressed", () => {
+    const afterRecovery = nextAckedKey("critHot", { key: "safe", rank: 0 });
+    expect(afterRecovery).toBeNull();
+    // Same zone returns → ack is null ≠ "critHot" → overlay flashes again.
+    expect(nextAckedKey(afterRecovery, { key: "critHot", rank: 3 })).toBeNull();
+  });
+  it("no-op when nothing is acked", () => {
+    expect(nextAckedKey(null, { key: "critHot", rank: 3 })).toBeNull();
+    expect(nextAckedKey(null, null)).toBeNull();
   });
 });

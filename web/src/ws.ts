@@ -1,3 +1,4 @@
+import { decodeSample, decodeSnapshot } from "./decode";
 import type { FleetItem, Sample } from "./types";
 
 // The server pushes a keepalive ({type:"ping"}) every ~25s when no telemetry is
@@ -50,9 +51,22 @@ export function connectLive(
     sock.onmessage = (e) => {
       if (ws !== sock) return;
       lastMsg = performance.now();
-      const msg = JSON.parse(e.data);
-      if (msg.type === "snapshot") onSnapshot(msg.fleet);
-      else if (msg.type === "sample") { const { type: _t, ...s } = msg; onSample(s); }
+      // WEB-4: a malformed frame must never kill the socket — warn + drop it.
+      let msg: unknown;
+      try { msg = JSON.parse(e.data); } catch (err) {
+        console.warn("bmsmon: ignoring malformed WS frame", err);
+        return;
+      }
+      if (typeof msg !== "object" || msg === null) return;
+      const m = msg as { type?: unknown; fleet?: unknown };
+      if (m.type === "snapshot") {
+        const fleet = decodeSnapshot(m.fleet);
+        if (fleet) onSnapshot(fleet);
+      } else if (m.type === "sample") {
+        // The whitelist decoder also strips the WS "type" tag.
+        const s = decodeSample(msg);
+        if (s) onSample(s);
+      }
       // {type:"ping"} keepalives just refresh lastMsg above.
     };
     sock.onclose = () => {
