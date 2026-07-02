@@ -52,6 +52,17 @@ Status legend: `OPEN` · `IN PROGRESS` · `FIXED` · `WONTFIX`
 | T3.7 | Remaining engine/VM cleanups: dual fleet writers, ETA computed twice, reporter.onStatus VM leak, UiState split/memoization | UI-3, UI-5, UI-6, UI-7 | FIXED |
 | T3.8 | Leftover server correctness: WS subscribe-before-snapshot + gap signal; bound `/web/samples`; per-batch battery upsert; shared `_jsonable` | SRV-10, SRV-11, SRV-13 | FIXED |
 
+### Tier 4 — low/info sweep (added 2026-07-02)
+
+| # | Item | Findings | Status |
+|---|------|----------|--------|
+| T4.1 | BLE polish: loop-local channel/wake, wake-on-frame, defensive frame copy + opcode assert, rotation≠unreachable, poll-rate comment, GATT status logging | BLE-5, BLE-6, BLE-7, BLE-8, BLE-12, BLE-13 | FIXED |
+| T4.2 | Data/cloud polish: reporter gating via settings flow + enqueue cap, retention triggers + byte math, cached settings snapshot, transactional CSV import, Room schema export + tsMs index, https-only base URL + `aud` claim, config-push 4xx handling | DATA-5, DATA-6, DATA-7, DATA-8, DATA-10, DATA-11, WEB-6b/6c (phone) | FIXED |
+| T4.3 | UI/model polish: disabled-in-stageAlert verify, charging-flap hysteresis, learnTail null-SOC, stale chart colors, severity constants, small smells + callback grouping, seam tests | UI-8..UI-14 | FIXED |
+| T4.4 | Server polish: `SampleIn` address/range validation, enroll rate limit, `aud` verify-if-present, temp-envelope optional columns, conftest cleanup | SRV-13 (rest), SEC-4 (partial), DATA-11 (server), WEB-6c (server), SRV-9 | FIXED |
+| T4.5 | Web polish: temp-envelope from synced config + correct resume copy, per-profile config selection, `useSyncExternalStore` + memoized cards, localStorage hook, stage-selection tests, error/loading UX | WEB-6, WEB-8, WEB-9, WEB-10 | FIXED |
+| — | `batch_seq` (DATA-13): WONTFIX — semantics documented server-side; `-1` is now the load-bearing import flag (skips live WS). `accepted` (SRV-9): honest count if cheap, else documented. WEB-11 = SRV-10, already FIXED. BLE-12: rate kept at 10 s deliberately (read-only, field-proven), comment added. | DATA-13, SRV-9, WEB-11, BLE-12 | RESOLVED BY POLICY |
+
 ---
 
 ## Findings — Android BLE / engine layer
@@ -331,6 +342,37 @@ direct-access-only); NAS `.env` secret strength; prod uvicorn staying single-pro
   (temp-config 200s via the full chain), and direct-container requests with spoofed
   `X-Authentik-*` admin headers now get **401** (SRV-3 attack path closed). GPS scrub
   task running (0 rows scrubbed — no data older than 3 years yet).
+- 2026-07-02 — Tier 4 web batch fixed (55/55 vitest, 22 added; tsc + prod build clean):
+  temp envelope resolves from the synced config per-field with hardcoded defaults as
+  fallback, threaded through every consumer; cold-warning banner copy now states the
+  real resume temperature (`charge_resume_cold_c`); newest-per-profile config
+  selection; `useSyncExternalStore` replaces the force-counter; `useLocalStorage` hook
+  (validating) for theme/unit/pins; `PackCard` memoized (stale-only "ago" strings so
+  connected cards skip the 1 s tick); REST fleet fallback polls every 10 s while the WS
+  is down, guarded by a NEW store rule — stale snapshot items refresh meta only, never
+  telemetry (fixes a latent snapshot-over-fresh-data regression, test-pinned);
+  stage-selection logic extracted to pure `selectStageItems()` + 6 tests; pre-snapshot
+  CONNECTING state distinct from empty fleet; AdminDevices distinguishes auth vs
+  network failures with inline retry.
+- 2026-07-02 — Tier 4 BLE batch fixed (209/209 tests, 8 added; written bytes unchanged):
+  control loop now receives its channel + wake as per-generation parameters (stale loops
+  can't steal the new generation's sessions); wake is a CONFLATED channel — fixes a
+  pre-existing lost-wake race — and fires on PollFrame/PollDrop/connect-outcome, so
+  frames deliver immediately instead of on the next 1 s tick; `writeStatus` writes a
+  defensive copy gated by pure `isSafeStatusFrame()` (length+opcode 0x13+checksum+
+  content-equality; refusal = no write, runtime `if`, uncompilable-out); planner drops
+  carry a reason — rotation no longer reports unreachable or logs link-down; dead
+  `firmwareFrame` removed; `slowPollMs` decision comment added; `connectGatt` uses
+  TRANSPORT_LE + dedicated handler thread; non-success GATT status codes and scan
+  failure codes now logged with meanings.
+- 2026-07-02 — Tier 4 server batch fixed (85/85 pytest, 17 added): ingest drops junk
+  addresses (printable-ASCII ≤32 rule, logged like the ts_ms filter, never 4xx); enroll
+  rate-limited (10/5 min per IP, XFF honored only behind the proxy secret); JWT `aud`
+  verified when present (`bmsmon-api`, older tokens without aud stay valid); temp-config
+  accepts + mirrors five optional envelope fields (also defuses the WEB-6b 422-forever
+  hazard for them); SRV-9 fixed honestly — `insert_samples` is now a single
+  `unnest ... ON CONFLICT DO NOTHING RETURNING` statement and `accepted` = rows actually
+  inserted (phone never reads it; verified).
 - 2026-07-02 (overnight) — Tier 3 committed per subsystem (b798a3d android, c15e3ff
   server, da5ff91 web, 4e18a21 docs), image built, deployed to ddnas02, and verified:
   health ok, unauth ingest 401, `/web` 302→Authentik, container healthy (new Dockerfile
@@ -341,3 +383,44 @@ direct-access-only); NAS `.env` secret strength; prod uvicorn staying single-pro
   (T1–T3) are now FIXED and deployed. Remaining findings are the untiered
   informational/low items (e.g. BLE-5/6/7/8/12/13, DATA-5/6/7/8/10/11/13, UI-8..14,
   SRV-9, WEB-6/8/9/10, temp-config contract edges) — none user-facing-critical.
+- 2026-07-02 — Tier 4 Android data/cloud + UI/model batch fixed (T4.2 + T4.3; 234/234
+  unit tests, 25 added):
+  - DATA-5/7: `TelemetryReporter` gates `report()` on a DataStore-flow-fed cached
+    `Persisted` snapshot (fresh within ms of construction and on every settings change);
+    the upload loop reads the same snapshot — zero `settings.load()` decodes remain on
+    the hot path (only the one-shot import paths still load). `OUTBOX_MAX` is also
+    enforced on the enqueue/drain path, amortized (count check every 500 inserts —
+    documented worst-case overshoot ~0.25% of the cap).
+  - DATA-6: retention now also triggers from `ingestRawOnly` (same 200-op counter) and
+    once unconditionally at repository construction (folded into the startup sweep op);
+    the raw-frame size cap converts hex chars → bytes (`rawFrameBytes`, /2) so 20 MB
+    means 20 MB (was effectively 10 MB).
+  - DATA-8: `importCsvOnce` batches samples 500/chunk inside `db.withTransaction`
+    (sessions still inserted inline for ids; buffer flushed before each rollup); still a
+    one-shot legacy path off the ops channel by design.
+  - DATA-10: `exportSchema = true` + `room.schemaLocation` → `app/schemas/…/3.json`
+    checked in; new bare `samples.tsMs` index via version 3 + `MIGRATION_2_3`
+    (index name verified against the generated schema).
+  - DATA-11 (phone): `normalizeApiBaseUrl` forces https (upgrades `http://`, prepends
+    scheme to bare hosts) at `SettingsStore.setApiBaseUrl`, VM `setApiBaseUrl`, and
+    `enroll`; device JWT now carries `aud: "bmsmon-api"` (server verifies-if-present —
+    **server must deploy before this app build ships**, already satisfied by T4.4).
+  - WEB-6b/6c (phone): pending temp-config push clears (with log) on a permanent 4xx
+    instead of re-POSTing forever (reuses PostResult); config body now carries the five
+    optional envelope fields (`cutoff_cold/hot_c`, `charge_lock_cold/hot_c`,
+    `charge_resume_cold_c`).
+  - UI-8: verified + seam-tested — `applyDisabled` → reachable-only filter means a
+    disabled stage pack raises no alert; unreachable-low-pack-no-alert documented at
+    `stagePacks()`.
+  - UI-9: pure `nextChargeHold` hysteresis (30 s latch after last Charging; genuine
+    Discharging un-suppresses immediately and clears the latch) wired into both the
+    stage overlay (UiState.withChargeHold in refresh) and the headless notifier.
+  - UI-10: `learnTail` drops null-SOC rows via pure `chargeSample` (null-SOC rows no
+    longer fabricate "below 98%" evidence — contrast pinned in test).
+  - UI-11: chart metric colors added to the `remember` key. UI-12: severity literals →
+    `SEVERITY_NONE`/`CAP_SEVERITY_*` + exhaustive `tempSeverity(TempRank)`, test-pinned.
+  - UI-13: `Row`→`PackRow`; `zone!!`→null-safe bind; "BELOW null%" fallback fixed;
+    `setStage` normalizes once for stage set + BLE; callback forest grouped into
+    immutable action holders (`ui/Actions.kt`: TopBar/Fleet/Roster/Monitoring/Alert/
+    Temp/Appearance/Display/Lock/Data/Cloud) — SettingsScreen 32→10 params,
+    HomeScreen 25→7, mechanical.
