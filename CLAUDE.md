@@ -255,15 +255,18 @@ uploads the profile's threshold config — signed + gzipped like telemetry, dura
 `POST /api/v1/config`; the WebUI mirrors it read-only. Telemetry uploads are **gzip-compressed**
 (`Content-Encoding: gzip`; server decompresses before the JWT body-hash verify).
 
-**Usage logging is intentionally ON right now — do not turn it off.** It records every
-telemetry sample to `…/Android/data/dev.joely.bmsmon/files/usage_log.csv` (columns incl.
-`current_a`, `power_w`, `regen`) so we can collect **real-world data to calibrate the UI later**:
+**Usage logging is intentionally ON right now — do not turn it off.** Every telemetry
+sample is recorded to the phone's Room DB (`bms.db`, `samples` table, columns incl.
+`current_a`, `power_w`, `regen`) via `TelemetryRepository`, and mirrored to the cloud
+Postgres when sync is enrolled, so we keep collecting **real-world data to calibrate the
+UI**:
 - the inner power ring's full scale `POWER_RING_FULL_W` (Fleet.kt; since **calibrated to 300 W** — see below),
 - the regen detection thresholds `REGEN_EPS` / `REGEN_WINDOW_MS` (Fleet.kt).
 
-Steady charging is being captured now as a baseline (`regen=0`); regen bursts while driving
-will log as `regen=1`. Pull the CSV (`adb pull …usage_log.csv`), find peak discharge `power_w`,
-and set the calibration constants. Logging + monitoring both persist across restarts.
+(The legacy `usage_log.csv` writer no longer exists — that file was one-time imported into
+Room; query the phone's `bms.db` or the cloud `samples` table instead of pulling a CSV.)
+Steady charging was captured as a baseline (`regen=0`); regen bursts while driving log as
+`regen=1`. Logging + monitoring both persist across restarts.
 
 The inner power ring full-scale `POWER_RING_FULL_W` (Fleet.kt) has been **calibrated to 300 W
 per pack** from real 2012-daily-driver logging. A fuller cumulative log (~96 k samples, ~5.5 k

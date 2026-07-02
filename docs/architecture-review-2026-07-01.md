@@ -43,13 +43,14 @@ Status legend: `OPEN` · `IN PROGRESS` · `FIXED` · `WONTFIX`
 
 | # | Item | Findings | Status |
 |---|------|----------|--------|
-| T3.1 | Headless temp notification hardcodes °F; web unit default dead code; web ack never re-arms | UI-4, WEB-3, WEB-7 | OPEN |
-| T3.2 | CancellationException swallowed; NaN-float guard in CloudJson; MonitorEngine default-db footgun | DATA-3, DATA-4, DATA-9 | OPEN |
-| T3.3 | Connection priority on stage change; monotonic clocks; BT-state receiver; START_STICKY; notif distinctUntilChanged | BLE-4, BLE-9, BLE-10, BLE-11 | OPEN |
-| T3.4 | Contract cruft: dead `cells` column, decorative `batch_seq`, import batches flooding WS, runtime WS/REST validation | WEB-4, WEB-5 | OPEN |
-| T3.5 | Ops: non-root container, HEALTHCHECK, Python lockfile, pinned bases/actions, single-worker constraint docs, dev-trust guard | SRV-12, SEC-10, SEC-11, SRV-8 | OPEN |
-| T3.6 | Docs drift: CLAUDE.md usage_log.csv paragraph (logging is Room-only now) | DATA-12 | OPEN |
-| T3.7 | Remaining engine/VM cleanups: dual fleet writers, ETA computed twice, reporter.onStatus VM leak, UiState split/memoization | UI-3, UI-5, UI-6, UI-7 | OPEN |
+| T3.1 | Headless temp notification hardcodes °F; web unit default dead code; web ack never re-arms | UI-4, WEB-3, WEB-7 | FIXED |
+| T3.2 | CancellationException swallowed; NaN-float guard in CloudJson; MonitorEngine default-db footgun | DATA-3, DATA-4, DATA-9 | FIXED |
+| T3.3 | Connection priority on stage change; monotonic clocks; BT-state receiver; START_STICKY; notif distinctUntilChanged | BLE-4, BLE-9, BLE-10, BLE-11 | FIXED |
+| T3.4 | Contract cruft: dead `cells` column, decorative `batch_seq`, import batches flooding WS, runtime WS/REST validation | WEB-4, WEB-5 | FIXED |
+| T3.5 | Ops: non-root container, HEALTHCHECK, Python lockfile, pinned bases/actions, single-worker constraint docs, dev-trust guard | SRV-12, SEC-10, SEC-11, SRV-8 | FIXED |
+| T3.6 | Docs drift: CLAUDE.md usage_log.csv paragraph (logging is Room-only now) | DATA-12 | FIXED |
+| T3.7 | Remaining engine/VM cleanups: dual fleet writers, ETA computed twice, reporter.onStatus VM leak, UiState split/memoization | UI-3, UI-5, UI-6, UI-7 | FIXED |
+| T3.8 | Leftover server correctness: WS subscribe-before-snapshot + gap signal; bound `/web/samples`; per-batch battery upsert; shared `_jsonable` | SRV-10, SRV-11, SRV-13 | FIXED |
 
 ---
 
@@ -287,6 +288,44 @@ direct-access-only); NAS `.env` secret strength; prod uvicorn staying single-pro
   `bmsmon-api` and adds the `bmsmon-proxy-secret` Traefik middleware
   (customRequestHeaders, UI-zone router only) — direct-container requests to `/web/*`
   and `/ws` now 401 without the header.
+- 2026-07-01 — Tier 3 BLE/service batch fixed (BLE-4/9/10/11; 201/201 tests, 18 added;
+  command bytes untouched): `BleSession.setHighPriority()` re-issues connection priority
+  when a held pack's stage membership changes (control-loop step, idempotent);
+  repository scheduling state now uses monotonic `elapsedRealtime()` (persisted/sample
+  timestamps stay wall-clock); BT off→on triggers `kickAll()` via an engine-owned
+  `ACTION_STATE_CHANGED` receiver; notification posts de-churned via
+  `distinctUntilChanged`; `START_STICKY` + `engine.restoreFromPersisted()` (pure
+  `restorePlan()` in new MonitorRestore.kt) resurrects monitoring headlessly after an
+  OS process kill — user Stop / swipe-from-Recents still fully end it. On-device
+  checks noted: BALANCED param update on pin, BT-toggle fast reconnect, sticky
+  restart via `am kill`, no notification flicker.
+- 2026-07-01 — Tier 3 server batch fixed (WEB-5 server parts, SRV-8/10/11/13, SEC-10/11,
+  SRV-12; 68/68 pytest; hardened Docker image built + run-verified locally):
+  dead `cells` column removed end-to-end (idempotent DROP COLUMN, cascade verified on
+  real partitions); historical-import batches (`batch_seq < 0`) no longer hit the live
+  WS; WS now subscribes before snapshotting and closes slow/overflowed clients (4408)
+  so they reconnect fresh; `/web/samples` clamped to 7 days + 100k rows; per-batch
+  battery upsert dedupe; shared `util.jsonable()`; dev-trust refused against non-local
+  DBs; single-worker constraint documented at all three load-bearing spots; Dockerfile:
+  non-root uid 10001 + HEALTHCHECK + `npm ci` (no fallback) + pinned
+  `requirements.lock` + explicit PYTHONPATH (bare `pip install .` footgun removed);
+  base images digest-pinned; workflow actions SHA-pinned.
+- 2026-07-01 — Tier 3 Android engine/VM batch fixed (UI-3/4/5/6/7, DATA-3/4/9; 183/183
+  tests, 7 added): ETA computed once in the engine and carried on
+  `BatteryStatus.etaFullMin`; reachability single-writer (`applyDisabled` in Fleet.kt,
+  engine marks disabled packs unreachable synchronously; VM no longer mutates fleet);
+  upload status flows through `MonitorState` (reporter hook now lives in the engine —
+  VM-leak gone); temp unit mirrored to the engine (`setTempAlertConfig(..., unit)`) and
+  °C users get °C notification margins — a unit change now also re-pushes cloud temp
+  config; CloudJson sanitizes non-finite floats; ops-channel rethrows
+  CancellationException; MonitorEngine default-db param removed; All-Batteries pipeline
+  memoized via `remember(...)`.
+- 2026-07-01 — Tier 3 web half fixed (WEB-3, WEB-7, WEB-4; 33/33 vitest, tsc + prod
+  build clean): temp-unit default now applies the phone's synced unit when no valid
+  localStorage choice exists; MainStage ack re-arms on recovery via pure
+  `nextAckedKey()` (temp.ts) so same-zone recurrences flash again; ConditionsSimulator
+  gated to dev builds / `?sim=1`; new zero-dep `decode.ts` whitelist decoders on every
+  WS frame + consumed REST response (malformed frames warn + drop, socket survives).
 - 2026-07-01 — GPS-retention image deployed to ddnas02; proxy secret live and verified:
   `/api/v1/health` ok, `/web/*` 302s to Authentik, logged-in dashboard traffic flows
   (temp-config 200s via the full chain), and direct-container requests with spoofed
