@@ -331,3 +331,13 @@ direct-access-only); NAS `.env` secret strength; prod uvicorn staying single-pro
   (temp-config 200s via the full chain), and direct-container requests with spoofed
   `X-Authentik-*` admin headers now get **401** (SRV-3 attack path closed). GPS scrub
   task running (0 rows scrubbed — no data older than 3 years yet).
+- 2026-07-02 (overnight) — Tier 3 committed per subsystem (b798a3d android, c15e3ff
+  server, da5ff91 web, 4e18a21 docs), image built, deployed to ddnas02, and verified:
+  health ok, unauth ingest 401, `/web` 302→Authentik, container healthy (new Dockerfile
+  HEALTHCHECK) and running as uid 10001 (non-root). Pixel updated in place
+  (`adb install -r` over wireless adb), relaunched, no crashes, MonitoringService
+  running, GATT registered, and **35 ingest POSTs in 2 min on the new container** —
+  the full phone→BLE→cloud pipeline confirmed live post-update. All review tiers
+  (T1–T3) are now FIXED and deployed. Remaining findings are the untiered
+  informational/low items (e.g. BLE-5/6/7/8/12/13, DATA-5/6/7/8/10/11/13, UI-8..14,
+  SRV-9, WEB-6/8/9/10, temp-config contract edges) — none user-facing-critical.
