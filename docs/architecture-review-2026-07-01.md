@@ -424,3 +424,11 @@ direct-access-only); NAS `.env` secret strength; prod uvicorn staying single-pro
     immutable action holders (`ui/Actions.kt`: TopBar/Fleet/Roster/Monitoring/Alert/
     Temp/Appearance/Display/Lock/Data/Cloud) — SettingsScreen 32→10 params,
     HomeScreen 25→7, mechanical.
+- 2026-07-02 — Tier 4 committed per subsystem (9234a3d android, b1ea222 server,
+  f2c8246 web, 20506ca docs), image built, deployed to ddnas02 (health ok, /web 302,
+  container healthy), and the Pixel updated in place over wireless adb in the correct
+  order (server first — required for the new JWT `aud` claim). Post-install: no
+  crashes, Room v2→v3 migration clean, MonitoringService running, and **48 ingest
+  POSTs / 0 auth failures in 1 min** with the new aud-bearing tokens.
+  **Every finding from the 2026-07-01 review is now FIXED or explicitly resolved by
+  policy. Review closed.**
