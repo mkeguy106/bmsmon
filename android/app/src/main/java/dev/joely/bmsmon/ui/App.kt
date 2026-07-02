@@ -6,6 +6,7 @@ import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.os.Build
 import android.view.WindowManager
@@ -101,10 +102,18 @@ fun App(vm: BatteryViewModel) {
 
     // Enter/exit Android Lock Task Mode to pin the app while locked. Device-owner-aware:
     // an ordinary install gets screen pinning (escapable via the system gesture); a
-    // provisioned device owner gets a true kiosk with no escape gesture.
+    // provisioned device owner gets a true kiosk with no escape gesture. Locking also
+    // freezes the orientation (SCREEN_ORIENTATION_LOCKED pins whatever is current at
+    // lock time); unlocking reverts to the app/sensor default.
     LaunchedEffect(activity, state.locked) {
         val act = activity ?: return@LaunchedEffect
-        if (state.locked) startLockTaskCompat(act) else runCatching { act.stopLockTask() }
+        if (state.locked) {
+            act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
+            startLockTaskCompat(act)
+        } else {
+            runCatching { act.stopLockTask() }
+            act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
     }
 
     // Notification permission (Android 13+) is requested opportunistically for the foreground-
