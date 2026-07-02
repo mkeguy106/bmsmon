@@ -427,6 +427,13 @@ Changes to the **stack** itself (`bmsmon/docker-compose.yml` or the shared `.env
 differently: push them to the `~/qnap-nas-docker` repo's `master` and its self-hosted runner
 (`.github/workflows/deploy.yml`) SSHes in and restarts the changed service.
 
+## Documentation
+
+A high-level summary of this project also lives in the Obsidian vault at
+`~/GoogleDrive/obsidian/notes/Bmsmon.md`. Update it alongside this file when
+the project's status or architecture changes meaningfully — it's a snapshot
+for cross-project reference, not a substitute for this CLAUDE.md's detail.
+
 ## Related Projects
 
 - [aiobmsble](https://github.com/patman15/aiobmsble) — Python async BLE BMS library (has `redodo_bms.py`)
