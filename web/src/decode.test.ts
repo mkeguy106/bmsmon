@@ -71,4 +71,22 @@ describe("decodeTempConfigs", () => {
     expect(decodeTempConfigs(null)).toBeNull();
     expect(warn).toHaveBeenCalled();
   });
+
+  // WEB-6: the five envelope fields are optional (older rows omit them).
+  it("carries the optional envelope fields through, tolerating null/absent", () => {
+    const env = {
+      cutoff_cold_c: -25, cutoff_hot_c: 65, charge_lock_cold_c: -2,
+      charge_lock_hot_c: 55, charge_resume_cold_c: 8,
+    };
+    expect(decodeTempConfigs([{ ...good, ...env }])).toEqual([{ ...good, ...env }]);
+    expect(decodeTempConfigs([{ ...good, cutoff_cold_c: null }]))
+      .toEqual([{ ...good, cutoff_cold_c: null }]); // null preserved, not coerced
+    expect(decodeTempConfigs([good])).toEqual([good]); // absent stays absent
+  });
+
+  it("a non-numeric envelope field invalidates the response (no coercion)", () => {
+    expect(decodeTempConfigs([{ ...good, cutoff_hot_c: "65" }])).toBeNull();
+    expect(decodeTempConfigs([{ ...good, charge_resume_cold_c: NaN }])).toBeNull();
+    expect(warn).toHaveBeenCalled();
+  });
 });

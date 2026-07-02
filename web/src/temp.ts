@@ -14,8 +14,21 @@ export const REDODO_DEFAULTS: TempThresholds = {
   coldCautionC: 5, hotCautionC: 45, coldCritC: -12, hotCritC: 53,
 };
 
-// Fixed Redodo envelope (BMS cutoffs + charge lock/resume points).
-export const ENV = { coldCutoffC: -20, hotCutoffC: 60, lockColdC: 0, lockHotC: 50 };
+/** BMS cutoffs + charge lock/resume points (the zone-ladder envelope). */
+export interface TempEnvelope {
+  coldCutoffC: number;
+  hotCutoffC: number;
+  lockColdC: number;
+  lockHotC: number;
+  chargeResumeColdC: number;
+}
+
+// Redodo profile defaults. WEB-6: the synced config may carry these per field
+// (older rows won't) — resolve via envelopeFromConfig, never read this directly
+// when a config is available.
+export const DEFAULT_ENV: TempEnvelope = {
+  coldCutoffC: -20, hotCutoffC: 60, lockColdC: 0, lockHotC: 50, chargeResumeColdC: 5,
+};
 
 export type TempRank = 0 | 1 | 2 | 3 | 4; // SAFE, CAUTION, WARNING, CRITICAL, CUTOFF
 export type TempSide = "cold" | "hot" | "safe";
@@ -29,8 +42,8 @@ export interface Zone { key: ZoneKey; rank: TempRank; side: TempSide }
 const z = (key: ZoneKey, rank: TempRank, side: TempSide): Zone => ({ key, rank, side });
 
 /** Classify a cell temperature severity-first (cold→hot). Mirrors the phone. */
-export function tempZone(tempC: number, t: TempThresholds): Zone {
-  const { coldCutoffC, hotCutoffC, lockColdC, lockHotC } = ENV;
+export function tempZone(tempC: number, t: TempThresholds, env: TempEnvelope = DEFAULT_ENV): Zone {
+  const { coldCutoffC, hotCutoffC, lockColdC, lockHotC } = env;
   if (tempC <= coldCutoffC) return z("cutoffCold", 4, "cold");
   if (tempC <= t.coldCritC) return z("critCold", 3, "cold");
   if (tempC <= lockColdC) return z("warnCold", 2, "cold");
@@ -58,8 +71,8 @@ export const formatDelta = (dC: number, unit: TempUnit): string =>
 /** "c°C / f°F" for the profile panel / zone copy. */
 export const dualStr = (c: number): string => `${c}°C / ${cToF(c)}°F`;
 
-export const marginToCutoffC = (tempC: number, side: TempSide): number =>
-  side === "cold" ? tempC - ENV.coldCutoffC : side === "hot" ? ENV.hotCutoffC - tempC : 0;
+export const marginToCutoffC = (tempC: number, side: TempSide, env: TempEnvelope = DEFAULT_ENV): number =>
+  side === "cold" ? tempC - env.coldCutoffC : side === "hot" ? env.hotCutoffC - tempC : 0;
 
 export const worstOf = <T extends { rank: TempRank }>(items: T[]): T | undefined =>
   items.reduce<T | undefined>((a, b) => (a === undefined || b.rank > a.rank ? b : a), undefined);
@@ -99,8 +112,8 @@ export const zoneLabel = (key: ZoneKey): string => ({
 }[key]);
 
 /** Human title + message for the alert banner (from the design's Z table). */
-export function zoneCopy(key: ZoneKey, t: TempThresholds): { title: string; msg: string } {
-  const { coldCutoffC, hotCutoffC, lockColdC, lockHotC } = ENV;
+export function zoneCopy(key: ZoneKey, t: TempThresholds, env: TempEnvelope = DEFAULT_ENV): { title: string; msg: string } {
+  const { coldCutoffC, hotCutoffC, lockColdC, lockHotC } = env;
   switch (key) {
     case "safe":
       return { title: "All packs within the safe window", msg: "No temperature action required." };
@@ -108,8 +121,10 @@ export function zoneCopy(key: ZoneKey, t: TempThresholds): { title: string; msg:
       return { title: "Getting cold",
         msg: `Charging locks out below ${dualStr(lockColdC)}. Warm the pack before charging.` };
     case "warnCold":
+      // WEB-6: charging resumes at the charge-resume point (default 5 °C), NOT
+      // at the (tunable) cold-caution threshold the old copy referenced.
       return { title: "Charge locked (low temp)",
-        msg: `BMS has paused charging. It resumes once cells warm above ${dualStr(t.coldCautionC)}.` };
+        msg: `BMS has paused charging. It resumes once cells warm above ${dualStr(env.chargeResumeColdC)}.` };
     case "critCold":
       return { title: "Approaching cold cutoff",
         msg: `Heading for the ${dualStr(coldCutoffC)} discharge cutoff. Get to warmth or shelter NOW — you still have power.` };
@@ -142,6 +157,13 @@ export interface TempConfig {
   unit: string;
   updated_at_ms: number;
   received_at: string;
+  // WEB-6: envelope fields synced from the phone. Optional/nullable — older
+  // rows predate them; resolve per-field via envelopeFromConfig.
+  cutoff_cold_c?: number | null;
+  cutoff_hot_c?: number | null;
+  charge_lock_cold_c?: number | null;
+  charge_lock_hot_c?: number | null;
+  charge_resume_cold_c?: number | null;
 }
 
 export const thresholdsFromConfig = (c: TempConfig | null): TempThresholds =>
@@ -149,3 +171,33 @@ export const thresholdsFromConfig = (c: TempConfig | null): TempThresholds =>
     coldCautionC: c.cold_caution_c, hotCautionC: c.hot_caution_c,
     coldCritC: c.cold_crit_c, hotCritC: c.hot_crit_c,
   };
+
+/** WEB-6: zone-ladder envelope from the synced config, per-field fallback to defaults. */
+export const envelopeFromConfig = (c: TempConfig | null): TempEnvelope =>
+  c == null ? DEFAULT_ENV : {
+    coldCutoffC: c.cutoff_cold_c ?? DEFAULT_ENV.coldCutoffC,
+    hotCutoffC: c.cutoff_hot_c ?? DEFAULT_ENV.hotCutoffC,
+    lockColdC: c.charge_lock_cold_c ?? DEFAULT_ENV.lockColdC,
+    lockHotC: c.charge_lock_hot_c ?? DEFAULT_ENV.lockHotC,
+    chargeResumeColdC: c.charge_resume_cold_c ?? DEFAULT_ENV.chargeResumeColdC,
+  };
+
+/**
+ * WEB-6: pick the active config from GET /web/temp-config (was `configs[0]`,
+ * which silently ignored profile_id). Group by profile_id, keep the newest per
+ * profile, then take the newest overall — deterministic, and correct today
+ * because the fleet is single-profile. When packs gain a profile mapping,
+ * keep the per-profile map and swap the final pick for a per-pack lookup.
+ */
+export function selectActiveConfig(configs: TempConfig[]): TempConfig | null {
+  const newestByProfile = new Map<string, TempConfig>();
+  for (const c of configs) {
+    const cur = newestByProfile.get(c.profile_id);
+    if (cur == null || c.updated_at_ms > cur.updated_at_ms) newestByProfile.set(c.profile_id, c);
+  }
+  let active: TempConfig | null = null;
+  for (const c of newestByProfile.values()) {
+    if (active == null || c.updated_at_ms > active.updated_at_ms) active = c;
+  }
+  return active;
+}

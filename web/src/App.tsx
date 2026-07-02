@@ -1,78 +1,122 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { AdminDevices } from "./components/AdminDevices";
 import { AllBatteries } from "./components/AllBatteries";
 import { MainStage } from "./components/MainStage";
 import { BatteryProfilePanel } from "./components/BatteryProfilePanel";
-import { getTempConfig } from "./api";
+import { getFleet, getTempConfig } from "./api";
 import { connectLive } from "./ws";
 import { createStore } from "./store";
-import { thresholdsFromConfig, type TempConfig, type TempUnit } from "./temp";
+import { selectStageItems } from "./stage";
+import {
+  envelopeFromConfig, selectActiveConfig, thresholdsFromConfig,
+  type TempConfig, type TempUnit,
+} from "./temp";
+import { readStored, useLocalStorage, type Codec } from "./useLocalStorage";
 import type { FleetItem } from "./types";
 
 // The phone polls background packs slowly (a pack can go ~a minute between reports), so only
 // treat a pack as disconnected after a generous gap — otherwise cards flap to DISCONNECTED.
 const STALE_MS = 90_000;
 
-// The user's explicit unit choice, if any. Garbage values are treated as absent.
-const storedUnit = (): TempUnit | null => {
-  try {
-    const v = localStorage.getItem("bmsmon-temp-unit");
-    return v === "C" || v === "F" ? v : null;
-  } catch (e) { return null; }
+// WEB-8: while the WS is down, fall back to REST snapshots at this cadence.
+const REST_FALLBACK_MS = 10_000;
+
+// Module-level codecs: useLocalStorage keys its setter identity on these.
+const themeCodec: Codec<"dark" | "light"> = {
+  decode: (raw) => (raw === "dark" || raw === "light" ? raw : null),
+  encode: (v) => v,
+};
+const unitCodec: Codec<TempUnit> = {
+  decode: (raw) => (raw === "C" || raw === "F" ? raw : null),
+  encode: (v) => v,
+};
+const pinsCodec: Codec<Set<string>> = {
+  decode: (raw) => {
+    const a: unknown = JSON.parse(raw);
+    return Array.isArray(a) ? new Set(a.filter((x): x is string => typeof x === "string")) : null;
+  },
+  encode: (s) => JSON.stringify([...s]),
 };
 
 export default function App() {
   const store = useRef(createStore()).current;
-  const [v, force] = useState(0);
+  // WEB-8: subscribe via useSyncExternalStore — the store's version counter is
+  // the snapshot, so a change re-renders exactly once (no manual force-counter).
+  const v = useSyncExternalStore(store.subscribe, store.getVersion);
   const [live, setLive] = useState(false);
+  // WEB-10: false until the first fleet snapshot (WS or REST fallback) lands —
+  // distinguishes "no data yet" from a genuinely empty fleet.
+  const [booted, setBooted] = useState(false);
   const [now, setNow] = useState(Date.now());
-  const [theme, setTheme] = useState<"dark" | "light">(
-    () => (document.documentElement.dataset.theme === "light" ? "light" : "dark"),
-  );
+
+  // The index.html pre-paint script applies the stored theme to <html> before
+  // React mounts, so storage (validated) and the DOM fallback always agree.
+  const [theme, setTheme] = useLocalStorage<"dark" | "light">("bmsmon-theme",
+    () => (document.documentElement.dataset.theme === "light" ? "light" : "dark"), themeCodec);
   const toggleTheme = () => {
     const next = theme === "dark" ? "light" : "dark";
     document.documentElement.dataset.theme = next;
-    try { localStorage.setItem("bmsmon-theme", next); } catch (e) { /* not persisted */ }
     setTheme(next);
   };
 
   // Temperature alert config synced from the phone (read-only). Poll periodically.
+  // WEB-6: pick the active config per profile (newest per profile_id, newest
+  // overall wins) instead of blindly taking configs[0].
   const [tempConfig, setTempConfig] = useState<TempConfig | null>(null);
   useEffect(() => {
     let alive = true;
     const load = () => getTempConfig()
-      .then((r) => { if (alive) setTempConfig(r.configs[0] ?? null); })
+      .then((r) => { if (alive) setTempConfig(selectActiveConfig(r.configs)); })
       .catch(() => { /* keep last */ });
     load();
     const t = setInterval(load, 60_000);
     return () => { alive = false; clearInterval(t); };
   }, []);
   const thr = useMemo(() => thresholdsFromConfig(tempConfig), [tempConfig]);
+  const env = useMemo(() => envelopeFromConfig(tempConfig), [tempConfig]);
 
-  const [unit, setUnit] = useState<TempUnit>(() => storedUnit() ?? "F");
+  const [unit, setUnit, setUnitLocal] = useLocalStorage<TempUnit>("bmsmon-temp-unit", () => "F", unitCodec);
   // WEB-3: default to the phone's synced unit. The lazy initializer above runs
   // before tempConfig has loaded, so apply the synced unit when it arrives —
-  // but only while the user hasn't chosen one (a stored choice always wins).
+  // but only while the user hasn't chosen one (a stored choice always wins);
+  // setUnitLocal deliberately does NOT persist, so the synced default never
+  // masquerades as a user choice.
   useEffect(() => {
-    if (tempConfig == null || storedUnit() != null) return;
-    setUnit(tempConfig.unit === "C" ? "C" : "F");
-  }, [tempConfig]);
-  const toggleUnit = () => {
-    const next: TempUnit = unit === "F" ? "C" : "F";
-    try { localStorage.setItem("bmsmon-temp-unit", next); } catch (e) { /* not persisted */ }
-    setUnit(next);
-  };
+    if (tempConfig == null || readStored("bmsmon-temp-unit", unitCodec.decode) != null) return;
+    setUnitLocal(tempConfig.unit === "C" ? "C" : "F");
+  }, [tempConfig, setUnitLocal]);
+  const toggleUnit = () => setUnit(unit === "F" ? "C" : "F");
 
-  useEffect(() => {
-    const unsub = store.subscribe(() => force((n) => n + 1));
-    return () => { unsub(); };
-  }, [store]);
-  useEffect(() => connectLive(store.applySnapshot, store.applySample, setLive), [store]);
+  useEffect(() => connectLive(
+    (f) => { store.applySnapshot(f); setBooted(true); },
+    store.applySample,
+    setLive,
+  ), [store]);
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, []);
 
+  // WEB-8: REST fallback — if the WS stays down for a fallback period, poll the
+  // fleet snapshot over REST until it reconnects. applySnapshot merges through
+  // the store's ts-guard, so a late/stale REST response can never regress
+  // fresher WS data. First fetch fires REST_FALLBACK_MS after the WS drops.
+  useEffect(() => {
+    if (live) return;
+    let alive = true;
+    const t = setInterval(() => {
+      getFleet()
+        .then((r) => {
+          if (!alive) return;
+          store.applySnapshot(r.fleet);
+          setBooted(true);
+        })
+        .catch(() => { /* still down — retry on the next tick */ });
+    }, REST_FALLBACK_MS);
+    return () => { alive = false; clearInterval(t); };
+  }, [live, store]);
+
+  // v (the store version) is the real dependency: the fleet only changes when it bumps.
   const items: FleetItem[] = useMemo(
     () => Object.values(store.getFleet()).sort((a, b) => (a.alias ?? "").localeCompare(b.alias ?? "")),
-    [store, now, v],
+    [store, v],
   );
   const staleAddrs = useMemo(
     () => new Set(items.filter((i) => now - i.ts_ms > STALE_MS).map((i) => i.address)),
@@ -83,37 +127,19 @@ export default function App() {
     [items, staleAddrs],
   );
 
-  // Main stage = the WHOLE active base (group), not a single pack. The lead pack is a fresh
-  // discharging pack, else the most-recently-updated pack; the stage then shows every pack in
-  // that pack's group, stably ordered, so it doesn't jump as packs poll in and out.
-  // Pinned packs (by address, persisted). If any are pinned, the main stage shows exactly those;
-  // otherwise it falls back to automatic base selection.
-  const [pinned, setPinned] = useState<Set<string>>(() => {
-    try { return new Set(JSON.parse(localStorage.getItem("bmsmon-pins") || "[]") as string[]); }
-    catch (e) { return new Set(); }
-  });
-  const togglePin = (addr: string) => setPinned((prev) => {
+  // Pinned packs (by address, persisted). If any are pinned, the main stage shows exactly
+  // those; otherwise selectStageItems falls back to automatic base selection.
+  const [pinned, setPinned] = useLocalStorage<Set<string>>("bmsmon-pins", () => new Set(), pinsCodec);
+  const togglePin = useCallback((addr: string) => setPinned((prev) => {
     const next = new Set(prev);
     if (next.has(addr)) next.delete(addr); else next.add(addr);
-    try { localStorage.setItem("bmsmon-pins", JSON.stringify([...next])); } catch (e) { /* not persisted */ }
     return next;
-  });
+  }), [setPinned]);
 
-  const stageItems = useMemo(() => {
-    const byAlias = (a: FleetItem, b: FleetItem) => (a.alias ?? "").localeCompare(b.alias ?? "");
-    const pins = items.filter((i) => pinned.has(i.address));
-    if (pins.length > 0) return pins.slice().sort(byAlias);
-    const fresh = items.filter((i) => !staleAddrs.has(i.address));
-    const byRecent = (a: FleetItem, b: FleetItem) => b.ts_ms - a.ts_ms;
-    const lead =
-      fresh.find((i) => (i.current_a ?? 0) < -0.1) ??
-      fresh.slice().sort(byRecent)[0] ??
-      items.slice().sort(byRecent)[0];
-    if (!lead) return [];
-    const gid = lead.group_id;
-    if (!gid) return [lead];
-    return items.filter((i) => i.group_id === gid).sort(byAlias);
-  }, [items, staleAddrs, pinned]);
+  const stageItems = useMemo(
+    () => selectStageItems(items, staleAddrs, pinned),
+    [items, staleAddrs, pinned],
+  );
 
   const [view, setView] = useState<"dashboard" | "settings">("dashboard");
 
@@ -125,7 +151,7 @@ export default function App() {
           color: live ? "var(--regen)" : "var(--text3)", fontSize: 13 }}>
           <span style={{ width: 9, height: 9, borderRadius: "50%",
             background: live ? "var(--regen)" : "var(--text3)" }} />
-          {live ? "LIVE" : "RECONNECTING…"}
+          {live ? "LIVE" : booted ? "RECONNECTING…" : "CONNECTING…"}
         </span>
         <span style={{ display: "flex", alignItems: "center", gap: 8,
           color: gpsActive ? "var(--regen)" : "var(--text3)", fontSize: 13 }}>
@@ -167,15 +193,23 @@ export default function App() {
           <div className="mono" style={{ color: "var(--text3)", fontSize: 11, letterSpacing: 2, margin: "0 4px" }}>
             SETTINGS
           </div>
-          <BatteryProfilePanel thr={thr} unit={unit} />
+          <BatteryProfilePanel thr={thr} env={env} />
           <AdminDevices />
+        </div>
+      ) : !booted ? (
+        // WEB-10: before the first snapshot we don't know the fleet yet — show a
+        // connecting state instead of "No active base" over an empty grid.
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10,
+          padding: "96px 0", color: "var(--text3)" }}>
+          <span className="mono" style={{ fontSize: 12, letterSpacing: 2 }}>CONNECTING…</span>
+          <span style={{ fontSize: 13 }}>Waiting for the first fleet snapshot.</span>
         </div>
       ) : (
       <div style={{ display: "grid", gap: 24 }}>
         <MainStage items={stageItems} staleAddrs={staleAddrs}
-          thr={thr} unit={unit} config={tempConfig} now={now}
+          thr={thr} env={env} unit={unit} config={tempConfig} now={now}
           pinned={pinned} onTogglePin={togglePin} />
-        <AllBatteries items={items} staleAddrs={staleAddrs} thr={thr} unit={unit}
+        <AllBatteries items={items} staleAddrs={staleAddrs} thr={thr} env={env} unit={unit}
           now={now} pinned={pinned} onTogglePin={togglePin} />
       </div>
       )}

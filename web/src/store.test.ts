@@ -58,4 +58,32 @@ describe("store", () => {
     s.applySample({ address: "B", ts_ms: 1, soc: 10 });
     expect(calls).toBe(1);
   });
+
+  // WEB-8: the REST fallback applies snapshots too — a late/stale REST
+  // response must never regress telemetry a fresher WS sample already wrote.
+  it("a stale snapshot item cannot regress a fresher sample (REST fallback race)", () => {
+    const s = createStore();
+    s.applySample({ address: "A", ts_ms: 300, soc: 61, voltage_v: 13.1 });
+    s.applySnapshot([{ address: "A", ts_ms: 200, soc: 55, voltage_v: 12.9, alias: "2012 · A", group_id: "2012" }]);
+    const a = s.getFleet()["A"];
+    expect(a.ts_ms).toBe(300);
+    expect(a.soc).toBe(61); // fresher WS telemetry kept
+    expect(a.alias).toBe("2012 · A"); // meta still refreshed
+    expect(a.group_id).toBe("2012");
+    // An equal-or-newer snapshot still applies in full (WS reconnect path).
+    s.applySnapshot([{ address: "A", ts_ms: 400, soc: 62, alias: "2012 · A" }]);
+    expect(s.getFleet()["A"].soc).toBe(62);
+  });
+
+  // WEB-8: getVersion is the useSyncExternalStore snapshot — it must bump on
+  // every notified change and hold steady when a sample is ignored.
+  it("bumps the version on change, not on ignored samples", () => {
+    const s = createStore();
+    const v0 = s.getVersion();
+    s.applySample({ address: "A", ts_ms: 100, soc: 50 });
+    const v1 = s.getVersion();
+    expect(v1).toBeGreaterThan(v0);
+    s.applySample({ address: "A", ts_ms: 50, soc: 99 }); // older → ignored, no notify
+    expect(s.getVersion()).toBe(v1);
+  });
 });

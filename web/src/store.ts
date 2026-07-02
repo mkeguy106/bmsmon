@@ -3,11 +3,25 @@ import type { FleetItem, Sample } from "./types";
 export function createStore() {
   const fleet: Record<string, FleetItem> = {};
   const subs = new Set<() => void>();
-  const notify = () => subs.forEach((f) => f());
+  // Monotonic version, bumped on every change — a stable getSnapshot for
+  // React's useSyncExternalStore (the fleet object itself is mutable).
+  let version = 0;
+  const notify = () => { version++; subs.forEach((f) => f()); };
 
   const merge = (s: Sample, meta?: Partial<FleetItem>) => {
     const cur = fleet[s.address];
     if (cur && cur.ts_ms >= s.ts_ms && !meta) return false;
+    if (cur && cur.ts_ms > s.ts_ms && meta) {
+      // Stale snapshot item — e.g. the REST fallback response landing after a
+      // fresher WS sample already arrived. Never regress telemetry/ts; only
+      // refresh the alias/group meta the snapshot legitimately carries.
+      fleet[s.address] = {
+        ...cur,
+        ...("alias" in meta ? { alias: meta.alias } : null),
+        ...("group_id" in meta ? { group_id: meta.group_id } : null),
+      };
+      return true;
+    }
     if (cur && s.link_event != null) {
       // Link-event samples ("Connected"/"Disconnected") carry no telemetry —
       // the server rematerializes every omitted field as an explicit null, and
@@ -31,6 +45,7 @@ export function createStore() {
 
   return {
     getFleet: () => fleet,
+    getVersion: () => version,
     applySnapshot(items: FleetItem[]) {
       items.forEach((i) => merge(i, i));
       notify();

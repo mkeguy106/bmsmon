@@ -1,4 +1,4 @@
-import { dualStr, ENV, type TempThresholds } from "../temp";
+import { dualStr, type TempEnvelope, type TempThresholds } from "../temp";
 
 const SPECS: [string, string][] = [
   ["CHEMISTRY", "LiFePO4"], ["NOMINAL", "12.8 V"], ["CAPACITY", "100 Ah"], ["ENERGY", "1280 Wh"],
@@ -7,24 +7,28 @@ const SPECS: [string, string][] = [
   ["EXPANSION", "4S4P · 20.5 kWh"], ["WARRANTY", "5 yr"],
 ];
 
-function rows(t: TempThresholds) {
+function rows(t: TempThresholds, env: TempEnvelope) {
   return [
     { zone: "CAUTION · COLD", cond: `≤ ${dualStr(t.coldCautionC)}`, action: "Charge lockout imminent — warm pack before charging.", color: "var(--cool)" },
     { zone: "CAUTION · HOT", cond: `≥ ${dualStr(t.hotCautionC)}`, action: "Approaching charge limit — improve airflow.", color: "var(--warm)" },
-    { zone: "CHARGE LOCK · COLD", cond: `≤ ${dualStr(ENV.lockColdC)}`, action: "BMS pauses charging; resumes above caution temp.", color: "var(--cold)" },
-    { zone: "CHARGE LOCK · HOT", cond: `≥ ${dualStr(ENV.lockHotC)}`, action: "Above max charge temp — stop charging, cool pack.", color: "var(--hot)" },
+    // WEB-6: charging resumes at the charge-resume point, not the caution threshold.
+    { zone: "CHARGE LOCK · COLD", cond: `≤ ${dualStr(env.lockColdC)}`, action: `BMS pauses charging; resumes above ${dualStr(env.chargeResumeColdC)}.`, color: "var(--cold)" },
+    { zone: "CHARGE LOCK · HOT", cond: `≥ ${dualStr(env.lockHotC)}`, action: "Above max charge temp — stop charging, cool pack.", color: "var(--hot)" },
     { zone: "CRITICAL · COLD", cond: `≤ ${dualStr(t.coldCritC)}`, action: "Approaching cutoff — act NOW while power remains.", color: "var(--critical)" },
     { zone: "CRITICAL · HOT", cond: `≥ ${dualStr(t.hotCritC)}`, action: "Approaching cutoff — act NOW while power remains.", color: "var(--critical)" },
-    { zone: "CUTOFF · COLD", cond: `≤ ${dualStr(ENV.coldCutoffC)}`, action: "BMS disconnects the load — pack goes offline.", color: "var(--critical)" },
-    { zone: "CUTOFF · HOT", cond: `≥ ${dualStr(ENV.hotCutoffC)}`, action: "Over-temp protection — pack goes offline.", color: "var(--critical)" },
+    { zone: "CUTOFF · COLD", cond: `≤ ${dualStr(env.coldCutoffC)}`, action: "BMS disconnects the load — pack goes offline.", color: "var(--critical)" },
+    { zone: "CUTOFF · HOT", cond: `≥ ${dualStr(env.hotCutoffC)}`, action: "Over-temp protection — pack goes offline.", color: "var(--critical)" },
   ];
 }
+
+/** Position on the gauge scale: −30…+70 °C maps to 0…100%. */
+const pct = (tC: number): number => tC + 30;
 
 const Label = ({ children }: { children: React.ReactNode }) => (
   <div className="mono" style={{ color: "var(--text3)", fontSize: 11, letterSpacing: 2 }}>{children}</div>
 );
 
-export function BatteryProfilePanel({ thr }: { thr: TempThresholds; unit: string }) {
+export function BatteryProfilePanel({ thr, env }: { thr: TempThresholds; env: TempEnvelope }) {
   return (
     <div style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 16, padding: 24 }}>
       <Label>BATTERY PROFILE</Label>
@@ -44,20 +48,27 @@ export function BatteryProfilePanel({ thr }: { thr: TempThresholds; unit: string
       </div>
 
       <Label>TEMPERATURE SAFETY ENVELOPE</Label>
+      {/* WEB-6: band geometry + labels derive from the resolved envelope/thresholds. */}
       <div style={{ position: "relative", height: 86, margin: "14px 8px 6px" }}>
-        <div style={{ position: "absolute", top: 6, left: "10%", width: "80%", height: 22, borderRadius: 6,
+        <div style={{ position: "absolute", top: 6, left: `${pct(env.coldCutoffC)}%`,
+          width: `${pct(env.hotCutoffC) - pct(env.coldCutoffC)}%`, height: 22, borderRadius: 6,
           background: "rgba(46,204,113,0.10)", border: "1px solid rgba(46,204,113,0.35)",
           display: "flex", alignItems: "center", padding: "0 10px" }}>
-          <span className="mono" style={{ fontSize: 10, color: "var(--text2)" }}>DISCHARGE  −20 → 60°C</span>
+          <span className="mono" style={{ fontSize: 10, color: "var(--text2)" }}>
+            DISCHARGE  {env.coldCutoffC} → {env.hotCutoffC}°C</span>
         </div>
-        <div style={{ position: "absolute", top: 6, left: "10%", width: "8%", height: 22, borderRadius: "6px 0 0 6px",
+        <div style={{ position: "absolute", top: 6, left: `${pct(env.coldCutoffC)}%`,
+          width: `${pct(thr.coldCritC) - pct(env.coldCutoffC)}%`, height: 22, borderRadius: "6px 0 0 6px",
           background: "rgba(229,52,43,0.28)", border: "1px solid rgba(229,52,43,0.6)" }} />
-        <div style={{ position: "absolute", top: 6, left: "83%", width: "7%", height: 22, borderRadius: "0 6px 6px 0",
+        <div style={{ position: "absolute", top: 6, left: `${pct(thr.hotCritC)}%`,
+          width: `${pct(env.hotCutoffC) - pct(thr.hotCritC)}%`, height: 22, borderRadius: "0 6px 6px 0",
           background: "rgba(229,52,43,0.28)", border: "1px solid rgba(229,52,43,0.6)" }} />
-        <div style={{ position: "absolute", top: 34, left: "30%", width: "50%", height: 22, borderRadius: 6,
+        <div style={{ position: "absolute", top: 34, left: `${pct(env.lockColdC)}%`,
+          width: `${pct(env.lockHotC) - pct(env.lockColdC)}%`, height: 22, borderRadius: 6,
           background: "rgba(230,126,34,0.10)", border: "1px solid rgba(230,126,34,0.35)",
           display: "flex", alignItems: "center", padding: "0 10px" }}>
-          <span className="mono" style={{ fontSize: 10, color: "var(--text2)" }}>CHARGE  0 → 50°C</span>
+          <span className="mono" style={{ fontSize: 10, color: "var(--text2)" }}>
+            CHARGE  {env.lockColdC} → {env.lockHotC}°C</span>
         </div>
         <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: 18, borderTop: "1px solid var(--divider)" }}>
           {[["0", "0"], ["30%", "0"], ["55%", "25"], ["80%", "50"]].map(([left, label], i) => (
@@ -74,7 +85,7 @@ export function BatteryProfilePanel({ thr }: { thr: TempThresholds; unit: string
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 26px", marginTop: 18 }}>
-        {rows(thr).map((r) => (
+        {rows(thr, env).map((r) => (
           <div key={r.zone} style={{ display: "flex", alignItems: "flex-start", gap: 11, padding: "9px 0",
             borderTop: "1px solid var(--divider)" }}>
             <span style={{ width: 8, height: 8, borderRadius: "50%", marginTop: 5, flex: "none", background: r.color }} />

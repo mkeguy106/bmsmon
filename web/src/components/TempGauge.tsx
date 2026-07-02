@@ -1,6 +1,6 @@
 import {
-  ENV, formatTemp, tempFillPct, tempZone, zoneColorVar,
-  type TempThresholds, type TempUnit,
+  formatTemp, tempFillPct, tempZone, zoneColorVar,
+  type TempEnvelope, type TempThresholds, type TempUnit,
 } from "../temp";
 
 // Fixed zone-band washes (bottom fraction, height fraction, rgba) — cold→hot.
@@ -13,19 +13,19 @@ const BANDS: [number, number, string][] = [
 ];
 
 /** Vertical temperature thermometer. −30…+70°C maps to 0…100%. */
-export function TempGauge({ tempC, thr, unit }:
-  { tempC: number; thr: TempThresholds; unit: TempUnit }) {
-  const zone = tempZone(tempC, thr);
+export function TempGauge({ tempC, thr, env, unit }:
+  { tempC: number; thr: TempThresholds; env: TempEnvelope; unit: TempUnit }) {
+  const zone = tempZone(tempC, thr, env);
   const color = zoneColorVar(zone.key);
   const fill = tempFillPct(tempC);
   const markerShadow = zone.rank >= 3
     ? `0 0 22px ${color}, 0 0 8px ${color}`
     : zone.rank > 0 ? `0 0 14px ${color}, 0 0 4px ${color}` : `0 0 8px ${color}`;
   const ticks = [
-    { t: ENV.hotCutoffC, note: "CUTOFF" },
+    { t: env.hotCutoffC, note: "CUTOFF" },
     { t: thr.hotCritC, note: "CRITICAL" },
     { t: thr.coldCritC, note: "CRITICAL" },
-    { t: ENV.coldCutoffC, note: "CUTOFF" },
+    { t: env.coldCutoffC, note: "CUTOFF" },
   ];
   return (
     <div style={{ display: "flex", alignItems: "stretch", gap: 10 }}>

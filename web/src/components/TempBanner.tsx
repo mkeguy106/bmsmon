@@ -1,13 +1,13 @@
 import {
   formatDelta, marginToCutoffC, zoneColorVar, zoneCopy, zoneLabel,
-  type TempThresholds, type TempUnit, type Zone,
+  type TempEnvelope, type TempThresholds, type TempUnit, type Zone,
 } from "../temp";
 
 export interface PackTemp { name: string; tempC: number; zone: Zone }
 
 /** Escalating alert banner reflecting the worst stage pack (mirrors the phone's stage banner). */
-export function TempBanner({ worst, thr, unit }:
-  { worst: PackTemp | null; thr: TempThresholds; unit: TempUnit }) {
+export function TempBanner({ worst, thr, env, unit }:
+  { worst: PackTemp | null; thr: TempThresholds; env: TempEnvelope; unit: TempUnit }) {
   if (!worst || worst.zone.rank === 0) {
     return (
       <Banner color="var(--safe)" border="rgba(46,204,113,0.35)" bg="rgba(46,204,113,0.07)"
@@ -15,10 +15,10 @@ export function TempBanner({ worst, thr, unit }:
     );
   }
   const color = zoneColorVar(worst.zone.key);
-  const copy = zoneCopy(worst.zone.key, thr);
+  const copy = zoneCopy(worst.zone.key, thr, env);
   let msg = copy.msg;
   if (worst.zone.rank === 3) {
-    const m = Math.max(0, Math.round(marginToCutoffC(worst.tempC, worst.zone.side)));
+    const m = Math.max(0, Math.round(marginToCutoffC(worst.tempC, worst.zone.side, env)));
     msg += ` Margin to cutoff: ${formatDelta(m, unit)}.`;
   }
   const strong = worst.zone.rank >= 4;

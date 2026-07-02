@@ -1,6 +1,6 @@
-import { formatTemp, tempZone, type TempThresholds, type TempUnit } from "../temp";
+import { memo } from "react";
+import { formatTemp, tempZone, type TempEnvelope, type TempThresholds, type TempUnit } from "../temp";
 import type { FleetItem } from "../types";
-import { relAgo } from "../util";
 import { PinButton } from "./PinButton";
 import { Ring } from "./Ring";
 
@@ -11,14 +11,19 @@ const Stat = ({ label, value, color }: { label: string; value: string; color: st
   </div>
 );
 
-export function PackCard({ item, stale, thr, unit, now, pinned, onTogglePin }:
-  { item: FleetItem; stale: boolean; thr: TempThresholds; unit: TempUnit;
-    now: number; pinned: boolean; onTogglePin: () => void }) {
+// WEB-8: memoized so per-sample re-renders don't redraw the whole grid. The
+// 1 s "ago" clock is deliberately NOT a `now` prop: the parent precomputes
+// `lastSeen` (only for stale packs), so connected cards skip every tick and a
+// stale card re-renders only when its coarse "Xm ago" string actually changes.
+// `onTogglePin` takes the address so the parent can pass one stable callback.
+export const PackCard = memo(function PackCard({ item, stale, lastSeen, thr, env, unit, pinned, onTogglePin }:
+  { item: FleetItem; stale: boolean; lastSeen: string | null; thr: TempThresholds; env: TempEnvelope;
+    unit: TempUnit; pinned: boolean; onTogglePin: (addr: string) => void }) {
   const connected = !stale;
   const n = (v: number | null | undefined, d = 1) => (v == null ? "—" : v.toFixed(d));
   // Disconnected packs keep their last-known telemetry, just muted — we still want to see it.
   const valColor = connected ? "var(--text)" : "var(--text3)";
-  const tempCrit = connected && item.temp_c != null && tempZone(item.temp_c, thr).rank >= 3;
+  const tempCrit = connected && item.temp_c != null && tempZone(item.temp_c, thr, env).rank >= 3;
   const tempColor = tempCrit ? "var(--critical)" : valColor;
   const tempStr = item.temp_c != null ? formatTemp(item.temp_c, unit) : "—";
   return (
@@ -30,15 +35,15 @@ export function PackCard({ item, stale, thr, unit, now, pinned, onTogglePin }:
           overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {item.alias ?? item.address}
         </div>
-        <PinButton pinned={pinned} onToggle={onTogglePin} />
+        <PinButton pinned={pinned} onToggle={() => onTogglePin(item.address)} />
       </div>
       <Ring soc={item.soc ?? null} current={item.current_a ?? null} power={item.power_w ?? null}
         connected={connected} size={120} />
       {/* Fixed-height status slot: last-seen time when disconnected, so the layout never reflows. */}
       <div style={{ height: 14, display: "flex", alignItems: "center" }}>
-        {!connected && (
+        {!connected && lastSeen != null && (
           <span className="mono" style={{ color: "var(--text3)", fontSize: 11, letterSpacing: 1 }}>
-            DISCONNECTED · {relAgo(item.ts_ms, now)}
+            DISCONNECTED · {lastSeen}
           </span>
         )}
       </div>
@@ -50,4 +55,4 @@ export function PackCard({ item, stale, thr, unit, now, pinned, onTogglePin }:
       </div>
     </div>
   );
-}
+});

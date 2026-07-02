@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { FleetItem } from "../types";
 import {
   OVERLAY_RANK, nextAckedKey, tempZone, worstOf, zoneColorVar, zoneLabel,
-  type TempConfig, type TempThresholds, type TempUnit, type Zone,
+  type TempConfig, type TempEnvelope, type TempThresholds, type TempUnit, type Zone,
 } from "../temp";
 import { fmtEta, relAgo } from "../util";
 import { Ring } from "./Ring";
@@ -19,9 +19,13 @@ import { PinButton } from "./PinButton";
 const SIM_ENABLED: boolean =
   import.meta.env.DEV || new URLSearchParams(location.search).get("sim") === "1";
 
-export function MainStage({ items, staleAddrs, thr, unit, config, now, pinned, onTogglePin }: {
+// WEB-8 note: the stage is deliberately NOT memoized — its featured pack gets a
+// fresh sample every ~1.5 s and disconnected packs render a live "updated ago"
+// from `now`, so it re-renders every tick anyway; at ≤ a base of packs that is
+// cheap. Memoization is applied where it pays: the All-Batteries grid cards.
+export function MainStage({ items, staleAddrs, thr, env, unit, config, now, pinned, onTogglePin }: {
   items: FleetItem[]; staleAddrs: Set<string>;
-  thr: TempThresholds; unit: TempUnit; config: TempConfig | null; now: number;
+  thr: TempThresholds; env: TempEnvelope; unit: TempUnit; config: TempConfig | null; now: number;
   pinned: Set<string>; onTogglePin: (addr: string) => void;
 }) {
   const group = items[0]?.group_id;
@@ -36,7 +40,7 @@ export function MainStage({ items, staleAddrs, thr, unit, config, now, pinned, o
     const connected = !staleAddrs.has(it.address);
     const sim = it.address === featuredAddr && simTemp != null;
     const displayTempC: number | null = sim ? simTemp : (it.temp_c ?? null);
-    const zone: Zone | null = displayTempC != null ? tempZone(displayTempC, thr) : null;
+    const zone: Zone | null = displayTempC != null ? tempZone(displayTempC, thr, env) : null;
     const liveAlert = sim || (connected && it.temp_c != null);
     return { it, connected, sim, displayTempC, zone, liveAlert };
   });
@@ -64,7 +68,7 @@ export function MainStage({ items, staleAddrs, thr, unit, config, now, pinned, o
   return (
     <div style={{ display: "grid", gap: 16 }}>
       <SyncedIndicator config={config} now={now} />
-      <TempBanner worst={worst} thr={thr} unit={unit} />
+      <TempBanner worst={worst} thr={thr} env={env} unit={unit} />
 
       <div style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 16, padding: 24 }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 16 }}>
@@ -97,7 +101,7 @@ export function MainStage({ items, staleAddrs, thr, unit, config, now, pinned, o
                     connected={connected} size={168} />
                   {zone && displayTempC != null && (
                     <div style={{ opacity: connected || sim ? 1 : 0.55 }}>
-                      <TempGauge tempC={displayTempC} thr={thr} unit={unit} />
+                      <TempGauge tempC={displayTempC} thr={thr} env={env} unit={unit} />
                     </div>
                   )}
                 </div>
@@ -145,7 +149,7 @@ export function MainStage({ items, staleAddrs, thr, unit, config, now, pinned, o
       </div>
 
       {flashing && worst && (
-        <TempOverlay worst={worst} unit={unit} onAck={() => setAckedKey(worst.key)} />
+        <TempOverlay worst={worst} env={env} unit={unit} onAck={() => setAckedKey(worst.key)} />
       )}
     </div>
   );

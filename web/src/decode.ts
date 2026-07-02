@@ -15,9 +15,16 @@ const SAMPLE_KEYS = [
   "lat", "lon", "gps_accuracy_m", "eta_full_min",
 ] as const;
 const FLEET_KEYS = [...SAMPLE_KEYS, "alias", "group_id"] as const;
+// WEB-6: envelope fields are optional (older rows/servers omit them) and may
+// be null — validated as optional numerics, never required.
+const TEMP_ENVELOPE_KEYS = [
+  "cutoff_cold_c", "cutoff_hot_c", "charge_lock_cold_c", "charge_lock_hot_c",
+  "charge_resume_cold_c",
+] as const;
 const TEMP_CONFIG_KEYS = [
   "device_id", "profile_id", "cold_caution_c", "hot_caution_c",
   "cold_crit_c", "hot_crit_c", "unit", "updated_at_ms", "received_at",
+  ...TEMP_ENVELOPE_KEYS,
 ] as const;
 
 const isObj = (x: unknown): x is Record<string, unknown> =>
@@ -60,12 +67,15 @@ export function decodeSnapshot(x: unknown): FleetItem[] | null {
   return out;
 }
 
+const optionalNum = (v: unknown): boolean => v == null || Number.isFinite(v);
+
 const validTempConfig = (x: unknown): x is Record<string, unknown> =>
   isObj(x) &&
   typeof x.device_id === "string" && typeof x.profile_id === "string" &&
   Number.isFinite(x.cold_caution_c) && Number.isFinite(x.hot_caution_c) &&
   Number.isFinite(x.cold_crit_c) && Number.isFinite(x.hot_crit_c) &&
-  typeof x.unit === "string" && Number.isFinite(x.updated_at_ms);
+  typeof x.unit === "string" && Number.isFinite(x.updated_at_ms) &&
+  TEMP_ENVELOPE_KEYS.every((k) => optionalNum(x[k]));
 
 /**
  * Strict: any malformed config invalidates the whole response — the caller

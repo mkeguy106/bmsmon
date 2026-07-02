@@ -4,7 +4,7 @@ import { createRoot } from "react-dom/client";
 import { MainStage } from "./components/MainStage";
 import { AllBatteries } from "./components/AllBatteries";
 import { BatteryProfilePanel } from "./components/BatteryProfilePanel";
-import { REDODO_DEFAULTS, type TempConfig } from "./temp";
+import { DEFAULT_ENV, REDODO_DEFAULTS, type TempConfig } from "./temp";
 import type { FleetItem } from "./types";
 import "./theme.css";
 
@@ -37,15 +37,15 @@ createRoot(document.getElementById("root")!).render(
     {settings ? (
       <>
         <div className="mono" style={{ color: "var(--text3)", fontSize: 11, letterSpacing: 2, margin: "0 4px 24px" }}>SETTINGS</div>
-        <BatteryProfilePanel thr={REDODO_DEFAULTS} unit="F" />
+        <BatteryProfilePanel thr={REDODO_DEFAULTS} env={DEFAULT_ENV} />
       </>
     ) : (
       <>
-        <MainStage items={stageItems} staleAddrs={stale} thr={REDODO_DEFAULTS} unit="F" config={config}
-          now={NOW} pinned={pinned} onTogglePin={noop} />
+        <MainStage items={stageItems} staleAddrs={stale} thr={REDODO_DEFAULTS} env={DEFAULT_ENV}
+          unit="F" config={config} now={NOW} pinned={pinned} onTogglePin={noop} />
         <div style={{ height: 24 }} />
-        <AllBatteries items={items} staleAddrs={stale} thr={REDODO_DEFAULTS} unit="F"
-          now={NOW} pinned={pinned} onTogglePin={noop} />
+        <AllBatteries items={items} staleAddrs={stale} thr={REDODO_DEFAULTS} env={DEFAULT_ENV}
+          unit="F" now={NOW} pinned={pinned} onTogglePin={noop} />
       </>
     )}
   </div>,
