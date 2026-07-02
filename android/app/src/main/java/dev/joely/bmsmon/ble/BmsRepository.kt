@@ -9,13 +9,13 @@ import dev.joely.bmsmon.ble.profile.RedodoBekenProfile
 import dev.joely.bmsmon.model.BmsTarget
 import dev.joely.bmsmon.model.Telemetry
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -28,9 +28,17 @@ import kotlinx.coroutines.withTimeoutOrNull
  *
  * Concurrency model — single-writer: all per-pack mutable state (held sessions, connecting set,
  * fail counts, backoff times, held-since timestamps) lives exclusively inside [controlLoop].
- * Connect and poll worker coroutines post outcomes back through [resultChannel]
- * (Channel.UNLIMITED, so [trySend] never blocks/suspends), which the control loop drains at the
- * top of every tick.  No shared mutable state is touched outside that coroutine.
+ * Connect and poll worker coroutines post outcomes back through the loop's event channel
+ * (Channel.UNLIMITED, so [Channel.trySend] never blocks/suspends), which the control loop drains
+ * at the top of every tick.  No shared mutable state is touched outside that coroutine.
+ *
+ * Generation isolation (BLE-5): each start() creates a FRESH event channel + wake signal and
+ * passes them into that generation's control loop and workers as captured parameters. The loop
+ * and its workers never read the [resultChannel]/[currentWake] properties, so a not-yet-cancelled
+ * old loop from a stop()→start() cycle can only ever drain its own (closed) channel — it can't
+ * steal the new loop's ConnectSuccess events (and close their sessions in its finally) or eat the
+ * new loop's wake. The properties exist only for the external API (setStage/kickAll/stop/…) to
+ * address the CURRENT generation.
  */
 class BmsRepository(
     private val context: Context,
@@ -47,7 +55,8 @@ class BmsRepository(
     @Volatile private var stageAddrs: Set<String> = emptySet()
     @Volatile private var disabledAddrs: Set<String> = emptySet()
     @Volatile private var running = false
-    @Volatile private var wakeDeferred: CompletableDeferred<Unit>? = null
+    // Current generation's wake signal — external API only; the loop uses its captured instance.
+    @Volatile private var currentWake: LoopWake? = null
     // Launch priority barrier: until [stagePriorityUntil], hold off connecting any non-stage pack so
     // the (restored) main stage connects and starts polling first. [stageInitialized] gates the very
     // first ticks before setStage lands, so we never admit a background pack ahead of the stage.
@@ -57,9 +66,23 @@ class BmsRepository(
     private var onPoll: (String, ByteArray, Telemetry?) -> Unit = { _, _, _ -> }
     private var onReachable: (String, Boolean) -> Unit = { _, _ -> }
 
-    // Events from connect/poll workers → control loop (single reader).
-    // UNLIMITED: trySend never suspends, so workers are never blocked by the loop's pace.
+    // Current generation's event channel (workers → control loop, single reader). UNLIMITED:
+    // trySend never suspends, so workers are never blocked by the loop's pace. External API only
+    // (kickAll posts, stop closes+drains); the loop and workers use their captured instance.
     @Volatile private var resultChannel: Channel<LoopEvent> = Channel(Channel.UNLIMITED)
+
+    /**
+     * Wake signal for one control-loop generation (BLE-5/BLE-6). CONFLATED: a wake posted while
+     * the loop is mid-tick is retained, so the very next [waitOrWake] returns immediately instead
+     * of sleeping a full tick — no lost wakes. Workers hold a reference to their OWN generation's
+     * instance, so a stale worker can never wake the wrong loop.
+     */
+    private class LoopWake {
+        private val signal = Channel<Unit>(Channel.CONFLATED)
+        fun wake() { signal.trySend(Unit) }
+        /** Sleep up to [ms], waking early on [wake] (including one posted before this call). */
+        suspend fun waitOrWake(ms: Long) { withTimeoutOrNull(ms) { signal.receive() } }
+    }
 
     // SupervisorJob wrapping the control loop and all workers: cancel once to stop everything.
     private var monitoringJob: Job? = null
@@ -82,7 +105,12 @@ class BmsRepository(
         allTargets = targets.map { it.copy(address = it.address.trim().uppercase()) }
         this.onPoll = onPoll
         this.onReachable = onReachable
-        resultChannel = Channel(Channel.UNLIMITED)
+        // Fresh channel + wake for THIS generation (BLE-5): captured by the loop/workers below;
+        // the properties only let the external API address the current generation.
+        val ch = Channel<LoopEvent>(Channel.UNLIMITED)
+        val wake = LoopWake()
+        resultChannel = ch
+        currentWake = wake
         // Arm the launch barrier: prioritize the stage's connect/poll for a grace window.
         stagePriorityUntil = now() + STAGE_PRIORITY_GRACE_MS
         stageInitialized = false
@@ -92,7 +120,7 @@ class BmsRepository(
         val childJob = SupervisorJob(scope.coroutineContext[Job])
         val childScope = CoroutineScope(scope.coroutineContext + childJob + Dispatchers.IO)
         monitoringJob = childJob
-        childScope.launch { controlLoop(childScope) }
+        childScope.launch { controlLoop(childScope, ch, wake) }
     }
 
     /** Set which batteries are on the stage (persistent, fast poll). */
@@ -138,19 +166,20 @@ class BmsRepository(
         stagePriorityUntil = 0L
     }
 
-    private fun wake() { wakeDeferred?.complete(Unit) }
-
-    /** Sleep up to [ms], but wake early on kick / stage / target change. */
-    private suspend fun waitOrWake(ms: Long) {
-        val w = CompletableDeferred<Unit>()
-        wakeDeferred = w
-        withTimeoutOrNull(ms) { w.await() }
-        wakeDeferred = null
-    }
+    /** Wake the CURRENT generation's control loop (external API paths only). */
+    private fun wake() { currentWake?.wake() }
 
     // ---- control loop: the only coroutine that mutates per-pack state ----
 
-    private suspend fun controlLoop(childScope: CoroutineScope) {
+    /**
+     * @param ch   this generation's event channel — never read from the [resultChannel] property.
+     * @param wake this generation's wake signal — never read from the [currentWake] property.
+     */
+    private suspend fun controlLoop(
+        childScope: CoroutineScope,
+        ch: Channel<LoopEvent>,
+        wake: LoopWake,
+    ) {
         // All per-pack state lives here.  Nothing outside this coroutine touches these.
         val held         = mutableMapOf<String, BleSession>()
         val pollJobs     = mutableMapOf<String, Job>()
@@ -160,11 +189,13 @@ class BmsRepository(
         val heldSince    = mutableMapOf<String, Long>()
 
         try {
-            while (running) {
+            // `running` is shared across generations; the scope check makes a cancelled old loop
+            // exit even if a rapid stop()→start() has already flipped `running` back to true.
+            while (running && childScope.isActive) {
                 val now = now()
 
                 // 1. Consume outcomes posted by workers since the last tick.
-                drainEvents(held, pollJobs, connecting, failCount, backoffUntil, heldSince, childScope, now)
+                drainEvents(held, pollJobs, connecting, failCount, backoffUntil, heldSince, childScope, ch, wake, now)
 
                 // 2. Decide connects/disconnects for this tick.
                 val desired = allTargets.map { it.address }.toSet() - disabledAddrs
@@ -187,12 +218,16 @@ class BmsRepository(
                     stageFirst   = stageFirst,
                 )
 
-                // 3. Drop connections the planner no longer wants.
-                for (addr in plan.toDisconnect) {
-                    pollJobs.remove(addr)?.cancel()
-                    connecting -= addr
-                    held.remove(addr)?.close()
-                    onReachable(addr, false)
+                // 3. Drop connections the planner no longer wants. Reason matters (BLE-8): only a
+                // genuine drop (user-disabled / removed from roster) is reported unreachable —
+                // which shows DISCONNECTED and logs a link-down. An overflow ROTATION of a healthy
+                // pack is planner bookkeeping, not a link loss: the pack keeps its last telemetry
+                // and stays "reachable-stale" until its next scheduled connect refreshes it.
+                for (drop in plan.toDisconnect) {
+                    pollJobs.remove(drop.addr)?.cancel()
+                    connecting -= drop.addr
+                    held.remove(drop.addr)?.close()
+                    if (drop.reason == DropReason.Undesired) onReachable(drop.addr, false)
                 }
 
                 // 4. Kick off connect attempts the planner requested.
@@ -200,8 +235,9 @@ class BmsRepository(
                     val target = allTargets.firstOrNull { it.address == addr } ?: continue
                     connecting += addr
                     val profile = ProfileRegistry.profileFor(target.name) ?: RedodoBekenProfile
-                    val ch = resultChannel
                     val highPriority = addr in stageAddrs
+                    // Workers capture THIS generation's ch + wake (BLE-5): outcomes can only ever
+                    // land on — and wake — the loop that launched them.
                     childScope.launch {
                         val session = BleSession(context, addr, profile, highPriority = highPriority)
                         var handed = false
@@ -219,6 +255,9 @@ class BmsRepository(
                             ch.trySend(LoopEvent.ConnectFailure(addr))
                         } finally {
                             if (!handed) session.close()
+                            // Process the outcome now (start polling a fresh session / schedule the
+                            // retry backoff) instead of at the next 1 s tick.
+                            wake.wake()
                         }
                     }
                 }
@@ -232,7 +271,7 @@ class BmsRepository(
                 val stageNow = stageAddrs
                 for ((addr, session) in held) session.setHighPriority(addr in stageNow)
 
-                waitOrWake(CONTROL_TICK_MS)
+                wake.waitOrWake(CONTROL_TICK_MS)
             }
         } finally {
             // Any exit path (normal, cancel, exception): close every open GATT session.
@@ -241,7 +280,8 @@ class BmsRepository(
         }
     }
 
-    /** Drain all pending worker events; all mutations to [held]/[connecting]/etc. happen here. */
+    /** Drain all pending worker events; all mutations to [held]/[connecting]/etc. happen here.
+     *  Reads only the loop's own [ch] (BLE-5), never the [resultChannel] property. */
     private fun drainEvents(
         held: MutableMap<String, BleSession>,
         pollJobs: MutableMap<String, Job>,
@@ -250,10 +290,12 @@ class BmsRepository(
         backoffUntil: MutableMap<String, Long>,
         heldSince: MutableMap<String, Long>,
         childScope: CoroutineScope,
+        ch: Channel<LoopEvent>,
+        wake: LoopWake,
         now: Long,
     ) {
         while (true) {
-            val event = resultChannel.tryReceive().getOrNull() ?: break
+            val event = ch.tryReceive().getOrNull() ?: break
             when (event) {
                 is LoopEvent.ConnectSuccess -> {
                     connecting -= event.addr
@@ -277,9 +319,8 @@ class BmsRepository(
                     // Start a persistent poll loop for this session.
                     val name    = allTargets.firstOrNull { it.address == event.addr }?.name ?: event.addr
                     val profile = ProfileRegistry.profileFor(name) ?: RedodoBekenProfile
-                    val ch      = resultChannel
                     pollJobs[event.addr] = childScope.launch {
-                        pollLoop(event.addr, event.session, profile, ch)
+                        pollLoop(event.addr, event.session, profile, ch, wake)
                     }
                 }
                 is LoopEvent.ConnectFailure -> {
@@ -328,6 +369,7 @@ class BmsRepository(
         session: BleSession,
         profile: BatteryProfile,
         ch: Channel<LoopEvent>,
+        wake: LoopWake,
     ) {
         var consecutiveTimeouts = 0
         while (true) {
@@ -345,6 +387,11 @@ class BmsRepository(
                 PollAction.DELIVER -> {
                     consecutiveTimeouts = 0
                     ch.trySend(LoopEvent.PollFrame(addr, raw!!))
+                    // BLE-6: wake the control loop so the frame is parsed/delivered NOW — without
+                    // this it sat in the channel until the next 1 s control tick, adding 0–1 s of
+                    // jitter to stage telemetry and delaying alert evaluation. wake is this
+                    // generation's own signal, so a stale worker can't wake the wrong loop.
+                    wake.wake()
                     val pollMs = if (addr in stageAddrs) profile.stagePollMs else profile.slowPollMs
                     delay(pollMs)
                 }
@@ -354,6 +401,7 @@ class BmsRepository(
                 }
                 PollAction.DROP -> {
                     ch.trySend(LoopEvent.PollDrop(addr))
+                    wake.wake()  // BLE-6: mark unreachable + schedule the reconnect immediately
                     return
                 }
             }

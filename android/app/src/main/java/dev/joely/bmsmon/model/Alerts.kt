@@ -42,9 +42,28 @@ fun evalStageAlert(packs: List<PackSoc>, cfg: AlertConfig): AlertEval {
 }
 
 /**
+ * Shared severity scale for the capacity-vs-temperature worst-of arbitration (UI-12). These used
+ * to be raw literals aligned with `TempRank.ordinal`, which silently broke if the enum was ever
+ * reordered — [tempSeverity] pins the mapping explicitly (exhaustive `when`, test-locked).
+ */
+const val SEVERITY_NONE = -1
+const val CAP_SEVERITY_WARNING = 2
+const val CAP_SEVERITY_CRITICAL = 3
+
+/** A temperature rank's severity on the shared scale. CRITICAL ties capacity-critical (and the
+ *  tie goes to temperature in [pickStageAlert]); CUTOFF outranks everything. */
+fun tempSeverity(rank: TempRank): Int = when (rank) {
+    TempRank.SAFE -> SEVERITY_NONE
+    TempRank.CAUTION -> 0
+    TempRank.WARNING -> 1
+    TempRank.CRITICAL -> 3
+    TempRank.CUTOFF -> 4
+}
+
+/**
  * Worst-of arbitration between the capacity and temperature stage alerts. Severities: -1 = no
- * alert present; capacity warning = 2 / capacity critical = 3; temperature = its [TempRank]
- * ordinal (CRITICAL = 3, CUTOFF = 4). Flashing = present AND not acknowledged.
+ * alert present; capacity warning = 2 / capacity critical = 3; temperature per [tempSeverity]
+ * (CRITICAL = 3, CUTOFF = 4). Flashing = present AND not acknowledged.
  *
  * An alert that would flash always beats one that is present but acknowledged — an acked temp
  * CRITICAL must not mask an un-acked capacity alert (or vice versa), or a flash the user never
@@ -65,6 +84,30 @@ fun pickStageAlert(
         tempFlashing != capFlashing -> if (tempFlashing) AlertKind.TEMPERATURE else AlertKind.CAPACITY
         else -> if (tempSeverity >= capSeverity) AlertKind.TEMPERATURE else AlertKind.CAPACITY
     }
+}
+
+/**
+ * Charging-suppression hysteresis (UI-9). At the charger the BMS flaps Idle ↔ Charging as the
+ * current tapers, and keying the capacity suppression directly on the instantaneous flag strobed
+ * the overlay. Suppression instead latches for [CHARGE_SUPPRESS_HOLD_MS] after the last
+ * charging=true evaluation — but a *genuine discharge* (unplugged and driving) clears the latch
+ * immediately, so a real low-battery alert is never delayed by the hold.
+ */
+const val CHARGE_SUPPRESS_HOLD_MS = 30_000L
+
+/** Latch state + resolved suppression for one evaluation. Pure — caller passes time in. */
+data class ChargeHold(val lastChargingAt: Long, val holdActive: Boolean)
+
+/**
+ * Fold one evaluation of the stage's lowest pack into the charge-suppression latch.
+ * [charging]/[discharging] describe that pack's current BMS state; [lastChargingAt] is the
+ * previous latch (0 = never). [holdActive] is true while suppression should extend through an
+ * Idle flap; the instantaneous `charging` flag itself still suppresses independently.
+ */
+fun nextChargeHold(charging: Boolean, discharging: Boolean, lastChargingAt: Long, now: Long): ChargeHold = when {
+    charging -> ChargeHold(now, true)
+    discharging -> ChargeHold(0L, false)   // genuine discharge: un-suppress at once, clear latch
+    else -> ChargeHold(lastChargingAt, lastChargingAt > 0 && now - lastChargingAt < CHARGE_SUPPRESS_HOLD_MS)
 }
 
 /** Outcome of the notification dedup logic. */

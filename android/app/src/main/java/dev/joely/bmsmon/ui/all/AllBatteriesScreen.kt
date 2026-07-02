@@ -72,6 +72,8 @@ import dev.joely.bmsmon.model.Roster
 import dev.joely.bmsmon.model.Telemetry
 import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.ui.ChargingBolt
+import dev.joely.bmsmon.ui.FleetActions
+import dev.joely.bmsmon.ui.RosterActions
 import dev.joely.bmsmon.ui.rememberBoltAlpha
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
@@ -81,7 +83,8 @@ import kotlin.math.roundToInt
 /** A row's group context: id+label, or null when the battery is ungrouped. */
 private data class RowGroup(val id: String, val label: String)
 
-private data class Row(val group: RowGroup?, val target: BmsTarget, val status: BatteryStatus?) {
+/** One list row's data (UI-13a: named PackRow — `Row` shadowed Compose's Row composable). */
+private data class PackRow(val group: RowGroup?, val target: BmsTarget, val status: BatteryStatus?) {
     val tele: Telemetry? get() = status?.telemetry
     val reachable: Boolean get() = status?.reachable == true
 }
@@ -101,12 +104,12 @@ private fun buildRows(
     filterBaseId: String,
     dailyDriverId: String,
     sortKey: SortKey,
-): List<Row> {
+): List<PackRow> {
     val grouped = roster.groupViews().flatMap { g ->
-        g.targets.map { t -> Row(RowGroup(g.id, g.label), t, fleet[t.address]) }
+        g.targets.map { t -> PackRow(RowGroup(g.id, g.label), t, fleet[t.address]) }
     }
     val ungrouped = roster.batteries.filter { it.groupId == null }
-        .map { b -> Row(null, BmsTarget(b.address, b.alias), fleet[b.address]) }
+        .map { b -> PackRow(null, BmsTarget(b.address, b.alias), fleet[b.address]) }
     var rows = grouped + ungrouped
 
     if (FilterKey.ReachableOnly in filters) rows = rows.filter { it.reachable }
@@ -124,22 +127,8 @@ private fun buildRows(
 @Composable
 fun AllBatteriesScreen(
     state: UiState,
-    onSetSort: (SortKey) -> Unit,
-    onToggleFilter: (FilterKey) -> Unit,
-    onSetFilterBase: (String) -> Unit,
-    onPinBase: (String) -> Unit,
-    onPinSingle: (String) -> Unit,
-    onDisconnect: (String) -> Unit,
-    onReconnect: (String) -> Unit,
-    onDisconnectAll: () -> Unit,
-    onReconnectAll: () -> Unit,
-    onAddScan: () -> Unit,
-    onOpenDetail: (String) -> Unit,
-    onRemove: (String) -> Unit,
-    onRename: (String, String) -> Unit,
-    onSetGroup: (String, String?) -> Unit,
-    onCreateGroup: (String, String) -> Unit,
-    onRenameGroup: (String, String) -> Unit,
+    fleet: FleetActions,
+    rosterEdit: RosterActions,
     modifier: Modifier = Modifier,
 ) {
     val c = Bm.colors
@@ -169,15 +158,15 @@ fun AllBatteriesScreen(
                     val allDisabled = rows.isNotEmpty() && rows.all { it.target.address in state.disabled }
                     if (allDisabled) {
                         Text("Reconnect all", color = Bm.accent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.clickable(onClick = onReconnectAll).padding(4.dp))
+                            modifier = Modifier.clickable(onClick = fleet.onReconnectAll).padding(4.dp))
                     } else {
                         Text("Disconnect all", color = Bm.power, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.clickable(onClick = onDisconnectAll).padding(4.dp))
+                            modifier = Modifier.clickable(onClick = fleet.onDisconnectAll).padding(4.dp))
                     }
                 }
                 Box(
                     Modifier.padding(start = 6.dp).size(34.dp).clip(RoundedCornerShape(9.dp))
-                        .clickable(onClick = onAddScan),
+                        .clickable(onClick = fleet.onAddScan),
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(Icons.Filled.Add, "Add battery", Modifier.size(22.dp), tint = Bm.accent)
@@ -186,19 +175,19 @@ fun AllBatteriesScreen(
         }
 
         ChipRow("Sort") {
-            Chip("Activity", state.sortKey == SortKey.Activity) { onSetSort(SortKey.Activity) }
-            Chip("SOC", state.sortKey == SortKey.Soc) { onSetSort(SortKey.Soc) }
-            Chip("Base", state.sortKey == SortKey.Base) { onSetSort(SortKey.Base) }
+            Chip("Activity", state.sortKey == SortKey.Activity) { fleet.onSetSort(SortKey.Activity) }
+            Chip("SOC", state.sortKey == SortKey.Soc) { fleet.onSetSort(SortKey.Soc) }
+            Chip("Base", state.sortKey == SortKey.Base) { fleet.onSetSort(SortKey.Base) }
         }
         ChipRow("Filter") {
-            Chip("Reachable", FilterKey.ReachableOnly in state.filters) { onToggleFilter(FilterKey.ReachableOnly) }
-            Chip("Active", FilterKey.ActiveOnly in state.filters) { onToggleFilter(FilterKey.ActiveOnly) }
-            Chip("Daily driver", FilterKey.DailyDriverOnly in state.filters) { onToggleFilter(FilterKey.DailyDriverOnly) }
-            Chip("By base", FilterKey.ByBase in state.filters) { onToggleFilter(FilterKey.ByBase) }
+            Chip("Reachable", FilterKey.ReachableOnly in state.filters) { fleet.onToggleFilter(FilterKey.ReachableOnly) }
+            Chip("Active", FilterKey.ActiveOnly in state.filters) { fleet.onToggleFilter(FilterKey.ActiveOnly) }
+            Chip("Daily driver", FilterKey.DailyDriverOnly in state.filters) { fleet.onToggleFilter(FilterKey.DailyDriverOnly) }
+            Chip("By base", FilterKey.ByBase in state.filters) { fleet.onToggleFilter(FilterKey.ByBase) }
         }
         if (FilterKey.ByBase in state.filters) {
             ChipRow("Base") {
-                groupViews.forEach { g -> Chip(g.label, state.filterBaseId == g.id) { onSetFilterBase(g.id) } }
+                groupViews.forEach { g -> Chip(g.label, state.filterBaseId == g.id) { fleet.onSetFilterBase(g.id) } }
             }
         }
 
@@ -211,15 +200,15 @@ fun AllBatteriesScreen(
                     isDailyDriver = row.group?.id == state.dailyDriverId,
                     disabled = row.target.address in state.disabled,
                     monitoring = state.monitoring,
-                    onOpenDetail = { onOpenDetail(row.target.address) },
-                    onPin = { if (row.group != null) onPinBase(row.group.id) else onPinSingle(row.target.address) },
-                    onDisconnect = { onDisconnect(row.target.address) },
-                    onReconnect = { onReconnect(row.target.address) },
-                    onRemove = { onRemove(row.target.address) },
-                    onRename = { onRename(row.target.address, it) },
-                    onSetGroup = { onSetGroup(row.target.address, it) },
-                    onCreateGroup = { onCreateGroup(row.target.address, it) },
-                    onRenameGroup = { row.group?.let { g -> onRenameGroup(g.id, it) } },
+                    onOpenDetail = { fleet.onOpenDetail(row.target.address) },
+                    onPin = { if (row.group != null) fleet.onPinBase(row.group.id) else fleet.onPinSingle(row.target.address) },
+                    onDisconnect = { fleet.onDisconnect(row.target.address) },
+                    onReconnect = { fleet.onReconnect(row.target.address) },
+                    onRemove = { rosterEdit.onRemove(row.target.address) },
+                    onRename = { rosterEdit.onRename(row.target.address, it) },
+                    onSetGroup = { rosterEdit.onSetGroup(row.target.address, it) },
+                    onCreateGroup = { rosterEdit.onCreateGroup(row.target.address, it) },
+                    onRenameGroup = { row.group?.let { g -> rosterEdit.onRenameGroup(g.id, it) } },
                 )
             }
         }
@@ -256,7 +245,7 @@ private fun Chip(label: String, selected: Boolean, onClick: () -> Unit) {
 @OptIn(ExperimentalFoundationApi::class, androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 private fun SwipeableBatteryRow(
-    row: Row,
+    row: PackRow,
     groups: List<RowGroup>,
     isStage: Boolean,
     isDailyDriver: Boolean,
@@ -361,7 +350,7 @@ private fun SwipeLeftToDelete(onTriggered: () -> Unit, content: @Composable () -
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun BatteryRow(
-    row: Row,
+    row: PackRow,
     groups: List<RowGroup>,
     isStage: Boolean,
     isDailyDriver: Boolean,

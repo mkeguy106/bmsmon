@@ -43,6 +43,25 @@ object BmsProtocol {
 
     val STATUS_FRAME: ByteArray get() = frame(ReadCommand.STATUS)
 
+    /**
+     * SAFETY GATE (BLE-7): true only for the exact known-safe 0x13 status query. Command frames
+     * are shared mutable ByteArrays; before anything is written to a live battery,
+     * [dev.joely.bmsmon.ble.BleSession] runs the (copied) frame through this predicate and refuses
+     * the write on any mismatch — so even an accidental in-place mutation of the shared array can
+     * never change the opcode sent to a pack. Deliberately a plain runtime check (never `assert`,
+     * which `-ea`-less runtimes compile out). Checks: length 8, STATUS opcode at index 4, valid
+     * trailing checksum (sum of bytes 0..6 & 0xFF), and byte-identity with the canonical frame.
+     */
+    fun isSafeStatusFrame(frame: ByteArray): Boolean {
+        if (frame.size != 8) return false
+        if (frame[4] != ReadCommand.STATUS.opcode.toByte()) return false
+        var sum = 0
+        for (i in 0 until 7) sum += frame[i].toInt() and 0xFF
+        if (frame[7] != (sum and 0xFF).toByte()) return false
+        // Belt and braces: must be byte-identical to the one frame this app is allowed to poll with.
+        return frame.contentEquals(STATUS_FRAME)
+    }
+
     // --- little-endian readers ---
     private fun u16(d: ByteArray, o: Int) = (d[o].toInt() and 0xFF) or ((d[o + 1].toInt() and 0xFF) shl 8)
     private fun i16(d: ByteArray, o: Int): Int { val v = u16(d, o); return if (v >= 0x8000) v - 0x10000 else v }

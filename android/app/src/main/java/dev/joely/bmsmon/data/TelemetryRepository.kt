@@ -1,5 +1,6 @@
 package dev.joely.bmsmon.data
 
+import androidx.room.withTransaction
 import dev.joely.bmsmon.data.db.BmsDatabase
 import dev.joely.bmsmon.data.db.RawFrameEntity
 import dev.joely.bmsmon.data.db.SampleEntity
@@ -13,6 +14,9 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import java.io.File
+
+/** Samples per transaction during the legacy CSV backfill (DATA-8). */
+private const val IMPORT_CHUNK = 500
 
 /**
  * Single facade for telemetry persistence (replaces TelemetryLogger). Writes are serialized through
@@ -47,6 +51,11 @@ class TelemetryRepository(private val db: BmsDatabase) {
                     OrphanedSessionAction.Delete -> db.sessions().deleteById(stub.id)
                 }
             }
+            // Startup retention pass (DATA-6): pruning previously only ever ran from ingest's
+            // every-200th counter, so an install that mostly sits idle (logging off, or only
+            // decode_fail raw frames arriving) never pruned at all. One unconditional prune here
+            // bounds the DB regardless of what happens afterwards.
+            prune(System.currentTimeMillis())
         }
         scope.launch {
             for (op in ops) {
@@ -77,6 +86,9 @@ class TelemetryRepository(private val db: BmsDatabase) {
     fun ingestRawOnly(address: String, raw: ByteArray, reason: String, tsMs: Long) {
         ops.trySend {
             db.rawFrames().insert(RawFrameEntity(address = address, tsMs = tsMs, hex = hex(raw), reason = reason))
+            // Raw-only inserts grow the same tables — count them toward the same prune counter
+            // (DATA-6; previously a decode_fail flood never triggered retention).
+            maybePrune(tsMs)
         }
     }
 
@@ -140,9 +152,14 @@ class TelemetryRepository(private val db: BmsDatabase) {
     private suspend fun maybePrune(nowMs: Long) {
         if (++sinceLastPrune < 200) return
         sinceLastPrune = 0
+        prune(nowMs)
+    }
+
+    private suspend fun prune(nowMs: Long) {
         db.samples().deleteOlderThan(cutoffMs(nowMs, SAMPLE_RETENTION_DAYS))
         db.rawFrames().deleteOlderThan(cutoffMs(nowMs, RAW_FRAME_RETENTION_DAYS))
-        while (db.rawFrames().totalHexBytes() > RAW_FRAME_MAX_BYTES) {
+        // The DAO sums hex CHARS (2 per byte) — convert before comparing against the byte cap.
+        while (rawFrameBytes(db.rawFrames().totalHexBytes()) > RAW_FRAME_MAX_BYTES) {
             if (db.rawFrames().deleteOldest(1000) == 0) break
         }
     }
@@ -164,16 +181,29 @@ class TelemetryRepository(private val db: BmsDatabase) {
     /** One session's rollups by id (for the timeline drill-down header/summary). */
     suspend fun session(sessionId: Long): SessionEntity? = db.sessions().byId(sessionId)
 
-    /** One-time backfill of legacy CSV files (oldest first). Segments via the same gap rule. */
+    /**
+     * One-time backfill of legacy CSV files (oldest first). Segments via the same gap rule.
+     * Samples are inserted in chunked transactions (DATA-8) instead of row-by-row autocommit —
+     * one journal commit per [IMPORT_CHUNK] rows instead of per row. Deliberately still bypasses
+     * the ops channel: it's a legacy one-shot whose local session bookkeeping is fully decoupled
+     * from the live-path shared maps, so channel ops can't race it.
+     */
     suspend fun importCsvOnce(files: List<File>) {
-        // Local bookkeeping — fully decoupled from the live-path shared maps so concurrent
-        // ingest ops flowing through the channel cannot race with this import.
         val openId = HashMap<String, Long>()
         val lastTs = HashMap<String, Long>()
         val wasDisconnect = HashMap<String, Boolean>()
+        val pending = ArrayList<SampleEntity>(IMPORT_CHUNK)
+
+        suspend fun flush() {
+            if (pending.isEmpty()) return
+            val batch = pending.toList()
+            pending.clear()
+            db.withTransaction { db.samples().insertAll(batch) }
+        }
 
         suspend fun localFinalize(addr: String) {
             val id = openId.remove(addr) ?: return
+            flush()   // the rollup reads this session's samples — they must be persisted first
             val samples = db.samples().forSession(id)
             if (samples.none { it.linkEvent == null }) return
             db.sessions().update(computeRollup(addr, id, samples))
@@ -192,11 +222,13 @@ class TelemetryRepository(private val db: BmsDatabase) {
                 }
                 val sessionId = openId[addr]
                     ?: db.sessions().insert(emptySession(addr, parsed.tsMs)).also { openId[addr] = it }
-                db.samples().insert(parsed.copy(sessionId = sessionId))
+                pending += parsed.copy(sessionId = sessionId)
+                if (pending.size >= IMPORT_CHUNK) flush()
                 lastTs[addr] = parsed.tsMs
                 wasDisconnect[addr] = parsed.linkEvent == "Disconnected"
             }
         }
+        flush()
         openId.keys.toList().forEach { localFinalize(it) }
     }
 

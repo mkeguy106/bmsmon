@@ -173,7 +173,9 @@ private fun UsageSection(pack: PackHealth) {
     val accent = Bm.accent
     val power = Bm.power
     val ss = pack.sessions
-    val metrics = remember(pack) {
+    // Colors are remember inputs too (UI-11): captured-only, they'd go stale after a theme or
+    // accent/power swatch change until the pack itself changed.
+    val metrics = remember(pack, accent, power, c.regen) {
         listOf(
             UsageMetric("energy", "Energy", "Wh", accent, ss.map { it.energyWh }) { "%.1f".format(it) },
             UsageMetric("peak", "Peak W", "W", power, ss.map { it.peakW }) { it.roundToInt().toString() },

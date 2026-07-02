@@ -10,7 +10,20 @@ fun BackoffSpec.delayFor(failCount: Int): Long {
     return d.coerceAtMost(capMs)
 }
 
-data class FleetPlan(val toConnect: List<String>, val toDisconnect: List<String>)
+/** Why the planner wants a link dropped (BLE-8) — the engine reacts differently per reason. */
+enum class DropReason {
+    /** No longer desired (user-disconnected or removed from the roster): a genuine drop — the
+     *  engine reports the pack unreachable and a link-down event is logged. */
+    Undesired,
+    /** Healthy pack rotated out only to lend its budget slot to a waiter (overflow). NOT a link
+     *  failure: the engine keeps it "reachable" with its last telemetry (reachable-stale) until
+     *  its next scheduled connect, and no link-down event is logged. */
+    Rotated,
+}
+
+data class PlannedDrop(val addr: String, val reason: DropReason)
+
+data class FleetPlan(val toConnect: List<String>, val toDisconnect: List<PlannedDrop>)
 
 /** Outcome of one poll attempt, fed to [pollAction]. */
 enum class PollOutcome { FRAME, TIMEOUT, ERROR }
@@ -61,7 +74,8 @@ fun planFleet(
     now: Long,
     stageFirst: Boolean = false,
 ): FleetPlan {
-    val toDisconnect = (held + connecting).filter { it !in desired }.toMutableList()
+    val toDisconnect = (held + connecting).filter { it !in desired }
+        .map { PlannedDrop(it, DropReason.Undesired) }.toMutableList()
     val activeAfterDrop = (held + connecting).filter { it in desired }
     val eligible = desired
         .filter { it !in held && it !in connecting }
@@ -77,7 +91,10 @@ fun planFleet(
         val victim = activeAfterDrop
             .filter { it in held && it !in stage }
             .minByOrNull { heldSince[it] ?: Long.MAX_VALUE }
-        if (victim != null) { toDisconnect += victim; toConnect += waiting.removeAt(0) }
+        if (victim != null) {
+            toDisconnect += PlannedDrop(victim, DropReason.Rotated)
+            toConnect += waiting.removeAt(0)
+        }
     }
     return FleetPlan(toConnect = toConnect, toDisconnect = toDisconnect)
 }

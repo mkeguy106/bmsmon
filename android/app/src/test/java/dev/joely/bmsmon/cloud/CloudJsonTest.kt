@@ -63,6 +63,26 @@ class CloudJsonTest {
         assertTrue(s.contains("\"lon\":-87.6298"))
     }
 
+    @Test fun tempConfig_includes_profile_envelope_fields() {
+        // WEB-6c: the config push carries the profile's fixed envelope so the web mirror renders
+        // the exact cutoffs / charge-lock points the phone alerts on (server fields optional).
+        val s = CloudJson.encodeTempConfig(
+            profileId = "redodo-beken-12v100",
+            t = dev.joely.bmsmon.model.TempThresholds(),          // Redodo defaults 5/45/-12/53
+            env = dev.joely.bmsmon.model.TempEnvelope(),          // Redodo defaults -20/60/0/5/50
+            unit = "F", updatedAtMs = 123L,
+        )
+        assertTrue(s.contains("\"profile_id\":\"redodo-beken-12v100\""))
+        assertTrue(s.contains("\"cold_crit_c\":-12"))
+        assertTrue(s.contains("\"cutoff_cold_c\":-20"))
+        assertTrue(s.contains("\"cutoff_hot_c\":60"))
+        assertTrue(s.contains("\"charge_lock_cold_c\":0"))
+        assertTrue(s.contains("\"charge_lock_hot_c\":50"))
+        assertTrue(s.contains("\"charge_resume_cold_c\":5"))
+        assertTrue(s.contains("\"unit\":\"F\""))
+        assertTrue(s.contains("\"updated_at_ms\":123"))
+    }
+
     @Test fun sampleJson_omits_gps_when_null() {
         val s = CloudJson.sampleJson(
             tsMs = 1L, address = "A", advertisedName = null, alias = null, groupId = null,

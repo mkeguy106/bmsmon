@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import java.io.ByteArrayOutputStream
 import java.util.zip.GZIPOutputStream
+import dev.joely.bmsmon.data.Persisted
 import dev.joely.bmsmon.data.SettingsStore
 import dev.joely.bmsmon.data.db.BmsDatabase
 import dev.joely.bmsmon.data.db.OutboxEntity
@@ -28,6 +29,15 @@ private const val BATCH = 200
 private const val OUTBOX_MAX = 200_000
 private const val IMPORT_PAGE = 500
 
+/**
+ * How many enqueue-path inserts may pass between outbox-cap checks (DATA-5). An exact COUNT per
+ * insert would double the write path's DB work for no benefit, so the cap is enforced amortized:
+ * the drain loop re-counts every [CAP_CHECK_EVERY] inserts (and once at startup) and drops the
+ * oldest overage. Worst-case transient overshoot is CAP_CHECK_EVERY rows (~0.25% of OUTBOX_MAX);
+ * the upload loop's own per-iteration check still bounds it while uploading.
+ */
+private const val CAP_CHECK_EVERY = 500
+
 /** gzip [data] into a standard gzip stream (decompressible by the server's gzip.decompress). */
 internal fun gzip(data: ByteArray): ByteArray {
     val bos = ByteArrayOutputStream(maxOf(32, data.size / 2))
@@ -46,7 +56,6 @@ class TelemetryReporter(
     private val enqueueChannel = Channel<OutboxEntity>(Channel.UNLIMITED)
     @Volatile private var started = false
     @Volatile var lastUploadMs = 0L
-    @Volatile private var reportingEnabled = false
     @Volatile private var importStarted = false
     private var uploaderJob: Job? = null
     private val uploadRate = UploadRate()
@@ -54,12 +63,38 @@ class TelemetryReporter(
     var onStatus: ((outboxCount: Long, lastUploadMs: Long, kbps: Double, authFailed: Boolean) -> Unit)? = null
     var onImportProgress: ((Long) -> Unit)? = null
 
+    /**
+     * Cached settings snapshot, kept fresh by collecting the DataStore flow (DATA-5/DATA-7):
+     * `report()` gates on it immediately (previously the gate was only refreshed by the upload
+     * loop, so samples between process start and its first pass — or after a settings change —
+     * were mis-gated), and the upload loop reads it instead of doing a full `settings.load()`
+     * decode twice every ~1.5 s iteration.
+     */
+    @Volatile private var cachedSettings: Persisted? = null
+    private val reportingEnabled: Boolean
+        get() = cachedSettings.let { it != null && it.cloudEnabled && it.enrolled && it.deviceId != null }
+
     init {
+        // Keep the settings snapshot fresh. DataStore emits the current value on collect, so the
+        // gate is correct within milliseconds of construction (before that, report() drops — the
+        // same conservative behavior as before, minus the multi-second first-loop-pass window).
+        scope.launch {
+            settings.persisted.collect { cachedSettings = it }
+        }
         // Single-writer drain from the channel into the outbox — never blocks callers.
         scope.launch {
+            var sinceCapCheck = CAP_CHECK_EVERY   // force a cap check on the first insert
             for (row in enqueueChannel) {
                 try {
                     db.outbox().insert(listOf(row))
+                    // Enforce OUTBOX_MAX on the enqueue path too (DATA-5) — amortized, see
+                    // CAP_CHECK_EVERY. Previously only the upload loop enforced it, so with the
+                    // uploader stopped (cloud off mid-flight, auth backoff) the outbox was unbounded.
+                    if (++sinceCapCheck >= CAP_CHECK_EVERY) {
+                        sinceCapCheck = 0
+                        val depth = db.outbox().count()
+                        if (depth > OUTBOX_MAX) db.outbox().dropOldest(depth - OUTBOX_MAX)
+                    }
                 } catch (e: CancellationException) {
                     throw e   // never swallow cancellation
                 } catch (_: Exception) {
@@ -211,22 +246,29 @@ class TelemetryReporter(
     private suspend fun uploadLoop() {
         var backoff = 1000L
         var seq = 0
-        reportingEnabled = settings.load().let { it.cloudEnabled && it.enrolled && it.deviceId != null }
         while (true) {
             try {
-                val p = settings.load()
-                reportingEnabled = p.cloudEnabled && p.enrolled && p.deviceId != null
-                val base = p.apiBaseUrl
-                if (!p.cloudEnabled || !p.enrolled || p.deviceId == null || base == null) {
+                // Hot path (DATA-7): read the flow-fed snapshot — no per-iteration Persisted decode.
+                val p = cachedSettings
+                val base = p?.apiBaseUrl
+                if (p == null || !p.cloudEnabled || !p.enrolled || p.deviceId == null || base == null) {
                     delay(2000)
                     continue
                 }
                 // One-way temperature-alert config push (latest-wins, durable across restarts):
-                // sign the plaintext + gzip like ingest, and clear only on success.
+                // sign the plaintext + gzip like ingest, and clear only on success — except a
+                // permanent 4xx reject (WEB-6b): the server will never accept that body, so
+                // re-POSTing it every ~1.5 s forever is pure waste. Drop it and log; the next
+                // threshold change enqueues a fresh (presumably fixed) config.
                 if (conn.online.value) {
                     p.pendingTempConfig?.let { cfg ->
-                        if (postSigned(CloudConfig(base).configUrl, p.deviceId, cfg.toByteArray()) == PostResult.Ok) {
-                            settings.clearPendingTempConfig()
+                        when (postSigned(CloudConfig(base).configUrl, p.deviceId, cfg.toByteArray())) {
+                            PostResult.Ok -> settings.clearPendingTempConfig()
+                            PostResult.Poison -> {
+                                Log.w(TAG, "config: server permanently rejected the temp-config push — dropping it (re-enqueued on the next threshold change)")
+                                settings.clearPendingTempConfig()
+                            }
+                            else -> {}   // transient / auth: keep it pending, retry next pass
                         }
                     }
                 }

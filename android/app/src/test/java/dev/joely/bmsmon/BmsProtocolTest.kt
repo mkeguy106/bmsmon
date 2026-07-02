@@ -99,6 +99,52 @@ class BmsProtocolTest {
         assertEquals(null, BmsProtocol.parseTelemetry(bad, "x"))
     }
 
+    // --- write-time safety gate (BLE-7): BleSession refuses any frame this predicate rejects ---
+
+    @Test
+    fun safeStatusFrameAcceptsTheRealStatusQuery() {
+        assertTrue(BmsProtocol.isSafeStatusFrame(BmsProtocol.frame(BmsProtocol.ReadCommand.STATUS)))
+        assertTrue(BmsProtocol.isSafeStatusFrame(BmsProtocol.STATUS_FRAME))
+        // The exact bytes from the protocol spec, built by hand.
+        assertTrue(BmsProtocol.isSafeStatusFrame(
+            byteArrayOf(0x00, 0x00, 0x04, 0x01, 0x13, 0x55.toByte(), 0xAA.toByte(), 0x17)))
+    }
+
+    @Test
+    fun safeStatusFrameRejectsShutdownOpcode() {
+        // 0x60 = BMS shutdown (the battery-bricking command) — even with a VALID checksum this
+        // must never pass the gate. 00 00 04 01 60 55 AA -> sum & 0xFF = 0x64.
+        val shutdown = byteArrayOf(0x00, 0x00, 0x04, 0x01, 0x60, 0x55.toByte(), 0xAA.toByte(), 0x64)
+        assertFalse(BmsProtocol.isSafeStatusFrame(shutdown))
+        // And every other destructive/unknown opcode mutation of the status frame.
+        for (opcode in intArrayOf(0x0A, 0x0B, 0x0C, 0x0D, 0x30, 0x80, 0xFF)) {
+            val f = BmsProtocol.frame(BmsProtocol.ReadCommand.STATUS)
+            f[4] = opcode.toByte()
+            var sum = 0
+            for (i in 0 until 7) sum += f[i].toInt() and 0xFF
+            f[7] = (sum and 0xFF).toByte()  // re-checksum so only the opcode check can reject it
+            assertFalse("opcode 0x%02X must be refused".format(opcode), BmsProtocol.isSafeStatusFrame(f))
+        }
+    }
+
+    @Test
+    fun safeStatusFrameRejectsWrongChecksum() {
+        val f = BmsProtocol.frame(BmsProtocol.ReadCommand.STATUS)
+        f[7] = (f[7] + 1).toByte()
+        assertFalse(BmsProtocol.isSafeStatusFrame(f))
+        // A corrupted non-opcode byte also fails (checksum and byte-identity both break).
+        val g = BmsProtocol.frame(BmsProtocol.ReadCommand.STATUS)
+        g[2] = 0x05
+        assertFalse(BmsProtocol.isSafeStatusFrame(g))
+    }
+
+    @Test
+    fun safeStatusFrameRejectsWrongLength() {
+        assertFalse(BmsProtocol.isSafeStatusFrame(ByteArray(0)))
+        assertFalse(BmsProtocol.isSafeStatusFrame(BmsProtocol.frame(BmsProtocol.ReadCommand.STATUS).copyOfRange(0, 7)))
+        assertFalse(BmsProtocol.isSafeStatusFrame(BmsProtocol.frame(BmsProtocol.ReadCommand.STATUS) + 0x00))
+    }
+
     /** Safety guard: the command whitelist must never contain a destructive opcode. */
     @Test
     fun commandWhitelistIsReadOnly() {

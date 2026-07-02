@@ -21,6 +21,15 @@ import java.util.UUID
 private const val ALIAS = "bmsmon_device"
 private const val KS = "AndroidKeyStore"
 
+/**
+ * Audience claim (DATA-11): scopes device tokens to this API so a captured token can't be
+ * replayed against another service sharing the key registry. The server verifies it when present
+ * (older tokens without `aud` stay valid). DEPLOYMENT ORDER: the verify-if-present server MUST be
+ * deployed before an app build carrying this claim ships — a pre-T4.4 server passes no `audience`
+ * kwarg to PyJWT, which then hard-rejects any token that carries `aud` (InvalidAudienceError).
+ */
+const val JWT_AUDIENCE = "bmsmon-api"
+
 /** JWT assembly + hashing — pure, JVM-testable (no Keystore dependency). */
 object Jwt {
     fun bodyHash(body: ByteArray): String =
@@ -31,6 +40,7 @@ object Jwt {
                   nowMs: Long, ttlSec: Long = 60): String {
         val claims = JWTClaimsSet.Builder()
             .subject(deviceId)
+            .audience(JWT_AUDIENCE)
             .issueTime(Date((nowMs / 1000) * 1000))
             .expirationTime(Date(((nowMs / 1000) + ttlSec) * 1000))
             .jwtID(UUID.randomUUID().toString())

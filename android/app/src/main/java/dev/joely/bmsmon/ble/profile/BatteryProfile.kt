@@ -30,8 +30,9 @@ data class BackoffSpec(val baseMs: Long, val factor: Int, val capMs: Long)
 
 /**
  * Everything brand/firmware-specific for one battery family. Selected by [namePrefixes]. SAFETY:
- * only prebuilt read-command frames are exposed ([statusFrame], [firmwareFrame]) — there is no
- * open opcode API, so no destructive command can ever be emitted.
+ * only one prebuilt read-command frame is exposed ([statusFrame], validated again at write time by
+ * [dev.joely.bmsmon.ble.BmsProtocol.isSafeStatusFrame]) — there is no open opcode API, so no
+ * destructive command can ever be emitted.
  */
 data class BatteryProfile(
     val id: String,
@@ -44,7 +45,6 @@ data class BatteryProfile(
     val cccdUuid: UUID,
     val writeWithResponse: Boolean,
     val statusFrame: ByteArray,
-    val firmwareFrame: ByteArray,
     val responseHeader: ByteArray,
     val layout: TelemetryLayout,
     val stagePollMs: Long,

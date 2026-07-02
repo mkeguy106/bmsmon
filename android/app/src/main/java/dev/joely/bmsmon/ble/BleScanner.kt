@@ -13,6 +13,17 @@ import dev.joely.bmsmon.ble.profile.ProfileRegistry
 /** True only for advertised names that match a known battery profile (see ble/profile). */
 fun isCompatibleBmsName(name: String?): Boolean = ProfileRegistry.profileFor(name) != null
 
+/** Human meaning of a [ScanCallback] `SCAN_FAILED_*` code, for field-diagnosable logs (BLE-13). */
+fun scanFailureName(errorCode: Int): String = when (errorCode) {
+    ScanCallback.SCAN_FAILED_ALREADY_STARTED -> "already started"
+    ScanCallback.SCAN_FAILED_APPLICATION_REGISTRATION_FAILED -> "app registration failed"
+    ScanCallback.SCAN_FAILED_INTERNAL_ERROR -> "internal error"
+    ScanCallback.SCAN_FAILED_FEATURE_UNSUPPORTED -> "feature unsupported"
+    ScanCallback.SCAN_FAILED_OUT_OF_HARDWARE_RESOURCES -> "out of hardware resources"
+    ScanCallback.SCAN_FAILED_SCANNING_TOO_FREQUENTLY -> "scanning too frequently"
+    else -> "unknown error"
+}
+
 /** A compatible device seen during a scan. */
 data class DiscoveredDevice(val address: String, val name: String)
 
@@ -39,7 +50,11 @@ class BleScanner(private val context: Context) {
                 }
             }
             override fun onScanFailed(errorCode: Int) {
-                Log.d("BleScanner", "scan failed: $errorCode")
+                // Log-only (BLE-13): start(onFound) has no error path to surface this through, and
+                // threading one in would ripple to every caller for a failure the user already
+                // experiences as "no devices found". Warn level + human-readable meaning so a
+                // field logcat pull explains WHY discovery went quiet.
+                Log.w("BleScanner", "scan failed: ${scanFailureName(errorCode)} ($errorCode)")
             }
         }
         scanner = s

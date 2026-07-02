@@ -3,12 +3,15 @@ package dev.joely.bmsmon
 import dev.joely.bmsmon.model.AlertKind
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.BatteryStatus
+import dev.joely.bmsmon.model.CHARGE_SUPPRESS_HOLD_MS
 import dev.joely.bmsmon.model.DEFAULT_ROSTER
 import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.Telemetry
+import dev.joely.bmsmon.model.applyDisabled
 import dev.joely.bmsmon.model.groupById
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -161,5 +164,74 @@ class StageAlertArbitrationTest {
         assertFalse(a.flashing)
         assertEquals(AlertKind.TEMPERATURE, a.kind)  // worst raw severity still shown (acked strip)
         assertTrue(a.present)
+    }
+
+    // --- UI-8: a user-disconnected (disabled) stage pack raises no alert ---
+    // Seam: engine.setDisabled applies applyDisabled to MonitorState synchronously; the VM
+    // mirrors that fleet, and stageAlert's reachable-only filter then excludes the pack. This
+    // drives the actual applyDisabled → stageAlert pipeline end to end.
+
+    @Test fun disabledStagePackRaisesNoAlert() {
+        val s = stateAt(soc = 5f, tempC = 65f)   // both capacity-critical AND temp CUTOFF if live
+        val disabled = DEFAULT_ROSTER.groupById("2012")!!.targets.map { it.address }.toSet()
+        val (fleet, regen) = applyDisabled(s.fleet, emptySet(), disabled)
+        val a = s.copy(fleet = fleet, regenAddrs = regen, disabled = disabled).stageAlert()
+        assertFalse(a.flashing)
+        assertFalse(a.present)
+        assertNull(a.activeThreshold)
+        // Documented consequence: DISCONNECTED rendering is the only signal for an absent pack.
+    }
+
+    @Test fun disablingOnePackLeavesTheOtherDrivingAlerts() {
+        val s = stateAt(soc = 12f, tempC = 25f)
+        val one = DEFAULT_ROSTER.groupById("2012")!!.targets.first().address
+        val (fleet, regen) = applyDisabled(s.fleet, emptySet(), setOf(one))
+        val a = s.copy(fleet = fleet, regenAddrs = regen, disabled = setOf(one)).stageAlert()
+        assertTrue(a.flashing)   // the still-reachable low pack keeps alerting
+        assertEquals(15, a.activeThreshold)
+    }
+
+    // --- UI-9: charging-suppression hysteresis at the UiState seam ---
+
+    /** Fleet where every pack of base 2012 reads Idle at [soc] (the charger-flap resting state). */
+    private fun idleFleetAt(soc: Float): Map<String, BatteryStatus> =
+        DEFAULT_ROSTER.groupById("2012")!!.targets.associate {
+            it.address to BatteryStatus(
+                Telemetry("x", soc = soc, powerW = 0f, current = 0f, voltage = 13f,
+                    capacityAh = 50f, cellV = 3.3f, temp = 25f, state = BatteryState.Idle),
+                reachable = true,
+            )
+        }
+
+    @Test fun chargeHoldSuppressesFlashDuringIdleFlap() {
+        // Charging latches the hold; the flap to Idle (within the window) must NOT strobe the
+        // overlay even though the pack is at a critical SOC and no longer reads Charging.
+        var s = stateAt(soc = 12f, tempC = 25f, charging = true).withChargeHold(now = 1_000L)
+        assertTrue(s.stageChargeHold)
+        s = s.copy(fleet = idleFleetAt(12f)).withChargeHold(now = 2_000L)   // Idle flap, 1 s later
+        assertTrue(s.stageChargeHold)   // still latched
+        val a = s.stageAlert()
+        assertFalse("latched hold must suppress the capacity flash", a.flashing)
+        assertFalse(a.present)
+    }
+
+    @Test fun chargeHoldClearsOnGenuineDischarge() {
+        // Charging first — latch on.
+        var s = stateAt(soc = 12f, tempC = 25f, charging = true).withChargeHold(now = 1_000L)
+        assertTrue(s.stageChargeHold)
+        // Then genuinely discharging (unplugged and driving): the latch clears immediately…
+        s = s.copy(fleet = fleetAt("2012", 12f, 25f, charging = false)).withChargeHold(now = 2_000L)
+        assertFalse(s.stageChargeHold)
+        assertEquals(0L, s.stageChargeLastAt)
+        // …and the low-battery alert flashes with no 30 s delay.
+        assertTrue(s.stageAlert().flashing)
+    }
+
+    @Test fun chargeHoldExpiresAfterWindowWhileUnreadable() {
+        // Latch on, then the window passes with no discharge signal: hold expires on refresh.
+        var s = stateAt(soc = 80f, tempC = 25f, charging = true).withChargeHold(now = 1_000L)
+        s = s.copy(fleet = s.fleet.mapValues { (_, st) -> st.copy(reachable = false) })
+        s = s.withChargeHold(now = 1_000L + CHARGE_SUPPRESS_HOLD_MS + 1)
+        assertFalse(s.stageChargeHold)
     }
 }

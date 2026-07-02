@@ -46,13 +46,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import dev.joely.bmsmon.FilterKey
-import dev.joely.bmsmon.SortKey
 import dev.joely.bmsmon.StageAlert
 import dev.joely.bmsmon.Appearance
 import dev.joely.bmsmon.UiState
 import dev.joely.bmsmon.model.GroupActivity
-import dev.joely.bmsmon.model.StageTarget
+import dev.joely.bmsmon.ui.FleetActions
+import dev.joely.bmsmon.ui.RosterActions
+import dev.joely.bmsmon.ui.TopBarActions
 import dev.joely.bmsmon.ui.all.AllBatteriesScreen
 import dev.joely.bmsmon.ui.theme.AlertCritical
 import dev.joely.bmsmon.ui.theme.AlertWarn
@@ -64,30 +64,12 @@ import kotlinx.coroutines.launch
 @Composable
 fun HomeScreen(
     state: UiState,
-    onCycleAppearance: () -> Unit,
-    onSettings: () -> Unit,
-    onHistory: () -> Unit,
-    onToggleMonitoring: () -> Unit,
-    onSetSort: (SortKey) -> Unit,
-    onToggleFilter: (FilterKey) -> Unit,
-    onSetFilterBase: (String) -> Unit,
-    onPinStage: (StageTarget) -> Unit,
-    onDisconnect: (String) -> Unit,
-    onReconnect: (String) -> Unit,
-    onDisconnectAll: () -> Unit,
-    onReconnectAll: () -> Unit,
+    topBar: TopBarActions,
+    fleet: FleetActions,
+    rosterEdit: RosterActions,
     onAcknowledge: () -> Unit,
-    onAddScan: () -> Unit,
-    onOpenDetail: (String) -> Unit,
-    onRemove: (String) -> Unit,
-    onRename: (String, String) -> Unit,
-    onSetGroup: (String, String?) -> Unit,
-    onCreateGroup: (String, String) -> Unit,
-    onRenameGroup: (String, String) -> Unit,
-    onPinSingle: (String) -> Unit,
     onHomePageChanged: (Int) -> Unit,
     locked: Boolean,
-    onToggleLock: () -> Unit,
 ) {
     val c = Bm.colors
     // Page 0 = stage (main); page 1 = all batteries — swipe LEFT from the stage to reach it.
@@ -102,14 +84,14 @@ fun HomeScreen(
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().background(c.bg)) {
-            TopBar(state, pager.currentPage, onCycleAppearance, onSettings, onHistory, onToggleMonitoring, locked, onToggleLock)
+            TopBar(state, pager.currentPage, topBar, locked)
             HorizontalPager(state = pager, userScrollEnabled = !locked, modifier = Modifier.weight(1f)) { page ->
                 when (page) {
                     0 -> StageScreen(
                         items = state.stageItems(),
                         tempInF = state.tempFahrenheit,
                         isEmpty = state.roster.batteries.isEmpty(),
-                        onAddScan = onAddScan,
+                        onAddScan = fleet.onAddScan,
                         showTempGauge = state.showTempGauge,
                         tempGaugeSide = state.tempGaugeSide,
                         thresholds = state.tempThresholdsFor(state.stageProfile().id),
@@ -117,28 +99,18 @@ fun HomeScreen(
                     )
                     else -> AllBatteriesScreen(
                         state = state,
-                        onSetSort = onSetSort,
-                        onToggleFilter = onToggleFilter,
-                        onSetFilterBase = onSetFilterBase,
-                        onPinBase = { groupId ->
-                            onPinStage(StageTarget.Base(groupId))
-                            scope.launch { pager.animateScrollToPage(0) }
-                        },
-                        onPinSingle = { addr ->
-                            onPinSingle(addr)
-                            scope.launch { pager.animateScrollToPage(0) }
-                        },
-                        onDisconnect = onDisconnect,
-                        onReconnect = onReconnect,
-                        onDisconnectAll = onDisconnectAll,
-                        onReconnectAll = onReconnectAll,
-                        onAddScan = onAddScan,
-                        onOpenDetail = onOpenDetail,
-                        onRemove = onRemove,
-                        onRename = onRename,
-                        onSetGroup = onSetGroup,
-                        onCreateGroup = onCreateGroup,
-                        onRenameGroup = onRenameGroup,
+                        // Pinning from the list also swings the pager back to the stage.
+                        fleet = fleet.copy(
+                            onPinBase = { groupId ->
+                                fleet.onPinBase(groupId)
+                                scope.launch { pager.animateScrollToPage(0) }
+                            },
+                            onPinSingle = { addr ->
+                                fleet.onPinSingle(addr)
+                                scope.launch { pager.animateScrollToPage(0) }
+                            },
+                        ),
+                        rosterEdit = rosterEdit,
                         modifier = Modifier.padding(top = 6.dp),
                     )
                 }
@@ -172,7 +144,11 @@ internal fun DangerOverlay(alert: StageAlert, onAcknowledge: () -> Unit) {
     val flashColor = if (alert.critical) AlertCritical else AlertWarn
     val peak = if (alert.critical) 0.58f else 0.34f
     val duration = if (alert.critical) 1000 else 1500
-    val fallbackDetail = "LOW BATTERY · ${alert.lowSoc}% · BELOW ${alert.activeThreshold}%"
+    // Safe fallback (UI-13c): activeThreshold is null for temperature alerts — never render
+    // "BELOW null%"; without a threshold just name the SOC.
+    val fallbackDetail = alert.activeThreshold
+        ?.let { "LOW BATTERY · ${alert.lowSoc}% · BELOW $it%" }
+        ?: "LOW BATTERY · ${alert.lowSoc}%"
     val detail = alert.detail.ifBlank { fallbackDetail }
 
     val transition = rememberInfiniteTransition(label = "danger")
@@ -259,12 +235,8 @@ internal fun AckedStrip(alert: StageAlert, modifier: Modifier = Modifier) {
 private fun TopBar(
     state: UiState,
     currentPage: Int,
-    onCycleAppearance: () -> Unit,
-    onSettings: () -> Unit,
-    onHistory: () -> Unit,
-    onToggleMonitoring: () -> Unit,
+    actions: TopBarActions,
     locked: Boolean,
-    onToggleLock: () -> Unit,
 ) {
     val c = Bm.colors
     val (label, labelColor, showPin) = when {
@@ -285,7 +257,7 @@ private fun TopBar(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Row(
-                if (locked) Modifier else Modifier.clickable(onClick = onToggleMonitoring),
+                if (locked) Modifier else Modifier.clickable(onClick = actions.onToggleMonitoring),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(
@@ -300,7 +272,7 @@ private fun TopBar(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 // While locked, hide appearance + settings; only the lock control remains (hold to unlock).
                 if (!locked) {
-                    Box(Modifier.size(40.dp).clickable(onClick = onCycleAppearance), contentAlignment = Alignment.Center) {
+                    Box(Modifier.size(40.dp).clickable(onClick = actions.onCycleAppearance), contentAlignment = Alignment.Center) {
                         when (state.appearance) {
                             Appearance.Dark -> Icon(Icons.Filled.DarkMode, "Appearance: Dark", Modifier.size(21.dp), tint = c.icon)
                             Appearance.Light -> Icon(Icons.Filled.LightMode, "Appearance: Light", Modifier.size(21.dp), tint = c.icon)
@@ -308,16 +280,16 @@ private fun TopBar(
                             Appearance.Auto -> Text("A", color = c.icon, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                         }
                     }
-                    Box(Modifier.size(40.dp).clickable(onClick = onHistory), contentAlignment = Alignment.Center) {
+                    Box(Modifier.size(40.dp).clickable(onClick = actions.onHistory), contentAlignment = Alignment.Center) {
                         Icon(Icons.Filled.ShowChart, "History", Modifier.size(22.dp), tint = c.icon)
                     }
-                    Box(Modifier.size(40.dp).clickable(onClick = onSettings), contentAlignment = Alignment.Center) {
+                    Box(Modifier.size(40.dp).clickable(onClick = actions.onSettings), contentAlignment = Alignment.Center) {
                         Icon(Icons.Filled.Settings, "Settings", Modifier.size(22.dp), tint = c.icon)
                     }
                 }
                 LockButton(
                     locked = locked,
-                    onToggle = onToggleLock,
+                    onToggle = actions.onToggleLock,
                     iconTint = if (locked) Bm.accent else c.icon,
                     ringColor = Bm.accent,
                 )

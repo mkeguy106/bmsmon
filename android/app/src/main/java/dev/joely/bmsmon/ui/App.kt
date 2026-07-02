@@ -180,6 +180,83 @@ fun App(vm: BatteryViewModel) {
         if (hasBlePermissions(context)) showScan = true else scanPermLauncher.launch(blePermissions())
     }
 
+    // Grouped action holders (UI-13e): one immutable holder per screen area instead of the old
+    // 20–30-lambda call sites. Same lambdas, same wiring — purely mechanical.
+    val topBarActions = TopBarActions(
+        onCycleAppearance = vm::cycleAppearance,
+        onSettings = vm::goSettings,
+        onHistory = vm::goHistory,
+        onToggleMonitoring = onMonitorToggle,
+        onToggleLock = { vm.setLocked(!state.locked) },
+    )
+    val fleetActions = FleetActions(
+        onSetSort = vm::setSort,
+        onToggleFilter = vm::toggleFilter,
+        onSetFilterBase = vm::setFilterBase,
+        onPinBase = { groupId -> vm.pinStage(dev.joely.bmsmon.model.StageTarget.Base(groupId)) },
+        onPinSingle = { addr -> vm.pinStage(dev.joely.bmsmon.model.StageTarget.Single(addr)) },
+        onDisconnect = vm::disconnectBattery,
+        onReconnect = vm::reconnectBattery,
+        onDisconnectAll = vm::disconnectAll,
+        onReconnectAll = vm::reconnectAll,
+        onOpenDetail = vm::openDetail,
+        onAddScan = onAddScan,
+    )
+    val rosterActions = RosterActions(
+        onRemove = vm::removeBattery,
+        onRename = vm::renameBattery,
+        onSetGroup = vm::setBatteryGroup,
+        onCreateGroup = vm::createGroupForBattery,
+        onRenameGroup = vm::renameGroup,
+    )
+    val monitoringActions = MonitoringActions(
+        onToggleMonitoring = onMonitorToggle,
+        onAddScan = onAddScan,
+        onSetDailyDriver = vm::setDailyDriver,
+        onSetDynamicStage = vm::setDynamicStage,
+        onSetStageHold = vm::setStageHold,
+    )
+    val alertActions = AlertActions(
+        onSetAlertsOn = vm::setAlertsOn,
+        onToggleThreshold = vm::toggleThreshold,
+        onSetCriticalThreshold = vm::setCriticalThreshold,
+        onResetAlerts = vm::resetAlertsToDefaults,
+    )
+    val tempActions = TempActions(
+        onSetTempAlertsEnabled = vm::setTempAlertsEnabled,
+        onSetShowTempGauge = vm::setShowTempGauge,
+        onSetTempGaugeSide = vm::setTempGaugeSide,
+        onSetTempThresholds = vm::setTempThresholds,
+        onResetTempThresholds = vm::resetTempThresholds,
+        onSetCloudSyncAlerts = vm::setCloudSyncAlerts,
+        onToggleTempUnit = vm::toggleTempUnit,
+    )
+    val appearanceActions = AppearanceActions(
+        onSetAppearance = vm::setAppearance,
+        onSetAutoLux = vm::setAutoLuxThreshold,
+        onSetAccent = vm::setAccent,
+        onSetPower = vm::setPower,
+    )
+    val displayActions = DisplayActions(
+        onSetTempFahrenheit = vm::setTempFahrenheit,
+        onSetKeepScreenOn = vm::setKeepScreenOn,
+    )
+    val lockActions = LockActions(
+        onSetLockShowTime = vm::setLockShowTime,
+        onSetLockShowWifi = vm::setLockShowWifi,
+        onSetLockShowBattery = vm::setLockShowBattery,
+    )
+    val dataActions = DataActions(
+        onSetLogging = vm::setLogging,
+        onClearLog = vm::clearLog,
+    )
+    val cloudActions = CloudActions(
+        onEnroll = vm::enroll,
+        onSetCloudEnabled = vm::setCloudEnabled,
+        onForget = vm::forgetDevice,
+        onSetGpsEnabled = onSetGps,
+    )
+
     BmTheme(dark = state.isDark, accent = state.accent, power = state.power) {
         Box(Modifier.fillMaxSize().background(Bm.colors.bg)) {
           val lockStrip = state.locked && (state.lockShowTime || state.lockShowWifi || state.lockShowBattery)
@@ -201,30 +278,12 @@ fun App(vm: BatteryViewModel) {
                 when (state.screen) {
                     Screen.Home -> HomeScreen(
                         state = state,
-                        onCycleAppearance = vm::cycleAppearance,
-                        onSettings = vm::goSettings,
-                        onHistory = vm::goHistory,
-                        onToggleMonitoring = onMonitorToggle,
-                        onSetSort = vm::setSort,
-                        onToggleFilter = vm::toggleFilter,
-                        onSetFilterBase = vm::setFilterBase,
-                        onPinStage = vm::pinStage,
-                        onDisconnect = vm::disconnectBattery,
-                        onReconnect = vm::reconnectBattery,
-                        onDisconnectAll = vm::disconnectAll,
-                        onReconnectAll = vm::reconnectAll,
+                        topBar = topBarActions,
+                        fleet = fleetActions,
+                        rosterEdit = rosterActions,
                         onAcknowledge = vm::acknowledgeAlert,
-                        onAddScan = onAddScan,
-                        onOpenDetail = vm::openDetail,
-                        onRemove = vm::removeBattery,
-                        onRename = vm::renameBattery,
-                        onSetGroup = vm::setBatteryGroup,
-                        onCreateGroup = vm::createGroupForBattery,
-                        onRenameGroup = vm::renameGroup,
-                        onPinSingle = { addr -> vm.pinStage(dev.joely.bmsmon.model.StageTarget.Single(addr)) },
                         onHomePageChanged = vm::setHomePage,
                         locked = state.locked,
-                        onToggleLock = { vm.setLocked(!state.locked) },
                     )
                     Screen.History -> {
                         val packs by androidx.compose.runtime.produceState<List<dev.joely.bmsmon.data.PackHealth>?>(null, vm) {
@@ -254,37 +313,14 @@ fun App(vm: BatteryViewModel) {
                     Screen.Settings -> SettingsScreen(
                         state = state,
                         onBack = vm::goHome,
-                        onToggleMonitoring = onMonitorToggle,
-                        onAddScan = onAddScan,
-                        onSetDailyDriver = vm::setDailyDriver,
-                        onSetDynamicStage = vm::setDynamicStage,
-                        onSetStageHold = vm::setStageHold,
-                        onSetAlertsOn = vm::setAlertsOn,
-                        onToggleThreshold = vm::toggleThreshold,
-                        onSetCriticalThreshold = vm::setCriticalThreshold,
-                        onResetAlerts = vm::resetAlertsToDefaults,
-                        onSetTempAlertsEnabled = vm::setTempAlertsEnabled,
-                        onSetShowTempGauge = vm::setShowTempGauge,
-                        onSetTempGaugeSide = vm::setTempGaugeSide,
-                        onSetTempThresholds = vm::setTempThresholds,
-                        onResetTempThresholds = vm::resetTempThresholds,
-                        onSetCloudSyncAlerts = vm::setCloudSyncAlerts,
-                        onToggleTempUnit = vm::toggleTempUnit,
-                        onSetKeepScreenOn = vm::setKeepScreenOn,
-                        onSetTempFahrenheit = vm::setTempFahrenheit,
-                        onSetLogging = vm::setLogging,
-                        onClearLog = vm::clearLog,
-                        onSetAccent = vm::setAccent,
-                        onSetPower = vm::setPower,
-                        onSetAppearance = vm::setAppearance,
-                        onSetAutoLux = vm::setAutoLuxThreshold,
-                        onSetLockShowTime = vm::setLockShowTime,
-                        onSetLockShowWifi = vm::setLockShowWifi,
-                        onSetLockShowBattery = vm::setLockShowBattery,
-                        onEnroll = vm::enroll,
-                        onSetCloudEnabled = vm::setCloudEnabled,
-                        onForget = vm::forgetDevice,
-                        onSetGpsEnabled = onSetGps,
+                        monitoring = monitoringActions,
+                        alerts = alertActions,
+                        temp = tempActions,
+                        appearance = appearanceActions,
+                        display = displayActions,
+                        lock = lockActions,
+                        data = dataActions,
+                        cloud = cloudActions,
                     )
                     Screen.Detail -> {
                         val addr = state.detailAddress

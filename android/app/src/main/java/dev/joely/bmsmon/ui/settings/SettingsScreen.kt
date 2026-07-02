@@ -92,6 +92,14 @@ import dev.joely.bmsmon.model.cToF
 import dev.joely.bmsmon.model.formatDelta
 import dev.joely.bmsmon.model.formatTemp
 import dev.joely.bmsmon.model.groupViews
+import dev.joely.bmsmon.ui.AlertActions
+import dev.joely.bmsmon.ui.AppearanceActions
+import dev.joely.bmsmon.ui.CloudActions
+import dev.joely.bmsmon.ui.DataActions
+import dev.joely.bmsmon.ui.DisplayActions
+import dev.joely.bmsmon.ui.LockActions
+import dev.joely.bmsmon.ui.MonitoringActions
+import dev.joely.bmsmon.ui.TempActions
 import dev.joely.bmsmon.ui.theme.AlertCritical
 import dev.joely.bmsmon.ui.theme.AlertWarn
 import dev.joely.bmsmon.ui.theme.Bm
@@ -116,37 +124,14 @@ private enum class SettingsPage { Monitoring, Alerts, Temperature, Groups, Appea
 fun SettingsScreen(
     state: UiState,
     onBack: () -> Unit,
-    onToggleMonitoring: () -> Unit,
-    onAddScan: () -> Unit,
-    onSetDailyDriver: (String) -> Unit,
-    onSetDynamicStage: (Boolean) -> Unit,
-    onSetStageHold: (Int) -> Unit,
-    onSetAlertsOn: (Boolean) -> Unit,
-    onToggleThreshold: (Int) -> Unit,
-    onSetCriticalThreshold: (Int) -> Unit,
-    onResetAlerts: () -> Unit,
-    onSetTempAlertsEnabled: (Boolean) -> Unit,
-    onSetShowTempGauge: (Boolean) -> Unit,
-    onSetTempGaugeSide: (GaugeSide) -> Unit,
-    onSetTempThresholds: (String, TempThresholds) -> Unit,
-    onResetTempThresholds: (String) -> Unit,
-    onSetCloudSyncAlerts: (Boolean) -> Unit,
-    onToggleTempUnit: () -> Unit,
-    onSetKeepScreenOn: (Boolean) -> Unit,
-    onSetTempFahrenheit: (Boolean) -> Unit,
-    onSetLogging: (Boolean) -> Unit,
-    onClearLog: () -> Unit,
-    onSetAccent: (Color) -> Unit,
-    onSetPower: (Color) -> Unit,
-    onSetAppearance: (Appearance) -> Unit,
-    onSetAutoLux: (Float) -> Unit,
-    onSetLockShowTime: (Boolean) -> Unit,
-    onSetLockShowWifi: (Boolean) -> Unit,
-    onSetLockShowBattery: (Boolean) -> Unit,
-    onEnroll: (String, String) -> Unit,
-    onSetCloudEnabled: (Boolean) -> Unit,
-    onForget: () -> Unit,
-    onSetGpsEnabled: (Boolean) -> Unit,
+    monitoring: MonitoringActions,
+    alerts: AlertActions,
+    temp: TempActions,
+    appearance: AppearanceActions,
+    display: DisplayActions,
+    lock: LockActions,
+    data: DataActions,
+    cloud: CloudActions,
 ) {
     var page by remember { mutableStateOf<SettingsPage?>(null) }
 
@@ -156,35 +141,39 @@ fun SettingsScreen(
     BackHandler(enabled = page != null) { page = null }
 
     when (page) {
-        null -> SettingsHub(state, onBack, onToggleMonitoring) { page = it }
+        null -> SettingsHub(state, onBack, monitoring.onToggleMonitoring) { page = it }
         SettingsPage.Monitoring -> DetailScaffold("Monitoring & Stage", { page = null }) {
-            MonitoringStageContent(state, onToggleMonitoring, onSetDynamicStage, onSetStageHold)
+            MonitoringStageContent(state, monitoring.onToggleMonitoring, monitoring.onSetDynamicStage,
+                monitoring.onSetStageHold)
         }
         SettingsPage.Alerts -> DetailScaffold("Alerts", { page = null }) {
-            AlertsContent(state, onSetAlertsOn, onToggleThreshold, onSetCriticalThreshold, onResetAlerts)
+            AlertsContent(state, alerts.onSetAlertsOn, alerts.onToggleThreshold,
+                alerts.onSetCriticalThreshold, alerts.onResetAlerts)
         }
         SettingsPage.Temperature -> DetailScaffold("Temperature", { page = null }) {
-            TemperatureContent(state, onSetTempAlertsEnabled, onSetShowTempGauge, onSetTempGaugeSide,
-                onSetTempThresholds, onResetTempThresholds, onSetCloudSyncAlerts, onToggleTempUnit)
+            TemperatureContent(state, temp.onSetTempAlertsEnabled, temp.onSetShowTempGauge,
+                temp.onSetTempGaugeSide, temp.onSetTempThresholds, temp.onResetTempThresholds,
+                temp.onSetCloudSyncAlerts, temp.onToggleTempUnit)
         }
         SettingsPage.Groups -> DetailScaffold("Battery Groups", { page = null }) {
-            GroupsContent(state, onSetDailyDriver, onAddScan)
+            GroupsContent(state, monitoring.onSetDailyDriver, monitoring.onAddScan)
         }
         SettingsPage.Appearance -> DetailScaffold("Appearance & Color", { page = null }) {
-            AppearanceColorContent(state, onSetAppearance, onSetAutoLux, onSetAccent, onSetPower)
+            AppearanceColorContent(state, appearance.onSetAppearance, appearance.onSetAutoLux,
+                appearance.onSetAccent, appearance.onSetPower)
         }
         SettingsPage.Display -> DetailScaffold("Display & Units", { page = null }) {
-            DisplayUnitsContent(state, onSetTempFahrenheit, onSetKeepScreenOn)
+            DisplayUnitsContent(state, display.onSetTempFahrenheit, display.onSetKeepScreenOn)
         }
         SettingsPage.Lock -> DetailScaffold("Lock Screen", { page = null }) {
-            LockScreenContent(state, onSetLockShowTime, onSetLockShowWifi, onSetLockShowBattery)
+            LockScreenContent(state, lock.onSetLockShowTime, lock.onSetLockShowWifi, lock.onSetLockShowBattery)
         }
         SettingsPage.Data -> DetailScaffold("Data & Logging", { page = null }) {
-            DataLoggingContent(state, onSetLogging, onClearLog)
+            DataLoggingContent(state, data.onSetLogging, data.onClearLog)
         }
         SettingsPage.About -> DetailScaffold("About", { page = null }) { AboutContent() }
         SettingsPage.Cloud -> DetailScaffold("Cloud sync", { page = null }) {
-            CloudSyncContent(state, onEnroll, onSetCloudEnabled, onForget, onSetGpsEnabled)
+            CloudSyncContent(state, cloud)
         }
     }
 }

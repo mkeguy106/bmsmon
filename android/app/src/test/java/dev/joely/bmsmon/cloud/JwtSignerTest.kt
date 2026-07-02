@@ -38,4 +38,15 @@ class JwtSignerTest {
         assertEquals(1060L, c.expirationTime.time / 1000)    // exp = iat + 60
         assertTrue(c.jwtid != null && c.jwtid.isNotEmpty())
     }
+
+    @Test fun jwt_carries_api_audience() {
+        // DATA-11: aud scopes device tokens to this API. The server verifies it when present
+        // (verify-if-present), so the value must match the server's expected audience exactly.
+        // DEPLOY ORDER: the verify-if-present server must be live before this claim ships.
+        val pair = kp()
+        val token = Jwt.signEs256(pair.private, "dev-123", "{}".toByteArray(), nowMs = 1_000_000L)
+        val c = SignedJWT.parse(token).jwtClaimsSet
+        assertEquals("bmsmon-api", JWT_AUDIENCE)
+        assertEquals(listOf(JWT_AUDIENCE), c.audience)
+    }
 }

@@ -1,6 +1,8 @@
 package dev.joely.bmsmon
 
 import dev.joely.bmsmon.ble.isCompatibleBmsName
+import dev.joely.bmsmon.ble.scanFailureName
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -21,5 +23,16 @@ class BleScannerTest {
         assertFalse(isCompatibleBmsName(""))
         assertFalse(isCompatibleBmsName("MyHeadphones"))
         assertFalse(isCompatibleBmsName("X-12100"))
+    }
+
+    /** BLE-13: scan-failure codes log with their human meaning (values per ScanCallback). */
+    @Test fun scanFailureCodesMapToHumanMeaning() {
+        assertEquals("already started", scanFailureName(1))
+        assertEquals("app registration failed", scanFailureName(2))
+        assertEquals("internal error", scanFailureName(3))
+        assertEquals("feature unsupported", scanFailureName(4))
+        assertEquals("out of hardware resources", scanFailureName(5))
+        assertEquals("scanning too frequently", scanFailureName(6))
+        assertEquals("unknown error", scanFailureName(42))
     }
 }

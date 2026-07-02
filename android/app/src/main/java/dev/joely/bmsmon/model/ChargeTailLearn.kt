@@ -3,6 +3,14 @@ package dev.joely.bmsmon.model
 /** One time-ordered charge observation for tail learning. */
 data class ChargeSample(val tsMs: Long, val soc: Float, val charging: Boolean)
 
+/**
+ * Map one raw telemetry row to a [ChargeSample], dropping rows without an SOC (UI-10). A null
+ * SOC must yield NO sample — the old `soc ?: -1f` mapping made a null-SOC charging row read as
+ * "below 98%", i.e. fabricated climb-through evidence for [observedChargeTailMinutes].
+ */
+fun chargeSample(tsMs: Long, soc: Float?, charging: Boolean): ChargeSample? =
+    soc?.let { ChargeSample(tsMs, it, charging) }
+
 /** Max gap within a single contiguous charging run before it's treated as broken. */
 private const val TAIL_MAX_GAP_MS = 5 * 60_000L
 

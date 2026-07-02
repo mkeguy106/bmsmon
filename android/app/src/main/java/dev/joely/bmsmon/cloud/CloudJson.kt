@@ -1,5 +1,6 @@
 package dev.joely.bmsmon.cloud
 
+import dev.joely.bmsmon.model.TempEnvelope
 import dev.joely.bmsmon.model.TempThresholds
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -64,12 +65,23 @@ object CloudJson {
     fun encodeBatch(seq: Int, rows: List<String>): ByteArray =
         ("""{"batch_seq":$seq,"samples":[""" + rows.joinToString(",") + "]}").toByteArray()
 
-    /** One-way temperature-alert config push body (phone → cloud). [unit] is "C"/"F". */
-    fun encodeTempConfig(profileId: String, t: TempThresholds, unit: String, updatedAtMs: Long): String =
+    /**
+     * One-way temperature-alert config push body (phone → cloud). [unit] is "C"/"F". Includes the
+     * profile's fixed envelope (WEB-6c) so the web mirror renders the exact cutoffs / charge-lock
+     * points the phone alerts on instead of hardcoding them.
+     */
+    fun encodeTempConfig(
+        profileId: String, t: TempThresholds, env: TempEnvelope, unit: String, updatedAtMs: Long,
+    ): String =
         json.encodeToString(
             TempConfigJson.serializer(),
-            TempConfigJson(profileId, t.coldCautionC, t.hotCautionC, t.coldCritC, t.hotCritC,
-                unit, updatedAtMs),
+            TempConfigJson(
+                profileId, t.coldCautionC, t.hotCautionC, t.coldCritC, t.hotCritC,
+                unit, updatedAtMs,
+                cutoff_cold_c = env.coldCutoffC, cutoff_hot_c = env.hotCutoffC,
+                charge_lock_cold_c = env.chargeLockColdC, charge_lock_hot_c = env.chargeLockHotC,
+                charge_resume_cold_c = env.chargeResumeColdC,
+            ),
         )
 }
 
@@ -82,4 +94,10 @@ data class TempConfigJson(
     val hot_crit_c: Int,
     val unit: String,
     val updated_at_ms: Long,
+    // Profile envelope (WEB-6c) — optional server-side; the server mirrors them when present.
+    val cutoff_cold_c: Int? = null,
+    val cutoff_hot_c: Int? = null,
+    val charge_lock_cold_c: Int? = null,
+    val charge_lock_hot_c: Int? = null,
+    val charge_resume_cold_c: Int? = null,
 )

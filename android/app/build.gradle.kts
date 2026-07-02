@@ -64,6 +64,12 @@ android {
     }
 }
 
+// Room schema export (DATA-10): the generated JSON schema per @Database version lands in
+// app/schemas/ and is checked into git (reviewable schema drift + migration-testable).
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2024.02.02")
     implementation(composeBom)

@@ -1,6 +1,7 @@
 package dev.joely.bmsmon
 
 import dev.joely.bmsmon.model.ChargeSample
+import dev.joely.bmsmon.model.chargeSample
 import dev.joely.bmsmon.model.foldTailEma
 import dev.joely.bmsmon.model.observedChargeTailMinutes
 import org.junit.Assert.assertEquals
@@ -40,5 +41,28 @@ class ChargeTailLearnTest {
 
     @Test fun emaFoldsTowardObservation() {
         assertEquals(51.0f, foldTailEma(prev = 45f, observed = 65f), 0.001f)
+    }
+
+    // --- UI-10: null-SOC rows are dropped, never treated as "below 98%" evidence ---
+
+    @Test fun chargeSampleDropsNullSoc() {
+        assertNull(chargeSample(1L, null, charging = true))
+        assertEquals(ChargeSample(1L, 99f, true), chargeSample(1L, 99f, charging = true))
+    }
+
+    @Test fun nullSocRowsDoNotFabricateClimbThroughEvidence() {
+        // A run that starts already in the tail (99→100) with a null-SOC charging row in front:
+        // the old `soc ?: -1f` mapping turned that row into "below 98%" and produced a bogus
+        // (and tiny) tail observation. Dropping the row keeps the run disqualified.
+        val rows = listOf(
+            Triple(0L, null as Float?, true),          // null-SOC charging row (BMS hiccup)
+            Triple(60_000L, 99f, true),
+            Triple(120_000L, 100f, true),
+        )
+        val mapped = rows.mapNotNull { (ts, soc, chg) -> chargeSample(ts, soc, chg) }
+        assertNull(observedChargeTailMinutes(mapped))
+        // The old mapping (null → -1f) fabricated exactly that evidence — pin the contrast:
+        val old = rows.map { (ts, soc, chg) -> ChargeSample(ts, soc ?: -1f, chg) }
+        assertEquals(1.0f, observedChargeTailMinutes(old)!!, 0.001f)
     }
 }

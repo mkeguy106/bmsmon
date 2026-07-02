@@ -1,0 +1,414 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 3,
+    "identityHash": "b2e7dcf360708b59a848a0501549f85b",
+    "entities": [
+      {
+        "tableName": "samples",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `address` TEXT NOT NULL, `tsMs` INTEGER NOT NULL, `sessionId` INTEGER NOT NULL, `state` TEXT, `soc` REAL, `currentA` REAL, `powerW` REAL, `voltageV` REAL, `tempC` REAL, `mosfetTempC` INTEGER, `soh` INTEGER, `fullChargeAh` REAL, `remainingAh` REAL, `cycles` INTEGER, `cellMinV` REAL, `cellMaxV` REAL, `regen` INTEGER NOT NULL, `linkEvent` TEXT)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "address",
+            "columnName": "address",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "tsMs",
+            "columnName": "tsMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sessionId",
+            "columnName": "sessionId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "soc",
+            "columnName": "soc",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "currentA",
+            "columnName": "currentA",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "powerW",
+            "columnName": "powerW",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "voltageV",
+            "columnName": "voltageV",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "tempC",
+            "columnName": "tempC",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "mosfetTempC",
+            "columnName": "mosfetTempC",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "soh",
+            "columnName": "soh",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "fullChargeAh",
+            "columnName": "fullChargeAh",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "remainingAh",
+            "columnName": "remainingAh",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "cycles",
+            "columnName": "cycles",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "cellMinV",
+            "columnName": "cellMinV",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "cellMaxV",
+            "columnName": "cellMaxV",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "regen",
+            "columnName": "regen",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "linkEvent",
+            "columnName": "linkEvent",
+            "affinity": "TEXT",
+            "notNull": false
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_samples_address_tsMs",
+            "unique": false,
+            "columnNames": [
+              "address",
+              "tsMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_samples_address_tsMs` ON `${TABLE_NAME}` (`address`, `tsMs`)"
+          },
+          {
+            "name": "index_samples_sessionId",
+            "unique": false,
+            "columnNames": [
+              "sessionId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_samples_sessionId` ON `${TABLE_NAME}` (`sessionId`)"
+          },
+          {
+            "name": "index_samples_tsMs",
+            "unique": false,
+            "columnNames": [
+              "tsMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_samples_tsMs` ON `${TABLE_NAME}` (`tsMs`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "sessions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `address` TEXT NOT NULL, `startMs` INTEGER NOT NULL, `endMs` INTEGER NOT NULL, `sampleCount` INTEGER NOT NULL, `peakPowerW` REAL NOT NULL, `p95PowerW` REAL NOT NULL, `meanPowerW` REAL NOT NULL, `peakCurrentA` REAL NOT NULL, `peakRegenW` REAL NOT NULL, `energyWh` REAL NOT NULL, `socStart` REAL NOT NULL, `socEnd` REAL NOT NULL, `minSoc` REAL NOT NULL, `maxSoc` REAL NOT NULL, `minVoltageUnderLoad` REAL NOT NULL, `estInternalResistanceMohm` REAL, `irConfidence` REAL NOT NULL, `sohEnd` INTEGER NOT NULL, `fullChargeAhEnd` REAL NOT NULL, `cyclesEnd` INTEGER NOT NULL, `maxTempC` REAL NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "address",
+            "columnName": "address",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "startMs",
+            "columnName": "startMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "endMs",
+            "columnName": "endMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sampleCount",
+            "columnName": "sampleCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peakPowerW",
+            "columnName": "peakPowerW",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "p95PowerW",
+            "columnName": "p95PowerW",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "meanPowerW",
+            "columnName": "meanPowerW",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peakCurrentA",
+            "columnName": "peakCurrentA",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peakRegenW",
+            "columnName": "peakRegenW",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "energyWh",
+            "columnName": "energyWh",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "socStart",
+            "columnName": "socStart",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "socEnd",
+            "columnName": "socEnd",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "minSoc",
+            "columnName": "minSoc",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "maxSoc",
+            "columnName": "maxSoc",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "minVoltageUnderLoad",
+            "columnName": "minVoltageUnderLoad",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "estInternalResistanceMohm",
+            "columnName": "estInternalResistanceMohm",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "irConfidence",
+            "columnName": "irConfidence",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sohEnd",
+            "columnName": "sohEnd",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fullChargeAhEnd",
+            "columnName": "fullChargeAhEnd",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "cyclesEnd",
+            "columnName": "cyclesEnd",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "maxTempC",
+            "columnName": "maxTempC",
+            "affinity": "REAL",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_sessions_address_startMs",
+            "unique": false,
+            "columnNames": [
+              "address",
+              "startMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_sessions_address_startMs` ON `${TABLE_NAME}` (`address`, `startMs`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "raw_frames",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `address` TEXT NOT NULL, `tsMs` INTEGER NOT NULL, `hex` TEXT NOT NULL, `reason` TEXT NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "address",
+            "columnName": "address",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "tsMs",
+            "columnName": "tsMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "hex",
+            "columnName": "hex",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "reason",
+            "columnName": "reason",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_raw_frames_tsMs",
+            "unique": false,
+            "columnNames": [
+              "tsMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_raw_frames_tsMs` ON `${TABLE_NAME}` (`tsMs`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "outbox",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `payload` TEXT NOT NULL, `enqueuedAt` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "payload",
+            "columnName": "payload",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "enqueuedAt",
+            "columnName": "enqueuedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      }
+    ],
+    "views": [],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'b2e7dcf360708b59a848a0501549f85b')"
+    ]
+  }
+}

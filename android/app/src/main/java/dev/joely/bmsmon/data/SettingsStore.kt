@@ -16,7 +16,10 @@ import dev.joely.bmsmon.model.Roster
 import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.Telemetry
 import dev.joely.bmsmon.model.TempThresholds
+import androidx.datastore.preferences.core.Preferences
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -116,8 +119,16 @@ class SettingsStore(private val context: Context) {
         val PENDING_TEMP_CONFIG = stringPreferencesKey("pending_temp_config")
     }
 
-    suspend fun load(): Persisted {
-        val p = context.dataStore.data.first()
+    suspend fun load(): Persisted = decode(context.dataStore.data.first())
+
+    /**
+     * Live view of the persisted settings: emits the current snapshot immediately on collect and
+     * again on every change. Lets long-lived consumers (the TelemetryReporter) keep a cached
+     * volatile copy instead of re-decoding the whole blob on a polling loop (DATA-5/DATA-7).
+     */
+    val persisted: Flow<Persisted> = context.dataStore.data.map(::decode)
+
+    private fun decode(p: Preferences): Persisted {
         return Persisted(
             accentArgb = p[K.ACCENT],
             powerArgb = p[K.POWER],
@@ -196,7 +207,9 @@ class SettingsStore(private val context: Context) {
     suspend fun setLockShowBattery(on: Boolean) = context.dataStore.edit { it[K.LOCK_SHOW_BATTERY] = on }.let {}
     suspend fun setDisabled(addrs: Set<String>) = context.dataStore.edit { it[K.DISABLED] = addrs }.let {}
     suspend fun setCloudEnabled(on: Boolean) = context.dataStore.edit { it[K.CLOUD_ENABLED] = on }.let {}
-    suspend fun setApiBaseUrl(url: String) = context.dataStore.edit { it[K.API_BASE_URL] = url }.let {}
+    /** Persist the cloud API base URL, forced to https (see [normalizeApiBaseUrl]). */
+    suspend fun setApiBaseUrl(url: String) =
+        context.dataStore.edit { it[K.API_BASE_URL] = normalizeApiBaseUrl(url) }.let {}
     suspend fun setDeviceId(id: String) = context.dataStore.edit { it[K.DEVICE_ID] = id }.let {}
     suspend fun setEnrolled(on: Boolean) = context.dataStore.edit { it[K.ENROLLED] = on }.let {}
     suspend fun setGpsEnabled(on: Boolean) = context.dataStore.edit { it[K.GPS_ENABLED] = on }.let {}
@@ -224,6 +237,22 @@ class SettingsStore(private val context: Context) {
         val fresh = java.util.UUID.randomUUID().toString()
         context.dataStore.edit { it[K.INSTALL_UUID] = fresh }
         return fresh
+    }
+}
+
+/**
+ * Cloud sync is HTTPS-only (DATA-11): the platform already blocks cleartext
+ * (`usesCleartextTraffic="false"`), but make the intent explicit at the entry point too — an
+ * `http://` URL is upgraded to `https://`, and a bare host gets the scheme prepended, instead of
+ * being stored and failing opaquely at upload time.
+ */
+fun normalizeApiBaseUrl(url: String): String {
+    val trimmed = url.trim()
+    return when {
+        trimmed.isEmpty() -> trimmed
+        trimmed.startsWith("https://", ignoreCase = true) -> trimmed
+        trimmed.startsWith("http://", ignoreCase = true) -> "https://" + trimmed.substring("http://".length)
+        else -> "https://$trimmed"
     }
 }
 

@@ -142,4 +142,27 @@ class FleetLogicTest {
         val items = stageState(fleet).stageItems()
         assertTrue(items.all { !it.connected && it.etaFullMin == null })
     }
+
+    // --- DISCONNECTED stageItems mapping (UI-14 seam coverage) ---
+
+    @Test fun stageItemsShowDisconnectedForNeverReportedPacks() {
+        // No fleet entry at all (fresh start, nothing has connected): still one item per stage
+        // pack, rendered DISCONNECTED — never a fake 0%-looking connected pack.
+        val items = stageState(emptyMap()).stageItems()
+        assertEquals(2, items.size)
+        assertTrue(items.all { !it.connected && !it.regen && it.etaFullMin == null })
+        // Placeholder telemetry keeps the roster name so the stage can still label the pack.
+        val names = roster.groupById("2012")!!.targets.map { it.name }
+        assertEquals(names, items.map { it.telemetry.name })
+    }
+
+    @Test fun stageItemsReachableWithoutTelemetryIsStillDisconnected() {
+        // Reachable-but-no-frame-yet (connect handshake done, first poll pending) must read
+        // DISCONNECTED too: "connected" requires reachable AND actual telemetry.
+        val fleet = roster.groupById("2012")!!.targets.associate {
+            it.address to BatteryStatus(telemetry = null, reachable = true)
+        }
+        val items = stageState(fleet).stageItems()
+        assertTrue(items.all { !it.connected })
+    }
 }

@@ -10,7 +10,9 @@ import androidx.room.PrimaryKey
  */
 @Entity(
     tableName = "samples",
-    indices = [Index(value = ["address", "tsMs"]), Index(value = ["sessionId"])],
+    // The bare tsMs index (DATA-10) serves retention pruning + id-less time scans — the
+    // (address, tsMs) composite can't (tsMs is its second column).
+    indices = [Index(value = ["address", "tsMs"]), Index(value = ["sessionId"]), Index(value = ["tsMs"])],
 )
 data class SampleEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,

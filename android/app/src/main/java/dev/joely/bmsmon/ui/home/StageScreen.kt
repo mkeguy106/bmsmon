@@ -113,7 +113,8 @@ private fun BatteryBlock(
     val unit = if (tempInF) TempUnit.F else TempUnit.C
     val zone = if (item.connected) tempZone(b.temp, thresholds, envelope) else null
     val tempCritical = zone != null && zone.rank.ordinal >= TempRank.CRITICAL.ordinal
-    val showGauge = showTempGauge && zone != null
+    // Null-safe bind (UI-13b): non-null exactly when the gauge should render — no `zone!!`.
+    val gaugeZone = zone.takeIf { showTempGauge }
     Column(
         modifier
             .fillMaxWidth()
@@ -123,12 +124,12 @@ private fun BatteryBlock(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-            if (showGauge && tempGaugeSide == GaugeSide.LEFT) {
-                TempGauge(b.temp, tempZoneColor(zone!!), formatTemp(b.temp, unit), tempCritical)
+            if (gaugeZone != null && tempGaugeSide == GaugeSide.LEFT) {
+                TempGauge(b.temp, tempZoneColor(gaugeZone), formatTemp(b.temp, unit), tempCritical)
             }
             StageRingBox(item, c)
-            if (showGauge && tempGaugeSide == GaugeSide.RIGHT) {
-                TempGauge(b.temp, tempZoneColor(zone!!), formatTemp(b.temp, unit), tempCritical)
+            if (gaugeZone != null && tempGaugeSide == GaugeSide.RIGHT) {
+                TempGauge(b.temp, tempZoneColor(gaugeZone), formatTemp(b.temp, unit), tempCritical)
             }
         }
         Text(

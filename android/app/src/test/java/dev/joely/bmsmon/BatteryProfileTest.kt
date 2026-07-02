@@ -24,15 +24,14 @@ class BatteryProfileTest {
     }
 
     @Test fun prebuiltFramesMatchTheClosedEnum() {
-        // The profile must expose the SAME bytes the closed ReadCommand enum produces — no other opcodes.
+        // The profile must expose the SAME bytes the closed ReadCommand enum produces — no other
+        // opcodes. statusFrame is the ONLY command frame a profile exposes (BLE-7 removed the dead
+        // firmwareFrame), and it must pass the write-time safety gate.
         assertEquals(
             BmsProtocol.frame(BmsProtocol.ReadCommand.STATUS).toList(),
             RedodoBekenProfile.statusFrame.toList(),
         )
-        assertEquals(
-            BmsProtocol.frame(BmsProtocol.ReadCommand.FW_VERSION).toList(),
-            RedodoBekenProfile.firmwareFrame.toList(),
-        )
+        assertEquals(true, BmsProtocol.isSafeStatusFrame(RedodoBekenProfile.statusFrame))
     }
 
     @Test fun connectionDefaultsMatchSpec() {

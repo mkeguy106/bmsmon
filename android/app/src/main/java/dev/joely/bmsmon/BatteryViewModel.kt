@@ -26,6 +26,11 @@ import dev.joely.bmsmon.model.TempSide
 import dev.joely.bmsmon.model.TempThresholds
 import dev.joely.bmsmon.model.TempZone
 import dev.joely.bmsmon.model.pickStageAlert
+import dev.joely.bmsmon.model.CAP_SEVERITY_CRITICAL
+import dev.joely.bmsmon.model.CAP_SEVERITY_WARNING
+import dev.joely.bmsmon.model.SEVERITY_NONE
+import dev.joely.bmsmon.model.nextChargeHold
+import dev.joely.bmsmon.model.tempSeverity
 import dev.joely.bmsmon.model.TempUnit
 import dev.joely.bmsmon.model.formatDelta
 import dev.joely.bmsmon.model.tempMarginToCutoffC
@@ -143,6 +148,10 @@ data class UiState(
     val tempAlertsEnabled: Boolean = true,
     val tempThresholdsByProfile: Map<String, TempThresholds> = emptyMap(),
     val acknowledgedTempKeys: Set<String> = emptySet(),
+    // Charging-suppression hysteresis (UI-9): when the stage's lowest pack last read Charging,
+    // and whether the latched hold is active (advanced in refresh() via withChargeHold).
+    val stageChargeLastAt: Long = 0,
+    val stageChargeHold: Boolean = false,
     val showTempGauge: Boolean = true,
     val tempGaugeSide: GaugeSide = GaugeSide.LEFT,
     val cloudSyncAlerts: Boolean = true,
@@ -247,13 +256,16 @@ data class UiState(
             packs.map { PackSoc(it.second.soc, it.second.state == BatteryState.Charging) },
             AlertConfig(alertsOn, enabledThresholds, criticalThreshold),
         )
+        // Suppressed while charging OR within the latched hold after charging (UI-9) — the
+        // Idle/Charging flap at the charger must not strobe the overlay.
+        val suppressed = capEval.charging || stageChargeHold
         val capAck = acknowledgedThresholds.intersect(capEval.crossed)
-        val capFlashing = !capEval.charging &&
+        val capFlashing = !suppressed &&
             capEval.activeThreshold != null && capEval.activeThreshold !in capAck
         val capSeverity = when {
-            capEval.activeThreshold == null || capEval.charging -> -1
-            capEval.critical -> 3
-            else -> 2
+            capEval.activeThreshold == null || suppressed -> SEVERITY_NONE
+            capEval.critical -> CAP_SEVERITY_CRITICAL
+            else -> CAP_SEVERITY_WARNING
         }
 
         // --- temperature (worst reachable stage pack; flashes only at rank >= CRITICAL) ---
@@ -269,7 +281,7 @@ data class UiState(
         // CRITICAL can't suppress an un-acked capacity flash); ties go to temperature.
         val pick = pickStageAlert(
             capSeverity, capFlashing,
-            if (tempPresent) tempRank.ordinal else -1, tempFlashing,
+            if (tempPresent) tempSeverity(tempRank) else SEVERITY_NONE, tempFlashing,
         )
         if (pick == AlertKind.TEMPERATURE && worst != null) {
             val (addr, tel, zone) = worst
@@ -293,14 +305,34 @@ data class UiState(
             activeThreshold = capEval.activeThreshold, ackEffective = capAck,
             kind = AlertKind.CAPACITY, headline = "BATTERY CAPACITY",
             detail = "LOW BATTERY · ${capEval.lowSoc}% · BELOW ${capEval.activeThreshold ?: 0}%",
-            present = capEval.activeThreshold != null && !capEval.charging,
+            present = capEval.activeThreshold != null && !suppressed,
         )
     }
 
-    /** Reachable stage packs that have reported telemetry, with their addresses. */
+    /**
+     * Reachable stage packs that have reported telemetry, with their addresses.
+     *
+     * The `reachable`-only filter is also what excludes *disabled* packs from alerting (UI-8):
+     * `engine.setDisabled` marks a disconnected pack unreachable synchronously in MonitorState
+     * (see `applyDisabled`), so a user-disconnected stage pack can never drive an alert.
+     * Deliberate consequence (accepted, documented): an UNREACHABLE low pack raises no alert at
+     * all — the DISCONNECTED stage rendering is the only signal. We alert on data, not absence.
+     */
     private fun stagePacks(): List<Pair<String, Telemetry>> =
         stageTarget.addresses(roster)
             .mapNotNull { a -> fleet[a]?.takeIf { it.reachable }?.telemetry?.let { a to it } }
+
+    /** Advance the charging-suppression latch (UI-9) off the stage's lowest reachable pack. */
+    fun withChargeHold(now: Long): UiState {
+        val lowest = stagePacks().minByOrNull { it.second.soc }?.second
+        val hold = nextChargeHold(
+            charging = lowest?.state == BatteryState.Charging,
+            discharging = lowest?.state == BatteryState.Discharging,
+            lastChargingAt = stageChargeLastAt, now = now,
+        )
+        return if (hold.lastChargingAt == stageChargeLastAt && hold.holdActive == stageChargeHold) this
+        else copy(stageChargeLastAt = hold.lastChargingAt, stageChargeHold = hold.holdActive)
+    }
 
     /** Worst temperature zone among the reachable stage packs (null when none are reporting). */
     fun stageWorstTemp(): Triple<String, Telemetry, TempZone>? {
@@ -785,21 +817,28 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(gpsEnabled = on) }
         engine.setGpsActive(on && _state.value.enrolled && _state.value.monitoring && _state.value.cloudEnabled)
     }
-    fun setApiBaseUrl(url: String) { viewModelScope.launch { store.setApiBaseUrl(url) }; _state.update { it.copy(apiBaseUrl = url) } }
+    fun setApiBaseUrl(url: String) {
+        val base = dev.joely.bmsmon.data.normalizeApiBaseUrl(url)   // https-only (DATA-11)
+        viewModelScope.launch { store.setApiBaseUrl(base) }
+        _state.update { it.copy(apiBaseUrl = base) }
+    }
 
     fun enroll(baseUrl: String, code: String) {
+        // HTTPS-only at the entry point (DATA-11): a manually typed http:// or bare host is
+        // normalized before ever being used or persisted.
+        val base = dev.joely.bmsmon.data.normalizeApiBaseUrl(baseUrl)
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             dev.joely.bmsmon.cloud.DeviceKeys.ensureKeyPair()
             val installUuid = store.installUuid()
             val res = dev.joely.bmsmon.cloud.EnrollClient(okhttp3.OkHttpClient())
-                .enroll(baseUrl, code, installUuid, dev.joely.bmsmon.cloud.DeviceKeys.publicKeySpkiB64())
+                .enroll(base, code, installUuid, dev.joely.bmsmon.cloud.DeviceKeys.publicKeySpkiB64())
             res.onSuccess { id ->
-                store.setApiBaseUrl(baseUrl)
+                store.setApiBaseUrl(base)
                 store.setDeviceId(id)
                 store.setEnrolled(true)
                 store.setCloudEnabled(true)
                 store.setGpsEnabled(true)
-                _state.update { it.copy(apiBaseUrl = baseUrl, enrolled = true, cloudEnabled = true, gpsEnabled = true) }
+                _state.update { it.copy(apiBaseUrl = base, enrolled = true, cloudEnabled = true, gpsEnabled = true) }
                 val app = getApplication<BmsApp>()
                 app.reporter.start()
                 app.reporter.startImportIfNeeded(_state.value.roster)
@@ -931,9 +970,10 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     private fun enqueueTempConfig(profileId: String) {
         if (!_state.value.cloudSyncAlerts || !_state.value.enrolled) return
         val t = _state.value.tempThresholdsFor(profileId)
+        val env = (ProfileRegistry.all.firstOrNull { it.id == profileId } ?: RedodoBekenProfile).tempEnvelope
         val unit = if (_state.value.tempFahrenheit) "F" else "C"
         viewModelScope.launch {
-            store.setPendingTempConfig(CloudJson.encodeTempConfig(profileId, t, unit, clockMs()))
+            store.setPendingTempConfig(CloudJson.encodeTempConfig(profileId, t, env, unit, clockMs()))
         }
     }
 
@@ -987,8 +1027,9 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             val isPinned = st.manualStage != null && resolved == st.manualStage &&
                 (!st.dynamicStage || now - st.manualPinnedAt < PIN_HOLD_MS)
             // Re-arm temp acks whenever the stage's worst pack has recovered below CRITICAL, so
-            // a recurring condition flashes again (refresh runs on every engine update + timer).
-            st.copy(stageTarget = resolved, pinned = isPinned).withTempAcksPruned()
+            // a recurring condition flashes again (refresh runs on every engine update + timer);
+            // advance the charging-suppression latch (UI-9) off the same fresh stage.
+            st.copy(stageTarget = resolved, pinned = isPinned).withChargeHold(now).withTempAcksPruned()
         }
         // Persist the resolved stage whenever it changes, so the next launch restores + prioritizes it.
         val newTarget = _state.value.stageTarget

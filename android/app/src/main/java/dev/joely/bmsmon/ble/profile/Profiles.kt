@@ -22,10 +22,14 @@ val RedodoBekenProfile = BatteryProfile(
     cccdUuid = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"),
     writeWithResponse = true,  // official Redodo app uses ATT Write Request (with response)
     statusFrame = BmsProtocol.frame(BmsProtocol.ReadCommand.STATUS),
-    firmwareFrame = BmsProtocol.frame(BmsProtocol.ReadCommand.FW_VERSION),
     responseHeader = byteArrayOf(0x01, 0x93.toByte(), 0x55, 0xAA.toByte()),
     layout = TelemetryLayout(),
     stagePollMs = 1500L,
+    // Deliberate rate decision (BLE-12): the official Redodo app's measured background rate is
+    // ~85 s/pack (~17 reads across 8 packs over ~3 min in the 2026-06-29 HCI capture), so ours is
+    // ~8x faster by choice — it's a read-only 0x13 status query on an already-held link, and what
+    // the capture proved matters is the STRUCTURE (persistent hold + slow poll + patient retry),
+    // which we match. Field-proven at 10 s across the 8-pack fleet. Revisit if packs misbehave.
     slowPollMs = 10_000L,
     maxHeldConnections = 8,
     connectTimeoutMs = 10_000L,

@@ -29,6 +29,7 @@ import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import dev.joely.bmsmon.UiState
+import dev.joely.bmsmon.ui.CloudActions
 import dev.joely.bmsmon.ui.theme.AlertCritical
 import dev.joely.bmsmon.ui.theme.Bm
 import org.json.JSONObject
@@ -36,11 +37,9 @@ import org.json.JSONObject
 @Composable
 internal fun ColumnScope.CloudSyncContent(
     state: UiState,
-    onEnroll: (String, String) -> Unit,
-    onSetCloudEnabled: (Boolean) -> Unit,
-    onForget: () -> Unit,
-    onSetGpsEnabled: (Boolean) -> Unit,
+    cloud: CloudActions,
 ) {
+    val (onEnroll, onSetCloudEnabled, onForget, onSetGpsEnabled) = cloud
     val c = Bm.colors
     val host = state.apiBaseUrl
         ?.removePrefix("https://")

@@ -10,6 +10,8 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
 import android.util.Log
 import dev.joely.bmsmon.ble.profile.BatteryProfile
 import dev.joely.bmsmon.ble.profile.RedodoBekenProfile
@@ -53,7 +55,15 @@ class BleSession(
         val ready = CompletableDeferred<Boolean>()
         connectReady = ready
         synchronized(buffer) { buffer.clear() }
-        gatt = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
+        // Full API-26+ overload (BLE-13): pin TRANSPORT_LE + 1M PHY and deliver every GATT
+        // callback on our dedicated handler thread instead of an arbitrary binder thread —
+        // deterministic callback threading, and field logs from all sessions serialize cleanly.
+        gatt = device.connectGatt(
+            context, false, callback,
+            BluetoothDevice.TRANSPORT_LE,
+            BluetoothDevice.PHY_LE_1M_MASK,
+            callbackHandler,
+        )
         return withTimeoutOrNull(timeoutMs) { ready.await() } ?: false
     }
 
@@ -69,7 +79,7 @@ class BleSession(
             response = resp
             buffer.clear()
         }
-        writeStatus(g, ch)
+        if (!writeStatus(g, ch)) return null  // refused unsafe frame → fail this poll (no write happened)
         return withTimeoutOrNull(timeoutMs) { resp.await() }
     }
 
@@ -97,8 +107,24 @@ class BleSession(
         ffe2 = null
     }
 
-    private fun writeStatus(g: BluetoothGatt, ch: BluetoothGattCharacteristic) {
-        val frame = profile.statusFrame
+    /**
+     * SAFETY (BLE-7): [BatteryProfile.statusFrame] is a shared mutable ByteArray. Take a defensive
+     * copy and refuse the write unless the copy is verifiably the known-safe 0x13 status query
+     * ([BmsProtocol.isSafeStatusFrame]: length 8, STATUS opcode, valid checksum) — so an accidental
+     * in-place mutation anywhere can never change the bytes sent to a live battery. A plain runtime
+     * `if` on the write path, structurally impossible to compile out (never `assert`).
+     * @return false if the frame was refused (nothing written) — the caller fails the poll.
+     */
+    private fun writeStatus(g: BluetoothGatt, ch: BluetoothGattCharacteristic): Boolean {
+        val frame = profile.statusFrame.copyOf()
+        if (!BmsProtocol.isSafeStatusFrame(frame)) {
+            Log.e(
+                TAG,
+                "REFUSED write to $address: status frame failed safety validation: " +
+                    frame.joinToString(" ") { "%02X".format(it) },
+            )
+            return false
+        }
         val type = if (profile.writeWithResponse) BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
                    else BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
         if (Build.VERSION.SDK_INT >= 33) {
@@ -111,10 +137,17 @@ class BleSession(
                 g.writeCharacteristic(ch)
             }
         }
+        return true
     }
 
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
+            // Diagnosability (BLE-13): surface the GATT status (e.g. the classic 133 =
+            // GATT_CONN_FAILED_ESTABLISHMENT) — behavior is unchanged, the retry/backoff
+            // machinery still sees only connectReady=false / a dropped link.
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                Log.w(TAG, "gatt status $status on connect $address (newState=$newState)")
+            }
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> g.discoverServices()
                 BluetoothProfile.STATE_DISCONNECTED -> {
@@ -125,6 +158,9 @@ class BleSession(
         }
 
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                Log.w(TAG, "gatt status $status on service discovery $address")
+            }
             val service = g.getService(profile.serviceUuid)
             val ffe1 = service?.getCharacteristic(profile.notifyUuid)
             ffe2 = service?.getCharacteristic(profile.writeUuid)
@@ -186,5 +222,15 @@ class BleSession(
         }
     }
 
-    private companion object { const val TAG = "BleSession" }
+    private companion object {
+        const val TAG = "BleSession"
+
+        // One dedicated callback thread shared by every session (BLE-13): GATT callbacks are tiny
+        // (complete a deferred / append to a buffer), so serializing all sessions onto one looper
+        // is cheap, keeps callback threading deterministic, and avoids the binder-thread pool.
+        // Process-lifetime, like the monitoring engine that owns the sessions — never stopped.
+        val callbackHandler: Handler by lazy {
+            Handler(HandlerThread("BleSessionCallbacks").apply { start() }.looper)
+        }
+    }
 }

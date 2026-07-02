@@ -18,7 +18,6 @@ import dev.joely.bmsmon.data.db.BmsDatabase
 import dev.joely.bmsmon.model.AlertConfig
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.BatteryStatus
-import dev.joely.bmsmon.model.ChargeSample
 import dev.joely.bmsmon.model.DEFAULT_ROSTER
 import dev.joely.bmsmon.model.PackSoc
 import dev.joely.bmsmon.model.SEED_TAIL_MIN
@@ -27,9 +26,11 @@ import dev.joely.bmsmon.model.TempRank
 import dev.joely.bmsmon.model.TempSide
 import dev.joely.bmsmon.model.TempThresholds
 import dev.joely.bmsmon.model.TempUnit
+import dev.joely.bmsmon.model.chargeSample
 import dev.joely.bmsmon.model.estimateChargeMinutes
 import dev.joely.bmsmon.model.evalStageAlert
 import dev.joely.bmsmon.model.foldTailEma
+import dev.joely.bmsmon.model.nextChargeHold
 import dev.joely.bmsmon.model.formatDelta
 import dev.joely.bmsmon.model.observedChargeTailMinutes
 import dev.joely.bmsmon.model.tempMarginToCutoffC
@@ -259,8 +260,11 @@ class MonitorEngine(
     }
 
     fun setStage(addresses: Set<String>) {
-        stageAddrs = addresses.map { it.uppercase() }.toSet()
-        ble.setStage(addresses)
+        // Normalize once (UI-13d): everything downstream — stageAddrs comparisons AND the BLE
+        // layer — sees the same uppercased set instead of whatever casing the caller had.
+        val norm = addresses.map { it.uppercase() }.toSet()
+        stageAddrs = norm
+        ble.setStage(norm)
         evaluateAlerts()
     }
 
@@ -291,16 +295,29 @@ class MonitorEngine(
         evaluateAlerts()
     }
 
+    // Charging-suppression latch for the headless notifier (UI-9) — same hysteresis as the
+    // in-app overlay, so an Idle/Charging flap at the charger can't strobe notifications either.
+    private var stageChargeLastAt = 0L
+
     /** Evaluate the stage against the alert config and drive headless notifications. */
     private fun evaluateAlerts() {
         if (!_state.value.monitoring) return
         val fleet = _state.value.fleet
         val label = stageAddrs.firstNotNullOfOrNull { roster.groupOf(it)?.id }
         alertConfig?.let { cfg ->
-            val packs = stageAddrs
-                .mapNotNull { fleet[it]?.takeIf { s -> s.reachable }?.telemetry }
-                .map { PackSoc(it.soc, it.state == BatteryState.Charging) }
-            alertNotifier.update(evalStageAlert(packs, cfg), label)
+            val tele = stageAddrs.mapNotNull { fleet[it]?.takeIf { s -> s.reachable }?.telemetry }
+            val packs = tele.map { PackSoc(it.soc, it.state == BatteryState.Charging) }
+            val lowest = tele.minByOrNull { it.soc }
+            val hold = nextChargeHold(
+                charging = lowest?.state == BatteryState.Charging,
+                discharging = lowest?.state == BatteryState.Discharging,
+                lastChargingAt = stageChargeLastAt, now = now(),
+            )
+            stageChargeLastAt = hold.lastChargingAt
+            val eval = evalStageAlert(packs, cfg)
+            // Present the latched hold as "charging" so nextNotifyDecision keeps the alert
+            // cancelled through the flap instead of cancel/re-notify churn.
+            alertNotifier.update(if (hold.holdActive && !eval.charging) eval.copy(charging = true) else eval, label)
         }
         evaluateTempAlerts(fleet, label)
     }
@@ -435,8 +452,9 @@ class MonitorEngine(
     /** Fold the just-completed charge's observed 98->100 tail into the per-pack EMA and persist it. */
     private suspend fun learnTail(addr: String, now: Long) {
         val since = now - 6 * 60 * 60_000L   // look back 6h for the completed run
-        val samples = repository.recentSamples(addr, since).map {
-            ChargeSample(it.tsMs, it.soc ?: -1f, it.state == "Charging")
+        // chargeSample drops null-SOC rows (UI-10) — they must not count as "below 98%" evidence.
+        val samples = repository.recentSamples(addr, since).mapNotNull {
+            chargeSample(it.tsMs, it.soc, it.state == "Charging")
         }
         val observed = observedChargeTailMinutes(samples) ?: return
         val prev = _state.value.tailMinByAddress[addr] ?: SEED_TAIL_MIN
