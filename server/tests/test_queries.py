@@ -10,7 +10,7 @@ def _sample(ts_ms, soc=87.0):
     return {"ts_ms": ts_ms, "state": "Discharging", "soc": soc, "current_a": -2.5,
             "power_w": 127.5, "voltage_v": 51.0, "temp_c": 25.0, "mosfet_temp_c": 28,
             "soh": 98, "full_charge_ah": 100.0, "remaining_ah": 87.5, "cycles": 342,
-            "cell_min_v": 3.17, "cell_max_v": 3.19, "cells": None, "regen": False,
+            "cell_min_v": 3.17, "cell_max_v": 3.19, "regen": False,
             "link_event": None}
 
 

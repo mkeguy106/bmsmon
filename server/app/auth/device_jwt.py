@@ -17,6 +17,16 @@ def body_hash(body: bytes) -> str:
 
 
 class JtiCache:
+    """JWT-replay guard: remembers seen jti values until their exp passes.
+
+    SINGLE-WORKER CONSTRAINT (SRV-8): this cache is process-local. Running
+    uvicorn with --workers >1 silently defeats replay protection — a replayed
+    token just needs to land on a worker that hasn't seen the jti. A restart
+    also clears it (bounded by the short token TTL + LEEWAY). Keep the server
+    single-process (see the Dockerfile CMD note) or move this to a shared
+    store first.
+    """
+
     def __init__(self) -> None:
         self._seen: dict[str, int] = {}
 

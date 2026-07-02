@@ -146,14 +146,20 @@ async def ingest(request: Request, pool=Depends(get_pool)):
                 "ingest: dropped %d/%d sample(s) with out-of-range ts_ms from device %s: %s",
                 len(bad), len(body.samples), device_id, bad[:10])
         rows = [q.sample_row(device_id, s.address, s.model_dump()) for s in samples]
+        # SRV-13: one registry upsert per unique address per batch (not per sample).
+        # Dict insertion order keeps the LAST-seen sample's alias/group per address.
+        by_addr = {s.address: s for s in samples}
         async with conn.transaction():
-            for s in samples:
+            for s in by_addr.values():
                 await q.upsert_battery(conn, s.address, s.advertised_name, s.alias,
                                        s.group_id, s.ts_ms)
             accepted = await q.insert_samples(conn, rows)
         await conn.execute("UPDATE devices SET last_seen_at=now() WHERE id=$1", device_id)
-    for s in samples:
-        await request.app.state.bus.publish({"type": "sample", **s.model_dump()})
+    # batch_seq < 0 (-1) marks a historical-import batch (see IngestBody): store it,
+    # but don't flood the live WS dashboards with thousands of stale frames (WEB-5).
+    if body.batch_seq >= 0:
+        for s in samples:
+            await request.app.state.bus.publish({"type": "sample", **s.model_dump()})
     return IngestResponse(accepted=accepted, last_seq=body.batch_seq)
 
 

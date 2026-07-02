@@ -88,3 +88,17 @@ async def test_proxy_secret_unset_ignores_header(client):
     # default (unset) = feature off: current prod behavior preserved
     r = await client.get("/web/fleet", headers=ADMIN_H)
     assert r.status_code == 200
+
+
+# Dev-trust guard (SRV-8): BMSMON_DEV_TRUST_HEADERS grants synthetic admin to every
+# request, so it only activates when DATABASE_URL points at a local dev database.
+
+async def test_dev_trust_works_with_local_db(client, set_setting):
+    set_setting("dev_trust_headers", True)  # test DB is localhost:5432 → qualifies
+    assert (await client.get("/web/fleet")).status_code == 200
+
+
+async def test_dev_trust_ignored_when_db_not_local(client, set_setting):
+    set_setting("dev_trust_headers", True)
+    set_setting("database_url", "postgresql://bmsmon:pw@db-prod.internal.example:5432/bmsmon")
+    assert (await client.get("/web/fleet")).status_code == 401

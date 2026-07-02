@@ -1,0 +1,32 @@
+# Pinned runtime dependency closure for the server image (SEC-10: reproducible builds).
+# = pyproject.toml [project].dependencies + their transitive deps, at the versions
+# resolved/tested in server/.venv. Dev/test-only packages (pytest, httpx, ...) excluded.
+#
+# Regenerate after changing pyproject dependencies:
+#   python -m venv /tmp/lockenv && /tmp/lockenv/bin/pip install ./server
+#   /tmp/lockenv/bin/pip freeze --exclude bmsmon-server > server/requirements.lock
+# (then re-add this header)
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anyio==4.14.1
+asyncpg==0.31.0
+cffi==2.0.0
+click==8.4.2
+cryptography==49.0.0
+fastapi==0.138.2
+h11==0.16.0
+httptools==0.8.0
+idna==3.18
+pycparser==3.0
+pydantic==2.13.4
+pydantic_core==2.46.4
+PyJWT==2.13.0
+python-dotenv==1.2.2
+PyYAML==6.0.3
+starlette==1.3.1
+typing-inspection==0.4.2
+typing_extensions==4.15.0
+uvicorn==0.49.0
+uvloop==0.22.1
+watchfiles==1.2.0
+websockets==16.0

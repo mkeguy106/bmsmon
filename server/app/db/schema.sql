@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS samples (
   soc real, current_a real, power_w real, voltage_v real,
   temp_c real, mosfet_temp_c int, soh int,
   full_charge_ah real, remaining_ah real, cycles int,
-  cell_min_v real, cell_max_v real, cells jsonb,
+  cell_min_v real, cell_max_v real,
   regen boolean NOT NULL DEFAULT false,
   link_event text,
   received_at timestamptz NOT NULL DEFAULT now(),
@@ -48,6 +48,11 @@ ALTER TABLE samples ADD COLUMN IF NOT EXISTS lat double precision;
 ALTER TABLE samples ADD COLUMN IF NOT EXISTS lon double precision;
 ALTER TABLE samples ADD COLUMN IF NOT EXISTS gps_accuracy_m real;
 ALTER TABLE samples ADD COLUMN IF NOT EXISTS eta_full_min real;
+
+-- WEB-5: the jsonb `cells` column was dead contract cruft — never sent by the phone
+-- (CloudJson.kt has no such field), never read by the web. Dropping on the partitioned
+-- parent cascades to every partition; IF EXISTS keeps this idempotent on every start.
+ALTER TABLE samples DROP COLUMN IF EXISTS cells;
 
 -- One-way temperature-alert config pushed from the phone (latest-wins per device+profile). The
 -- webui reads these to alert on exactly what the phone does; there is no write path back from web.

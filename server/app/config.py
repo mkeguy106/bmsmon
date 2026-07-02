@@ -44,6 +44,8 @@ class Settings:
     # 1095 days (3 years). Set <= 0 to disable scrubbing entirely (keep GPS forever).
     gps_retention_days: int = int(os.environ.get("BMSMON_GPS_RETENTION_DAYS", "1095"))
     # In local dev (no Authentik in front), trust a synthetic identity so /web/* works.
+    # Guarded: only honored when DATABASE_URL points at a local dev DB — see
+    # auth.authentik.dev_trust_active().
     dev_trust_headers: bool = os.environ.get("BMSMON_DEV_TRUST_HEADERS", "0") == "1"
     dev_user: str = os.environ.get("BMSMON_DEV_USER", "dev@covert.life")
     dev_groups: list[str] = field(

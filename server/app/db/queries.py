@@ -1,4 +1,3 @@
-import json
 from datetime import datetime, timezone
 
 import asyncpg
@@ -16,8 +15,6 @@ def sample_row(device_id: str, address: str, s: dict) -> dict:
            "ts": datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)}
     for c in _COLS:
         row[c] = s.get(c)
-    cells = s.get("cells")
-    row["cells"] = json.dumps(cells) if cells is not None else None
     row["regen"] = bool(s.get("regen", False))
     return row
 
@@ -25,10 +22,10 @@ def sample_row(device_id: str, address: str, s: dict) -> dict:
 _INSERT = """
 INSERT INTO samples
   (device_id,address,ts_ms,ts,state,soc,current_a,power_w,voltage_v,temp_c,
-   mosfet_temp_c,soh,full_charge_ah,remaining_ah,cycles,cell_min_v,cell_max_v,cells,regen,link_event,
+   mosfet_temp_c,soh,full_charge_ah,remaining_ah,cycles,cell_min_v,cell_max_v,regen,link_event,
    lat,lon,gps_accuracy_m,eta_full_min)
 VALUES
-  ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+  ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
 ON CONFLICT DO NOTHING
 """
 
@@ -42,7 +39,7 @@ async def insert_samples(conn: asyncpg.Connection, rows: list[dict]) -> int:
         (r["device_id"], r["address"], r["ts_ms"], r["ts"], r["state"], r["soc"],
          r["current_a"], r["power_w"], r["voltage_v"], r["temp_c"], r["mosfet_temp_c"],
          r["soh"], r["full_charge_ah"], r["remaining_ah"], r["cycles"], r["cell_min_v"],
-         r["cell_max_v"], r["cells"], r["regen"], r["link_event"],
+         r["cell_max_v"], r["regen"], r["link_event"],
          r["lat"], r["lon"], r["gps_accuracy_m"], r["eta_full_min"])
         for r in rows
     ])
@@ -108,7 +105,7 @@ async def fleet_snapshot(conn) -> list[dict]:
         """SELECT
               s.device_id, s.address, s.ts_ms, s.ts, s.state, s.soc, s.current_a, s.power_w,
               s.voltage_v, s.temp_c, s.mosfet_temp_c, s.soh, s.full_charge_ah, s.remaining_ah,
-              s.cycles, s.cell_min_v, s.cell_max_v, s.cells, s.regen, s.link_event,
+              s.cycles, s.cell_min_v, s.cell_max_v, s.regen, s.link_event,
               s.lat, s.lon, s.gps_accuracy_m, s.eta_full_min, s.received_at,
               b.alias, b.group_id, b.advertised_name
            FROM batteries b
@@ -144,11 +141,21 @@ async def scrub_expired_gps(conn, retention_days: int) -> int:
     return int(status.rsplit(" ", 1)[-1])  # asyncpg status tag, e.g. "UPDATE 3"
 
 
-async def samples_range(conn, address: str, from_ms: int, to_ms: int) -> list[dict]:
+# SRV-11 bounds for /web/samples: cap the caller-chosen range at 7 days (a wider
+# request gets its start clamped up to end-7d) and hard-LIMIT the row count so an
+# admin typo can't materialize millions of partition rows in one response.
+SAMPLES_MAX_RANGE_MS = 7 * 24 * 3600 * 1000
+SAMPLES_MAX_ROWS = 100_000
+
+
+async def samples_range(conn, address: str, from_ms: int, to_ms: int,
+                        limit: int = SAMPLES_MAX_ROWS) -> list[dict]:
+    from_ms = max(from_ms, to_ms - SAMPLES_MAX_RANGE_MS)
     a = datetime.fromtimestamp(from_ms / 1000, tz=timezone.utc)
     b = datetime.fromtimestamp(to_ms / 1000, tz=timezone.utc)
     rows = await conn.fetch(
-        "SELECT * FROM samples WHERE address=$1 AND ts>=$2 AND ts<=$3 ORDER BY ts", address, a, b
+        "SELECT * FROM samples WHERE address=$1 AND ts>=$2 AND ts<=$3 ORDER BY ts LIMIT $4",
+        address, a, b, limit,
     )
     return [dict(r) for r in rows]
 

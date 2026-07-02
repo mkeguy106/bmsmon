@@ -31,7 +31,6 @@ class SampleIn(BaseModel):
     cycles: int | None = None
     cell_min_v: float | None = None
     cell_max_v: float | None = None
-    cells: list[float] | None = None
     regen: bool = False
     link_event: str | None = None
     lat: float | None = None
@@ -41,6 +40,10 @@ class SampleIn(BaseModel):
 
 
 class IngestBody(BaseModel):
+    # batch_seq semantics: a per-process counter on the phone (no ordering guarantee
+    # across uploader restarts); -1 marks a historical-import batch, which the ingest
+    # router does NOT fan out to the live WS. Echoed back as last_seq; reserved for
+    # diagnostics — NOT used for dedup (the samples PK handles that).
     batch_seq: int
     samples: list[SampleIn] = []
 

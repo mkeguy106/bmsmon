@@ -7,7 +7,7 @@ from app.auth.enroll import generate_code, hash_code
 from app.db import queries as q
 from app.db.pool import get_pool
 from app.models import MintCodeResponse
-from app.routers.ws import _jsonable
+from app.util import jsonable
 
 router = APIRouter(prefix="/web")
 
@@ -15,28 +15,31 @@ router = APIRouter(prefix="/web")
 @router.get("/fleet")
 async def fleet(user: AuthUser = Depends(current_user), pool=Depends(get_pool)):
     async with pool.acquire() as conn:
-        return {"fleet": _jsonable(await q.fleet_snapshot(conn))}
+        return {"fleet": jsonable(await q.fleet_snapshot(conn))}
 
 
 @router.get("/temp-config")
 async def temp_config(user: AuthUser = Depends(current_user), pool=Depends(get_pool)):
     """Read-only mirror of the temperature-alert thresholds the phone pushed (one-way)."""
     async with pool.acquire() as conn:
-        return {"configs": _jsonable(await q.get_temp_config_all(conn))}
+        return {"configs": jsonable(await q.get_temp_config_all(conn))}
 
 
 @router.get("/samples")
 async def samples(address: str, from_ms: int = Query(...), to_ms: int = Query(...),
                   user: AuthUser = Depends(require_admin), pool=Depends(get_pool)):
-    """Admin-only: full sample history includes GPS coordinates."""
+    """Admin-only: full sample history includes GPS coordinates.
+
+    Bounded (SRV-11): the range is clamped to the last 7 days before to_ms and the
+    result is hard-capped at SAMPLES_MAX_ROWS rows (see queries.samples_range)."""
     async with pool.acquire() as conn:
-        return {"samples": _jsonable(await q.samples_range(conn, address, from_ms, to_ms))}
+        return {"samples": jsonable(await q.samples_range(conn, address, from_ms, to_ms))}
 
 
 @router.get("/devices")
 async def devices(user: AuthUser = Depends(require_admin), pool=Depends(get_pool)):
     async with pool.acquire() as conn:
-        return {"devices": _jsonable(await q.list_devices(conn))}
+        return {"devices": jsonable(await q.list_devices(conn))}
 
 
 @router.post("/enroll-codes", response_model=MintCodeResponse)

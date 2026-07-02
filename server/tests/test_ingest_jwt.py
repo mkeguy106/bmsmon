@@ -211,6 +211,42 @@ def _gps_payload():
          "soc": 87.0, "lat": 41.8781, "lon": -87.6298, "gps_accuracy_m": 7.5}]}
 
 
+async def test_ingest_ignores_legacy_cells_field(app, client):
+    # WEB-5: the dead `cells` column was dropped server-side. A stale client that
+    # still sends the field must not break (pydantic ignores unknown fields).
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    payload = _payload()
+    payload["samples"][0]["cells"] = [3.31, 3.32, 3.33, 3.34]
+    body = json.dumps(payload).encode()
+    r = await client.post("/api/v1/ingest", content=body,
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
+    assert r.status_code == 200
+    assert r.json() == {"accepted": 1, "last_seq": 7}
+
+
+async def test_ingest_upserts_battery_last_values_per_address(app, client):
+    # SRV-13: one registry upsert per unique address per batch, keeping the values
+    # of the LAST-seen sample for that address.
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    now_ms = int(time.time() * 1000)
+    payload = {"batch_seq": 13, "samples": [
+        {"ts_ms": now_ms - 1000, "address": A, "alias": "stale alias", "group_id": "2011",
+         "soc": 50.0},
+        {"ts_ms": now_ms, "address": A, "alias": "2012 · A", "group_id": "2012", "soc": 51.0},
+    ]}
+    body = json.dumps(payload).encode()
+    r = await client.post("/api/v1/ingest", content=body,
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
+    assert r.status_code == 200
+    assert r.json() == {"accepted": 2, "last_seq": 13}
+    async with app.state.pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT alias, group_id FROM batteries WHERE address=$1", A)
+    assert row["alias"] == "2012 · A"
+    assert row["group_id"] == "2012"
+
+
 async def test_ingest_stores_gps(app, client):
     priv, spki = _keypair()
     device_id = await _enroll_device(app, spki)
