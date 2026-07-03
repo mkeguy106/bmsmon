@@ -13,7 +13,7 @@ import dev.joely.bmsmon.R
 import dev.joely.bmsmon.model.AlertEval
 import dev.joely.bmsmon.model.TempRank
 import dev.joely.bmsmon.model.TempSide
-import dev.joely.bmsmon.model.nextNotifyDecision
+import dev.joely.bmsmon.model.reconcileFleetNotifications
 
 /**
  * Headless low-SOC alert notifications. Driven by the engine on each fleet update; the dedup
@@ -21,22 +21,33 @@ import dev.joely.bmsmon.model.nextNotifyDecision
  * (heads-up + sound + vibration); warnings use a silent low-importance channel. Distinct from the
  * foreground-service ongoing notification.
  */
+/** One pack's capacity evaluation plus its display label, fed to [AlertNotifier.updateFleet]. */
+data class PackAlert(val eval: AlertEval, val label: String?)
+
 class AlertNotifier(private val context: Context) {
 
     private val nm = NotificationManagerCompat.from(context)
-    private var lastNotified: Int? = null
+    /** Per-address notification baseline (last band notified) — one entry per low pack. */
+    private val lastByAddr = mutableMapOf<String, Int?>()
+    /** Stable notification id per address so two low packs show two distinct notifications. */
+    private val idByAddr = mutableMapOf<String, Int>()
+    private var nextCapId = NOTIF_CAP_BASE
     private var lastTempKey: String? = null
 
     init { createChannels() }
 
-    /** Apply the latest stage evaluation: post / escalate / stay quiet / cancel. */
-    fun update(eval: AlertEval, stageLabel: String?) {
-        val d = nextNotifyDecision(eval, lastNotified)
-        lastNotified = d.newLastNotified
-        when {
-            d.cancel -> nm.cancel(NOTIF_ID)
-            d.notify -> post(eval, stageLabel)
-        }
+    /**
+     * Apply the latest fleet-wide capacity evaluation: post / escalate / stay quiet / cancel, per
+     * pack. Every reachable low pack gets its own notification (deduped per address), so a second
+     * low pack is never masked by the one currently on the stage. Packs absent from [evals] (gone
+     * unreachable or recovered) are cancelled.
+     */
+    fun updateFleet(evals: Map<String, PackAlert>) {
+        val plan = reconcileFleetNotifications(evals.mapValues { it.value.eval }, lastByAddr)
+        plan.cancel.forEach { addr -> idByAddr[addr]?.let { nm.cancel(it) } }
+        plan.notify.forEach { addr -> evals[addr]?.let { post(addr, it.eval, it.label) } }
+        lastByAddr.clear()
+        lastByAddr.putAll(plan.newLast)
     }
 
     /**
@@ -59,9 +70,9 @@ class AlertNotifier(private val context: Context) {
 
     /** Clear any active alert notification (e.g. monitoring stopped). */
     fun clear() {
-        lastNotified = null
+        idByAddr.values.forEach { nm.cancel(it) }
+        lastByAddr.clear()
         lastTempKey = null
-        nm.cancel(NOTIF_ID)
         nm.cancel(NOTIF_TEMP_ID)
     }
 
@@ -83,10 +94,10 @@ class AlertNotifier(private val context: Context) {
         }
     }
 
-    private fun post(eval: AlertEval, stageLabel: String?) {
-        val where = stageLabel?.let { " · $it" } ?: ""
+    private fun post(addr: String, eval: AlertEval, packLabel: String?) {
+        val where = packLabel?.let { " · $it" } ?: ""
         val title = if (eval.critical) "Critical battery${where}" else "Low battery${where}"
-        val text = "Stage at ${eval.lowSoc}% (alert level ${eval.activeThreshold}%)"
+        val text = "${packLabel ?: "Pack"} at ${eval.lowSoc}% (alert level ${eval.activeThreshold}%)"
         val open = PendingIntent.getActivity(
             context, 2,
             Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
@@ -103,9 +114,12 @@ class AlertNotifier(private val context: Context) {
             .build()
         // POST_NOTIFICATIONS may be denied; notify() is a no-op then (the in-app flash still shows).
         if (NotificationManagerCompat.from(context).areNotificationsEnabled()) {
-            try { nm.notify(NOTIF_ID, n) } catch (_: SecurityException) {}
+            try { nm.notify(idFor(addr), n) } catch (_: SecurityException) {}
         }
     }
+
+    /** Stable per-address notification id (assigned on first use), so each low pack owns a slot. */
+    private fun idFor(addr: String): Int = idByAddr.getOrPut(addr) { nextCapId++ }
 
     private fun createChannels() {
         if (Build.VERSION.SDK_INT < 26) return
@@ -126,7 +140,9 @@ class AlertNotifier(private val context: Context) {
     private companion object {
         const val CH_CRITICAL = "alerts_critical"
         const val CH_WARNING = "alerts_warning"
-        const val NOTIF_ID = 2       // capacity alert; distinct from the FGS ongoing notification (1)
-        const val NOTIF_TEMP_ID = 3  // temperature alert
+        const val NOTIF_TEMP_ID = 3  // temperature alert (single, stage-worst driven)
+        // Per-pack capacity alerts get ids from here up (100, 101, …) — clear of the FGS ongoing
+        // notification (1) and the temperature alert (3), so multiple low packs never collide.
+        const val NOTIF_CAP_BASE = 100
     }
 }

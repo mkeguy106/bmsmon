@@ -3,7 +3,7 @@ import { AdminDevices } from "./components/AdminDevices";
 import { AllBatteries } from "./components/AllBatteries";
 import { MainStage } from "./components/MainStage";
 import { BatteryProfilePanel } from "./components/BatteryProfilePanel";
-import { getFleet, getTempConfig } from "./api";
+import { getFleet, getTempConfig, getAlertConfig, DEFAULT_ALERT_CONFIG, type AlertConfig } from "./api";
 import { connectLive } from "./ws";
 import { createStore } from "./store";
 import { selectStageItems } from "./stage";
@@ -75,6 +75,23 @@ export default function App() {
   const thr = useMemo(() => thresholdsFromConfig(tempConfig), [tempConfig]);
   const env = useMemo(() => envelopeFromConfig(tempConfig), [tempConfig]);
 
+  // Low-SOC stage-seize config synced from the phone (read-only). Polls on the
+  // same cadence as the temp config. On fetch failure keep the default
+  // (threshold 30) rather than blanking the override.
+  const [alertConfig, setAlertConfig] = useState<AlertConfig>(DEFAULT_ALERT_CONFIG);
+  useEffect(() => {
+    let alive = true;
+    const load = () => getAlertConfig()
+      .then((c) => { if (alive) setAlertConfig(c); })
+      .catch(() => { if (alive) setAlertConfig(DEFAULT_ALERT_CONFIG); });
+    load();
+    const t = setInterval(load, 60_000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
+  // Alerts off → no seize; otherwise the pushed value, default 30 when absent.
+  const seizeThreshold: number | null =
+    alertConfig.alerts_on === false ? null : (alertConfig.seize_soc ?? 30);
+
   const [unit, setUnit, setUnitLocal] = useLocalStorage<TempUnit>("bmsmon-temp-unit", () => "F", unitCodec);
   // WEB-3: default to the phone's synced unit. The lazy initializer above runs
   // before tempConfig has loaded, so apply the synced unit when it arrives —
@@ -137,8 +154,15 @@ export default function App() {
   }), [setPinned]);
 
   const stageItems = useMemo(
-    () => selectStageItems(items, staleAddrs, pinned),
-    [items, staleAddrs, pinned],
+    () => selectStageItems(items, staleAddrs, pinned, seizeThreshold),
+    [items, staleAddrs, pinned, seizeThreshold],
+  );
+  // True when the low-SOC seize override actually fired (a fresh pack at/below
+  // the threshold is on stage) — drives the MainStage "LOW" marker.
+  const lowSeized = useMemo(
+    () => seizeThreshold != null &&
+      items.some((i) => !staleAddrs.has(i.address) && i.soc != null && i.soc <= seizeThreshold),
+    [items, staleAddrs, seizeThreshold],
   );
 
   const [view, setView] = useState<"dashboard" | "settings">("dashboard");
@@ -208,7 +232,7 @@ export default function App() {
       <div style={{ display: "grid", gap: 24 }}>
         <MainStage items={stageItems} staleAddrs={staleAddrs}
           thr={thr} env={env} unit={unit} config={tempConfig} now={now}
-          pinned={pinned} onTogglePin={togglePin} />
+          pinned={pinned} onTogglePin={togglePin} lowSeized={lowSeized} />
         <AllBatteries items={items} staleAddrs={staleAddrs} thr={thr} env={env} unit={unit}
           now={now} pinned={pinned} onTogglePin={togglePin} />
       </div>

@@ -295,29 +295,35 @@ class MonitorEngine(
         evaluateAlerts()
     }
 
-    // Charging-suppression latch for the headless notifier (UI-9) — same hysteresis as the
-    // in-app overlay, so an Idle/Charging flap at the charger can't strobe notifications either.
-    private var stageChargeLastAt = 0L
+    // Per-pack charging-suppression latch for the headless notifier (UI-9) — same hysteresis as the
+    // in-app overlay, so an Idle/Charging flap at the charger can't strobe notifications either. Keyed
+    // by address now that notifications are fleet-wide (each low pack alerts independently).
+    private val packChargeAt = mutableMapOf<String, Long>()
 
-    /** Evaluate the stage against the alert config and drive headless notifications. */
+    /** Evaluate EVERY reachable pack against the alert config and drive per-pack headless
+     *  notifications, so a low pack that isn't on the stage still raises the alarm. */
     private fun evaluateAlerts() {
         if (!_state.value.monitoring) return
         val fleet = _state.value.fleet
         val label = stageAddrs.firstNotNullOfOrNull { roster.groupOf(it)?.id }
         alertConfig?.let { cfg ->
-            val tele = stageAddrs.mapNotNull { fleet[it]?.takeIf { s -> s.reachable }?.telemetry }
-            val packs = tele.map { PackSoc(it.soc, it.state == BatteryState.Charging) }
-            val lowest = tele.minByOrNull { it.soc }
-            val hold = nextChargeHold(
-                charging = lowest?.state == BatteryState.Charging,
-                discharging = lowest?.state == BatteryState.Discharging,
-                lastChargingAt = stageChargeLastAt, now = now(),
-            )
-            stageChargeLastAt = hold.lastChargingAt
-            val eval = evalStageAlert(packs, cfg)
-            // Present the latched hold as "charging" so nextNotifyDecision keeps the alert
-            // cancelled through the flap instead of cancel/re-notify churn.
-            alertNotifier.update(if (hold.holdActive && !eval.charging) eval.copy(charging = true) else eval, label)
+            val now = now()
+            val evals = fleet.mapNotNull { (addr, s) ->
+                val tel = s.telemetry?.takeIf { s.reachable } ?: return@mapNotNull null
+                val charging = tel.state == BatteryState.Charging
+                val hold = nextChargeHold(
+                    charging = charging,
+                    discharging = tel.state == BatteryState.Discharging,
+                    lastChargingAt = packChargeAt[addr] ?: 0L, now = now,
+                )
+                packChargeAt[addr] = hold.lastChargingAt
+                val eval = evalStageAlert(listOf(PackSoc(tel.soc, charging)), cfg)
+                // Present the latched hold as "charging" so the alert stays cancelled through an
+                // Idle/Charging flap instead of cancel/re-notify churn.
+                val held = if (hold.holdActive && !eval.charging) eval.copy(charging = true) else eval
+                addr to PackAlert(held, roster.batteryAt(addr)?.alias ?: tel.name)
+            }.toMap()
+            alertNotifier.updateFleet(evals)
         }
         evaluateTempAlerts(fleet, label)
     }

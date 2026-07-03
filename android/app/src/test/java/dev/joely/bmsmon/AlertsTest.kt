@@ -11,6 +11,7 @@ import dev.joely.bmsmon.model.TempRank
 import dev.joely.bmsmon.model.evalStageAlert
 import dev.joely.bmsmon.model.nextChargeHold
 import dev.joely.bmsmon.model.nextNotifyDecision
+import dev.joely.bmsmon.model.reconcileFleetNotifications
 import dev.joely.bmsmon.model.tempSeverity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -125,6 +126,49 @@ class AlertsTest {
     @Test fun cancelsWhenCharging() {
         val d = nextNotifyDecision(eval(30, charging = true), lastNotified = 30)
         assertTrue(d.cancel); assertFalse(d.notify); assertNull(d.newLastNotified)
+    }
+
+    // --- reconcileFleetNotifications: per-pack, fleet-wide dedup (a 2nd low pack isn't masked) ---
+
+    @Test fun twoLowPacksEachFireIndependently() {
+        val r = reconcileFleetNotifications(mapOf("A" to eval(30), "B" to eval(80)), emptyMap())
+        assertEquals(setOf("A", "B"), r.notify)
+        assertTrue(r.cancel.isEmpty())
+        assertEquals(30, r.newLast["A"]); assertEquals(80, r.newLast["B"])
+    }
+
+    @Test fun eachPackDedupsAgainstItsOwnBaseline() {
+        // A sits in the same band (quiet); B escalates to a lower band (fires) — independently.
+        val r = reconcileFleetNotifications(
+            mapOf("A" to eval(80), "B" to eval(30)),
+            last = mapOf("A" to 80, "B" to 80),
+        )
+        assertEquals(setOf("B"), r.notify)
+        assertEquals(80, r.newLast["A"]); assertEquals(30, r.newLast["B"])
+    }
+
+    @Test fun recoveredPackCancelsWithoutAffectingItsPeer() {
+        val r = reconcileFleetNotifications(
+            mapOf("A" to eval(null), "B" to eval(30)),
+            last = mapOf("A" to 30, "B" to 30),
+        )
+        assertEquals(setOf("A"), r.cancel)
+        assertFalse("B" in r.cancel)
+        assertFalse("B" in r.notify)   // B still in its band → quiet, baseline kept
+        assertEquals(30, r.newLast["B"])
+    }
+
+    @Test fun packThatVanishesFromTheFleetIsCancelled() {
+        // B went unreachable (dropped out of the eval map) → its notification is cancelled.
+        val r = reconcileFleetNotifications(mapOf("A" to eval(30)), last = mapOf("A" to 30, "B" to 30))
+        assertEquals(setOf("B"), r.cancel)
+        assertFalse("A" in r.notify)   // A unchanged band
+    }
+
+    @Test fun chargingPackCancelsFleetWide() {
+        val r = reconcileFleetNotifications(mapOf("A" to eval(30, charging = true)), last = mapOf("A" to 30))
+        assertEquals(setOf("A"), r.cancel)
+        assertNull(r.newLast["A"])
     }
 
     // --- nextChargeHold: charging-suppression hysteresis (UI-9) ---

@@ -125,3 +125,34 @@ fun nextNotifyDecision(eval: AlertEval, lastNotified: Int?): NotifyDecision {
     val notify = lastNotified == null || active < lastNotified
     return NotifyDecision(notify = notify, cancel = false, newLastNotified = active)
 }
+
+/** Per-address plan for the fleet-wide notifier: who to [notify], who to [cancel], and the new
+ *  per-address baselines to carry forward. */
+data class FleetNotify(
+    val newLast: Map<String, Int?>,
+    val cancel: Set<String>,
+    val notify: Set<String>,
+)
+
+/**
+ * Fleet-wide notification reconciliation (pure). Every reachable pack is evaluated independently
+ * (its own [AlertEval]) and deduped against its own baseline in [last] via [nextNotifyDecision],
+ * so two packs can hold two live low-battery notifications at once and a second low pack is never
+ * masked by the first. A pack that has recovered/charged cancels; a pack that has dropped out of
+ * [evals] entirely (unreachable / off BLE) also cancels — we alert on live data, not on absence.
+ */
+fun reconcileFleetNotifications(evals: Map<String, AlertEval>, last: Map<String, Int?>): FleetNotify {
+    val newLast = mutableMapOf<String, Int?>()
+    val cancel = mutableSetOf<String>()
+    val notify = mutableSetOf<String>()
+    cancel += last.keys - evals.keys  // packs that vanished this round
+    for ((addr, eval) in evals) {
+        val d = nextNotifyDecision(eval, last[addr])
+        when {
+            d.cancel -> cancel += addr
+            d.notify -> { notify += addr; newLast[addr] = d.newLastNotified }
+            else -> newLast[addr] = d.newLastNotified  // same band → keep baseline, stay quiet
+        }
+    }
+    return FleetNotify(newLast, cancel, notify)
+}

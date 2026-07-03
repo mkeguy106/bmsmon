@@ -47,7 +47,17 @@ data class StageInputs(
     val current: StageTarget,
     val now: Long,
     val groups: List<BatteryGroup>,
+    /**
+     * SOC at/below which a reachable pack seizes the stage (safety override), or null to disable.
+     * The ViewModel sets this to the highest enabled capacity-alert threshold when the "pull low
+     * packs to stage" setting and alerts are both on.
+     */
+    val seizeThreshold: Int? = null,
 )
+
+/** The group that owns [address] (case-insensitive), or null if it's ungrouped. */
+private fun groupForAddress(groups: List<BatteryGroup>, address: String): BatteryGroup? =
+    groups.firstOrNull { g -> g.targets.any { it.address.equals(address, ignoreCase = true) } }
 
 /**
  * Resolve which target owns the stage:
@@ -61,6 +71,26 @@ data class StageInputs(
  *  Daily driver breaks ties.
  */
 fun resolveStage(i: StageInputs): StageTarget {
+    // Low-pack safety override: a reachable pack at/below the seize threshold pulls the stage to its
+    // base ahead of everything — the active chair AND a manual pin — so a pack draining too low can
+    // never sit hidden off-stage (that's what would let it discharge to damage). Lowest SOC wins; the
+    // daily driver breaks exact ties. When the pack recovers above the threshold this branch yields
+    // and the normal pin/auto resolution below takes back over (restoring any manual pin).
+    i.seizeThreshold?.let { thr ->
+        val low = i.fleet.entries
+            .mapNotNull { (addr, s) ->
+                s.telemetry?.takeIf { s.reachable && it.soc <= thr }?.let { addr to it.soc }
+            }
+            .minWithOrNull(
+                compareBy<Pair<String, Float>> { it.second }
+                    .thenByDescending { groupForAddress(i.groups, it.first)?.id == i.dailyDriverId }
+                    .thenBy { it.first },
+            )
+        if (low != null) {
+            val g = groupForAddress(i.groups, low.first)
+            return if (g != null) StageTarget.Base(g.id) else StageTarget.Single(low.first)
+        }
+    }
     i.manualStage?.let { pin ->
         if (!i.dynamicEnabled) return pin
         if (i.now - i.manualPinnedAt < PIN_HOLD_MS) return pin

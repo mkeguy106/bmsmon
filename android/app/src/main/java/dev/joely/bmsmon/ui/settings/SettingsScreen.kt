@@ -148,7 +148,7 @@ fun SettingsScreen(
         }
         SettingsPage.Alerts -> DetailScaffold("Alerts", { page = null }) {
             AlertsContent(state, alerts.onSetAlertsOn, alerts.onToggleThreshold,
-                alerts.onSetCriticalThreshold, alerts.onResetAlerts)
+                alerts.onSetCriticalThreshold, alerts.onSetSeizeLowToStage, alerts.onResetAlerts)
         }
         SettingsPage.Temperature -> DetailScaffold("Temperature", { page = null }) {
             TemperatureContent(state, temp.onSetTempAlertsEnabled, temp.onSetShowTempGauge,
@@ -616,18 +616,25 @@ private fun ColumnScope.AlertsContent(
     onSetAlertsOn: (Boolean) -> Unit,
     onToggleThreshold: (Int) -> Unit,
     onSetCriticalThreshold: (Int) -> Unit,
+    onSetSeizeLowToStage: (Boolean) -> Unit,
     onResetAlerts: () -> Unit,
 ) {
     val c = Bm.colors
     GroupedCard {
         ToggleRow("Low-battery alerts", "Notify (sound/vibration) and flash the stage when a pack runs low",
             state.alertsOn, onSetAlertsOn)
+        ToggleRow(
+            "Pull low packs to stage",
+            "When any pack hits your highest trigger level, jump it onto the main stage — over the " +
+                "in-use base and a manual pin — so it can't drain too low unseen. Alarms fire either way.",
+            state.seizeLowToStage, onSetSeizeLowToStage,
+        )
     }
 
     SectionLabel("Trigger levels")
     PlainCard {
         Text(
-            "These are the triggers: you'll be alerted when the lowest pack on the stage drops to one of " +
+            "These are the triggers: you'll be alerted when any pack in the fleet drops to one of " +
                 "the levels you turn on here (at or below). Levels at or under the critical line are shown red.",
             color = c.text2, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.padding(bottom = 12.dp),
         )
@@ -673,7 +680,9 @@ private fun ColumnScope.AlertsContent(
             .padding(14.dp),
     ) {
         Text(
-            if (next != null) "Next alert fires when a pack on stage drops to $next%."
+            if (next != null)
+                "Next alert fires when any pack — on stage or not — drops to $next%" +
+                    (if (state.seizeLowToStage) ", and that pack jumps onto the stage." else ".")
             else "Low-battery alerts are off.",
             color = c.text2, fontSize = 12.sp, lineHeight = 17.sp,
         )

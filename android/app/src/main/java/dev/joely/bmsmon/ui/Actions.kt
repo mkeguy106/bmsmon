@@ -61,6 +61,7 @@ data class AlertActions(
     val onSetAlertsOn: (Boolean) -> Unit,
     val onToggleThreshold: (Int) -> Unit,
     val onSetCriticalThreshold: (Int) -> Unit,
+    val onSetSeizeLowToStage: (Boolean) -> Unit,
     val onResetAlerts: () -> Unit,
 )
 

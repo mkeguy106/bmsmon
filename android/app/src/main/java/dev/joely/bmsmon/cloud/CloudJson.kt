@@ -72,6 +72,7 @@ object CloudJson {
      */
     fun encodeTempConfig(
         profileId: String, t: TempThresholds, env: TempEnvelope, unit: String, updatedAtMs: Long,
+        seizeSoc: Int? = null, alertsOn: Boolean? = null,
     ): String =
         json.encodeToString(
             TempConfigJson.serializer(),
@@ -81,6 +82,7 @@ object CloudJson {
                 cutoff_cold_c = env.coldCutoffC, cutoff_hot_c = env.hotCutoffC,
                 charge_lock_cold_c = env.chargeLockColdC, charge_lock_hot_c = env.chargeLockHotC,
                 charge_resume_cold_c = env.chargeResumeColdC,
+                seize_soc = seizeSoc, alerts_on = alertsOn,
             ),
         )
 }
@@ -100,4 +102,9 @@ data class TempConfigJson(
     val charge_lock_cold_c: Int? = null,
     val charge_lock_hot_c: Int? = null,
     val charge_resume_cold_c: Int? = null,
+    // Device-level capacity alert seize threshold (highest enabled ladder rung) + master on/off.
+    // Rides the same one-way config push; the server upserts it into device_alert_config and the
+    // WebUI mirrors it to drive its own low-pack stage seize. Null on temp-only pushes.
+    val seize_soc: Int? = null,
+    val alerts_on: Boolean? = null,
 )
