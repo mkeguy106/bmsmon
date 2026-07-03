@@ -246,6 +246,7 @@ fun App(vm: BatteryViewModel) {
         onSetAutoLux = vm::setAutoLuxThreshold,
         onSetAccent = vm::setAccent,
         onSetPower = vm::setPower,
+        onResetColors = vm::resetColors,
     )
     val displayActions = DisplayActions(
         onSetTempFahrenheit = vm::setTempFahrenheit,

@@ -632,6 +632,11 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(power = c) }
         viewModelScope.launch { store.setPower(c.toArgb()) }
     }
+    /** Restore both the theme accent and the power-ring color to their app defaults. */
+    fun resetColors() {
+        setAccent(DefaultAccent)
+        setPower(DefaultPower)
+    }
 
     fun setDailyDriver(id: String) {
         val g = _state.value.roster.groupById(id) ?: return

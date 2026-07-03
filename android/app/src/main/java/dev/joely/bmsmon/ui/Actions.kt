@@ -82,6 +82,7 @@ data class AppearanceActions(
     val onSetAutoLux: (Float) -> Unit,
     val onSetAccent: (Color) -> Unit,
     val onSetPower: (Color) -> Unit,
+    val onResetColors: () -> Unit,
 )
 
 /** Settings › Display & units. */

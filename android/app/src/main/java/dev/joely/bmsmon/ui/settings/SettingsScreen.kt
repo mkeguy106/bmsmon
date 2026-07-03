@@ -110,7 +110,6 @@ import dev.joely.bmsmon.ui.theme.TempCool
 import dev.joely.bmsmon.ui.theme.ThemeSwatches
 import kotlin.math.roundToInt
 
-private fun Color.hex(): String = "#%06X".format(0xFFFFFF and toArgb())
 private fun shortMac(addr: String): String = addr.removePrefix("C8:47:80:")
 
 /** Category colors for the hub icon tiles — drawn from the app's own swatch palette. */
@@ -160,7 +159,7 @@ fun SettingsScreen(
         }
         SettingsPage.Appearance -> DetailScaffold("Appearance & Color", { page = null }) {
             AppearanceColorContent(state, appearance.onSetAppearance, appearance.onSetAutoLux,
-                appearance.onSetAccent, appearance.onSetPower)
+                appearance.onSetAccent, appearance.onSetPower, appearance.onResetColors)
         }
         SettingsPage.Display -> DetailScaffold("Display & Units", { page = null }) {
             DisplayUnitsContent(state, display.onSetTempFahrenheit, display.onSetKeepScreenOn)
@@ -1041,6 +1040,7 @@ private fun ColumnScope.AppearanceColorContent(
     onSetAutoLux: (Float) -> Unit,
     onSetAccent: (Color) -> Unit,
     onSetPower: (Color) -> Unit,
+    onResetColors: () -> Unit,
 ) {
     val c = Bm.colors
     SectionLabel("Theme", top = 2.dp)
@@ -1085,7 +1085,7 @@ private fun ColumnScope.AppearanceColorContent(
     SectionLabel("Theme color")
     PlainCard {
         SwatchGrid(ThemeSwatches, state.accent, onSetAccent)
-        CustomColorRow(state.accent)
+        CustomColorPicker(state.accent, onSetAccent)
     }
 
     SectionLabel("Power ring color")
@@ -1093,7 +1093,14 @@ private fun ColumnScope.AppearanceColorContent(
         Text("Inner ring — charge / discharge rate", color = c.text2, fontSize = 12.sp,
             modifier = Modifier.padding(bottom = 14.dp))
         SwatchGrid(PowerSwatches, state.power, onSetPower)
-        CustomColorRow(state.power)
+        CustomColorPicker(state.power, onSetPower)
+    }
+
+    Row(
+        Modifier.fillMaxWidth().padding(top = 16.dp),
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        PillButton("Reset to defaults", outlined = true, onClick = onResetColors)
     }
 }
 
@@ -1138,21 +1145,6 @@ private fun SwatchGrid(swatches: List<Color>, selected: Color, onSelect: (Color)
                     }
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun CustomColorRow(selected: Color) {
-    val c = Bm.colors
-    Text("Custom Color", color = c.text2, fontSize = 12.sp, modifier = Modifier.padding(top = 16.dp, bottom = 8.dp))
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(width = 46.dp, height = 38.dp).clip(RoundedCornerShape(8.dp)).background(selected))
-        Box(
-            Modifier.padding(start = 11.dp).weight(1f).clip(RoundedCornerShape(8.dp)).background(c.inputBg)
-                .border(1.dp, c.inputBorder, RoundedCornerShape(8.dp)).padding(horizontal = 13.dp, vertical = 10.dp),
-        ) {
-            Text(selected.hex(), color = c.text, fontFamily = MonoFont, fontSize = 14.sp)
         }
     }
 }
