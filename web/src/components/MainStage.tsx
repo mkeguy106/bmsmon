@@ -23,10 +23,10 @@ const SIM_ENABLED: boolean =
 // fresh sample every ~1.5 s and disconnected packs render a live "updated ago"
 // from `now`, so it re-renders every tick anyway; at ≤ a base of packs that is
 // cheap. Memoization is applied where it pays: the All-Batteries grid cards.
-export function MainStage({ items, staleAddrs, thr, env, unit, config, now, pinned, onTogglePin }: {
+export function MainStage({ items, staleAddrs, thr, env, unit, config, now, pinned, onTogglePin, lowSeized }: {
   items: FleetItem[]; staleAddrs: Set<string>;
   thr: TempThresholds; env: TempEnvelope; unit: TempUnit; config: TempConfig | null; now: number;
-  pinned: Set<string>; onTogglePin: (addr: string) => void;
+  pinned: Set<string>; onTogglePin: (addr: string) => void; lowSeized?: boolean;
 }) {
   const group = items[0]?.group_id;
   const featuredAddr = items[0]?.address;
@@ -74,6 +74,11 @@ export function MainStage({ items, staleAddrs, thr, env, unit, config, now, pinn
         <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 16 }}>
           <span className="mono" style={{ color: "var(--text3)", fontSize: 11, letterSpacing: 2 }}>MAIN STAGE</span>
           {group && <span style={{ color: "var(--text2)", fontSize: 13 }}>Base {group}</span>}
+          {lowSeized && (
+            <span className="mono" title="A pack dropped to the low-SOC threshold and seized the stage"
+              style={{ fontSize: 10, letterSpacing: 1, color: "var(--critical)",
+                border: "1px solid var(--critical)", borderRadius: 4, padding: "2px 6px" }}>LOW</span>
+          )}
           {pinnedMode
             ? <span className="mono" style={{ marginLeft: "auto", fontSize: 10, letterSpacing: 1,
                 color: "var(--accent)" }}>PINNED · AUTO OFF</span>

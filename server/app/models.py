@@ -75,6 +75,12 @@ class TempConfigBody(BaseModel):
     charge_lock_cold_c: float | None = None
     charge_lock_hot_c: float | None = None
     charge_resume_cold_c: float | None = None
+    # Device-level capacity alert sync (parallel to temp config): the SOC threshold at
+    # which a low pack should seize the WebUI main stage, and whether capacity alerts are
+    # on. Optional — an older app pushing a temp-only body must keep validating (never a
+    # 422 the phone re-POSTs forever), so both stay None-defaulted and backward compatible.
+    seize_soc: int | None = None
+    alerts_on: bool | None = None
 
 
 class OkResponse(BaseModel):

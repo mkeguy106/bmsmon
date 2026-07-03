@@ -229,6 +229,7 @@ fun App(vm: BatteryViewModel) {
         onSetAlertsOn = vm::setAlertsOn,
         onToggleThreshold = vm::toggleThreshold,
         onSetCriticalThreshold = vm::setCriticalThreshold,
+        onSetSeizeLowToStage = vm::setSeizeLowToStage,
         onResetAlerts = vm::resetAlertsToDefaults,
     )
     val tempActions = TempActions(

@@ -59,4 +59,81 @@ describe("selectStageItems", () => {
     expect(selectStageItems([], none, none)).toEqual([]);
     expect(selectStageItems([], none, new Set(["A"]))).toEqual([]);
   });
+
+  describe("low-SOC seize", () => {
+    it("a fresh pack at/below the threshold overrides pins", () => {
+      const items = [
+        mk("A", { alias: "2012 · A", group_id: "2012", soc: 80 }),
+        mk("B", { alias: "2024 · A", group_id: "2024", soc: 22 }), // low → seizes
+        mk("C", { alias: "2024 · B", group_id: "2024", soc: 55 }),
+      ];
+      // Pins on A, but the low 2024 base seizes instead (whole group, alias order).
+      const out = selectStageItems(items, none, new Set(["A"]), 30);
+      expect(out.map((i) => i.address)).toEqual(["B", "C"]);
+    });
+
+    it("overrides auto-selection (a discharging base) too", () => {
+      const items = [
+        mk("A", { alias: "2012 · A", group_id: "2012", current_a: -5, soc: 90 }), // would win auto
+        mk("B", { alias: "2016 · A", group_id: "2016", soc: 18 }), // low → seizes
+      ];
+      const out = selectStageItems(items, none, none, 30);
+      expect(out.map((i) => i.address)).toEqual(["B"]);
+    });
+
+    it("the lowest-SOC pack wins among several below the threshold", () => {
+      const items = [
+        mk("A", { alias: "2012 · A", group_id: "2012", soc: 28 }),
+        mk("B", { alias: "2016 · A", group_id: "2016", soc: 12 }), // lowest → leads
+        mk("C", { alias: "2016 · B", group_id: "2016", soc: 40 }),
+        mk("D", { alias: "2024 · A", group_id: "2024", soc: 25 }),
+      ];
+      const out = selectStageItems(items, none, none, 30);
+      expect(out.map((i) => i.address)).toEqual(["B", "C"]); // whole 2016 base
+    });
+
+    it("a STALE low pack is ignored", () => {
+      const items = [
+        mk("A", { alias: "2012 · A", group_id: "2012", soc: 10, ts_ms: 2000 }), // low but stale
+        mk("B", { alias: "2016 · A", group_id: "2016", current_a: -3, soc: 80 }),
+      ];
+      // Seize does not fire; auto picks the discharging fresh pack's base.
+      const out = selectStageItems(items, new Set(["A"]), none, 30);
+      expect(out.map((i) => i.address)).toEqual(["B"]);
+    });
+
+    it("seizeThreshold = null disables the override (falls back to pin/auto)", () => {
+      const items = [
+        mk("A", { alias: "2012 · A", group_id: "2012", soc: 5 }), // very low, ignored
+        mk("B", { alias: "2024 · A", group_id: "2024", soc: 90 }),
+      ];
+      // Pins on B still win when the override is off.
+      expect(selectStageItems(items, none, new Set(["B"]), null).map((i) => i.address)).toEqual(["B"]);
+      // Default arg (no threshold) behaves the same.
+      expect(selectStageItems(items, none, new Set(["B"])).map((i) => i.address)).toEqual(["B"]);
+    });
+
+    it("fallback threshold 30: a pack at 30 seizes, at 31 does not", () => {
+      const at30 = [
+        mk("A", { alias: "2012 · A", group_id: "2012", current_a: -5, soc: 90 }),
+        mk("B", { alias: "2024 · A", group_id: "2024", soc: 30 }),
+      ];
+      expect(selectStageItems(at30, none, none, 30).map((i) => i.address)).toEqual(["B"]);
+
+      const at31 = [
+        mk("A", { alias: "2012 · A", group_id: "2012", current_a: -5, soc: 90 }),
+        mk("B", { alias: "2024 · A", group_id: "2024", soc: 31 }),
+      ];
+      // No pack qualifies → auto selection (the discharging 2012 base).
+      expect(selectStageItems(at31, none, none, 30).map((i) => i.address)).toEqual(["A"]);
+    });
+
+    it("a seizing lead without a group stands alone", () => {
+      const items = [
+        mk("A", { group_id: null, soc: 15 }),
+        mk("B", { group_id: "g", soc: 80 }),
+      ];
+      expect(selectStageItems(items, none, none, 30).map((i) => i.address)).toEqual(["A"]);
+    });
+  });
 });

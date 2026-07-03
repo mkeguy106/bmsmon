@@ -43,7 +43,7 @@ class MonitorRestoreTest {
         dailyDriverId = dailyDriverId, lastStage = lastStage, dynamicStage = null,
         stageHoldMinutes = null, monitoring = monitoring, logging = logging,
         alertsOn = alertsOn, enabledThresholds = enabledThresholds,
-        criticalThreshold = criticalThreshold, keepScreenOn = true, sortKey = null,
+        criticalThreshold = criticalThreshold, seizeLowToStage = true, keepScreenOn = true, sortKey = null,
         filters = null, filterBaseId = null, lastTelemetry = lastTelemetry,
         tempFahrenheit = tempFahrenheit, roster = roster, appearance = null,
         autoLuxThreshold = null, locked = false, csvImported = false,

@@ -42,7 +42,18 @@ class FleetLogicTest {
         fleet: Map<String, BatteryStatus>,
         lastDischargeAt: Map<String, Long> = emptyMap(),
         current: StageTarget = StageTarget.Base("2012"),
-    ) = StageInputs(fleet, "2012", true, null, 0, lastDischargeAt, hold, current, now, roster.groupViews())
+        manualStage: StageTarget? = null,
+        seizeThreshold: Int? = null,
+    ) = StageInputs(fleet, "2012", true, manualStage, now, lastDischargeAt, hold, current, now,
+        roster.groupViews(), seizeThreshold)
+
+    /** A pack with a chosen SOC (Idle) at every target of each named group. */
+    private fun fleetWithSoc(vararg groupSoc: Pair<String, Float>): Map<String, BatteryStatus> =
+        groupSoc.flatMap { (gid, soc) ->
+            roster.groupById(gid)!!.targets.map {
+                it.address to BatteryStatus(tel(BatteryState.Idle).copy(soc = soc), reachable = true)
+            }
+        }.toMap()
 
     // --- regen detection ---
 
@@ -83,6 +94,71 @@ class FleetLogicTest {
         val fleet = fleetWith("2016" to BatteryState.Idle, "2023" to BatteryState.Idle)
         val r = resolveStage(inputs(fleet, emptyMap(), StageTarget.Base("2024")))
         assertEquals(StageTarget.Base("2024"), r)
+    }
+
+    // --- low-pack stage seize (safety override) ---
+
+    @Test fun lowPackSeizesStageOverActiveDischarge() {
+        // 2016 actively discharging (would normally own the stage) but 2024 is at 25% ≤ 30 → seize.
+        val fleet = fleetWith("2016" to BatteryState.Discharging) + fleetWithSoc("2024" to 25f)
+        val r = resolveStage(inputs(fleet, seizeThreshold = 30))
+        assertEquals(StageTarget.Base("2024"), r)
+    }
+
+    @Test fun lowPackSeizesStageOverManualPin() {
+        val fleet = fleetWithSoc("2024" to 20f) + fleetWith("2012" to BatteryState.Idle)
+        val r = resolveStage(inputs(fleet, manualStage = StageTarget.Base("2012"), seizeThreshold = 30))
+        assertEquals(StageTarget.Base("2024"), r)
+    }
+
+    @Test fun lowestSocPackWinsAmongSeveralLow() {
+        val fleet = fleetWithSoc("2016" to 28f, "2024" to 12f)
+        val r = resolveStage(inputs(fleet, seizeThreshold = 30))
+        assertEquals(StageTarget.Base("2024"), r)
+    }
+
+    @Test fun dailyDriverBreaksSeizeSocTie() {
+        val fleet = fleetWithSoc("2012" to 20f, "2016" to 20f)  // tie at 20 → daily driver 2012 wins
+        val r = resolveStage(inputs(fleet, seizeThreshold = 30))
+        assertEquals(StageTarget.Base("2012"), r)
+    }
+
+    @Test fun unreachableLowPackDoesNotSeize() {
+        val addr = roster.groupById("2024")!!.targets.first().address
+        val fleet = mapOf(addr to BatteryStatus(tel(BatteryState.Idle).copy(soc = 8f), reachable = false)) +
+            fleetWith("2016" to BatteryState.Discharging)
+        val r = resolveStage(inputs(fleet, seizeThreshold = 30))
+        assertEquals(StageTarget.Base("2016"), r)  // no live SOC → normal resolution, not the dead pack
+    }
+
+    @Test fun chargingLowPackStillSeizes() {
+        // Charging doesn't block the seize (the alarm flash is suppressed elsewhere, the stage isn't).
+        val charging = fleetWithSoc("2024" to 15f)
+            .mapValues { it.value.copy(telemetry = it.value.telemetry!!.copy(state = BatteryState.Charging)) }
+        val fleet = charging + fleetWith("2016" to BatteryState.Idle)
+        val r = resolveStage(inputs(fleet, seizeThreshold = 30))
+        assertEquals(StageTarget.Base("2024"), r)
+    }
+
+    @Test fun seizeFiresAtThresholdAndReleasesAbove() {
+        val idle2012 = fleetWith("2012" to BatteryState.Idle)
+        // 30 ≤ 30 → seize
+        assertEquals(
+            StageTarget.Base("2024"),
+            resolveStage(inputs(fleetWithSoc("2024" to 30f) + idle2012, seizeThreshold = 30)),
+        )
+        // 31 > 30 → no seize; everything idle keeps the current stage (the pin here)
+        assertEquals(
+            StageTarget.Base("2012"),
+            resolveStage(inputs(fleetWithSoc("2024" to 31f) + idle2012,
+                manualStage = StageTarget.Base("2012"), seizeThreshold = 30)),
+        )
+    }
+
+    @Test fun nullSeizeThresholdDisablesSeize() {
+        val fleet = fleetWithSoc("2024" to 5f) + fleetWith("2016" to BatteryState.Discharging)
+        val r = resolveStage(inputs(fleet, seizeThreshold = null))
+        assertEquals(StageTarget.Base("2016"), r)  // seize off → the discharging base owns the stage
     }
 
     // --- applyDisabled: single-writer reachability (a just-disconnected pack is unreachable

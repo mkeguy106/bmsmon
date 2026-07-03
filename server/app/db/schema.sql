@@ -76,3 +76,13 @@ ALTER TABLE device_temp_config ADD COLUMN IF NOT EXISTS cutoff_hot_c real;
 ALTER TABLE device_temp_config ADD COLUMN IF NOT EXISTS charge_lock_cold_c real;
 ALTER TABLE device_temp_config ADD COLUMN IF NOT EXISTS charge_lock_hot_c real;
 ALTER TABLE device_temp_config ADD COLUMN IF NOT EXISTS charge_resume_cold_c real;
+
+-- One-way capacity alert config pushed from the phone (latest-wins per device, device-level
+-- not per-profile). Tells the webui the SOC threshold at which a low pack seizes the main
+-- stage, plus whether capacity alerts are on. Read-only mirror on the web; no write path back.
+CREATE TABLE IF NOT EXISTS device_alert_config (
+  device_id text PRIMARY KEY,
+  seize_soc int,
+  alerts_on boolean,
+  updated_at_ms bigint
+);

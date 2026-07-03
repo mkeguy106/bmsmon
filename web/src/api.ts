@@ -26,6 +26,33 @@ export const getTempConfig = async (): Promise<{ configs: TempConfig[] }> => {
   return { configs };
 };
 
+// GET /web/alert-config — the phone's synced low-SOC stage-seize threshold.
+// When no phone has pushed config the server returns
+// {seize_soc: null, alerts_on: true, updated_at_ms: 0}.
+export interface AlertConfig {
+  seize_soc: number | null;
+  alerts_on: boolean;
+  updated_at_ms: number;
+}
+
+export const DEFAULT_ALERT_CONFIG: AlertConfig = {
+  seize_soc: null, alerts_on: true, updated_at_ms: 0,
+};
+
+export const getAlertConfig = async (): Promise<AlertConfig> => {
+  const r = await fetch("/web/alert-config").then(j);
+  if (!isObj(r) ||
+      !(r.seize_soc === null || Number.isFinite(r.seize_soc)) ||
+      typeof r.alerts_on !== "boolean" || !Number.isFinite(r.updated_at_ms)) {
+    throw new Error("malformed /web/alert-config response");
+  }
+  return {
+    seize_soc: r.seize_soc as number | null,
+    alerts_on: r.alerts_on,
+    updated_at_ms: r.updated_at_ms as number,
+  };
+};
+
 export const getDevices = async (): Promise<{ devices: DeviceRow[] }> => {
   const r = await fetch("/web/devices").then(j);
   if (!isObj(r) || !Array.isArray(r.devices) ||

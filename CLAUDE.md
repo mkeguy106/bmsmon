@@ -240,7 +240,27 @@ type (`BATTERY CAPACITY` / `TEMPERATURE`) and fires headless notifications via `
 N% fires **at** N%, `<=`) and `model/TempAlerts.kt` (cold→hot zone ladder: caution/warning/
 critical/cutoff, **critical fires before the BMS cutoff**). The unified `stageAlert()` shows the
 **worst** of the two. Capacity/temperature settings live in `Settings › Alerts` and
-`Settings › Temperature`; the stage's worst pack drives the overlay + `AlertNotifier` dedup.
+`Settings › Temperature`; the stage's worst pack drives the overlay + temperature `AlertNotifier`
+dedup.
+
+**Capacity alerts are fleet-wide, not stage-only.** Because only one base occupies the stage at a
+time, a low pack that isn't on the stage used to be invisible — a pack could drain to damage
+unseen. So `MonitorEngine.evaluateAlerts()` evaluates **every reachable pack** against the ladder
+and fires a **per-pack** headless notification, deduped **per address** (`AlertNotifier` keys
+`lastByAddr`/`idByAddr` by address, ids from `NOTIF_CAP_BASE`; per-pack charge-hold latch). The
+pure `reconcileFleetNotifications()` (`model/Alerts.kt`) does the fan-out dedup: notify the fresh
+crossings, cancel recovered/charging/vanished packs. A second low pack is never masked by the one
+on stage. (Temperature notifications stay stage-worst-driven.)
+
+**Low pack seizes the stage (safety override).** `resolveStage()` (`model/Fleet.kt`) has a
+pre-emptive branch — before the manual-pin check — that stages the base of the **lowest reachable
+pack at/below the seize threshold**, over the active chair AND a manual pin (daily-driver breaks
+ties). The seize threshold is `StageInputs.seizeThreshold`, set by the ViewModel to the **highest
+enabled capacity threshold** (default ladder top = 30%) when both `alertsOn` and the new
+`seizeLowToStage` setting are on (else null). Charging doesn't block the seize (the flash is still
+charge-suppressed). On recovery the branch yields and normal pin/auto resolution takes back over.
+`Settings › Alerts` gains a **"Pull low packs to stage"** toggle (default ON) gating only the
+visual seize — fleet-wide notifications fire regardless.
 
 **Temperature monitoring:** a vertical temperature gauge (`ui/gauge/TempGauge.kt`) sits beside the
 SOC ring on the stage (toggle + L/R position in settings), plus a `TEMP` stat tile. Thresholds are
@@ -314,8 +334,11 @@ foreground-service Stop), which tears the engine down entirely.
 tier (red / faster pulse) is user-configurable via `criticalThreshold` (`UiState` +
 `DEFAULT_CRITICAL_THRESHOLD = 15`), replacing the old hardcoded `≤15`. The Alerts settings page
 shows the full ladder (chips ≤ critical tint red), a single-select **Critical level** picker, and
-a **Reset to defaults** button. `stageAlert()` resolves the alert from the lowest pack on stage;
-charging suppresses the flash; acknowledged thresholds silence until SOC drops to the next level.
+a **Reset to defaults** button. `stageAlert()` resolves the in-app flash from the lowest pack on
+stage; charging suppresses the flash; acknowledged thresholds silence until SOC drops to the next
+level. The **highest enabled** ladder rung doubles as the stage-seize threshold (see "Low pack
+seizes the stage" above), and headless notifications are **fleet-wide/per-pack** (see "Capacity
+alerts are fleet-wide") — the ladder is the single source of truth for all three.
 
 **GPS telemetry (cloud upload).** When cloud sync is enrolled, the app captures the phone's
 location (`location/LocationSource.kt`, fused provider) and attaches `lat`/`lon`/`gps_accuracy_m`
@@ -362,10 +385,16 @@ The cloud backend lives in `server/` (FastAPI + asyncpg + **Postgres 16**) and t
 `web/` (React + Vite). The phone (`android/`) enrolls a device and uploads signed telemetry
 batches to `POST /api/v1/ingest` (gzipped) + threshold config to `POST /api/v1/config`; the WebUI
 reads `GET /web/fleet` + a `/ws` live feed + `GET /web/temp-config` (the read-only temperature
-mirror), plus admin-gated `GET /web/samples`, `GET /web/devices`, `POST /web/enroll-codes`,
+mirror) + `GET /web/alert-config` (the read-only capacity-seize mirror), plus admin-gated
+`GET /web/samples`, `GET /web/devices`, `POST /web/enroll-codes`,
 `DELETE /web/devices/{id}`). The temperature config lives in the `device_temp_config` table
 (per device+profile, latest-wins); the WebUI mirror (`web/src/temp.ts` + `TempGauge`/`TempBanner`/
-`TempOverlay`/`BatteryProfilePanel`) re-evaluates the same zone ladder read-only. Schema is
+`TempOverlay`/`BatteryProfilePanel`) re-evaluates the same zone ladder read-only. The **capacity
+seize threshold** rides the same `POST /api/v1/config` body (optional flat `seize_soc`/`alerts_on`
+fields on `TempConfigBody`) into the device-level `device_alert_config` table (latest-wins); the
+WebUI reads it via `GET /web/alert-config` and `web/src/stage.ts` `selectStageItems` seizes its
+main stage for the lowest fresh pack `≤ (alerts_on ? seize_soc ?? 30 : ∅)` — over pins and
+auto-selection, with a **"LOW"** marker (`MainStage.tsx`), no audible alarm. Schema is
 idempotent SQL in `server/app/db/schema.sql` (`CREATE TABLE IF NOT EXISTS` + `ALTER TABLE ... ADD
 COLUMN IF NOT EXISTS`) run on pool creation — so **schema changes apply automatically on container
 start; there is no separate migration step**.

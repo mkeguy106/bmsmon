@@ -25,6 +25,20 @@ async def temp_config(user: AuthUser = Depends(current_user), pool=Depends(get_p
         return {"configs": jsonable(await q.get_temp_config_all(conn))}
 
 
+@router.get("/alert-config")
+async def alert_config(user: AuthUser = Depends(current_user), pool=Depends(get_pool)):
+    """Read-only mirror of the capacity-alert config the phone pushed (one-way).
+
+    Returns the SOC threshold at which a low pack seizes the main stage. Defaults to
+    {seize_soc: null, alerts_on: true, updated_at_ms: 0} when the phone hasn't pushed one."""
+    async with pool.acquire() as conn:
+        cfg = await q.get_alert_config(conn)
+    if cfg is None:
+        return {"seize_soc": None, "alerts_on": True, "updated_at_ms": 0}
+    return {"seize_soc": cfg["seize_soc"], "alerts_on": cfg["alerts_on"],
+            "updated_at_ms": cfg["updated_at_ms"]}
+
+
 @router.get("/samples")
 async def samples(address: str, from_ms: int = Query(...), to_ms: int = Query(...),
                   user: AuthUser = Depends(require_admin), pool=Depends(get_pool)):

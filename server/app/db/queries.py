@@ -117,6 +117,34 @@ async def get_temp_config_all(conn) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def upsert_alert_config(conn, device_id: str, seize_soc: int, alerts_on: bool,
+                              updated_at_ms: int) -> None:
+    """Store the latest capacity-alert config for a device (one-way phone push, device-level).
+
+    Latest-wins guarded on updated_at_ms (mirrors upsert_temp_config): an incoming push only
+    overwrites the stored row when its updated_at_ms >= the stored one, so a stale/reordered
+    push can't clobber a newer config."""
+    await conn.execute(
+        """INSERT INTO device_alert_config (device_id, seize_soc, alerts_on, updated_at_ms)
+           VALUES ($1,$2,$3,$4)
+           ON CONFLICT (device_id) DO UPDATE SET
+             seize_soc = EXCLUDED.seize_soc,
+             alerts_on = EXCLUDED.alerts_on,
+             updated_at_ms = EXCLUDED.updated_at_ms
+           WHERE EXCLUDED.updated_at_ms >= device_alert_config.updated_at_ms""",
+        device_id, seize_soc, alerts_on, updated_at_ms,
+    )
+
+
+async def get_alert_config(conn) -> dict | None:
+    """Single most-recent capacity-alert config across all devices (for the read-only webui)."""
+    row = await conn.fetchrow(
+        """SELECT device_id, seize_soc, alerts_on, updated_at_ms
+           FROM device_alert_config ORDER BY updated_at_ms DESC LIMIT 1"""
+    )
+    return dict(row) if row else None
+
+
 async def fleet_snapshot(conn) -> list[dict]:
     """Latest REAL telemetry row per pack. Link-event rows (BLE Connected/Disconnected
     transitions, all telemetry fields null) are skipped so a disconnect doesn't wipe the

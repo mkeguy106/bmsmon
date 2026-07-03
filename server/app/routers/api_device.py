@@ -225,5 +225,11 @@ async def config(request: Request, pool=Depends(get_pool)):
         except ValidationError:
             raise HTTPException(422, "invalid body")
         await q.upsert_temp_config(conn, device_id, cfg.model_dump())
+        # Device-level capacity alert sync (parallel to temp config): only when the phone
+        # includes it — a temp-only body leaves seize_soc None and the alert config untouched.
+        if cfg.seize_soc is not None:
+            await q.upsert_alert_config(
+                conn, device_id, cfg.seize_soc,
+                cfg.alerts_on if cfg.alerts_on is not None else True, cfg.updated_at_ms)
         await conn.execute("UPDATE devices SET last_seen_at=now() WHERE id=$1", device_id)
     return OkResponse()

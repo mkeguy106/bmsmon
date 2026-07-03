@@ -144,6 +144,9 @@ data class UiState(
     val enabledThresholds: Set<Int> = DEFAULT_THRESHOLDS.toSet(),
     val acknowledgedThresholds: Set<Int> = emptySet(),
     val criticalThreshold: Int = DEFAULT_CRITICAL_THRESHOLD,
+    // When on (and alerts on), any reachable pack at/below the highest enabled threshold seizes the
+    // main stage — over the active chair and a manual pin — so a too-low pack can't hide off-stage.
+    val seizeLowToStage: Boolean = true,
     // temperature alerts (per-profile thresholds; unit reuses tempFahrenheit below)
     val tempAlertsEnabled: Boolean = true,
     val tempThresholdsByProfile: Map<String, TempThresholds> = emptyMap(),
@@ -186,6 +189,15 @@ data class UiState(
     val dailyDriver: BatteryGroup
         get() = roster.groupById(dailyDriverId) ?: BatteryGroup(dailyDriverId, dailyDriverId, emptyList())
     val stageGroupId: String? get() = (stageTarget as? StageTarget.Base)?.groupId
+
+    /** SOC at/below which a reachable pack seizes the stage on the phone, or null when disabled
+     *  (alerts off, the seize toggle off, or no thresholds enabled). */
+    val seizeThreshold: Int? get() =
+        if (alertsOn && seizeLowToStage && enabledThresholds.isNotEmpty()) enabledThresholds.max() else null
+
+    /** Highest enabled capacity threshold, pushed to the cloud so the WebUI drives its own low-pack
+     *  stage seize (defaults to 30 when the ladder is empty, matching the web fallback). */
+    val cloudSeizeSoc: Int get() = enabledThresholds.maxOrNull() ?: 30
 
     /** App-wide temperature unit (reuses the existing °C/°F preference). */
     val tempUnit: TempUnit get() = if (tempFahrenheit) TempUnit.F else TempUnit.C
@@ -407,6 +419,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     alertsOn = p.alertsOn,
                     enabledThresholds = p.enabledThresholds ?: s.enabledThresholds,
                     criticalThreshold = p.criticalThreshold ?: s.criticalThreshold,
+                    seizeLowToStage = p.seizeLowToStage,
                     keepScreenOn = p.keepScreenOn,
                     tempFahrenheit = p.tempFahrenheit,
                     tempAlertsEnabled = p.tempAlertsEnabled,
@@ -883,6 +896,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(alertsOn = enabled) }
         viewModelScope.launch { store.setAlertsOn(enabled) }
         pushAlertConfig()
+        enqueueCapacityConfig()
     }
     fun toggleThreshold(t: Int) {
         _state.update {
@@ -891,6 +905,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         }
         viewModelScope.launch { store.setThresholds(_state.value.enabledThresholds) }
         pushAlertConfig()
+        enqueueCapacityConfig()
     }
     fun setCriticalThreshold(t: Int) {
         // Auto-arm: choosing a critical level also enables that threshold, so it can't silently
@@ -901,8 +916,15 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             store.setThresholds(_state.value.enabledThresholds)
         }
         pushAlertConfig()
+        enqueueCapacityConfig()
     }
-    /** Restore every alert setting (toggle, thresholds, critical level) to its default. */
+    /** Toggle the low-pack stage seize (phone-side visual override). Alerts still fire fleet-wide
+     *  when off; refresh() picks up the change on its next tick (engine update / timer). */
+    fun setSeizeLowToStage(enabled: Boolean) {
+        _state.update { it.copy(seizeLowToStage = enabled) }
+        viewModelScope.launch { store.setSeizeLowToStage(enabled) }
+    }
+    /** Restore every alert setting (toggle, thresholds, critical level, seize) to its default. */
     fun resetAlertsToDefaults() {
         _state.update {
             it.copy(
@@ -910,14 +932,17 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                 enabledThresholds = DEFAULT_THRESHOLDS.toSet(),
                 criticalThreshold = DEFAULT_CRITICAL_THRESHOLD,
                 acknowledgedThresholds = emptySet(),
+                seizeLowToStage = true,
             )
         }
         viewModelScope.launch {
             store.setAlertsOn(true)
             store.setThresholds(DEFAULT_THRESHOLDS.toSet())
             store.setCriticalThreshold(DEFAULT_CRITICAL_THRESHOLD)
+            store.setSeizeLowToStage(true)
         }
         pushAlertConfig()
+        enqueueCapacityConfig()
     }
     fun setKeepScreenOn(enabled: Boolean) {
         _state.update { it.copy(keepScreenOn = enabled) }
@@ -966,16 +991,26 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         if (on) enqueueTempConfig(_state.value.stageProfile().id)
     }
 
-    /** Queue this profile's threshold config for the one-way cloud push (drained by the uploader). */
+    /** Queue this profile's threshold config for the one-way cloud push (drained by the uploader).
+     *  The device-level capacity seize threshold + alerts-on flag ride along so the WebUI can drive
+     *  its own low-pack stage seize (latest-wins server-side). */
     private fun enqueueTempConfig(profileId: String) {
         if (!_state.value.cloudSyncAlerts || !_state.value.enrolled) return
         val t = _state.value.tempThresholdsFor(profileId)
         val env = (ProfileRegistry.all.firstOrNull { it.id == profileId } ?: RedodoBekenProfile).tempEnvelope
         val unit = if (_state.value.tempFahrenheit) "F" else "C"
+        val seizeSoc = _state.value.cloudSeizeSoc
+        val alertsOn = _state.value.alertsOn
         viewModelScope.launch {
-            store.setPendingTempConfig(CloudJson.encodeTempConfig(profileId, t, env, unit, clockMs()))
+            store.setPendingTempConfig(
+                CloudJson.encodeTempConfig(profileId, t, env, unit, clockMs(), seizeSoc, alertsOn),
+            )
         }
     }
+
+    /** Push the capacity seize threshold / alerts-on to the cloud after a low-battery-alert change,
+     *  reusing the per-profile temp-config channel (temp values unchanged, latest-wins). */
+    private fun enqueueCapacityConfig() = enqueueTempConfig(_state.value.stageProfile().id)
 
     fun setLocked(enabled: Boolean) {
         _state.update { it.copy(locked = enabled) }
@@ -1022,7 +1057,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             val resolved = resolveStage(
                 StageInputs(st.fleet, st.dailyDriverId, st.dynamicStage, st.manualStage,
                     st.manualPinnedAt, st.lastDischargeAt, st.stageHoldMinutes * 60_000L, st.stageTarget, now,
-                    st.roster.groupViews()),
+                    st.roster.groupViews(), seizeThreshold = st.seizeThreshold),
             )
             val isPinned = st.manualStage != null && resolved == st.manualStage &&
                 (!st.dynamicStage || now - st.manualPinnedAt < PIN_HOLD_MS)

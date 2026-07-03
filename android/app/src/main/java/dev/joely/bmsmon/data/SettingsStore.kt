@@ -39,6 +39,7 @@ data class Persisted(
     val alertsOn: Boolean,
     val enabledThresholds: Set<Int>?,
     val criticalThreshold: Int?,
+    val seizeLowToStage: Boolean,
     val keepScreenOn: Boolean,
     val sortKey: String?,
     val filters: Set<String>?,
@@ -87,6 +88,7 @@ class SettingsStore(private val context: Context) {
         val ALERTS_ON = booleanPreferencesKey("alerts_on")
         val THRESHOLDS = stringSetPreferencesKey("alert_thresholds")
         val CRITICAL_THRESHOLD = intPreferencesKey("alert_critical_threshold")
+        val SEIZE_LOW_TO_STAGE = booleanPreferencesKey("seize_low_to_stage")
         val KEEP_SCREEN_ON = booleanPreferencesKey("keep_screen_on")
         val SORT_KEY = stringPreferencesKey("all_sort")
         val FILTERS = stringSetPreferencesKey("all_filters")
@@ -143,6 +145,7 @@ class SettingsStore(private val context: Context) {
             alertsOn = p[K.ALERTS_ON] ?: true,
             enabledThresholds = p[K.THRESHOLDS]?.mapNotNull { it.toIntOrNull() }?.toSet(),
             criticalThreshold = p[K.CRITICAL_THRESHOLD],
+            seizeLowToStage = p[K.SEIZE_LOW_TO_STAGE] ?: true,
             keepScreenOn = p[K.KEEP_SCREEN_ON] ?: true,
             sortKey = p[K.SORT_KEY],
             filters = p[K.FILTERS],
@@ -191,6 +194,8 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { it[K.THRESHOLDS] = values.map(Int::toString).toSet() }.let {}
     suspend fun setCriticalThreshold(t: Int) =
         context.dataStore.edit { it[K.CRITICAL_THRESHOLD] = t }.let {}
+    suspend fun setSeizeLowToStage(on: Boolean) =
+        context.dataStore.edit { it[K.SEIZE_LOW_TO_STAGE] = on }.let {}
     suspend fun setKeepScreenOn(on: Boolean) = context.dataStore.edit { it[K.KEEP_SCREEN_ON] = on }.let {}
     suspend fun setSort(name: String) = context.dataStore.edit { it[K.SORT_KEY] = name }.let {}
     suspend fun setFilters(names: Set<String>) = context.dataStore.edit { it[K.FILTERS] = names }.let {}
