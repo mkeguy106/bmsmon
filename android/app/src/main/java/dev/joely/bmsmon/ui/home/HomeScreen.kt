@@ -57,6 +57,7 @@ import dev.joely.bmsmon.ui.all.AllBatteriesScreen
 import dev.joely.bmsmon.ui.theme.AlertCritical
 import dev.joely.bmsmon.ui.theme.AlertWarn
 import dev.joely.bmsmon.ui.theme.Bm
+import dev.joely.bmsmon.ui.theme.MonoFont
 import dev.joely.bmsmon.ui.theme.RegenGreen
 import kotlinx.coroutines.launch
 
@@ -85,6 +86,14 @@ fun HomeScreen(
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().background(c.bg)) {
             TopBar(state, pager.currentPage, topBar, locked)
+            // Contextual status line under the utility bar: fleet activity + cloud sync normally,
+            // escalating to the red alert strip in the same slot — so it never collides with the bar.
+            StatusLine(
+                state = state,
+                alert = alert,
+                showAlert = pager.currentPage == 0 && alert.present && !alert.flashing,
+                locked = locked,
+            )
             HorizontalPager(state = pager, userScrollEnabled = !locked, modifier = Modifier.weight(1f)) { page ->
                 when (page) {
                     0 -> StageScreen(
@@ -116,18 +125,10 @@ fun HomeScreen(
                 }
             }
         }
-        // Cloud-upload status tucked into the stage's bottom-right corner (stage page only).
-        if (pager.currentPage == 0 && state.cloudEnabled && state.enrolled) {
-            UploadBadge(
-                state,
-                Modifier.align(Alignment.BottomEnd).padding(end = 18.dp, bottom = 12.dp),
-            )
-        }
-        // Alerts are evaluated only while the stage (page 0) is foregrounded.
-        if (pager.currentPage == 0) {
-            if (alert.flashing) DangerOverlay(alert, onAcknowledge)
-            else if (alert.present) AckedStrip(alert, Modifier.align(Alignment.TopCenter))
-        }
+        // A flashing (un-acknowledged) alert still takes over the whole stage. The acknowledged
+        // strip and the cloud-upload status now live in the StatusLine directly under the top bar,
+        // so neither overlaps the utility row any more.
+        if (pager.currentPage == 0 && alert.flashing) DangerOverlay(alert, onAcknowledge)
     }
 }
 
@@ -206,28 +207,71 @@ internal fun DangerOverlay(alert: StageAlert, onAcknowledge: () -> Unit) {
     }
 }
 
-/** Small persistent strip at the top of the stage once an alert is acknowledged (condition still on). */
+/**
+ * Contextual status line directly under the utility bar. It carries one honest line about the fleet:
+ * normally the stage's activity/mode on the left and cloud-sync status on the right; when a capacity
+ * or temperature alert is acknowledged, the whole line escalates to the red [AlertPill] in the same
+ * slot. Because it's a real row in the column (not an overlay), it can never collide with the bar.
+ */
 @Composable
-internal fun AckedStrip(alert: StageAlert, modifier: Modifier = Modifier) {
+private fun StatusLine(state: UiState, alert: StageAlert, showAlert: Boolean, locked: Boolean) {
+    val c = Bm.colors
+    Box(Modifier.fillMaxWidth().background(c.bg).padding(start = 18.dp, end = 18.dp, bottom = 10.dp)) {
+        if (showAlert) {
+            AlertPill(alert)
+        } else {
+            val st = stageState(state, locked)
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(st.text, color = st.color, fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.9.sp, fontFamily = MonoFont)
+                if (state.cloudEnabled && state.enrolled) UploadBadge(state)
+            }
+        }
+    }
+}
+
+private data class StageStateLabel(val text: String, val color: Color)
+
+/** The stage's live activity/mode as a short colored label (base name lives in the utility row). */
+@Composable
+private fun stageState(state: UiState, locked: Boolean): StageStateLabel {
+    val c = Bm.colors
+    val (text, color) = when {
+        !state.monitoring -> "MONITORING OFF" to c.text3
+        state.stageRegen -> "REGEN ↻" to RegenGreen
+        state.pinned -> "PINNED" to Bm.accent
+        !state.dynamicStage -> "MANUAL" to c.text2
+        state.stageActivity == GroupActivity.Discharging -> "DISCHARGING" to Bm.power
+        state.stageActivity == GroupActivity.Charging -> "CHARGING" to Bm.accent
+        state.stageActivity == GroupActivity.Idle -> "IDLE" to c.text2
+        else -> "…" to c.text3
+    }
+    return StageStateLabel(if (locked) "$text · LOCKED" else text, color)
+}
+
+/** The acknowledged-alert form of the status line: a red strip naming the alert + its reading. */
+@Composable
+private fun AlertPill(alert: StageAlert) {
     val c = Bm.colors
     Row(
-        modifier
-            .padding(horizontal = 14.dp, vertical = 8.dp)
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
             .background(AlertCritical.copy(alpha = 0.10f))
             .border(1.dp, AlertCritical.copy(alpha = 0.55f), RoundedCornerShape(10.dp))
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(Icons.Filled.Warning, null, Modifier.size(14.dp), tint = AlertCritical)
         Column(Modifier.weight(1f).padding(start = 10.dp)) {
             Text(alert.headline, color = AlertCritical, fontSize = 11.sp, fontWeight = FontWeight.Bold,
-                letterSpacing = 0.5.sp, fontFamily = dev.joely.bmsmon.ui.theme.MonoFont)
+                letterSpacing = 0.5.sp, fontFamily = MonoFont)
             Text(alert.detail.ifBlank { "${alert.lowSoc}%" }, color = c.text2, fontSize = 9.sp,
-                fontFamily = dev.joely.bmsmon.ui.theme.MonoFont, maxLines = 1)
+                fontFamily = MonoFont, maxLines = 1)
         }
-        Text("ACK'D", color = c.text3, fontSize = 9.sp, fontFamily = dev.joely.bmsmon.ui.theme.MonoFont)
+        Text("ACK'D", color = c.text3, fontSize = 9.sp, fontFamily = MonoFont)
     }
 }
 
@@ -239,18 +283,9 @@ private fun TopBar(
     locked: Boolean,
 ) {
     val c = Bm.colors
-    val (label, labelColor, showPin) = when {
-        !state.monitoring -> Triple("MONITORING OFF", c.text3, false)
-        state.stageRegen -> Triple("${state.stageLabel} · REGEN ↻", RegenGreen, false)
-        state.pinned -> Triple("${state.stageLabel} · PINNED", Bm.accent, true)
-        !state.dynamicStage -> Triple("${state.stageLabel} · MANUAL", c.text2, false)
-        state.stageActivity == GroupActivity.Discharging -> Triple("${state.stageLabel} · DISCHARGING", Bm.power, false)
-        state.stageActivity == GroupActivity.Charging -> Triple("${state.stageLabel} · CHARGING", Bm.accent, false)
-        state.stageActivity == GroupActivity.Idle -> Triple("${state.stageLabel} · IDLE", c.text2, false)
-        else -> Triple("${state.stageLabel} · …", c.text3, false)
-    }
-    val statusLabel = if (locked) "$label · LOCKED" else label
-    Box(Modifier.fillMaxWidth().background(c.bg).padding(horizontal = 18.dp, vertical = 12.dp)) {
+    // Utility row = pure identity (base name + pin) · page dots · actions. The live activity/mode
+    // and alert now live one line down in StatusLine, so this row stays uncrowded and fixed-width.
+    Box(Modifier.fillMaxWidth().background(c.bg).padding(start = 18.dp, top = 12.dp, end = 18.dp, bottom = 4.dp)) {
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -265,9 +300,13 @@ private fun TopBar(
                     null, Modifier.size(18.dp),
                     tint = if (state.monitoring) Bm.accent else c.text3,
                 )
-                if (showPin) Icon(Icons.Filled.PushPin, null, Modifier.padding(start = 6.dp).size(13.dp), tint = Bm.accent)
-                Text(statusLabel, color = labelColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
-                    letterSpacing = 0.9.sp, modifier = Modifier.padding(start = 7.dp))
+                if (state.pinned) Icon(Icons.Filled.PushPin, null, Modifier.padding(start = 6.dp).size(13.dp), tint = Bm.accent)
+                Text(
+                    state.stageLabel,
+                    color = if (state.monitoring) c.text else c.text3,
+                    fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.6.sp,
+                    modifier = Modifier.padding(start = 7.dp),
+                )
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 // While locked, hide appearance + settings; only the lock control remains (hold to unlock).
