@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { decodeHistory, decodeRangeConfigs, decodeSample, decodeSnapshot, decodeTempConfigs, decodeTrends, decodeChargeSessions, decodeNotes } from "./decode";
+import { decodeHistory, decodeRangeConfigs, decodeSample, decodeSnapshot, decodeTempConfigs, decodeTrends, decodeChargeSessions, decodeNotes, decodeTrack } from "./decode";
 
 let warn: MockInstance;
 beforeEach(() => { warn = vi.spyOn(console, "warn").mockImplementation(() => {}); });
@@ -182,5 +182,18 @@ describe("decodeChargeSessions", () => {
 describe("decodeNotes", () => {
   it("decodes notes", () => {
     expect(decodeNotes([{ base_id: "2012", body: "hi", updated_at_ms: 5 }])?.[0].base_id).toBe("2012");
+  });
+});
+
+describe("decodeTrack", () => {
+  it("decodes a track, dropping points missing lat/lon", () => {
+    const t = decodeTrack({ address: "AA", points: [
+      { t: 1, lat: 43.0, lon: -87.9, power_w: -60, current_a: -4, soc: 88 },
+      { t: 2, lat: null, lon: -87.9, power_w: -60, current_a: -4, soc: 88 } ] });
+    expect(t?.points.length).toBe(1);
+    expect(t?.points[0].lat).toBe(43.0);
+  });
+  it("decodeTrack null for malformed root", () => {
+    expect(decodeTrack({ address: 5 })).toBeNull();
   });
 });

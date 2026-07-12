@@ -9,6 +9,7 @@ import type { TempConfig } from "./temp";
 import type { RangeConfigRow } from "./range";
 import type { HistSeries } from "./v2/history";
 import type { TrendSeries, ChargeSession, NoteRow } from "./v2/trends";
+import type { Track } from "./v2/track";
 
 // Explicit whitelists mirroring types.ts / temp.ts — when a field the UI reads
 // is added there, add it here too or the decoder will strip it.
@@ -184,4 +185,17 @@ export function decodeNotes(x: unknown): NoteRow[] | null {
       out.push({ base_id: n.base_id, body: n.body, updated_at_ms: n.updated_at_ms as number });
   }
   return out;
+}
+
+/** null when the track itself is malformed; individually bad points (missing t/lat/lon) are dropped. */
+export function decodeTrack(x: unknown): Track | null {
+  if (!isObj(x) || typeof x.address !== "string" || !Array.isArray(x.points)) return warn("track", x);
+  const points: Track["points"] = [];
+  for (const p of x.points) {
+    if (!isObj(p) || !Number.isFinite(p.t) || !Number.isFinite(p.lat) || !Number.isFinite(p.lon)) continue;
+    points.push({ t: p.t as number, lat: p.lat as number, lon: p.lon as number,
+      power_w: numOrNull(p.power_w) ?? null, current_a: numOrNull(p.current_a) ?? null,
+      soc: numOrNull(p.soc) ?? null });
+  }
+  return { address: x.address, points };
 }

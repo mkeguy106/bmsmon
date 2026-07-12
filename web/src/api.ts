@@ -1,9 +1,10 @@
-import { decodeSnapshot, decodeTempConfigs, decodeRangeConfigs, decodeHistory, decodeTrends, decodeChargeSessions, decodeNotes } from "./decode";
+import { decodeSnapshot, decodeTempConfigs, decodeRangeConfigs, decodeHistory, decodeTrends, decodeChargeSessions, decodeNotes, decodeTrack } from "./decode";
 import type { DeviceRow, FleetItem } from "./types";
 import type { TempConfig } from "./temp";
 import type { RangeConfigRow } from "./range";
 import type { HistSeries } from "./v2/history";
 import type { TrendSeries, ChargeSession, NoteRow } from "./v2/trends";
+import type { Track } from "./v2/track";
 
 const j = async (r: Response): Promise<unknown> => {
   if (!r.ok) throw new Error(String(r.status));
@@ -114,3 +115,10 @@ export const getNotes = async (): Promise<{ notes: NoteRow[] }> => {
 export const putNote = (baseId: string, body: string): Promise<unknown> =>
   fetch("/web/notes", { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ base_id: baseId, body }) }).then(j);
+
+export const getTrack = async (address: string, fromMs: number, toMs: number): Promise<Track> => {
+  const r = await fetch(`/web/track?address=${encodeURIComponent(address)}&from_ms=${fromMs}&to_ms=${toMs}`).then(j);
+  const t = decodeTrack(r);
+  if (!t) throw new Error("malformed /web/track response");
+  return t;
+};
