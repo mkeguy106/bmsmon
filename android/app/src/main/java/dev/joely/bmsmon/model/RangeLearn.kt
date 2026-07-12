@@ -46,6 +46,13 @@ private const val DRIVE_MAX_ACCURACY_M = 20f
 private const val DRIVE_MIN_SPEED_MPS = 0.4f
 private const val DRIVE_MAX_SPEED_MPS = 4.0f
 
+// Vehicle-context exclusion: 90% of gate-passing drive distance in the 2026-07 field data was
+// the chair powered (>40 W) inside a van creeping below the speed cap — vehicle miles must not
+// teach Wh/mile. Any nearby GPS movement faster than the chair can go marks the whole window.
+private const val VEHICLE_SPEED_MPS = 4.5f
+private const val VEHICLE_CONTEXT_WINDOW_MS = 180_000L
+private const val CONTEXT_MAX_ACCURACY_M = 30f
+
 private const val METERS_PER_MILE = 1609.34f
 private const val METERS_PER_DEG = 111_320.0
 
@@ -74,7 +81,37 @@ private fun distanceM(lat1: Double, lon1: Double, lat2: Double, lon2: Double): F
     return sqrt(dx * dx + dy * dy).toFloat()
 }
 
+/** Timestamps of GPS movement faster than the chair can go (any state) — vehicle context. */
+private fun vehicleSpeedTimestamps(rows: List<RangeRow>): LongArray {
+    val out = ArrayList<Long>()
+    for (i in 1 until rows.size) {
+        val prev = rows[i - 1]
+        val cur = rows[i]
+        val dt = (cur.tsMs - prev.tsMs) / 1000f
+        if (dt < BURN_DT_MIN_S || dt > DRIVE_DT_MAX_S) continue
+        if (cur.lat == null || cur.lon == null || prev.lat == null || prev.lon == null) continue
+        if ((cur.gpsAccuracyM ?: Float.MAX_VALUE) >= CONTEXT_MAX_ACCURACY_M) continue
+        if ((prev.gpsAccuracyM ?: Float.MAX_VALUE) >= CONTEXT_MAX_ACCURACY_M) continue
+        if (distanceM(prev.lat, prev.lon, cur.lat, cur.lon) / dt > VEHICLE_SPEED_MPS) out.add(cur.tsMs)
+    }
+    return out.toLongArray()
+}
+
+/** True when any vehicle-speed movement lies within the context window of [tsMs]. */
+private fun vehicleNearby(fastTs: LongArray, tsMs: Long): Boolean {
+    if (fastTs.isEmpty()) return false
+    val from = tsMs - VEHICLE_CONTEXT_WINDOW_MS
+    var lo = 0
+    var hi = fastTs.size
+    while (lo < hi) {
+        val mid = (lo + hi) ushr 1
+        if (fastTs[mid] < from) lo = mid + 1 else hi = mid
+    }
+    return lo < fastTs.size && fastTs[lo] <= tsMs + VEHICLE_CONTEXT_WINDOW_MS
+}
+
 private fun accumulate(rows: List<RangeRow>, zone: ZoneId): Map<LocalDate, DayStats> {
+    val fastTs = vehicleSpeedTimestamps(rows)
     val days = HashMap<LocalDate, DayStats>()
     for (i in 1 until rows.size) {
         val prev = rows[i - 1]
@@ -97,7 +134,11 @@ private fun accumulate(rows: List<RangeRow>, zone: ZoneId): Map<LocalDate, DaySt
             ) {
                 val d = distanceM(prev.lat, prev.lon, cur.lat, cur.lon)
                 val speed = d / dt
-                if (speed in DRIVE_MIN_SPEED_MPS..DRIVE_MAX_SPEED_MPS) {
+                // Vehicle-context check: a chair-speed segment minutes from vehicle-speed
+                // movement is the chair riding IN the vehicle, not driving.
+                if (speed in DRIVE_MIN_SPEED_MPS..DRIVE_MAX_SPEED_MPS &&
+                    !vehicleNearby(fastTs, cur.tsMs)
+                ) {
                     s.driveWh += p * dt / 3600f
                     s.driveM += d
                 }

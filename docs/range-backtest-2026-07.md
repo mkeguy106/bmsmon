@@ -35,3 +35,22 @@ Two observations worth keeping:
 
 Re-check at the 2026-07-15 accuracy check-in alongside the charge-ETA and power-ring
 calibrations (see CLAUDE.md).
+
+## Addendum (2026-07-11): vehicle-context contamination in drive segments
+
+User-prompted follow-up: classifying every gate-passing drive segment on 2012-A by whether any
+GPS movement within ±3 min exceeded 4.5 m/s (a speed the chair cannot reach — vehicle context):
+
+| context | segments | miles | avg speed | avg draw |
+|---|---|---|---|---|
+| genuine chair driving | 60 | 0.10 mi | 1.45 m/s | 68 W |
+| vehicle context | 375 | **0.86 mi** | 2.03 m/s | 94 W |
+
+**~90% of gate-passing drive distance was the chair powered (>40 W) inside a van creeping
+below the 4.0 m/s cap.** The learner now rejects any chair-speed segment with vehicle-speed
+movement within ±3 min (`VEHICLE_SPEED_MPS = 4.5`, `VEHICLE_CONTEXT_WINDOW_MS = 180 s`).
+Genuine chair driving adjacent to van boarding is also discarded — the safe direction to err.
+
+Note: the genuine chair-context sample (0.10 mi, ~21 Wh/mi) is too small to re-derive the
+Wh/mile seed yet; the seed band (15–25) stays. Re-derive from clean accumulated data at the
+accuracy check-in.

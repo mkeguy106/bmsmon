@@ -33,6 +33,53 @@ class RangeLearnTest {
         }
     }
 
+    /** [n] qualified drive segments at 2 m/s (20 m / 10 s), 72 W, starting 9:00 on [day]. */
+    private fun shortDrive(day: Int, n: Int): List<RangeRow> = (0..n).map { i ->
+        RangeRow(ts(day, 9) + i * 10_000L, "Discharging", 72f,
+            lat = 40.0 + i * 20 / 111_320.0, lon = -75.0, gpsAccuracyM = 10f, regen = false)
+    }
+
+    /** One 8 m/s GPS hop (80 m / 10 s, Idle) continuing the drive path at [offsetS] after 9:00. */
+    private fun vehicleHop(day: Int, offsetS: Int, fromLatSteps: Int): List<RangeRow> {
+        val t0 = ts(day, 9) + offsetS * 1000L
+        val lat0 = 40.0 + fromLatSteps * 20 / 111_320.0
+        return listOf(
+            RangeRow(t0, "Idle", 0f, lat0, -75.0, gpsAccuracyM = 15f, regen = false),
+            RangeRow(t0 + 10_000L, "Idle", 0f, lat0 + 80.0 / 111_320.0, -75.0,
+                gpsAccuracyM = 15f, regen = false),
+        )
+    }
+
+    @Test fun shortDriveWithoutVehicleContextLearns() {
+        // Control for the vehicle-context tests: 16 segments (320 m) alone → day qualifies
+        // and whPerMile is learned (~16.09 Wh/mi), not seeded.
+        val rows = (1..3).flatMap { d -> shortDrive(d, 16) + idleFiller(d, 10, 13) }
+        val p = learnRangeParams(rows, zone, nowMs = ts(4, 0))
+        assertEquals(16.09f, (p.whPerMile.lo + p.whPerMile.hi) / 2f, 0.3f)
+    }
+
+    @Test fun vehicleContextExcludesDriveFromWhPerMile() {
+        // Same 16-segment drive (ends 9:02:40), then an 8 m/s hop at 9:02:50 — vehicle speed
+        // within ±3 min of every drive segment, so the whole day's drive is discarded and
+        // whPerMile stays seeded. (Chair draw in a creeping van must not teach miles.)
+        val rows = (1..3).flatMap { d ->
+            shortDrive(d, 16) + vehicleHop(d, offsetS = 170, fromLatSteps = 16) + idleFiller(d, 10, 13)
+        }
+        val p = learnRangeParams(rows, zone, nowMs = ts(4, 0))
+        assertEquals(SEED_RANGE_PARAMS.whPerMile.lo, p.whPerMile.lo, 0f)
+        assertEquals(SEED_RANGE_PARAMS.whPerMile.hi, p.whPerMile.hi, 0f)
+    }
+
+    @Test fun distantVehicleMovementDoesNotDisqualify() {
+        // The same hop 20 minutes after the drive is outside the ±3 min context window —
+        // the drive still teaches Wh/mile.
+        val rows = (1..3).flatMap { d ->
+            shortDrive(d, 16) + vehicleHop(d, offsetS = 1200, fromLatSteps = 16) + idleFiller(d, 10, 13)
+        }
+        val p = learnRangeParams(rows, zone, nowMs = ts(4, 0))
+        assertEquals(16.09f, (p.whPerMile.lo + p.whPerMile.hi) / 2f, 0.3f)
+    }
+
     @Test fun percentileInterpolatesLinearly() {
         val v = listOf(100f, 120f, 140f, 160f, 180f)
         assertEquals(116f, percentile(v, 0.2f), 0.01f)  // idx 0.8 → 100 + 0.8×20

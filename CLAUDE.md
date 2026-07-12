@@ -363,7 +363,10 @@ smoothed KB/s) surfaced through the reporter's `onStatus` into `UiState.cloudUpl
 high/low line — `~37–50 mi · ~9–13h use · ~5–9 days` — under the rings whenever the staged
 packs are connected and not charging (charging shows the recharge ETA instead). Pure math in
 `model/RangeEstimate.kt` (estimate + live tilt + formatting) and `model/RangeLearn.kt`
-(per-day p20/p80 bands: Wh/day, active W, Wh/mile from GPS-qualified outdoor drive segments)
+(per-day p20/p80 bands: Wh/day, active W, Wh/mile from GPS-qualified outdoor drive segments,
+with **vehicle-context exclusion** — a chair-speed segment is rejected if any GPS movement
+within ±3 min exceeds 4.5 m/s, because field data showed ~90% of gate-passing "drive" miles
+were the chair powered inside a van in slow traffic)
 with a line-for-line TS twin in `web/src/range.ts` (no tilt on web — documented divergence).
 The engine learns every 6 h from the local 14-day Room history (GPS now stored locally —
 samples db v4), refreshes today's tilt inputs every 5 min, computes the per-pack estimate once
