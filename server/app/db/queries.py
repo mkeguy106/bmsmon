@@ -319,6 +319,19 @@ async def history_series(conn, since_ms: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def charge_session_buckets(conn, address: str, since_ms: int) -> list[dict]:
+    """1-minute buckets of charging-only rows (current_a > 0.1) since since_ms."""
+    rows = await conn.fetch(
+        """SELECT (ts_ms / 60000) * 60000 AS bucket_ms,
+                  avg(soc)::real AS soc, max(temp_c)::real AS temp_max
+             FROM samples
+            WHERE address = $1 AND ts_ms >= $2 AND link_event IS NULL AND current_a > 0.1
+            GROUP BY bucket_ms ORDER BY bucket_ms""",
+        address, since_ms,
+    )
+    return [dict(r) for r in rows]
+
+
 def trend_bucket_ms(span_ms: int) -> int:
     """Adaptive bucket size for /web/trends, coarsened as the requested span grows so a
     multi-month range doesn't return an unbounded number of points."""

@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Query
 
 from app.auth.authentik import AuthUser, current_user, require_admin
 from app.auth.enroll import generate_code, hash_code
+from app.charge_sessions import detect_charge_sessions
 from app.db import queries as q
 from app.db.pool import get_pool
 from app.models import MintCodeResponse
@@ -78,6 +79,18 @@ async def trends(address: str, from_ms: int = Query(...), to_ms: int = Query(...
               for r in rows]
     return {"address": address, "bucket_ms": bucket,
             "first_ms": int(first) if first is not None else None, "points": points}
+
+
+@router.get("/charge-sessions")
+async def charge_sessions(address: str, days: int = Query(30, ge=1, le=365),
+                          user: AuthUser = Depends(current_user), pool=Depends(get_pool)):
+    """Read-only detected charge sessions (full CC->CV runs) for a pack."""
+    since_ms = int(time.time() * 1000) - days * 86_400_000
+    async with pool.acquire() as conn:
+        buckets = await q.charge_session_buckets(conn, address, since_ms)
+    return {"sessions": detect_charge_sessions([
+        {"bucket_ms": int(b["bucket_ms"]), "soc": _f(b["soc"]), "temp_max": _f(b["temp_max"])} for b in buckets
+    ])}
 
 
 @router.get("/samples")
