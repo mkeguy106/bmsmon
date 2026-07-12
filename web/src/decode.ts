@@ -6,12 +6,13 @@
 // console.warn) so callers can drop a frame or throw without crashing.
 import type { FleetItem, Sample } from "./types";
 import type { TempConfig } from "./temp";
+import type { RangeConfigRow } from "./range";
 
 // Explicit whitelists mirroring types.ts / temp.ts — when a field the UI reads
 // is added there, add it here too or the decoder will strip it.
 const SAMPLE_KEYS = [
   "address", "ts_ms", "state", "soc", "current_a", "power_w", "voltage_v",
-  "temp_c", "soh", "cycles", "regen", "link_event",
+  "temp_c", "soh", "cycles", "full_charge_ah", "remaining_ah", "regen", "link_event",
   "lat", "lon", "gps_accuracy_m", "eta_full_min",
 ] as const;
 const FLEET_KEYS = [...SAMPLE_KEYS, "alias", "group_id"] as const;
@@ -85,4 +86,25 @@ const validTempConfig = (x: unknown): x is Record<string, unknown> =>
 export function decodeTempConfigs(x: unknown): TempConfig[] | null {
   if (!Array.isArray(x) || !x.every(validTempConfig)) return warn("temp-config", x);
   return x.map((c) => pick<TempConfig>(c, TEMP_CONFIG_KEYS));
+}
+
+const RANGE_CONFIG_KEYS = [
+  "device_id", "address", "wh_per_day_lo", "wh_per_day_hi", "active_w_lo", "active_w_hi",
+  "wh_per_mile_lo", "wh_per_mile_hi", "learned_days", "updated_at_ms",
+] as const;
+
+const validRangeConfig = (x: unknown): x is Record<string, unknown> =>
+  isObj(x) && typeof x.device_id === "string" && typeof x.address === "string" &&
+  Number.isFinite(x.wh_per_day_lo) && Number.isFinite(x.wh_per_day_hi) &&
+  Number.isFinite(x.active_w_lo) && Number.isFinite(x.active_w_hi) &&
+  Number.isFinite(x.wh_per_mile_lo) && Number.isFinite(x.wh_per_mile_hi) &&
+  Number.isFinite(x.updated_at_ms);
+
+/** Strict like decodeTempConfigs: any malformed row invalidates the response. */
+export function decodeRangeConfigs(x: unknown): RangeConfigRow[] | null {
+  if (!Array.isArray(x) || !x.every(validRangeConfig)) return warn("range-config", x);
+  return x.map((c) => {
+    const row = pick<RangeConfigRow>(c, RANGE_CONFIG_KEYS);
+    return { ...row, learned_days: row.learned_days ?? 0 };
+  });
 }

@@ -3,6 +3,7 @@ export interface Sample {
   soc?: number | null; current_a?: number | null; power_w?: number | null;
   voltage_v?: number | null; temp_c?: number | null; soh?: number | null;
   cycles?: number | null; regen?: boolean; link_event?: string | null;
+  full_charge_ah?: number | null; remaining_ah?: number | null;
   lat?: number | null; lon?: number | null; gps_accuracy_m?: number | null;
   eta_full_min?: number | null;
 }
