@@ -1,3 +1,4 @@
+import time
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query
@@ -44,6 +45,19 @@ async def range_config(user: AuthUser = Depends(current_user), pool=Depends(get_
     """Read-only mirror of the learned discharge-range bands the phone pushed (one-way)."""
     async with pool.acquire() as conn:
         return {"configs": jsonable(await q.get_range_config_all(conn))}
+
+
+@router.get("/history")
+async def history(hours: int = Query(24, ge=1, le=168),
+                  user: AuthUser = Depends(current_user), pool=Depends(get_pool)):
+    """Read-only per-pack downsampled SOC history for the Fleet Health sparkline."""
+    since_ms = int(time.time() * 1000) - hours * 3_600_000
+    async with pool.acquire() as conn:
+        rows = await q.history_series(conn, since_ms)
+    series: dict[str, list[dict]] = {}
+    for r in rows:
+        series.setdefault(r["address"], []).append({"t": int(r["bucket_ms"]), "soc": float(r["soc"])})
+    return {"series": [{"address": a, "points": p} for a, p in series.items()]}
 
 
 @router.get("/samples")

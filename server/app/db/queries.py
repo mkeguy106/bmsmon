@@ -296,3 +296,24 @@ async def list_devices(conn) -> list[dict]:
 
 async def revoke_device(conn, device_id) -> None:
     await conn.execute("UPDATE devices SET revoked=true WHERE id=$1", device_id)
+
+
+HISTORY_BUCKET_MS = 1_800_000  # 30-minute buckets
+
+
+async def history_series(conn, since_ms: int) -> list[dict]:
+    """Per-pack 30-minute-bucketed average SOC since since_ms (real telemetry only).
+
+    Returns flat rows {address, bucket_ms, soc} ordered by address, bucket_ms — the
+    route groups them into one series per pack. Bounded by the window, not row-capped."""
+    rows = await conn.fetch(
+        """SELECT address,
+                  (ts_ms / $2) * $2 AS bucket_ms,
+                  avg(soc)::real AS soc
+             FROM samples
+            WHERE ts_ms >= $1 AND link_event IS NULL AND soc IS NOT NULL
+            GROUP BY address, bucket_ms
+            ORDER BY address, bucket_ms""",
+        since_ms, HISTORY_BUCKET_MS,
+    )
+    return [dict(r) for r in rows]
