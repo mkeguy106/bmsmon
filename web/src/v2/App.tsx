@@ -13,6 +13,7 @@ import { HealthView } from "./views/HealthView";
 import { HistoryView } from "./views/HistoryView";
 import { AlertsView } from "./views/AlertsView";
 import { SettingsView } from "./views/SettingsView";
+import { JourneyView } from "./views/JourneyView";
 import { useFleetData } from "./useFleetData";
 import { useV2Configs } from "./useV2Configs";
 import { useHistory } from "./useHistory";
@@ -28,7 +29,7 @@ const THEME_CYCLE: ThemeMode[] = ["system", "light", "dark"];
 
 export default function App() {
   const [settings, patch] = useV2Settings();
-  useTheme(settings.themeMode);
+  const resolvedTheme = useTheme(settings.themeMode);
   const [view, setView] = useLocalStorage<V2View>("bmsmon-v2-view", () => "command", viewCodec);
   const [collapsed, setCollapsed] = useLocalStorage<boolean>("bmsmon-v2-nav", () => false, boolCodec);
   const mobile = resolveMobile(settings.deviceMode, useWinWidth());
@@ -57,7 +58,7 @@ export default function App() {
   const content =
     view === "command" ? <CommandView data={data} mobile={mobile} onOpen={setView} tempF={tempF} /> :
     view === "health" ? <HealthView data={data} history={history} unit={settings.tempUnitPref} mobile={mobile} /> :
-    view === "journey" ? <Placeholder title="JOURNEY" /> :
+    view === "journey" ? <JourneyView data={data} theme={resolvedTheme} unit={settings.tempUnitPref} mobile={mobile} /> :
     view === "history" ? <HistoryView data={data} unit={settings.tempUnitPref} mobile={mobile} /> :
     view === "alerts" ? <AlertsView alerts={alerts} acked={acked} onAck={ack} now={data.now} /> :
     <SettingsView />;
