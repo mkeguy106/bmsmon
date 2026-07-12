@@ -114,3 +114,10 @@ or wire a real map lib (**Leaflet / MapLibre** with a dark/light style). Either 
 - **2026-07-12** — Brainstormed scope, decomposed into 4 phases, confirmed same-`web/` +
   separate-`/v2/`-build architecture, chose full 4-cell pipeline for Command. Roadmap + Phase 1
   spec written.
+- **2026-07-12** — Phase 1 (Foundation + Command) implementation COMPLETE on branch
+  `feat/webui-v2-phase1`: app shell (nav/theme/mobile) and the live Command view are in place,
+  and the per-cell-voltage telemetry pipeline (android → server → web) has landed. Full-suite
+  verification passed (web 95 vitest + tsc clean, server 99 pytest incl. `test_cells.py`, android
+  295 JVM unit tests incl. `CloudJsonTest`); both bundles build (`dist/index.html` v1 +
+  `dist/v2/index.html` v2 sharing `dist/assets`) and serve correctly. Pending: final review,
+  merge, and deploy.

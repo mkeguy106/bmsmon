@@ -451,6 +451,17 @@ driving live temperature alerts — like the Android All-Batteries view. A dev-o
 (`web/preview.html` → `src/preview.tsx`) renders the components with mock data for Playwright
 screenshots; it is **not** in the production bundle (`vite build` emits only `index.html`).
 
+### WebUI v2 (in progress)
+
+A v2 dashboard is being built alongside v1, served at `/v2/` (React, `web/src/v2/`) via a second
+Vite rollup input into `web/dist/v2/` — no server change; both bundles share `web/dist/assets`.
+Phase 1 (branch `feat/webui-v2-phase1`, implementation complete, pending review/merge/deploy) =
+the app shell (left nav, top bar, theme, mobile bottom tabs) plus a live **Command** view (fleet
+rail, stage, range/recharge, aside) bound to the same `/web/fleet` + `/ws` data, and a per-cell-
+voltage telemetry pipeline (android `cells[]` → server `samples.cellN_v` → fleet snapshot `cells`
+array → web). The other five views (Fleet Health, Journey, History, Alerts, Settings) are
+placeholders for later phases. Roadmap/spec: `docs/superpowers/specs/2026-07-12-webui-v2-roadmap.md`.
+
 **Local dev/test:** `docker compose -f server/docker-compose.dev.yml up -d` brings up a Postgres on
 `localhost:5432` (user/pw/db all `bmsmon`, matching the default `DATABASE_URL`). Run server tests
 with the venv: `cd server && .venv/bin/python -m pytest` (bare `python` lacks the deps).
