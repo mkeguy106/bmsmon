@@ -309,6 +309,8 @@ constants if the larger dataset has moved them:
   (was ±4–7 min).
 - **Discharge + regen gauge calibration** — re-check `POWER_RING_FULL_W` (300 W) and
   `REGEN_EPS` (0.1 A) / `REGEN_WINDOW_MS` (30 s) in `Fleet.kt` against the larger real-world set.
+- **Discharge-range bands** — re-run the backtest in docs/range-backtest-2026-07.md; check the
+  learned Wh/mile band against accumulated outdoor driving (it learns from sparse data).
 
 Garbage-frame guard: `parseTelemetry` realigns to the `01 93 55 AA` status header (BLE
 notification fragments can prepend stale bytes, which previously decoded as soc=0/37.6 V and
@@ -356,6 +358,24 @@ next to the stage label, only when cloud sync is enrolled: `↑ X.X KB/s` (green
 `↑ synced` when caught up, `↑ N queued` (amber) when buffering/offline. The rate comes from
 `cloud/UploadRate.kt` (a pure, unit-tested 5 s rolling window of actual POST body bytes →
 smoothed KB/s) surfaced through the reporter's `onStatus` into `UiState.cloudUploadKbps`.
+
+**Discharge estimate (miles + time remaining).** The stage shows a base-level learned
+high/low line — `~37–50 mi · ~9–13h use · ~5–9 days` — under the rings whenever the staged
+packs are connected and not charging (charging shows the recharge ETA instead). Pure math in
+`model/RangeEstimate.kt` (estimate + live tilt + formatting) and `model/RangeLearn.kt`
+(per-day p20/p80 bands: Wh/day, active W, Wh/mile from GPS-qualified outdoor drive segments)
+with a line-for-line TS twin in `web/src/range.ts` (no tilt on web — documented divergence).
+The engine learns every 6 h from the local 14-day Room history (GPS now stored locally —
+samples db v4), refreshes today's tilt inputs every 5 min, computes the per-pack estimate once
+per poll onto `BatteryStatus.range` (same single-writer pattern as `etaFullMin`), persists
+params in SettingsStore, and pushes them over the one-way config channel (optional `ranges`
+list on the `POST /api/v1/config` body) into `device_range_config`, mirrored read-only by
+`GET /web/range-config` for the WebUI's MainStage strip. Seeds until ≥3 qualifying days:
+130 Wh/day ±40%, 75 W ±30%, 20 Wh/mi ±25% — validated against the real fleet history in
+docs/range-backtest-2026-07.md (daily drivers learn real bands ~81–213 Wh/day; background
+packs stay seeded until they get stage time, by design). Miles are EV-range semantics
+("if you spent the remaining charge driving"), learnable only from outdoor GPS segments —
+indoor driving is invisible to GPS at wheelchair speeds.
 
 ## Development
 
