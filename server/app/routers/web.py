@@ -8,7 +8,7 @@ from app.auth.enroll import generate_code, hash_code
 from app.charge_sessions import detect_charge_sessions
 from app.db import queries as q
 from app.db.pool import get_pool
-from app.models import MintCodeResponse
+from app.models import MintCodeResponse, NoteBody, OkResponse
 from app.util import jsonable
 
 router = APIRouter(prefix="/web")
@@ -91,6 +91,19 @@ async def charge_sessions(address: str, days: int = Query(30, ge=1, le=365),
     return {"sessions": detect_charge_sessions([
         {"bucket_ms": int(b["bucket_ms"]), "soc": _f(b["soc"]), "temp_max": _f(b["temp_max"])} for b in buckets
     ])}
+
+
+@router.get("/notes")
+async def notes(user: AuthUser = Depends(current_user), pool=Depends(get_pool)):
+    async with pool.acquire() as conn:
+        return {"notes": jsonable(await q.get_notes(conn))}
+
+
+@router.post("/notes", response_model=OkResponse)
+async def post_note(body: NoteBody, user: AuthUser = Depends(current_user), pool=Depends(get_pool)):
+    async with pool.acquire() as conn:
+        await q.upsert_note(conn, body.base_id, body.body, int(time.time() * 1000))
+    return OkResponse(ok=True)
 
 
 @router.get("/samples")

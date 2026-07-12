@@ -107,6 +107,18 @@ class TempConfigBody(BaseModel):
     ranges: list[RangeConfigRow] | None = None
 
 
+class NoteBody(BaseModel):
+    base_id: str
+    body: str
+
+    @field_validator("body")
+    @classmethod
+    def _cap(cls, v: str) -> str:
+        if len(v) > 4000:
+            raise ValueError("body too long")
+        return v
+
+
 class OkResponse(BaseModel):
     ok: bool = True
 

@@ -365,3 +365,15 @@ async def first_sample_ms(conn, address: str) -> int | None:
     selectable history range on the client."""
     return await conn.fetchval(
         "SELECT min(ts_ms) FROM samples WHERE address = $1 AND link_event IS NULL", address)
+
+
+async def get_notes(conn) -> list[dict]:
+    rows = await conn.fetch("SELECT base_id, body, updated_at_ms FROM web_notes ORDER BY base_id")
+    return [dict(r) for r in rows]
+
+
+async def upsert_note(conn, base_id: str, body: str, updated_at_ms: int) -> None:
+    await conn.execute(
+        """INSERT INTO web_notes (base_id, body, updated_at_ms) VALUES ($1, $2, $3)
+           ON CONFLICT (base_id) DO UPDATE SET body = EXCLUDED.body, updated_at_ms = EXCLUDED.updated_at_ms""",
+        base_id, body, updated_at_ms)

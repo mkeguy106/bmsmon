@@ -108,3 +108,12 @@ CREATE TABLE IF NOT EXISTS device_range_config (
   received_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (device_id, address)
 );
+
+-- WebUI-authored free-text notes per base (first WebUI write path). One row per base_id,
+-- latest-wins on upsert; no phone involvement.
+CREATE TABLE IF NOT EXISTS web_notes (
+  base_id text PRIMARY KEY,
+  body text NOT NULL,
+  updated_at_ms bigint NOT NULL,
+  received_at timestamptz NOT NULL DEFAULT now()
+);
