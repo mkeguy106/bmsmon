@@ -10,6 +10,7 @@ import { BottomTabs } from "./components/BottomTabs";
 import { Placeholder } from "./components/Placeholder";
 import { CommandView } from "./views/CommandView";
 import { HealthView } from "./views/HealthView";
+import { HistoryView } from "./views/HistoryView";
 import { AlertsView } from "./views/AlertsView";
 import { SettingsView } from "./views/SettingsView";
 import { useFleetData } from "./useFleetData";
@@ -57,7 +58,7 @@ export default function App() {
     view === "command" ? <CommandView data={data} mobile={mobile} onOpen={setView} tempF={tempF} /> :
     view === "health" ? <HealthView data={data} history={history} unit={settings.tempUnitPref} mobile={mobile} /> :
     view === "journey" ? <Placeholder title="JOURNEY" /> :
-    view === "history" ? <Placeholder title="HISTORY" /> :
+    view === "history" ? <HistoryView data={data} unit={settings.tempUnitPref} mobile={mobile} /> :
     view === "alerts" ? <AlertsView alerts={alerts} acked={acked} onAck={ack} now={data.now} /> :
     <SettingsView />;
 

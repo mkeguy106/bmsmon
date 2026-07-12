@@ -8,6 +8,8 @@ import type { TrendSeries } from "../trends";
 import { useTrends } from "../useTrends";
 import { LineChart, type ChartSeries } from "../components/LineChart";
 import { Segmented } from "../components/Segmented";
+import { ChargeSessionTable } from "../components/ChargeSessionTable";
+import { NotesCard } from "../components/NotesCard";
 import { projectMonthsTo80 } from "../model/trends";
 
 // ── Persisted control state ────────────────────────────────────────────────
@@ -119,6 +121,10 @@ export function HistoryView({ data, unit, mobile }: {
     return p ? [p] : [];
   }, [base, hist.pack]);
   const addresses = useMemo(() => selectedPacks.map((p) => p.item.address), [selectedPacks]);
+  // address → A/B letter, for the charge-session table's PACK column in Group mode.
+  const labels = useMemo(
+    () => Object.fromEntries(selectedPacks.map((p) => [p.item.address, p.letter])),
+    [selectedPacks]);
 
   // "all" resolves to the earliest first_ms once a series is loaded; until then a
   // now−1y default. The effect re-resolves it after the first fetch (first_ms is
@@ -295,6 +301,10 @@ export function HistoryView({ data, unit, mobile }: {
       <ChartCard title="Temperature · min / avg / max">
         <LineChart series={tempChart} ribbon={tempRibbon} unitLabel={unitLabel} height={200} />
       </ChartCard>
+
+      {/* ── Charge-session log + per-base notes ── */}
+      <ChargeSessionTable addresses={addresses} labels={labels} unit={unit} />
+      <NotesCard baseId={base.id} />
     </div>
   );
 }
