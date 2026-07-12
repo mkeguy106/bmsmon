@@ -1,6 +1,5 @@
 import { useMemo, useState } from "react";
 import { useLocalStorage } from "../../useLocalStorage";
-import { useV2Settings } from "../useV2Settings";
 import { groupBases, DAILY_DRIVER_BASE } from "../fleet";
 import { tripsCodec, type Trip } from "../trips";
 import { CommandFleetRail } from "../components/CommandFleetRail";
@@ -15,12 +14,9 @@ import type { FleetData } from "../useFleetData";
  * range · aside). Accepts the live fleet `data` as a PROP — the v2 App owns the
  * single live store and passes it in, so this view never opens a second store.
  */
-export function CommandView({ data, mobile, onOpen }: {
-  data: FleetData; mobile: boolean; onOpen: (v: V2View) => void;
+export function CommandView({ data, mobile, onOpen, tempF }: {
+  data: FleetData; mobile: boolean; onOpen: (v: V2View) => void; tempF: boolean;
 }) {
-  const [settings] = useV2Settings();
-  const tempF = settings.tempUnitPref === "F";
-
   // Which base occupies the stage — session state, seeded to the daily driver.
   const [stageBaseId, setStageBaseId] = useState<string>(DAILY_DRIVER_BASE);
   const [trips, setTrips] = useLocalStorage<Trip[]>("bmsmon-v2-trips", () => [], tripsCodec);

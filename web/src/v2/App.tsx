@@ -37,9 +37,10 @@ export default function App() {
   // The single live data store for v2 — owned here and passed down. CommandView
   // must NOT call useFleetData itself or it would open a second store + WS.
   const data = useFleetData();
+  const tempF = settings.tempUnitPref === "F";
 
   const content =
-    view === "command" ? <CommandView data={data} mobile={mobile} onOpen={setView} /> :
+    view === "command" ? <CommandView data={data} mobile={mobile} onOpen={setView} tempF={tempF} /> :
     view === "health" ? <Placeholder title="FLEET HEALTH" /> :
     view === "journey" ? <Placeholder title="JOURNEY" /> :
     view === "history" ? <Placeholder title="HISTORY" /> :

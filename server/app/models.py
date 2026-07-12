@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class EnrollBody(BaseModel):
@@ -38,6 +38,14 @@ class SampleIn(BaseModel):
     lon: float | None = None
     gps_accuracy_m: float | None = None
     eta_full_min: float | None = None
+
+    @field_validator("cells")
+    @classmethod
+    def _clip_cells(cls, v: list[float] | None) -> list[float] | None:
+        # The stored/REST representation is always exactly 4 cells (cell1_v..cell4_v),
+        # so truncate here to keep the WS broadcast (raw model_dump()) in agreement
+        # with fleet_snapshot instead of diverging on non-4-element uploads.
+        return v[:4] if v else v
 
 
 class IngestBody(BaseModel):
