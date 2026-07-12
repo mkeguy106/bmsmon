@@ -1,5 +1,6 @@
 import type { Base, BasePack, BaseStatus } from "../fleet";
 import { Bar, Chip } from "./Atoms";
+import { socColor, sohColor } from "../colors";
 
 const STATUS_DOT: Record<BaseStatus, string> = {
   "in-use": "var(--ok)",
@@ -15,15 +16,6 @@ const STATUS_TAG: Record<BaseStatus, string> = {
   spares: "SPARES",
   offline: "OFFLINE",
 };
-
-function socColor(soc: number | null | undefined, connected: boolean): string {
-  if (!connected || soc == null) return "var(--text-4)";
-  return soc < 15 ? "var(--live)" : soc < 30 ? "var(--warn)" : "var(--ok)";
-}
-function sohColor(soh: number | null | undefined): string {
-  if (soh == null) return "var(--text-4)";
-  return soh >= 90 ? "var(--ok)" : soh >= 80 ? "var(--warn)" : "var(--live)";
-}
 
 function PackRow({ pack, onStage }: { pack: BasePack; onStage: () => void }) {
   const { item, letter, connected } = pack;

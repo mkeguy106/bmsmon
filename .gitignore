@@ -7,3 +7,7 @@ build/
 
 # Local emulator/device screenshots
 screenshots/
+
+# Agent/session scratch (never committed)
+.claude/
+scratchpad/

@@ -48,15 +48,16 @@ export function deriveAlerts(
       }
     }
     // cell imbalance
-    const dvRaw = deltaMv(i);
-    // Round before thresholding: cell voltages are floats, so e.g. (3.36-3.30)*1000
-    // lands on 60.00000000000006 in IEEE-754, not exactly 60 — round first so the
-    // mV comparison matches the (already-rounded) mV value shown in the message.
-    const dv = dvRaw != null ? Math.round(dvRaw) : null;
-    if (dv != null && dv > 40) {
+    const dv = deltaMv(i);
+    // Epsilon-compare the raw mV so IEEE-754 dust doesn't flip a boundary: e.g.
+    // (3.36-3.30)*1000 = 60.00000000000006, which must still read as a 60 mV warning,
+    // not a critical. EPS is far below telemetry's integer-mV granularity, so a true
+    // 40/60 boundary is exact while the float artifact is absorbed. Display rounds.
+    const EPS = 1e-6;
+    if (dv != null && dv > 40 + EPS) {
       out.push({ id: `cell:${i.address}`, address: i.address, kind: "cell",
-        severity: dv > 60 ? "critical" : "warning",
-        title: "Cell imbalance", msg: `Δ ${dv} mV across cells.`, tsMs: i.ts_ms });
+        severity: dv > 60 + EPS ? "critical" : "warning",
+        title: "Cell imbalance", msg: `Δ ${Math.round(dv)} mV across cells.`, tsMs: i.ts_ms });
     }
   }
   const rank = (s: AlertSeverity) => (s === "critical" ? 0 : 1);

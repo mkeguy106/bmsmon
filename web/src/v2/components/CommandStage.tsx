@@ -4,6 +4,7 @@ import type { FleetItem } from "../../types";
 import { estimatePackRange, minRange, SEED_RANGE_PARAMS, type PackRange, type RangeParams } from "../../range";
 import { Ring } from "./Ring";
 import { StatTile, CellTiles, Chip } from "./Atoms";
+import { sohColor } from "../colors";
 
 const THERMAL_C = 44;
 
@@ -21,10 +22,6 @@ function roleText(base: Base): string {
   const st = { "in-use": "in use now", charging: "on charge", backup: "backup ready",
     spares: "spare", offline: "offline" }[base.status];
   return `${driver} · ${st}`;
-}
-function sohColor(soh: number | null | undefined): string {
-  if (soh == null) return "var(--text-4)";
-  return soh >= 90 ? "var(--ok)" : soh >= 80 ? "var(--warn)" : "var(--live)";
 }
 export function fmtTemp(c: number | null | undefined, tempF: boolean): string {
   if (c == null) return "—";

@@ -2,11 +2,8 @@ import type { ReactNode } from "react";
 import type { Base } from "../fleet";
 import type { FleetItem } from "../../types";
 import { Bar } from "./Atoms";
+import { socColor } from "../colors";
 
-function socColor(soc: number | null | undefined): string {
-  if (soc == null) return "var(--text-4)";
-  return soc < 15 ? "var(--live)" : soc < 30 ? "var(--warn)" : "var(--ok)";
-}
 function fmtEta(min: number): string {
   const m = Math.round(min);
   if (m < 60) return `${m} min`;

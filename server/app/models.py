@@ -118,6 +118,14 @@ class NoteBody(BaseModel):
             raise ValueError("body too long")
         return v
 
+    @field_validator("base_id")
+    @classmethod
+    def _cap_base_id(cls, v: str) -> str:
+        # base_id is a group_id (e.g. "2012") and the web_notes PRIMARY KEY — keep it small.
+        if not v or len(v) > 64:
+            raise ValueError("invalid base_id")
+        return v
+
 
 class OkResponse(BaseModel):
     ok: bool = True

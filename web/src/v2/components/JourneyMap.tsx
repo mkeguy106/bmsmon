@@ -105,10 +105,17 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme }: {
     group.addTo(map);
     trailRef.current = group;
 
+  }, [points, segKinds, hotspots, theme, mapReady]);
+
+  // --- Fit the map to the trip once per track change — NOT on theme flip, so a
+  //     light/dark toggle re-tiles/re-colors without discarding the user's pan/zoom.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || points.length === 0) return;
     map.invalidateSize();
     const bounds = L.latLngBounds(points.map((p) => [p.lat, p.lon] as [number, number]));
     if (bounds.isValid()) map.fitBounds(bounds, { padding: [24, 24], maxZoom: 17 });
-  }, [points, segKinds, hotspots, theme, mapReady]);
+  }, [points, mapReady]);
 
   // --- Playback cursor: a single marker walked to points[cursorIndex].
   useEffect(() => {
@@ -122,6 +129,8 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme }: {
     const latlng: [number, number] = [pt.lat, pt.lon];
     if (cursorRef.current) {
       cursorRef.current.setLatLng(latlng);
+      // Re-resolve colors so a theme flip doesn't leave the cursor at the old theme's values.
+      cursorRef.current.setStyle({ color: resolveColor("var(--app-bg)"), fillColor: resolveColor("var(--text)") });
     } else {
       cursorRef.current = L.circleMarker(latlng, {
         radius: 6, color: resolveColor("var(--app-bg)"), weight: 2,

@@ -7,6 +7,7 @@ import { healthSummary, healthBoardOrder, packStatus, type PackStatus } from "..
 import { groupBases, DAILY_DRIVER_BASE, type BasePack } from "../fleet";
 import { Bar, StatTile, Chip } from "../components/Atoms";
 import { Sparkline } from "../components/Sparkline";
+import { socColor, sohColor } from "../colors";
 
 const STATUS_COLOR: Record<PackStatus, string> = {
   "in-use": "var(--ok)", charging: "var(--warn)", low: "var(--live)",
@@ -16,14 +17,6 @@ const STATUS_TAG: Record<PackStatus, string> = {
   "in-use": "IN USE", charging: "CHARGING", low: "LOW", idle: "IDLE", offline: "OFFLINE",
 };
 
-function socColor(soc: number | null | undefined, connected: boolean): string {
-  if (!connected || soc == null) return "var(--text-4)";
-  return soc < 15 ? "var(--live)" : soc < 30 ? "var(--warn)" : "var(--ok)";
-}
-function healthColor(soh: number | null | undefined): string {
-  if (soh == null) return "var(--text-4)";
-  return soh >= 90 ? "var(--ok)" : soh >= 80 ? "var(--warn)" : "var(--live)";
-}
 
 // PACK · CAPACITY · HEALTH · TEMP · CYCLES · trend sparkline · STATUS.
 const BOARD_COLUMNS = "minmax(90px,1fr) minmax(120px,1.4fr) 64px 64px 56px 104px 96px";
@@ -58,7 +51,7 @@ function HeroPackCard({ pack }: { pack: BasePack }) {
       <HeroBarRow label="CAPACITY" frac={capFrac ?? 0}
         text={capFrac != null ? `${Math.round(capFrac * 100)}%` : "—"} color="var(--text-3)" />
       <HeroBarRow label="HEALTH" frac={soh != null ? soh / 100 : 0}
-        text={soh != null ? `${Math.round(soh)}%` : "—"} color={healthColor(soh)} />
+        text={soh != null ? `${Math.round(soh)}%` : "—"} color={sohColor(soh)} />
     </div>
   );
 }
@@ -101,7 +94,7 @@ function BoardRow({ item, connected, points, unit }: {
           {soc != null ? `${Math.round(soc)}%` : "—"}
         </span>
       </div>
-      <span className="mono" style={{ fontSize: 11, color: healthColor(soh) }}>
+      <span className="mono" style={{ fontSize: 11, color: sohColor(soh) }}>
         {soh != null ? `${Math.round(soh)}%` : "—"}
       </span>
       <span className="mono" style={{ fontSize: 11, color: "var(--text-3)" }}>

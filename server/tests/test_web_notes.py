@@ -20,3 +20,10 @@ async def test_notes_requires_identity(client):
 async def test_notes_over_length_rejected(client):
     r = await client.post("/web/notes", headers=USER, json={"base_id": "2012", "body": "x" * 5000})
     assert r.status_code == 422
+
+
+async def test_notes_bad_base_id_rejected(client):
+    assert (await client.post("/web/notes", headers=USER,
+            json={"base_id": "", "body": "x"})).status_code == 422
+    assert (await client.post("/web/notes", headers=USER,
+            json={"base_id": "z" * 65, "body": "x"})).status_code == 422
