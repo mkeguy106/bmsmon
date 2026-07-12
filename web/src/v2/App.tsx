@@ -8,6 +8,8 @@ import { Nav } from "./components/Nav";
 import { TopBar } from "./components/TopBar";
 import { BottomTabs } from "./components/BottomTabs";
 import { Placeholder } from "./components/Placeholder";
+import { CommandView } from "./views/CommandView";
+import { useFleetData } from "./useFleetData";
 import type { V2View } from "./nav";
 
 const viewCodec: Codec<V2View> = {
@@ -32,8 +34,12 @@ export default function App() {
 
   const unacked = 0; // wired in Phase 2
 
+  // The single live data store for v2 — owned here and passed down. CommandView
+  // must NOT call useFleetData itself or it would open a second store + WS.
+  const data = useFleetData();
+
   const content =
-    view === "command" ? <Placeholder title="COMMAND" /> : // replaced in Task 16
+    view === "command" ? <CommandView data={data} mobile={mobile} onOpen={setView} /> :
     view === "health" ? <Placeholder title="FLEET HEALTH" /> :
     view === "journey" ? <Placeholder title="JOURNEY" /> :
     view === "history" ? <Placeholder title="HISTORY" /> :
@@ -47,7 +53,7 @@ export default function App() {
           onSelect={setView} onToggleCollapse={() => setCollapsed((c) => !c)} />
       )}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
-        <TopBar view={view} live={false} gps={false} synced={false}
+        <TopBar view={view} live={data.live} gps={data.gps} synced={data.live}
           themeMode={settings.themeMode} mobile={mobile}
           onCycleTheme={cycleTheme} onToggleDevice={toggleDevice} onSelectView={setView} />
         <main style={{ padding: mobile ? "16px 14px 76px" : 18, flex: 1 }}>{content}</main>
