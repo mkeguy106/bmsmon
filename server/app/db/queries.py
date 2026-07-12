@@ -360,6 +360,21 @@ async def trend_series(conn, address: str, from_ms: int, to_ms: int, bucket_ms: 
     return [dict(r) for r in rows]
 
 
+async def track_series(conn, address: str, from_ms: int, to_ms: int) -> list[dict]:
+    """15-second buckets of GPS-carrying real telemetry (lat/lon present) with discharge context."""
+    rows = await conn.fetch(
+        """SELECT (ts_ms / 15000) * 15000 AS bucket_ms,
+                  avg(lat)::double precision AS lat, avg(lon)::double precision AS lon,
+                  avg(power_w)::real AS power_w, avg(current_a)::real AS current_a, avg(soc)::real AS soc
+             FROM samples
+            WHERE address = $1 AND ts_ms >= $2 AND ts_ms < $3
+              AND link_event IS NULL AND lat IS NOT NULL AND lon IS NOT NULL
+            GROUP BY bucket_ms ORDER BY bucket_ms""",
+        address, from_ms, to_ms,
+    )
+    return [dict(r) for r in rows]
+
+
 async def first_sample_ms(conn, address: str) -> int | None:
     """Earliest real-telemetry timestamp for a pack, used by /web/trends to bound the
     selectable history range on the client."""

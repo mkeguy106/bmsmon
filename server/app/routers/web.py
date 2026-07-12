@@ -93,6 +93,18 @@ async def charge_sessions(address: str, days: int = Query(30, ge=1, le=365),
     ])}
 
 
+@router.get("/track")
+async def track(address: str, from_ms: int = Query(...), to_ms: int = Query(...),
+                user: AuthUser = Depends(current_user), pool=Depends(get_pool)):
+    """Read-only 15-second-bucketed per-pack GPS + discharge series for the Journey map."""
+    async with pool.acquire() as conn:
+        rows = await q.track_series(conn, address, from_ms, to_ms)
+    points = [{"t": int(r["bucket_ms"]), "lat": _f(r["lat"]), "lon": _f(r["lon"]),
+               "power_w": _f(r["power_w"]), "current_a": _f(r["current_a"]), "soc": _f(r["soc"])}
+              for r in rows]
+    return {"address": address, "points": points}
+
+
 @router.get("/notes")
 async def notes(user: AuthUser = Depends(current_user), pool=Depends(get_pool)):
     async with pool.acquire() as conn:
