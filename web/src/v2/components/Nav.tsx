@@ -106,7 +106,7 @@ export function Nav({ view, collapsed, unackedCount, onSelect, onToggleCollapse 
                         padding: "0 4px",
                         borderRadius: 8,
                         background: "var(--live)",
-                        color: "#fff",
+                        color: "var(--badge-text)",
                         fontSize: 10,
                         fontWeight: 600,
                         position: collapsed ? "absolute" : "static",

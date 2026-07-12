@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useLocalStorage, type Codec } from "../useLocalStorage";
 import { useV2Settings } from "./useV2Settings";
 import { useTheme, type ThemeMode } from "./useTheme";
@@ -9,7 +9,13 @@ import { TopBar } from "./components/TopBar";
 import { BottomTabs } from "./components/BottomTabs";
 import { Placeholder } from "./components/Placeholder";
 import { CommandView } from "./views/CommandView";
+import { HealthView } from "./views/HealthView";
+import { AlertsView } from "./views/AlertsView";
+import { SettingsView } from "./views/SettingsView";
 import { useFleetData } from "./useFleetData";
+import { useV2Configs } from "./useV2Configs";
+import { useHistory } from "./useHistory";
+import { deriveAlerts } from "./model/alerts";
 import type { V2View } from "./nav";
 
 const viewCodec: Codec<V2View> = {
@@ -32,20 +38,28 @@ export default function App() {
     deviceMode: settings.deviceMode === "mobile" ? "desktop" : "mobile",
   }), [patch, settings.deviceMode]);
 
-  const unacked = 0; // wired in Phase 2
-
   // The single live data store for v2 — owned here and passed down. CommandView
   // must NOT call useFleetData itself or it would open a second store + WS.
   const data = useFleetData();
   const tempF = settings.tempUnitPref === "F";
 
+  const { tempConfig } = useV2Configs();
+  const history = useHistory();
+  const alerts = useMemo(
+    () => deriveAlerts(data.items, data.staleAddrs, tempConfig),
+    [data.items, data.staleAddrs, tempConfig],
+  );
+  const [acked, setAcked] = useState<Set<string>>(new Set());
+  const ack = useCallback((id: string) => setAcked((p) => new Set(p).add(id)), []);
+  const unacked = alerts.filter((a) => !acked.has(a.id)).length;
+
   const content =
     view === "command" ? <CommandView data={data} mobile={mobile} onOpen={setView} tempF={tempF} /> :
-    view === "health" ? <Placeholder title="FLEET HEALTH" /> :
+    view === "health" ? <HealthView data={data} history={history} unit={settings.tempUnitPref} mobile={mobile} /> :
     view === "journey" ? <Placeholder title="JOURNEY" /> :
     view === "history" ? <Placeholder title="HISTORY" /> :
-    view === "alerts" ? <Placeholder title="ALERTS" /> :
-    <Placeholder title="SETTINGS" />;
+    view === "alerts" ? <AlertsView alerts={alerts} acked={acked} onAck={ack} now={data.now} /> :
+    <SettingsView />;
 
   return (
     <div style={{ display: "flex", minHeight: "100vh" }}>

@@ -127,6 +127,7 @@ export function TopBar({ view, live, gps, synced, themeMode, mobile, onCycleThem
         type="button"
         onClick={onCycleTheme}
         title={`Theme: ${themeStep.label} (click to cycle)`}
+        aria-label={`Theme: ${themeStep.label}`}
         style={{
           display: "flex",
           alignItems: "center",

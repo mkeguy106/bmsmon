@@ -3,6 +3,7 @@
   --track:#27272a; --border:rgba(255,255,255,.07); --border-strong:rgba(255,255,255,.11);
   --hover:rgba(255,255,255,.04); --nav-active:rgba(255,255,255,.06); --row-alt:rgba(255,255,255,.012);
   --text:#f4f4f5; --text-2:#d4d4d8; --text-3:#a1a1aa; --text-4:#71717a; --text-5:#52525b;
+  --badge-text:#fff;
   color-scheme: dark;
 }
 :root[data-theme="light"] {
@@ -10,6 +11,7 @@
   --track:#e4e4e7; --border:rgba(0,0,0,.09); --border-strong:rgba(0,0,0,.14);
   --hover:rgba(0,0,0,.045); --nav-active:rgba(0,0,0,.06); --row-alt:rgba(0,0,0,.02);
   --text:#18181b; --text-2:#3f3f46; --text-3:#52525b; --text-4:#71717a; --text-5:#a1a1aa;
+  --badge-text:#fff;
   color-scheme: light;
 }
 :root { --ok:#22c55e; --warn:#eab308; --live:#ef4444; }

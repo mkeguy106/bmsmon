@@ -64,7 +64,7 @@ export function BottomTabs({ view, unackedCount, onSelect }: {
                     padding: "0 3px",
                     borderRadius: 7,
                     background: "var(--live)",
-                    color: "#fff",
+                    color: "var(--badge-text)",
                     fontSize: 9,
                     fontWeight: 600,
                   }}
