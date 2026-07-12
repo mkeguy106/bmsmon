@@ -231,5 +231,10 @@ async def config(request: Request, pool=Depends(get_pool)):
             await q.upsert_alert_config(
                 conn, device_id, cfg.seize_soc,
                 cfg.alerts_on if cfg.alerts_on is not None else True, cfg.updated_at_ms)
+        # Learned discharge-range bands (parallel to alert config): only when the phone
+        # includes them — a temp-only body leaves ranges None and the stored rows untouched.
+        if cfg.ranges:
+            for row in cfg.ranges:
+                await q.upsert_range_config(conn, device_id, row.model_dump())
         await conn.execute("UPDATE devices SET last_seen_at=now() WHERE id=$1", device_id)
     return OkResponse()

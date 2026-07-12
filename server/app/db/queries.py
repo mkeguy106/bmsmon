@@ -145,6 +145,41 @@ async def get_alert_config(conn) -> dict | None:
     return dict(row) if row else None
 
 
+async def upsert_range_config(conn, device_id, row: dict) -> None:
+    """Store one pack's learned discharge-range bands (one-way phone push, latest-wins
+    guarded on updated_at_ms — mirrors upsert_temp_config)."""
+    await conn.execute(
+        """INSERT INTO device_range_config
+             (device_id, address, wh_per_day_lo, wh_per_day_hi, active_w_lo, active_w_hi,
+              wh_per_mile_lo, wh_per_mile_hi, learned_days, updated_at_ms, received_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
+           ON CONFLICT (device_id, address) DO UPDATE SET
+             wh_per_day_lo = EXCLUDED.wh_per_day_lo,
+             wh_per_day_hi = EXCLUDED.wh_per_day_hi,
+             active_w_lo = EXCLUDED.active_w_lo,
+             active_w_hi = EXCLUDED.active_w_hi,
+             wh_per_mile_lo = EXCLUDED.wh_per_mile_lo,
+             wh_per_mile_hi = EXCLUDED.wh_per_mile_hi,
+             learned_days = EXCLUDED.learned_days,
+             updated_at_ms = EXCLUDED.updated_at_ms,
+             received_at = now()
+           WHERE EXCLUDED.updated_at_ms >= device_range_config.updated_at_ms""",
+        device_id, row["address"], row["wh_per_day_lo"], row["wh_per_day_hi"],
+        row["active_w_lo"], row["active_w_hi"], row["wh_per_mile_lo"], row["wh_per_mile_hi"],
+        row["learned_days"], row["updated_at_ms"],
+    )
+
+
+async def get_range_config_all(conn) -> list[dict]:
+    """Latest learned range bands per device+pack (for the read-only webui mirror)."""
+    rows = await conn.fetch(
+        """SELECT device_id, address, wh_per_day_lo, wh_per_day_hi, active_w_lo, active_w_hi,
+                  wh_per_mile_lo, wh_per_mile_hi, learned_days, updated_at_ms, received_at
+           FROM device_range_config ORDER BY updated_at_ms DESC"""
+    )
+    return [dict(r) for r in rows]
+
+
 async def fleet_snapshot(conn) -> list[dict]:
     """Latest REAL telemetry row per pack. Link-event rows (BLE Connected/Disconnected
     transitions, all telemetry fields null) are skipped so a disconnect doesn't wipe the

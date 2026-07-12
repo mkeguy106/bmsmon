@@ -57,6 +57,18 @@ class IngestResponse(BaseModel):
     last_seq: int
 
 
+class RangeConfigRow(BaseModel):
+    address: str
+    wh_per_day_lo: float
+    wh_per_day_hi: float
+    active_w_lo: float
+    active_w_hi: float
+    wh_per_mile_lo: float
+    wh_per_mile_hi: float
+    learned_days: int = 0
+    updated_at_ms: int
+
+
 class TempConfigBody(BaseModel):
     profile_id: str
     cold_caution_c: int
@@ -81,6 +93,9 @@ class TempConfigBody(BaseModel):
     # 422 the phone re-POSTs forever), so both stay None-defaulted and backward compatible.
     seize_soc: int | None = None
     alerts_on: bool | None = None
+    # Learned discharge-range bands, one row per pack (2026-07-11 design). Optional — an
+    # older app pushing a temp-only body must keep validating (never a re-POSTed 422).
+    ranges: list[RangeConfigRow] | None = None
 
 
 class OkResponse(BaseModel):

@@ -39,6 +39,13 @@ async def alert_config(user: AuthUser = Depends(current_user), pool=Depends(get_
             "updated_at_ms": cfg["updated_at_ms"]}
 
 
+@router.get("/range-config")
+async def range_config(user: AuthUser = Depends(current_user), pool=Depends(get_pool)):
+    """Read-only mirror of the learned discharge-range bands the phone pushed (one-way)."""
+    async with pool.acquire() as conn:
+        return {"configs": jsonable(await q.get_range_config_all(conn))}
+
+
 @router.get("/samples")
 async def samples(address: str, from_ms: int = Query(...), to_ms: int = Query(...),
                   user: AuthUser = Depends(require_admin), pool=Depends(get_pool)):

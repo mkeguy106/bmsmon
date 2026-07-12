@@ -86,3 +86,20 @@ CREATE TABLE IF NOT EXISTS device_alert_config (
   alerts_on boolean,
   updated_at_ms bigint
 );
+
+-- Learned discharge-range parameter bands pushed from the phone (one-way, latest-wins per
+-- device+pack). The webui's range.ts formula twin reads these; no write path back from web.
+CREATE TABLE IF NOT EXISTS device_range_config (
+  device_id uuid NOT NULL,
+  address text NOT NULL,
+  wh_per_day_lo real NOT NULL,
+  wh_per_day_hi real NOT NULL,
+  active_w_lo real NOT NULL,
+  active_w_hi real NOT NULL,
+  wh_per_mile_lo real NOT NULL,
+  wh_per_mile_hi real NOT NULL,
+  learned_days int NOT NULL DEFAULT 0,
+  updated_at_ms bigint NOT NULL,
+  received_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (device_id, address)
+);
