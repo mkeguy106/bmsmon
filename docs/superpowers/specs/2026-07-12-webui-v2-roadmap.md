@@ -87,7 +87,7 @@ insufficient. Need **downsampled long-range trend aggregation per MAC** (e.g. da
 of SOH, cell spread, temp) and a **charge-session detection/log** query. Design these as read-only
 web endpoints when the phase starts.
 
-### Phase 4 — Journey / GPS  *(needs new backend + a map-tech decision)*
+### Phase 4 — Journey / GPS  *(COMPLETE — see Progress log)*
 GPS trip visualization with discharge-colored trail, transit rail lines, hotspots, and playback.
 
 **Backend (new):** a **web-scoped GPS-trail endpoint** (per day/range, per pack, with `current_a`/
@@ -144,3 +144,20 @@ or wire a real map lib (**Leaflet / MapLibre** with a dark/light style). Either 
   persisted across a full page reload) all verified live; Command/Health/Alerts/Settings render
   with no regressions and v1 is unaffected; zero console/page errors throughout. Pending: final
   review, merge, and deploy.
+- **2026-07-12** — Phase 4 (Journey) implementation COMPLETE on branch `feat/webui-v2-phase4`:
+  the map-tech call landed on a real base map — a new read-only `GET /web/track` endpoint (15 s-
+  bucketed per-pack GPS + discharge series) backs a Leaflet map (CARTO dark/light tiles) with a
+  discharge-colored trail (green/amber/red by |power|), dashed transit legs, hotspot markers, a
+  playback scrubber, and an energy-over-distance chart — plus the Journey view itself (date nav,
+  map, dock, playback). Full-suite verification passed (web 131 vitest + tsc clean, server 124
+  pytest incl. `test_track.py` + `test_web_track.py`); both bundles build correctly (`dist/v2`
+  chunk includes leaflet + its CSS; v1 chunk carries zero leaflet references) and serve correctly.
+  End-to-end: no headless browser was available in this environment, so verification was done via
+  clean build/serve (curl 200s on `/` and `/v2/`, correct asset refs), the real API server seeded
+  with a synthetic outdoor trip (active discharge legs, a hard-pull hotspot, and a low-current
+  transit/vehicle leg) — `/web/track` correctly bucketed and returned all three segment types
+  (~-75 W active, ~-260 W hotspot bucket, ~-9 W transit bucket) — and code+test inspection of the
+  no-GPS-day empty state ("No GPS trip recorded"). A follow-up session with a headless browser
+  should still do a full click-through before merge. **All six v2 views are now live — Command,
+  Fleet Health, Journey, History, Alerts, Settings — the v2 design is fully implemented** (Devices
+  admin view stays "SOON"). Pending: final review, merge, and deploy.

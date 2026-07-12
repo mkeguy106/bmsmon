@@ -451,27 +451,25 @@ driving live temperature alerts — like the Android All-Batteries view. A dev-o
 (`web/preview.html` → `src/preview.tsx`) renders the components with mock data for Playwright
 screenshots; it is **not** in the production bundle (`vite build` emits only `index.html`).
 
-### WebUI v2 (in progress)
+### WebUI v2 (all six views live)
 
-A v2 dashboard is being built alongside v1, served at `/v2/` (React, `web/src/v2/`) via a second
-Vite rollup input into `web/dist/v2/` — no server change; both bundles share `web/dist/assets`.
-Phase 1 (branch `feat/webui-v2-phase1`, implementation complete, pending review/merge/deploy) =
-the app shell (left nav, top bar, theme, mobile bottom tabs) plus a live **Command** view (fleet
-rail, stage, range/recharge, aside) bound to the same `/web/fleet` + `/ws` data, and a per-cell-
-voltage telemetry pipeline (android `cells[]` → server `samples.cellN_v` → fleet snapshot `cells`
-array → web). Phase 2 (branch `feat/webui-v2-phase2`, implementation complete, pending
-review/merge/deploy) makes **Fleet Health** (tiles + 8-pack board + 24h sparkline), **Alerts**
-(capacity ladder + temp zones + cell imbalance, `localStorage` acknowledge), and **Settings**
-(units/map trail/theme segmented toggles) live views; **Journey** and **History** remain
-placeholders for later phases. A read-only `GET /web/history` endpoint (30-min bucketed per-pack
-SOC) backs the Fleet Health sparkline. Phase 3 (branch `feat/webui-v2-phase3`, implementation
-complete, pending review/merge/deploy) makes **History** a live view — per-base capacity-fade/
-cell-imbalance/temperature trend charts with A/B breakdown, a charge-session log, and editable
-per-base notes — backed by three new read-only-except-one endpoints: `GET /web/trends`
-(adaptive-bucket per-pack SOH/cell-spread/temp series), `GET /web/charge-sessions` (server-side
-CC→CV session detection), and `GET`/`POST /web/notes` (the **WebUI's first write path**, a new
-`web_notes` table, Authentik-gated like every other `/web/*` route). Only **Journey** remains a
-placeholder. Roadmap/spec: `docs/superpowers/specs/2026-07-12-webui-v2-roadmap.md`.
+A v2 dashboard runs alongside v1, served at `/v2/` (React, `web/src/v2/`) via a second Vite
+rollup input into `web/dist/v2/` — no server change; both bundles share `web/dist/assets`. Phases
+1–4 (branches `feat/webui-v2-phase1..4`, implementation complete, pending review/merge/deploy)
+have landed all six planned views: **Command** (fleet rail, stage, range/recharge, aside, bound to
+`/web/fleet` + `/ws`, plus a per-cell-voltage pipeline android `cells[]` → server `samples.cellN_v`
+→ fleet snapshot `cells` → web), **Fleet Health** (tiles + 8-pack board + 24h sparkline off
+`GET /web/history`), **Alerts** (capacity ladder + temp zones + cell imbalance, `localStorage`
+acknowledge), **Settings** (units/map trail/theme segmented toggles), **History** (per-base
+capacity-fade/cell-imbalance/temperature trend charts with A/B breakdown, a charge-session log, and
+editable per-base notes, backed by `GET /web/trends`, `GET /web/charge-sessions`, and the
+**WebUI's first write path** `GET`/`POST /web/notes`), and **Journey** (GPS trip visualization —
+date nav, a Leaflet base map with CARTO dark/light tiles, a discharge-colored trail
+green/amber/red by |power|, dashed transit legs, hotspot markers, playback scrubber, and an
+energy-over-distance chart, backed by the new read-only `GET /web/track` endpoint — 15 s-bucketed
+per-pack GPS + discharge series). `leaflet` is now a `web/` dependency (its CSS ships only in the
+`/v2/` chunk; v1 carries zero leaflet references). **Devices** (admin device management) is the
+only nav entry still "SOON." Roadmap/spec: `docs/superpowers/specs/2026-07-12-webui-v2-roadmap.md`.
 
 **Local dev/test:** `docker compose -f server/docker-compose.dev.yml up -d` brings up a Postgres on
 `localhost:5432` (user/pw/db all `bmsmon`, matching the default `DATABASE_URL`). Run server tests
