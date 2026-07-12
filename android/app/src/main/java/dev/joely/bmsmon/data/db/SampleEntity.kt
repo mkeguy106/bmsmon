@@ -33,5 +33,11 @@ data class SampleEntity(
     val cellMinV: Float?,
     val cellMaxV: Float?,
     val regen: Boolean,
+    // GPS fix at sample time (nullable; null on link rows, pre-v4 rows, and GPS-off samples).
+    // Stored locally so the range learner can compute Wh/mile offline — previously GPS only
+    // rode the cloud outbox (see the 2026-07-11 discharge-estimate design).
+    val lat: Double? = null,
+    val lon: Double? = null,
+    val gpsAccuracyM: Float? = null,
     val linkEvent: String?,
 )

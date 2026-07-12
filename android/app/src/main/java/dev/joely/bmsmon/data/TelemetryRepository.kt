@@ -5,6 +5,7 @@ import dev.joely.bmsmon.data.db.BmsDatabase
 import dev.joely.bmsmon.data.db.RawFrameEntity
 import dev.joely.bmsmon.data.db.SampleEntity
 import dev.joely.bmsmon.data.db.SessionEntity
+import dev.joely.bmsmon.location.GpsFix
 import dev.joely.bmsmon.model.Telemetry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -72,10 +73,10 @@ class TelemetryRepository(private val db: BmsDatabase) {
 
     private fun hex(raw: ByteArray): String = raw.joinToString("") { "%02x".format(it) }
 
-    fun ingest(address: String, t: Telemetry, raw: ByteArray, reason: String, regen: Boolean, tsMs: Long) {
+    fun ingest(address: String, t: Telemetry, raw: ByteArray, reason: String, regen: Boolean, tsMs: Long, fix: GpsFix? = null) {
         ops.trySend {
             val sessionId = advanceSession(address, tsMs)
-            db.samples().insert(sampleFrom(address, t, sessionId, regen, tsMs))
+            db.samples().insert(sampleFrom(address, t, sessionId, regen, tsMs, fix))
             db.rawFrames().insert(RawFrameEntity(address = address, tsMs = tsMs, hex = hex(raw), reason = reason))
             lastSampleTs[address] = tsMs
             pendingDisconnect[address] = false
@@ -139,14 +140,15 @@ class TelemetryRepository(private val db: BmsDatabase) {
         sohEnd = 0, fullChargeAhEnd = 0f, cyclesEnd = 0, maxTempC = 0f,
     )
 
-    private fun sampleFrom(address: String, t: Telemetry, sessionId: Long, regen: Boolean, tsMs: Long) =
+    private fun sampleFrom(address: String, t: Telemetry, sessionId: Long, regen: Boolean, tsMs: Long, fix: GpsFix?) =
         SampleEntity(
             address = address, tsMs = tsMs, sessionId = sessionId, state = t.state.name,
             soc = t.soc, currentA = t.current, powerW = t.powerW, voltageV = t.voltage,
             tempC = t.temp, mosfetTempC = t.mosfetTemp, soh = t.soh, fullChargeAh = t.fullChargeAh,
             remainingAh = t.capacityAh, cycles = t.cycles,
             cellMinV = t.cells.minOrNull(), cellMaxV = t.cells.maxOrNull() ?: t.cellV,
-            regen = regen, linkEvent = null,
+            regen = regen, lat = fix?.lat, lon = fix?.lon, gpsAccuracyM = fix?.accuracyM,
+            linkEvent = null,
         )
 
     private suspend fun maybePrune(nowMs: Long) {

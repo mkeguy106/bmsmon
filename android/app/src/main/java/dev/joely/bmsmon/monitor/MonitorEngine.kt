@@ -426,7 +426,7 @@ class MonitorEngine(
         if (logging) {
             val header = (ProfileRegistry.profileFor(roster.batteryAt(addr)?.advertisedName)
                 ?: RedodoBekenProfile).responseHeader
-            repository.ingest(addr, t, raw, classifyFrame(raw, parsedOk = true, header), regen, now)
+            repository.ingest(addr, t, raw, classifyFrame(raw, parsedOk = true, header), regen, now, fix)
         }
         if (addr.uppercase() in stageAddrs) evaluateAlerts()
         if (t.state == BatteryState.Charging && t.soc >= TARGET_SOC &&

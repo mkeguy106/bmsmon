@@ -10,7 +10,7 @@ import androidx.room.RoomDatabase
 // is reviewable and migration tests become possible.
 @Database(
     entities = [SampleEntity::class, SessionEntity::class, RawFrameEntity::class, OutboxEntity::class],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 abstract class BmsDatabase : RoomDatabase() {
@@ -37,9 +37,19 @@ abstract class BmsDatabase : RoomDatabase() {
             }
         }
 
+        // Discharge-estimate feature: persist the GPS fix locally (it previously only rode the
+        // cloud outbox) so Wh/mile can be learned on-phone, offline. Nullable — no backfill.
+        val MIGRATION_3_4 = object : androidx.room.migration.Migration(3, 4) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE samples ADD COLUMN lat REAL")
+                db.execSQL("ALTER TABLE samples ADD COLUMN lon REAL")
+                db.execSQL("ALTER TABLE samples ADD COLUMN gpsAccuracyM REAL")
+            }
+        }
+
         fun create(context: Context): BmsDatabase =
             Room.databaseBuilder(context, BmsDatabase::class.java, "bms.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .build()
     }
 }
