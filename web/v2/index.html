@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8" /><title>bmsmon · v2</title>
+    <meta name="color-scheme" content="light dark" />
+    <meta name="darkreader-lock" />
+    <script>
+      try {
+        var m = JSON.parse(localStorage.getItem("bmsmon-v2-settings") || "{}").themeMode
+             || (localStorage.getItem("bmsmon-theme") === "light" ? "light" : "system");
+        var dark = m === "dark" || (m !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.dataset.theme = dark ? "dark" : "light";
+      } catch (e) { document.documentElement.dataset.theme = "dark"; }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  </head>
+  <body><div id="root"></div><script type="module" src="/src/v2/main.tsx"></script></body>
+</html>
