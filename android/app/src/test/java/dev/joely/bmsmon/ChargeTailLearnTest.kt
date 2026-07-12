@@ -17,8 +17,22 @@ class ChargeTailLearnTest {
         assertEquals(2.0f, observedChargeTailMinutes(climb(96, 100))!!, 0.001f)
     }
 
-    @Test fun nullWhenNeverReaches100() {
-        assertNull(observedChargeTailMinutes(climb(96, 99)))
+    @Test fun cutoffAt99CompletesTheTail() {
+        // This BMS never reports 100 while Charging — it caps at 99 and flips to Idle at
+        // charger cutoff (SOC 100 appears right after). A run that climbed through 98 and
+        // ENDED at >=99 is a completed tail: 98 at index 2, run end (99) at index 3 -> 1 min.
+        assertEquals(1.0f, observedChargeTailMinutes(climb(96, 99))!!, 0.001f)
+    }
+
+    @Test fun cutoffAt99TerminatedByIdleRowStillCompletes() {
+        val a = climb(96, 99)
+        val idle = listOf(ChargeSample(a.last().tsMs + 60_000L, 100f, false))
+        assertEquals(1.0f, observedChargeTailMinutes(a + idle)!!, 0.001f)
+    }
+
+    @Test fun nullWhenRunEndsBelow99() {
+        // Unplugged mid-tail at 98 — not a completed tail.
+        assertNull(observedChargeTailMinutes(climb(96, 98)))
     }
 
     @Test fun nullWhenStartsAlreadyInTail() {

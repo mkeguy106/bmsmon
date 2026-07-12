@@ -14,11 +14,19 @@ fun chargeSample(tsMs: Long, soc: Float?, charging: Boolean): ChargeSample? =
 /** Max gap within a single contiguous charging run before it's treated as broken. */
 private const val TAIL_MAX_GAP_MS = 5 * 60_000L
 
+/** A run that climbed through 98 and ENDED at/above this SOC completed its tail at cutoff. */
+private const val CUTOFF_COMPLETE_SOC = 99f
+
 /**
- * Minutes from first reaching [TAIL_START_SOC] (98%) to first reaching [TARGET_SOC] (100%) within
- * the most recent contiguous charging run that cleanly climbed through the tail (had a sample below
- * 98% first). Returns null if no such completed tail exists — unplugged early, started already full,
- * or a gap/non-charging sample broke the run. [samples] must be ascending by tsMs.
+ * Minutes from first reaching [TAIL_START_SOC] (98%) to the end of the charge, within the most
+ * recent contiguous charging run that cleanly climbed through the tail (had a sample below 98%
+ * first). "End of the charge" is the first sample at [TARGET_SOC] when the BMS reports one —
+ * but this BMS never reports 100 while Charging (it caps at 99; 100 appears only after the
+ * charger cuts off and the state flips Idle), so a run that ENDS at >= [CUTOFF_COMPLETE_SOC]
+ * is also complete, measured to its last sample (the cutoff — where SOC 100 shows up in the
+ * field data). Returns null if no completed tail exists — unplugged early (run ends < 99),
+ * started already full, or a gap/non-charging sample broke the run mid-climb. [samples] must
+ * be ascending by tsMs.
  */
 fun observedChargeTailMinutes(samples: List<ChargeSample>): Float? {
     var best: Float? = null
@@ -34,8 +42,12 @@ fun observedChargeTailMinutes(samples: List<ChargeSample>): Float? {
         val sawBelow = run.any { it.soc < TAIL_START_SOC }
         val t98 = run.firstOrNull { it.soc >= TAIL_START_SOC }?.tsMs
         val t100 = run.firstOrNull { it.soc >= TARGET_SOC }?.tsMs
-        if (sawBelow && t98 != null && t100 != null && t100 > t98) {
-            best = (t100 - t98) / 60_000f   // most recent qualifying run wins
+        if (sawBelow && t98 != null) {
+            if (t100 != null && t100 > t98) {
+                best = (t100 - t98) / 60_000f   // most recent qualifying run wins
+            } else if (t100 == null && run.last().soc >= CUTOFF_COMPLETE_SOC && run.last().tsMs > t98) {
+                best = (run.last().tsMs - t98) / 60_000f
+            }
         }
         i = j + 1
     }

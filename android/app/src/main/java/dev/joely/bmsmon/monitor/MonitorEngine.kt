@@ -26,7 +26,7 @@ import dev.joely.bmsmon.model.RangeRow
 import dev.joely.bmsmon.model.SEED_RANGE_PARAMS
 import dev.joely.bmsmon.model.SEED_TAIL_MIN
 import dev.joely.bmsmon.model.TodayUsage
-import dev.joely.bmsmon.model.TARGET_SOC
+import dev.joely.bmsmon.model.TAIL_START_SOC
 import dev.joely.bmsmon.model.TempRank
 import dev.joely.bmsmon.model.TempSide
 import dev.joely.bmsmon.model.TempThresholds
@@ -461,7 +461,13 @@ class MonitorEngine(
             repository.ingest(addr, t, raw, classifyFrame(raw, parsedOk = true, header), regen, now, fix)
         }
         if (addr.uppercase() in stageAddrs) evaluateAlerts()
-        if (t.state == BatteryState.Charging && t.soc >= TARGET_SOC &&
+        // Tail learn fires at charger CUTOFF: this BMS never reports SOC 100 while Charging
+        // (it caps at 99; 100 appears only after the state flips) — so the old "100 while
+        // Charging" trigger never fired and every pack sat on the seed. The Charging→other
+        // transition of a pack that had climbed into the tail is the completed-charge signal.
+        val prevTel = st0.fleet[addr]?.telemetry
+        if (prevTel?.state == BatteryState.Charging && t.state != BatteryState.Charging &&
+            prevTel.soc >= TAIL_START_SOC &&
             now - (lastTailLearnAt[addr] ?: 0L) > 30 * 60_000L
         ) {
             lastTailLearnAt[addr] = now

@@ -303,10 +303,13 @@ left as-is.
 data, re-verify against fresh telemetry (phone Room DB `bms.db` or cloud Postgres) and adjust
 constants if the larger dataset has moved them:
 - **Charge-time ETA** — the self-learning time-to-full estimate (physics coulomb for the CC bulk
-  ≤98%; a learned per-pack `tailMin` EMA for the 98→100% CV tail, seeded ~45 min). At design time
-  only **2 full-arc charge sessions** existed, so the tail prior was weak — confirm whether more
-  completed full charges (SOC reaches 100) have tightened it, and re-backtest the CC region
-  (was ±4–7 min).
+  ≤98%; a learned per-pack `tailMin` EMA for the 98→100% CV tail, seeded 58 min). Checked
+  2026-07-12 over 8 full charges: CC bulk median error 1.4 min (p90 6.1) — good. Found + fixed:
+  this BMS **never reports SOC 100 while Charging** (caps at 99; 100 appears after cutoff), so
+  the original learner/trigger never fired — tail completion is now "climbed through 98, run
+  ended ≥99" measured to charger cutoff, triggered on the Charging→other transition, and the
+  seed was re-anchored to the measured medians (53/64 min on the 2012 pair). Next check:
+  confirm the EMA is actually folding per-pack observations.
 - **Discharge + regen gauge calibration** — re-check `POWER_RING_FULL_W` (300 W) and
   `REGEN_EPS` (0.1 A) / `REGEN_WINDOW_MS` (30 s) in `Fleet.kt` against the larger real-world set.
 - **Discharge-range bands** — re-run the backtest in docs/range-backtest-2026-07.md; check the

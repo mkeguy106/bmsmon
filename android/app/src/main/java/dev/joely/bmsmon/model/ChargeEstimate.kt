@@ -9,7 +9,9 @@ import kotlin.math.roundToInt
  */
 const val TAIL_START_SOC = 98f
 const val TARGET_SOC = 100f
-const val SEED_TAIL_MIN = 45f
+// Reseeded 45 -> 58 at the 2026-07-12 calibration check: 8 completed full charges measured
+// median tails of 53 min (2012-B) and 64 min (2012-A) from 98% to charger cutoff.
+const val SEED_TAIL_MIN = 58f
 const val TAIL_EMA_ALPHA = 0.3f
 private const val MIN_CHARGE_CURRENT_A = 0.2f
 
