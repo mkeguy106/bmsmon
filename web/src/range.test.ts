@@ -25,6 +25,11 @@ describe("estimatePackRange", () => {
     expect(estimatePackRange(false, 0, params)).toBeNull();
     expect(estimatePackRange(false, null, params)).toBeNull();
   });
+  // SHARED VECTOR: android RangeEstimateTest.kt asserts the same null result for a zero whPerDay band.
+  it("null when whPerDay band is zero", () => {
+    const zeroDay: RangeParams = { ...params, whPerDay: { lo: 0, hi: 0 } };
+    expect(estimatePackRange(false, 70, zeroDay)).toBeNull();
+  });
 });
 
 describe("minRange", () => {

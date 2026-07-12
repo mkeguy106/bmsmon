@@ -40,7 +40,6 @@ private const val BURN_DT_MIN_S = 0.5f
 private const val BURN_DT_MAX_S = 60f
 
 // Qualified drive segment bounds (see the spec's data findings on GPS jitter).
-private const val DRIVE_DT_MIN_S = 0.5f
 private const val DRIVE_DT_MAX_S = 15f
 private const val DRIVE_MIN_POWER_W = 40f
 private const val DRIVE_MAX_ACCURACY_M = 20f
@@ -112,8 +111,12 @@ private fun accumulate(rows: List<RangeRow>, zone: ZoneId): Map<LocalDate, DaySt
 private fun bandOf(values: List<Float>, seed: Band): Band {
     if (values.size < MIN_LEARN_DAYS) return seed
     val sorted = values.sorted()
+    val hiRaw = percentile(sorted, 0.8f)
+    // All-zero(ish) days carry no signal (e.g. a pack staged but parked for days) — an
+    // honest band can't be learned from them, and a zero hi would divide to Infinity.
+    if (hiRaw <= 0f) return seed
     val lo = percentile(sorted, 0.2f).coerceAtLeast(0.01f)
-    val hi = percentile(sorted, 0.8f)
+    val hi = hiRaw.coerceAtLeast(lo)
     // A degenerate flat band (identical days) still needs width for an honest hi/lo readout.
     return if (hi - lo < lo * 0.1f) Band(lo * 0.95f, hi * 1.05f) else Band(lo, hi)
 }

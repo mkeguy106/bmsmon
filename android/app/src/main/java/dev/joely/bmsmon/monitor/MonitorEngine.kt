@@ -221,8 +221,11 @@ class MonitorEngine(
                 if (saved.rangeParamsByAddress.isNotEmpty())
                     _state.update { it.copy(rangeParamsByAddress = saved.rangeParamsByAddress) }
             }
+            // Started only after the persisted-params load completes, so the first learn pass
+            // can never race a stale load and get clobbered by it. Guarded by monitoring in case
+            // stop() ran while the load was in flight.
+            if (_state.value.monitoring) startRangeLoop()
         }
-        startRangeLoop()
     }
 
     /**
@@ -514,9 +517,14 @@ class MonitorEngine(
         val zone = java.time.ZoneId.systemDefault()
         val learn = now - lastRangeLearnAt > 6 * 60 * 60_000L
         if (learn) lastRangeLearnAt = now
+        // Non-learn passes only feed todayUsage() (rows since local midnight) — scope the query
+        // to that instead of always dragging in the full 14-day window (up to ~800k rows/pack).
+        val midnight = java.time.Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
+            .atStartOfDay(zone).toInstant().toEpochMilli()
+        val since = if (learn) now - 14L * 86_400_000L else midnight
         for (b in roster.batteries) {
             val addr = b.address
-            val rows = repository.recentSamples(addr, now - 14L * 86_400_000L).map {
+            val rows = repository.rangeRows(addr, since).map {
                 RangeRow(it.tsMs, it.state, it.powerW, it.lat, it.lon, it.gpsAccuracyM, it.regen)
             }
             if (rows.isEmpty()) continue

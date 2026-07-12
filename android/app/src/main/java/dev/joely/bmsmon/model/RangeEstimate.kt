@@ -73,6 +73,10 @@ fun estimatePackRange(
 ): PackRange? {
     if (state == BatteryState.Charging) return null
     if (remainingAh <= 0f || !remainingAh.isFinite()) return null
+    // A band edge that is zero/negative/non-finite would divide to Infinity — no estimate
+    // beats a nonsense one (also shields the web twin from stale synced rows).
+    val bands = listOf(params.whPerDay, params.activeW, params.whPerMile)
+    if (bands.any { !it.lo.isFinite() || !it.hi.isFinite() || it.lo <= 0f || it.hi <= 0f }) return null
     val remWh = remainingAh * NOMINAL_PACK_V
 
     // Live tilt (Android only; the web twin passes today = null): weight grows with how much

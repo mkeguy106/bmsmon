@@ -40,6 +40,12 @@ class RangeEstimateTest {
         assertNull(estimatePackRange(BatteryState.Idle, 0f, params, null))
     }
 
+    // SHARED VECTOR: web/src/range.test.ts asserts the same null result for a zero whPerDay band.
+    @Test fun nullWhenWhPerDayBandIsZero() {
+        val zeroDay = params.copy(whPerDay = Band(0f, 0f))
+        assertNull(estimatePackRange(BatteryState.Discharging, 70f, zeroDay, today = null))
+    }
+
     @Test fun idleStillEstimates() {
         val r = estimatePackRange(BatteryState.Idle, 70f, params, null)
         assertEquals(896f / 24f, r!!.milesLo, 0.01f)

@@ -2,6 +2,7 @@ package dev.joely.bmsmon.data
 
 import androidx.room.withTransaction
 import dev.joely.bmsmon.data.db.BmsDatabase
+import dev.joely.bmsmon.data.db.RangeRowColumns
 import dev.joely.bmsmon.data.db.RawFrameEntity
 import dev.joely.bmsmon.data.db.SampleEntity
 import dev.joely.bmsmon.data.db.SessionEntity
@@ -176,6 +177,10 @@ class TelemetryRepository(private val db: BmsDatabase) {
     /** Telemetry rows for one pack since [sinceMs] (link rows excluded), oldest first — for tail learning. */
     suspend fun recentSamples(address: String, sinceMs: Long): List<SampleEntity> =
         db.samples().since(address, sinceMs)
+
+    /** Lean 7-column rows for the range learner (linkEvent rows excluded), oldest first. */
+    suspend fun rangeRows(address: String, sinceMs: Long): List<RangeRowColumns> =
+        db.samples().rangeRowsSince(address, sinceMs)
 
     /** All rows (telemetry + link events) for one session, oldest first — for the timeline pooler. */
     suspend fun samplesForSession(sessionId: Long): List<SampleEntity> = db.samples().forSession(sessionId)

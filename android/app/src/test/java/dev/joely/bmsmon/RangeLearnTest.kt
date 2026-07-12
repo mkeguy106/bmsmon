@@ -101,6 +101,16 @@ class RangeLearnTest {
         assertEquals(SEED_RANGE_PARAMS.whPerMile.lo, p.whPerMile.lo, 0f)
     }
 
+    @Test fun zeroDischargeQualifyingDaysFallBackToSeedWhPerDay() {
+        // 3 qualifying days (13 h coverage each) with ZERO discharge — a pack staged but parked.
+        // A learned hi of 0 would divide to Infinity downstream, so bandOf must fall back to seed.
+        val rows = (1..3).flatMap { d -> idleFiller(d, 8, 13) }
+        val p = learnRangeParams(rows, zone, nowMs = ts(4, 0))
+        assertEquals(SEED_RANGE_PARAMS.whPerDay.lo, p.whPerDay.lo, 0f)
+        assertEquals(SEED_RANGE_PARAMS.whPerDay.hi, p.whPerDay.hi, 0f)
+        assertEquals(3, p.learnedDays)
+    }
+
     @Test fun todayUsageSumsSinceLocalMidnight() {
         val rows = dischargeDay(1, 23, 1f, 100f) +   // yesterday — excluded
             dischargeDay(2, 8, 2f, 100f)             // today: 200 Wh over 2 h

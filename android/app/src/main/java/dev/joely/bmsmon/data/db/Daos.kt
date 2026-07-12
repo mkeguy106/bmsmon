@@ -6,6 +6,17 @@ import androidx.room.Query
 import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
+/** Lean projection for the range learner — avoids materializing full 22-column rows. */
+data class RangeRowColumns(
+    val tsMs: Long,
+    val state: String?,
+    val powerW: Float?,
+    val lat: Double?,
+    val lon: Double?,
+    val gpsAccuracyM: Float?,
+    val regen: Boolean,
+)
+
 @Dao
 interface SampleDao {
     @Insert suspend fun insert(sample: SampleEntity): Long
@@ -19,6 +30,12 @@ interface SampleDao {
 
     @Query("SELECT * FROM samples WHERE address = :address AND tsMs >= :sinceMs AND linkEvent IS NULL ORDER BY tsMs ASC")
     suspend fun since(address: String, sinceMs: Long): List<SampleEntity>
+
+    @Query(
+        "SELECT tsMs, state, powerW, lat, lon, gpsAccuracyM, regen FROM samples " +
+            "WHERE address = :address AND tsMs >= :sinceMs AND linkEvent IS NULL ORDER BY tsMs ASC"
+    )
+    suspend fun rangeRowsSince(address: String, sinceMs: Long): List<RangeRowColumns>
 
     @Query("DELETE FROM samples WHERE tsMs < :cutoffMs")
     suspend fun deleteOlderThan(cutoffMs: Long): Int

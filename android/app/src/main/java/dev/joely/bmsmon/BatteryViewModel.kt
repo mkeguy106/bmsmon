@@ -383,8 +383,9 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     private var autoCandidate: Mode? = null
     private var autoCandidateSince = 0L
 
-    // Last range-params map pushed to the cloud — dedups the config enqueue (the engine re-learns
-    // every 6 h; identical results must not re-POST).
+    // Last range-params map pushed to the cloud (updatedMs stripped) — dedups the config enqueue
+    // (the engine re-learns every 6 h; identical results must not re-POST just because the
+    // timestamp moved).
     private var lastPushedRangeParams: Map<String, RangeParams> = emptyMap()
 
     private val _state = MutableStateFlow(UiState())
@@ -506,10 +507,9 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 // Learned range params changed → ride the one-way config push so the WebUI's
                 // formula twin uses the same bands (latest-wins per address server-side).
-                if (es.rangeParamsByAddress.isNotEmpty() &&
-                    es.rangeParamsByAddress != lastPushedRangeParams
-                ) {
-                    lastPushedRangeParams = es.rangeParamsByAddress
+                val strippedNew = es.rangeParamsByAddress.mapValues { it.value.copy(updatedMs = 0L) }
+                if (strippedNew.isNotEmpty() && strippedNew != lastPushedRangeParams) {
+                    lastPushedRangeParams = strippedNew
                     enqueueTempConfig(_state.value.stageProfile().id)
                 }
             }

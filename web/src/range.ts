@@ -62,6 +62,10 @@ export function estimatePackRange(
 ): PackRange | null {
   if (charging) return null;
   if (remainingAh == null || !Number.isFinite(remainingAh) || remainingAh <= 0) return null;
+  // A band edge that is zero/negative/non-finite would divide to Infinity — no estimate
+  // beats a nonsense one (shields against stale synced rows).
+  const bands = [params.whPerDay, params.activeW, params.whPerMile];
+  if (bands.some((b) => !Number.isFinite(b.lo) || !Number.isFinite(b.hi) || b.lo <= 0 || b.hi <= 0)) return null;
   const remWh = remainingAh * NOMINAL_PACK_V;
   return {
     milesLo: remWh / params.whPerMile.hi, milesHi: remWh / params.whPerMile.lo,
