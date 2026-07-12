@@ -29,8 +29,9 @@ private const val MIN_DAY_COVERAGE_S = 12f * 3600f
 /** Minimum discharge time for a day to teach the active-draw mean. */
 private const val MIN_DAY_DIS_H = 0.25f
 
-/** Minimum qualified drive distance for a day to teach Wh/mile. */
-private const val MIN_DAY_DRIVE_M = 80.4672f  // 0.05 mi
+/** Minimum clean outdoor distance for a day to count as an "outing day" for Wh/mile. A day
+ *  with only a token outdoor sliver must not divide its whole burn by a few hundred meters. */
+private const val OUTING_MIN_DRIVE_M = 804.67f  // 0.5 mi
 
 /** Days of history needed before a learned band replaces its seed. */
 private const val MIN_LEARN_DAYS = 3
@@ -70,7 +71,6 @@ private data class DayStats(
     var coverageS: Float = 0f,
     var disWh: Float = 0f,
     var disS: Float = 0f,
-    var driveWh: Float = 0f,
     var driveM: Float = 0f,
 )
 
@@ -139,7 +139,6 @@ private fun accumulate(rows: List<RangeRow>, zone: ZoneId): Map<LocalDate, DaySt
                 if (speed in DRIVE_MIN_SPEED_MPS..DRIVE_MAX_SPEED_MPS &&
                     !vehicleNearby(fastTs, cur.tsMs)
                 ) {
-                    s.driveWh += p * dt / 3600f
                     s.driveM += d
                 }
             }
@@ -171,8 +170,11 @@ fun learnRangeParams(rows: List<RangeRow>, zone: ZoneId, nowMs: Long): RangePara
     val whPerDay = qualifying.map { it.disWh }
     val activeW = qualifying.filter { it.disS / 3600f >= MIN_DAY_DIS_H }
         .map { it.disWh / (it.disS / 3600f) }
-    val whPerMile = days.values.filter { it.driveM >= MIN_DAY_DRIVE_M }
-        .map { it.driveWh / (it.driveM / METERS_PER_MILE) }
+    // OUTING-DAY semantics: the day's TOTAL burn divides by its clean outdoor miles, so every
+    // overhead (indoor maneuvering, idle-on time) lands in the per-mile cost — the estimate
+    // converges on lived "how far does it take me" range, not smooth-cruise physics.
+    val whPerMile = qualifying.filter { it.driveM >= OUTING_MIN_DRIVE_M }
+        .map { it.disWh / (it.driveM / METERS_PER_MILE) }
     return RangeParams(
         whPerDay = bandOf(whPerDay, SEED_RANGE_PARAMS.whPerDay),
         activeW = bandOf(activeW, SEED_RANGE_PARAMS.activeW),

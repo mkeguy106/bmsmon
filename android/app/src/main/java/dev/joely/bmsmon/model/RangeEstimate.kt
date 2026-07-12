@@ -33,11 +33,13 @@ data class RangeParams(
     val updatedMs: Long,
 )
 
-/** Cold-start bands from the 2026-07 real-data investigation (2 weeks, 2012 daily driver). */
+/** Cold-start bands from the 2026-07 real-data investigation (2 weeks, 2012 daily driver).
+ *  whPerMile is OUTING-DAY cost (a day's total burn per clean outdoor mile — see RangeLearn),
+ *  seeded at a conservative 15–25 mi full-charge equivalent (1280 Wh/pack ÷ 25..15 mi). */
 val SEED_RANGE_PARAMS = RangeParams(
     whPerDay = Band(78f, 182f),      // 130 Wh/day ±40%
     activeW = Band(52.5f, 97.5f),    // 75 W ±30%
-    whPerMile = Band(15f, 25f),      // 20 Wh/mi ±25%
+    whPerMile = Band(51f, 85f),      // full charge ≈ 15–25 practical miles
     learnedDays = 0,
     updatedMs = 0L,
 )

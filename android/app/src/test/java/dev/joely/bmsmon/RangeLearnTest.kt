@@ -33,10 +33,11 @@ class RangeLearnTest {
         }
     }
 
-    /** [n] qualified drive segments at 2 m/s (20 m / 10 s), 72 W, starting 9:00 on [day]. */
-    private fun shortDrive(day: Int, n: Int): List<RangeRow> = (0..n).map { i ->
+    /** [n] qualified drive segments at 3 m/s (30 m / 10 s), 72 W, starting 9:00 on [day].
+     *  27 segments = 810 m = 0.503 mi — just over the 0.5 mi outing-day bar. */
+    private fun outingDrive(day: Int, n: Int): List<RangeRow> = (0..n).map { i ->
         RangeRow(ts(day, 9) + i * 10_000L, "Discharging", 72f,
-            lat = 40.0 + i * 20 / 111_320.0, lon = -75.0, gpsAccuracyM = 10f, regen = false)
+            lat = 40.0 + i * 30 / 111_320.0, lon = -75.0, gpsAccuracyM = 10f, regen = false)
     }
 
     /** One 8 m/s GPS hop (80 m / 10 s, Idle) continuing the drive path at [offsetS] after 9:00. */
@@ -50,20 +51,40 @@ class RangeLearnTest {
         )
     }
 
-    @Test fun shortDriveWithoutVehicleContextLearns() {
-        // Control for the vehicle-context tests: 16 segments (320 m) alone → day qualifies
-        // and whPerMile is learned (~16.09 Wh/mi), not seeded.
-        val rows = (1..3).flatMap { d -> shortDrive(d, 16) + idleFiller(d, 10, 13) }
+    @Test fun outingDayLearnsWhPerMileFromFullDayBurn() {
+        // Outing-day semantics: the day's TOTAL discharge (drive 5.4 Wh + 100 Wh of GPS-less
+        // indoor burn) divides by the day's clean outdoor miles (810 m = 0.5033 mi), so all
+        // overhead lands in the per-mile cost: 105.4 / 0.5033 ≈ 209.4 Wh/mi.
+        val rows = (1..3).flatMap { d ->
+            outingDrive(d, 27) + dischargeDay(d, 12, 1f, 100f) + idleFiller(d, 13, 11)
+        }
         val p = learnRangeParams(rows, zone, nowMs = ts(4, 0))
-        assertEquals(16.09f, (p.whPerMile.lo + p.whPerMile.hi) / 2f, 0.3f)
+        assertEquals(209.4f, (p.whPerMile.lo + p.whPerMile.hi) / 2f, 2f)
+    }
+
+    @Test fun outingDriveAloneLearns() {
+        // Control for the vehicle-context tests: 27 segments (810 m ≥ 0.5 mi) with only the
+        // drive's own burn → 5.4 Wh / 0.5033 mi ≈ 10.73 Wh/mi, learned not seeded.
+        val rows = (1..3).flatMap { d -> outingDrive(d, 27) + idleFiller(d, 10, 13) }
+        val p = learnRangeParams(rows, zone, nowMs = ts(4, 0))
+        assertEquals(10.73f, (p.whPerMile.lo + p.whPerMile.hi) / 2f, 0.3f)
+    }
+
+    @Test fun subOutingDistanceStaysSeeded() {
+        // A day with only a token outdoor sliver (10 segments = 300 m < 0.5 mi) must not
+        // divide the whole day's burn by it — whPerMile stays seeded.
+        val rows = (1..3).flatMap { d -> outingDrive(d, 10) + idleFiller(d, 10, 13) }
+        val p = learnRangeParams(rows, zone, nowMs = ts(4, 0))
+        assertEquals(SEED_RANGE_PARAMS.whPerMile.lo, p.whPerMile.lo, 0f)
+        assertEquals(SEED_RANGE_PARAMS.whPerMile.hi, p.whPerMile.hi, 0f)
     }
 
     @Test fun vehicleContextExcludesDriveFromWhPerMile() {
-        // Same 16-segment drive (ends 9:02:40), then an 8 m/s hop at 9:02:50 — vehicle speed
-        // within ±3 min of every drive segment, so the whole day's drive is discarded and
-        // whPerMile stays seeded. (Chair draw in a creeping van must not teach miles.)
+        // 27-segment drive (ends 9:04:30), then an 8 m/s hop at 9:04:40 — vehicle speed
+        // within ±3 min of every segment from 9:01:40 on; the surviving early segments
+        // (< 0.5 mi) leave the day under the outing bar, so whPerMile stays seeded.
         val rows = (1..3).flatMap { d ->
-            shortDrive(d, 16) + vehicleHop(d, offsetS = 170, fromLatSteps = 16) + idleFiller(d, 10, 13)
+            outingDrive(d, 27) + vehicleHop(d, offsetS = 280, fromLatSteps = 27) + idleFiller(d, 10, 13)
         }
         val p = learnRangeParams(rows, zone, nowMs = ts(4, 0))
         assertEquals(SEED_RANGE_PARAMS.whPerMile.lo, p.whPerMile.lo, 0f)
@@ -74,10 +95,10 @@ class RangeLearnTest {
         // The same hop 20 minutes after the drive is outside the ±3 min context window —
         // the drive still teaches Wh/mile.
         val rows = (1..3).flatMap { d ->
-            shortDrive(d, 16) + vehicleHop(d, offsetS = 1200, fromLatSteps = 16) + idleFiller(d, 10, 13)
+            outingDrive(d, 27) + vehicleHop(d, offsetS = 1200, fromLatSteps = 27) + idleFiller(d, 10, 13)
         }
         val p = learnRangeParams(rows, zone, nowMs = ts(4, 0))
-        assertEquals(16.09f, (p.whPerMile.lo + p.whPerMile.hi) / 2f, 0.3f)
+        assertEquals(10.73f, (p.whPerMile.lo + p.whPerMile.hi) / 2f, 0.3f)
     }
 
     @Test fun percentileInterpolatesLinearly() {

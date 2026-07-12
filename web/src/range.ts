@@ -12,11 +12,13 @@ export interface RangeParams {
   learnedDays: number; updatedMs: number;
 }
 
-/** Cold-start bands — must match SEED_RANGE_PARAMS in RangeEstimate.kt. */
+/** Cold-start bands — must match SEED_RANGE_PARAMS in RangeEstimate.kt. whPerMile is
+ *  outing-day cost (a day's total burn per clean outdoor mile), seeded at a conservative
+ *  15–25 mi full-charge equivalent. */
 export const SEED_RANGE_PARAMS: RangeParams = {
   whPerDay: { lo: 78, hi: 182 },
   activeW: { lo: 52.5, hi: 97.5 },
-  whPerMile: { lo: 15, hi: 25 },
+  whPerMile: { lo: 51, hi: 85 },
   learnedDays: 0, updatedMs: 0,
 };
 

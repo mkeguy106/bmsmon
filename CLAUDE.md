@@ -363,10 +363,12 @@ smoothed KB/s) surfaced through the reporter's `onStatus` into `UiState.cloudUpl
 high/low line — `~37–50 mi · ~9–13h use · ~5–9 days` — under the rings whenever the staged
 packs are connected and not charging (charging shows the recharge ETA instead). Pure math in
 `model/RangeEstimate.kt` (estimate + live tilt + formatting) and `model/RangeLearn.kt`
-(per-day p20/p80 bands: Wh/day, active W, Wh/mile from GPS-qualified outdoor drive segments,
-with **vehicle-context exclusion** — a chair-speed segment is rejected if any GPS movement
-within ±3 min exceeds 4.5 m/s, because field data showed ~90% of gate-passing "drive" miles
-were the chair powered inside a van in slow traffic)
+(per-day p20/p80 bands: Wh/day, active W, and **outing-day Wh/mile** — a day's TOTAL discharge
+divided by its clean outdoor miles, counted only on days with ≥0.5 mi of GPS-qualified driving,
+so indoor/idle overhead lands in the per-mile cost and the estimate converges on lived range,
+not smooth-cruise physics — with **vehicle-context exclusion**: a chair-speed segment is
+rejected if any GPS movement within ±3 min exceeds 4.5 m/s, because field data showed ~90% of
+gate-passing "drive" miles were the chair powered inside a van in slow traffic)
 with a line-for-line TS twin in `web/src/range.ts` (no tilt on web — documented divergence).
 The engine learns every 6 h from the local 14-day Room history (GPS now stored locally —
 samples db v4), refreshes today's tilt inputs every 5 min, computes the per-pack estimate once
@@ -374,11 +376,12 @@ per poll onto `BatteryStatus.range` (same single-writer pattern as `etaFullMin`)
 params in SettingsStore, and pushes them over the one-way config channel (optional `ranges`
 list on the `POST /api/v1/config` body) into `device_range_config`, mirrored read-only by
 `GET /web/range-config` for the WebUI's MainStage strip. Seeds until ≥3 qualifying days:
-130 Wh/day ±40%, 75 W ±30%, 20 Wh/mi ±25% — validated against the real fleet history in
-docs/range-backtest-2026-07.md (daily drivers learn real bands ~81–213 Wh/day; background
-packs stay seeded until they get stage time, by design). Miles are EV-range semantics
-("if you spent the remaining charge driving"), learnable only from outdoor GPS segments —
-indoor driving is invisible to GPS at wheelchair speeds.
+130 Wh/day ±40%, 75 W ±30%, and whPerMile 51–85 (a conservative 15–25 practical miles at full
+charge — user-facing miles are OUTING semantics, "how far will it actually take me", not
+continuous-cruise physics). Wh/day and active-W were validated against the real fleet history
+in docs/range-backtest-2026-07.md (daily drivers learn real bands ~81–213 Wh/day; background
+packs stay seeded until they get stage time, by design). Wh/mile is learnable only from
+outdoor GPS outing days — indoor driving is invisible to GPS at wheelchair speeds.
 
 ## Development
 

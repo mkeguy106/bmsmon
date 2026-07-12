@@ -70,6 +70,6 @@ describe("seeds", () => {
   it("match the spec", () => {
     expect(SEED_RANGE_PARAMS.whPerDay).toEqual({ lo: 78, hi: 182 });
     expect(SEED_RANGE_PARAMS.activeW).toEqual({ lo: 52.5, hi: 97.5 });
-    expect(SEED_RANGE_PARAMS.whPerMile).toEqual({ lo: 15, hi: 25 });
+    expect(SEED_RANGE_PARAMS.whPerMile).toEqual({ lo: 51, hi: 85 });
   });
 });

@@ -100,8 +100,8 @@ class RangeEstimateTest {
         assertEquals(182f, SEED_RANGE_PARAMS.whPerDay.hi, 0f)
         assertEquals(52.5f, SEED_RANGE_PARAMS.activeW.lo, 0f)
         assertEquals(97.5f, SEED_RANGE_PARAMS.activeW.hi, 0f)
-        assertEquals(15f, SEED_RANGE_PARAMS.whPerMile.lo, 0f)
-        assertEquals(25f, SEED_RANGE_PARAMS.whPerMile.hi, 0f)
+        assertEquals(51f, SEED_RANGE_PARAMS.whPerMile.lo, 0f)
+        assertEquals(85f, SEED_RANGE_PARAMS.whPerMile.hi, 0f)
         assertEquals(0, SEED_RANGE_PARAMS.learnedDays)
     }
 }

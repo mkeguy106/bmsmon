@@ -52,5 +52,16 @@ movement within ±3 min (`VEHICLE_SPEED_MPS = 4.5`, `VEHICLE_CONTEXT_WINDOW_MS =
 Genuine chair driving adjacent to van boarding is also discarded — the safe direction to err.
 
 Note: the genuine chair-context sample (0.10 mi, ~21 Wh/mi) is too small to re-derive the
-Wh/mile seed yet; the seed band (15–25) stays. Re-derive from clean accumulated data at the
-accuracy check-in.
+Wh/mile seed yet. Re-derive from clean accumulated data at the accuracy check-in.
+
+## Addendum 2 (2026-07-12): miles switched to outing-day semantics
+
+The user (correctly) rejected the cruise-physics range reading (37–62 mi at 69%): the original
+Wh/mile measured energy per mile *while cruising* (~21 Wh/mi/pack), ignoring that most real
+energy goes to indoor maneuvering and idle-on overhead. The learner now computes **outing-day
+Wh/mile** — a day's TOTAL discharge ÷ that day's clean outdoor miles, on coverage-qualified
+days with ≥0.5 mi of vehicle-excluded outdoor driving — so lived overhead prices into every
+mile and the estimate converges on experiential range. The seed became 51–85 Wh/mi per pack
+(= a conservative 15–25 practical miles at 100%; user was unsure of the chair's true range).
+69% now reads ~11–18 mi instead of 37–62. No qualifying outing days exist yet in the history;
+the first few real outings will start replacing the seed.
