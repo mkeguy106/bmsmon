@@ -6,6 +6,8 @@ export interface Sample {
   full_charge_ah?: number | null; remaining_ah?: number | null;
   lat?: number | null; lon?: number | null; gps_accuracy_m?: number | null;
   eta_full_min?: number | null;
+  cell_min_v?: number | null; cell_max_v?: number | null; mosfet_temp_c?: number | null;
+  cells?: number[] | null;
 }
 export type FleetItem = Sample & { alias?: string | null; group_id?: string | null };
 export interface DeviceRow {

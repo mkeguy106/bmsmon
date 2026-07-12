@@ -14,6 +14,7 @@ const SAMPLE_KEYS = [
   "address", "ts_ms", "state", "soc", "current_a", "power_w", "voltage_v",
   "temp_c", "soh", "cycles", "full_charge_ah", "remaining_ah", "regen", "link_event",
   "lat", "lon", "gps_accuracy_m", "eta_full_min",
+  "cell_min_v", "cell_max_v", "mosfet_temp_c", "cells",
 ] as const;
 const FLEET_KEYS = [...SAMPLE_KEYS, "alias", "group_id"] as const;
 // WEB-6: envelope fields are optional (older rows/servers omit them) and may
@@ -45,16 +46,27 @@ const warn = (what: string, x: unknown): null => {
 const hasIdentity = (x: unknown): x is Record<string, unknown> =>
   isObj(x) && typeof x.address === "string" && Number.isFinite(x.ts_ms);
 
+// A malformed `cells` (not an array, empty, or containing a non-finite/null
+// entry) is dropped entirely so callers fall back to cell_min_v/cell_max_v
+// rather than rendering garbage.
+const normCells = <T extends { cells?: unknown }>(s: T): T => {
+  const c = s.cells;
+  if (!(Array.isArray(c) && c.length > 0 && c.every((x) => typeof x === "number" && Number.isFinite(x)))) {
+    if ("cells" in (s as object)) delete (s as { cells?: unknown }).cells;
+  }
+  return s;
+};
+
 /** A sample is only usable with a string address and a finite ts_ms. */
 export function decodeSample(x: unknown): Sample | null {
   if (!hasIdentity(x)) return warn("sample", x);
-  return pick<Sample>(x, SAMPLE_KEYS);
+  return normCells(pick<Sample>(x, SAMPLE_KEYS));
 }
 
 /** Snapshot items additionally carry alias/group_id meta. */
 export function decodeFleetItem(x: unknown): FleetItem | null {
   if (!hasIdentity(x)) return warn("fleet item", x);
-  return pick<FleetItem>(x, FLEET_KEYS);
+  return normCells(pick<FleetItem>(x, FLEET_KEYS));
 }
 
 /** null when the snapshot itself is malformed; individually bad items are dropped. */

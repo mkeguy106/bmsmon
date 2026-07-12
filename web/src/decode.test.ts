@@ -29,6 +29,22 @@ describe("decodeSample", () => {
     expect(decodeSample({ address: "A", ts_ms: NaN })).toBeNull();
     expect(warn).toHaveBeenCalled();
   });
+
+  it("keeps a valid cells array", () => {
+    const s = decodeSample({ address: "AA", ts_ms: 1, cells: [3.31, 3.32, 3.34, 3.33] });
+    expect(s?.cells).toEqual([3.31, 3.32, 3.34, 3.33]);
+  });
+
+  it("drops a cells array containing non-finite / null entries", () => {
+    const s = decodeSample({ address: "AA", ts_ms: 1, cells: [3.31, null, 3.34, 3.33] });
+    expect(s?.cells).toBeUndefined();
+  });
+
+  it("passes cell_min_v / cell_max_v through", () => {
+    const s = decodeSample({ address: "AA", ts_ms: 1, cell_min_v: 3.30, cell_max_v: 3.35 });
+    expect(s?.cell_min_v).toBe(3.30);
+    expect(s?.cell_max_v).toBe(3.35);
+  });
 });
 
 describe("decodeSnapshot", () => {
