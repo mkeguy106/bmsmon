@@ -15,6 +15,13 @@ export function NotesCard({ baseId }: { baseId: string }) {
   const [status, setStatus] = useState<SaveState>("idle");
   const dirty = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Tracks the not-yet-fired debounced save so it can be flushed (instead of
+  // dropped) if the base changes or the component unmounts mid-debounce.
+  const pendingSave = useRef<{ base: string; body: string } | null>(null);
+  // Guards setStatus calls that resolve after unmount (harmless dev warning
+  // otherwise). The fire-and-forget flush save intentionally does NOT use this.
+  const mounted = useRef(true);
+  useEffect(() => () => { mounted.current = false; }, []);
 
   // Load the note for this base. Reset dirty on base change so a fresh load can
   // populate; the alive guard drops a superseded/late response.
@@ -31,8 +38,15 @@ export function NotesCard({ baseId }: { baseId: string }) {
     return () => { alive = false; };
   }, [baseId]);
 
-  // Clear any pending debounce when the base changes / component unmounts.
-  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, [baseId]);
+  // When the base changes / component unmounts, flush any pending debounced
+  // save (targeting the ORIGINAL base) instead of silently dropping it.
+  useEffect(() => () => {
+    if (timer.current && pendingSave.current) {
+      putNote(pendingSave.current.base, pendingSave.current.body); // fire-and-forget
+      pendingSave.current = null;
+    }
+    if (timer.current) clearTimeout(timer.current);
+  }, [baseId]);
 
   const onChange = (v: string) => {
     setText(v);
@@ -40,10 +54,12 @@ export function NotesCard({ baseId }: { baseId: string }) {
     setStatus("saving");
     if (timer.current) clearTimeout(timer.current);
     const target = baseId;
+    pendingSave.current = { base: target, body: v };
     timer.current = setTimeout(() => {
       putNote(target, v)
-        .then(() => { if (target === baseId) setStatus("saved"); })
-        .catch(() => { if (target === baseId) setStatus("failed"); });
+        .then(() => { if (mounted.current && target === baseId) setStatus("saved"); })
+        .catch(() => { if (mounted.current && target === baseId) setStatus("failed"); });
+      pendingSave.current = null;
     }, 800);
   };
 
