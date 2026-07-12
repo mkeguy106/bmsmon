@@ -78,7 +78,7 @@ The three remaining zero-backend views. All drive off `/web/fleet` + `/ws` + `/w
 
 **Backend:** none required (pending the sparkline decision above).
 
-### Phase 3 — History  *(needs new backend)*
+### Phase 3 — History  ← **done**
 Per-base trend hub: capacity fade (SOH over months/years + "≈ N mo to 80%" projection), cell
 imbalance trend, temperature; A/B pack breakdown keyed by MAC; charge-session log; editable notes.
 
@@ -129,4 +129,18 @@ or wire a real map lib (**Leaflet / MapLibre** with a dark/light style). Either 
   sparkline. Full-suite verification passed (web 109 vitest + tsc clean, server 107 pytest incl.
   `test_history.py` + `test_web_history.py`); both bundles build and serve correctly; `/v2/`
   driven end-to-end headlessly (Health/Alerts/Settings all render; v1 unaffected). Pending: final
+  review, merge, and deploy.
+- **2026-07-12** — Phase 3 (History) implementation COMPLETE on branch `feat/webui-v2-phase3`:
+  three new read-only backend routes — `GET /web/trends` (adaptive-bucket per-pack SOH/cell-spread/
+  temperature series), `GET /web/charge-sessions` (pure detection over 1-min charging buckets), and
+  `GET`/`POST /web/notes` (the WebUI's first write path, backed by a new `web_notes` table) — plus
+  the History view itself (base/A-B/range controls, three `LineChart`s with SOH-to-80% projection,
+  the charge-session table, and the persisted notes card). Full-suite verification passed (web 117
+  vitest + tsc clean, server 121 pytest incl. `test_trends.py`, `test_web_trends.py`,
+  `test_charge_sessions.py`, `test_web_charge_sessions.py`, `test_web_notes.py`); both bundles
+  build and serve correctly; `/v2/` driven end-to-end against a seeded dev DB (2 weeks of history +
+  a daily charge ramp for Base 2012) with headless Playwright — History's three charts, base/AB/
+  range controls (refetch confirmed), the charge-session table, and notes save→reload (confirmed
+  persisted across a full page reload) all verified live; Command/Health/Alerts/Settings render
+  with no regressions and v1 is unaffected; zero console/page errors throughout. Pending: final
   review, merge, and deploy.

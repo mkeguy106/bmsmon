@@ -464,8 +464,14 @@ review/merge/deploy) makes **Fleet Health** (tiles + 8-pack board + 24h sparklin
 (capacity ladder + temp zones + cell imbalance, `localStorage` acknowledge), and **Settings**
 (units/map trail/theme segmented toggles) live views; **Journey** and **History** remain
 placeholders for later phases. A read-only `GET /web/history` endpoint (30-min bucketed per-pack
-SOC) backs the Fleet Health sparkline. Roadmap/spec:
-`docs/superpowers/specs/2026-07-12-webui-v2-roadmap.md`.
+SOC) backs the Fleet Health sparkline. Phase 3 (branch `feat/webui-v2-phase3`, implementation
+complete, pending review/merge/deploy) makes **History** a live view — per-base capacity-fade/
+cell-imbalance/temperature trend charts with A/B breakdown, a charge-session log, and editable
+per-base notes — backed by three new read-only-except-one endpoints: `GET /web/trends`
+(adaptive-bucket per-pack SOH/cell-spread/temp series), `GET /web/charge-sessions` (server-side
+CC→CV session detection), and `GET`/`POST /web/notes` (the **WebUI's first write path**, a new
+`web_notes` table, Authentik-gated like every other `/web/*` route). Only **Journey** remains a
+placeholder. Roadmap/spec: `docs/superpowers/specs/2026-07-12-webui-v2-roadmap.md`.
 
 **Local dev/test:** `docker compose -f server/docker-compose.dev.yml up -d` brings up a Postgres on
 `localhost:5432` (user/pw/db all `bmsmon`, matching the default `DATABASE_URL`). Run server tests
