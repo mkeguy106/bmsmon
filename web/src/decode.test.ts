@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { decodeRangeConfigs, decodeSample, decodeSnapshot, decodeTempConfigs } from "./decode";
+import { decodeHistory, decodeRangeConfigs, decodeSample, decodeSnapshot, decodeTempConfigs } from "./decode";
 
 let warn: MockInstance;
 beforeEach(() => { warn = vi.spyOn(console, "warn").mockImplementation(() => {}); });
@@ -138,5 +138,21 @@ describe("decodeRangeConfigs", () => {
     expect(decodeRangeConfigs({ configs: [] })).toBeNull();
     expect(decodeRangeConfigs("x")).toBeNull();
     expect(warn).toHaveBeenCalled();
+  });
+});
+
+describe("decodeHistory", () => {
+  it("decodes a valid history payload", () => {
+    const s = decodeHistory([{ address: "AA", points: [{ t: 1000, soc: 85 }, { t: 2000, soc: 70 }] }]);
+    expect(s).toEqual([{ address: "AA", points: [{ t: 1000, soc: 85 }, { t: 2000, soc: 70 }] }]);
+  });
+
+  it("drops malformed points but keeps the series", () => {
+    const s = decodeHistory([{ address: "AA", points: [{ t: 1000, soc: 85 }, { t: null, soc: 70 }] }]);
+    expect(s).toEqual([{ address: "AA", points: [{ t: 1000, soc: 85 }] }]);
+  });
+
+  it("returns null for a non-array", () => {
+    expect(decodeHistory({ nope: true })).toBeNull();
   });
 });

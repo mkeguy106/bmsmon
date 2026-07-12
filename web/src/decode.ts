@@ -7,6 +7,7 @@
 import type { FleetItem, Sample } from "./types";
 import type { TempConfig } from "./temp";
 import type { RangeConfigRow } from "./range";
+import type { HistSeries } from "./v2/history";
 
 // Explicit whitelists mirroring types.ts / temp.ts — when a field the UI reads
 // is added there, add it here too or the decoder will strip it.
@@ -120,4 +121,19 @@ export function decodeRangeConfigs(x: unknown): RangeConfigRow[] | null {
     const row = pick<RangeConfigRow>(c, RANGE_CONFIG_KEYS);
     return { ...row, learned_days: row.learned_days ?? 0 };
   });
+}
+
+/** null when the response itself is malformed; individually bad points are dropped. */
+export function decodeHistory(x: unknown): HistSeries[] | null {
+  if (!Array.isArray(x)) return warn("history", x);
+  const out: HistSeries[] = [];
+  for (const s of x) {
+    if (!isObj(s) || typeof s.address !== "string" || !Array.isArray(s.points)) continue;
+    const points = s.points.filter(
+      (p): p is { t: number; soc: number } =>
+        isObj(p) && Number.isFinite(p.t) && Number.isFinite(p.soc),
+    );
+    out.push({ address: s.address, points });
+  }
+  return out;
 }

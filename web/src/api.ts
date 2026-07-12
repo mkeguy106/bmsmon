@@ -1,7 +1,8 @@
-import { decodeSnapshot, decodeTempConfigs, decodeRangeConfigs } from "./decode";
+import { decodeSnapshot, decodeTempConfigs, decodeRangeConfigs, decodeHistory } from "./decode";
 import type { DeviceRow, FleetItem } from "./types";
 import type { TempConfig } from "./temp";
 import type { RangeConfigRow } from "./range";
+import type { HistSeries } from "./v2/history";
 
 const j = async (r: Response): Promise<unknown> => {
   if (!r.ok) throw new Error(String(r.status));
@@ -80,3 +81,10 @@ export const mintCode = async (): Promise<{ code: string; expires_at: string }> 
 
 export const revokeDevice = (id: string): Promise<unknown> =>
   fetch(`/web/devices/${id}`, { method: "DELETE" }).then(j);
+
+export const getHistory = async (hours = 24): Promise<{ series: HistSeries[] }> => {
+  const r = await fetch(`/web/history?hours=${hours}`).then(j);
+  const series = isObj(r) ? decodeHistory((r as { series?: unknown }).series) : null;
+  if (!series) throw new Error("malformed /web/history response");
+  return { series };
+};
