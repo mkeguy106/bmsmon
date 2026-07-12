@@ -74,14 +74,14 @@ export function energySeries(points: TrackPoint[], cumMi: number[]): EnergyPoint
 
 export interface TripSummary { miles: number; activeMiles: number; transitMiles: number; peakW: number; durationMin: number }
 export function tripSummary(points: TrackPoint[], cumMi: number[]): TripSummary {
-  let activeMiles = 0, transitMiles = 0, peakW = 0;
+  let activeMiles = 0, transitMiles = 0;
   for (let i = 1; i < points.length; i++) {
     const seg = haversineMi(points[i - 1], points[i]);
     const kind = classifySegment(points[i], seg);
     if (kind === "active") activeMiles += seg;
     else if (kind === "transit") transitMiles += seg;
-    peakW = Math.max(peakW, Math.abs(points[i].power_w ?? 0));
   }
+  const peakW = points.reduce((m, p) => Math.max(m, Math.abs(p.power_w ?? 0)), 0);
   return { miles: cumMi[cumMi.length - 1] ?? 0, activeMiles, transitMiles, peakW,
     durationMin: points.length > 1 ? (points[points.length - 1].t - points[0].t) / 60000 : 0 };
 }

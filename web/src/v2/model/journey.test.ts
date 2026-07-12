@@ -41,6 +41,20 @@ describe("cumulativeMiles + tripSummary", () => {
     expect(s.activeMiles).toBeCloseTo(cum[1], 5);
     expect(s.peakW).toBe(0); // power_w is 0 here
   });
+
+  it("peakW considers the first point, not just the pairwise loop from index 1", () => {
+    const pts = [p({ power_w: -500, current_a: -4 }), p({ power_w: -50, current_a: -4, lon: -87.89 })];
+    const cum = cumulativeMiles(pts);
+    const s = tripSummary(pts, cum);
+    expect(s.peakW).toBe(500);
+  });
+
+  it("peakW handles a single-point trip", () => {
+    const pts = [p({ power_w: -300 })];
+    const cum = cumulativeMiles(pts);
+    const s = tripSummary(pts, cum);
+    expect(s.peakW).toBe(300);
+  });
 });
 
 describe("detectHotspots", () => {
