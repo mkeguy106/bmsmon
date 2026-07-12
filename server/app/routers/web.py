@@ -13,6 +13,10 @@ from app.util import jsonable
 router = APIRouter(prefix="/web")
 
 
+def _f(v):
+    return float(v) if v is not None else None
+
+
 @router.get("/fleet")
 async def fleet(user: AuthUser = Depends(current_user), pool=Depends(get_pool)):
     async with pool.acquire() as conn:
@@ -58,6 +62,22 @@ async def history(hours: int = Query(24, ge=1, le=168),
     for r in rows:
         series.setdefault(r["address"], []).append({"t": int(r["bucket_ms"]), "soc": float(r["soc"])})
     return {"series": [{"address": a, "points": p} for a, p in series.items()]}
+
+
+@router.get("/trends")
+async def trends(address: str, from_ms: int = Query(...), to_ms: int = Query(...),
+                 user: AuthUser = Depends(current_user), pool=Depends(get_pool)):
+    """Read-only adaptive-bucket per-pack SOH / cell-spread / temperature trend series."""
+    bucket = q.trend_bucket_ms(max(1, to_ms - from_ms))
+    async with pool.acquire() as conn:
+        rows = await q.trend_series(conn, address, from_ms, to_ms, bucket)
+        first = await q.first_sample_ms(conn, address)
+    points = [{"t": int(r["bucket_ms"]),
+               "soh": _f(r["soh"]), "cell_spread_mv": _f(r["cell_spread_mv"]),
+               "temp_avg": _f(r["temp_avg"]), "temp_min": _f(r["temp_min"]), "temp_max": _f(r["temp_max"])}
+              for r in rows]
+    return {"address": address, "bucket_ms": bucket,
+            "first_ms": int(first) if first is not None else None, "points": points}
 
 
 @router.get("/samples")

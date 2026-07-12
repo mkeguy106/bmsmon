@@ -317,3 +317,38 @@ async def history_series(conn, since_ms: int) -> list[dict]:
         since_ms, HISTORY_BUCKET_MS,
     )
     return [dict(r) for r in rows]
+
+
+def trend_bucket_ms(span_ms: int) -> int:
+    """Adaptive bucket size for /web/trends, coarsened as the requested span grows so a
+    multi-month range doesn't return an unbounded number of points."""
+    D = 86_400_000
+    if span_ms <= 2 * D:
+        return 1_800_000       # 30 min
+    if span_ms <= 14 * D:
+        return 21_600_000      # 6 h
+    if span_ms <= 92 * D:
+        return 86_400_000      # 1 day
+    return 604_800_000         # 7 days
+
+
+async def trend_series(conn, address: str, from_ms: int, to_ms: int, bucket_ms: int) -> list[dict]:
+    """Per-pack bucketed SOH / cell-spread / temperature trend for /web/trends."""
+    rows = await conn.fetch(
+        """SELECT (ts_ms / $4) * $4 AS bucket_ms,
+                  avg(soh)::real AS soh,
+                  avg((cell_max_v - cell_min_v) * 1000)::real AS cell_spread_mv,
+                  avg(temp_c)::real AS temp_avg, min(temp_c)::real AS temp_min, max(temp_c)::real AS temp_max
+             FROM samples
+            WHERE address = $1 AND ts_ms >= $2 AND ts_ms < $3 AND link_event IS NULL
+            GROUP BY bucket_ms ORDER BY bucket_ms""",
+        address, from_ms, to_ms, bucket_ms,
+    )
+    return [dict(r) for r in rows]
+
+
+async def first_sample_ms(conn, address: str) -> int | None:
+    """Earliest real-telemetry timestamp for a pack, used by /web/trends to bound the
+    selectable history range on the client."""
+    return await conn.fetchval(
+        "SELECT min(ts_ms) FROM samples WHERE address = $1 AND link_event IS NULL", address)
