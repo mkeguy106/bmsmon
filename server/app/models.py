@@ -31,6 +31,7 @@ class SampleIn(BaseModel):
     cycles: int | None = None
     cell_min_v: float | None = None
     cell_max_v: float | None = None
+    cells: list[float] | None = None
     regen: bool = False
     link_event: str | None = None
     lat: float | None = None

@@ -16,6 +16,9 @@ def sample_row(device_id: str, address: str, s: dict) -> dict:
     for c in _COLS:
         row[c] = s.get(c)
     row["regen"] = bool(s.get("regen", False))
+    cells = s.get("cells")
+    for i in range(4):
+        row[f"cell{i + 1}_v"] = cells[i] if cells and i < len(cells) else None
     return row
 
 
@@ -27,13 +30,14 @@ WITH ins AS (
   INSERT INTO samples
     (device_id,address,ts_ms,ts,state,soc,current_a,power_w,voltage_v,temp_c,
      mosfet_temp_c,soh,full_charge_ah,remaining_ah,cycles,cell_min_v,cell_max_v,regen,link_event,
-     lat,lon,gps_accuracy_m,eta_full_min)
+     lat,lon,gps_accuracy_m,eta_full_min,cell1_v,cell2_v,cell3_v,cell4_v)
   SELECT * FROM unnest(
     $1::uuid[], $2::text[], $3::bigint[], $4::timestamptz[], $5::text[],
     $6::real[], $7::real[], $8::real[], $9::real[], $10::real[],
     $11::int[], $12::int[], $13::real[], $14::real[], $15::int[],
     $16::real[], $17::real[], $18::boolean[], $19::text[],
-    $20::float8[], $21::float8[], $22::real[], $23::real[])
+    $20::float8[], $21::float8[], $22::real[], $23::real[],
+    $24::real[], $25::real[], $26::real[], $27::real[])
   ON CONFLICT DO NOTHING
   RETURNING 1
 )
@@ -43,7 +47,8 @@ SELECT count(*) FROM ins
 _INSERT_FIELDS = ["device_id", "address", "ts_ms", "ts", "state", "soc", "current_a",
                   "power_w", "voltage_v", "temp_c", "mosfet_temp_c", "soh",
                   "full_charge_ah", "remaining_ah", "cycles", "cell_min_v", "cell_max_v",
-                  "regen", "link_event", "lat", "lon", "gps_accuracy_m", "eta_full_min"]
+                  "regen", "link_event", "lat", "lon", "gps_accuracy_m",
+                  "eta_full_min", "cell1_v", "cell2_v", "cell3_v", "cell4_v"]
 
 
 async def insert_samples(conn: asyncpg.Connection, rows: list[dict]) -> int:
@@ -196,6 +201,8 @@ async def fleet_snapshot(conn) -> list[dict]:
               s.voltage_v, s.temp_c, s.mosfet_temp_c, s.soh, s.full_charge_ah, s.remaining_ah,
               s.cycles, s.cell_min_v, s.cell_max_v, s.regen, s.link_event,
               s.lat, s.lon, s.gps_accuracy_m, s.eta_full_min, s.received_at,
+              CASE WHEN s.cell1_v IS NULL THEN NULL
+                   ELSE ARRAY[s.cell1_v, s.cell2_v, s.cell3_v, s.cell4_v] END AS cells,
               b.alias, b.group_id, b.advertised_name
            FROM batteries b
            JOIN LATERAL (

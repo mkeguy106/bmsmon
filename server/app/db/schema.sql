@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS samples (
   temp_c real, mosfet_temp_c int, soh int,
   full_charge_ah real, remaining_ah real, cycles int,
   cell_min_v real, cell_max_v real,
+  cell1_v real, cell2_v real, cell3_v real, cell4_v real,
   regen boolean NOT NULL DEFAULT false,
   link_event text,
   received_at timestamptz NOT NULL DEFAULT now(),
@@ -48,6 +49,10 @@ ALTER TABLE samples ADD COLUMN IF NOT EXISTS lat double precision;
 ALTER TABLE samples ADD COLUMN IF NOT EXISTS lon double precision;
 ALTER TABLE samples ADD COLUMN IF NOT EXISTS gps_accuracy_m real;
 ALTER TABLE samples ADD COLUMN IF NOT EXISTS eta_full_min real;
+ALTER TABLE samples ADD COLUMN IF NOT EXISTS cell1_v real;
+ALTER TABLE samples ADD COLUMN IF NOT EXISTS cell2_v real;
+ALTER TABLE samples ADD COLUMN IF NOT EXISTS cell3_v real;
+ALTER TABLE samples ADD COLUMN IF NOT EXISTS cell4_v real;
 
 -- WEB-5: the jsonb `cells` column was dead contract cruft — never sent by the phone
 -- (CloudJson.kt has no such field), never read by the web. Dropping on the partitioned
