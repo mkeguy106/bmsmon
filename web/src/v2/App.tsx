@@ -7,7 +7,6 @@ import { resolveMobile } from "./settings";
 import { Nav } from "./components/Nav";
 import { TopBar } from "./components/TopBar";
 import { BottomTabs } from "./components/BottomTabs";
-import { Placeholder } from "./components/Placeholder";
 import { CommandView } from "./views/CommandView";
 import { HealthView } from "./views/HealthView";
 import { HistoryView } from "./views/HistoryView";
