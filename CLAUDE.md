@@ -459,8 +459,13 @@ Phase 1 (branch `feat/webui-v2-phase1`, implementation complete, pending review/
 the app shell (left nav, top bar, theme, mobile bottom tabs) plus a live **Command** view (fleet
 rail, stage, range/recharge, aside) bound to the same `/web/fleet` + `/ws` data, and a per-cell-
 voltage telemetry pipeline (android `cells[]` → server `samples.cellN_v` → fleet snapshot `cells`
-array → web). The other five views (Fleet Health, Journey, History, Alerts, Settings) are
-placeholders for later phases. Roadmap/spec: `docs/superpowers/specs/2026-07-12-webui-v2-roadmap.md`.
+array → web). Phase 2 (branch `feat/webui-v2-phase2`, implementation complete, pending
+review/merge/deploy) makes **Fleet Health** (tiles + 8-pack board + 24h sparkline), **Alerts**
+(capacity ladder + temp zones + cell imbalance, `localStorage` acknowledge), and **Settings**
+(units/map trail/theme segmented toggles) live views; **Journey** and **History** remain
+placeholders for later phases. A read-only `GET /web/history` endpoint (30-min bucketed per-pack
+SOC) backs the Fleet Health sparkline. Roadmap/spec:
+`docs/superpowers/specs/2026-07-12-webui-v2-roadmap.md`.
 
 **Local dev/test:** `docker compose -f server/docker-compose.dev.yml up -d` brings up a Postgres on
 `localhost:5432` (user/pw/db all `bmsmon`, matching the default `DATABASE_URL`). Run server tests

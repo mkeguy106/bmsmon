@@ -66,7 +66,7 @@ CELL VOLTAGES section shows real C1–C4. Additive schema; falls back to min/max
 **Backend:** additive `samples` cell columns + ingest model + snapshot select (small, additive).
 GPS-derived Command bits (DRIVEN TODAY, Today's Route mini-map) are **stubbed** here, wired in Phase 4.
 
-### Phase 2 — Fleet Health + Alerts + Settings
+### Phase 2 — Fleet Health + Alerts + Settings  ← **done**
 The three remaining zero-backend views. All drive off `/web/fleet` + `/ws` + `/web/{temp,alert,range}-config`:
 - **Fleet Health:** 8-pack board (capacity/health bars, temp, cycles, 24h sparkline, status). The
   24h sparkline needs a small recent-samples read — decide then whether to reuse `/web/samples`
@@ -121,3 +121,12 @@ or wire a real map lib (**Leaflet / MapLibre** with a dark/light style). Either 
   295 JVM unit tests incl. `CloudJsonTest`); both bundles build (`dist/index.html` v1 +
   `dist/v2/index.html` v2 sharing `dist/assets`) and serve correctly. Pending: final review,
   merge, and deploy.
+- **2026-07-12** — Phase 2 (Fleet Health + Alerts + Settings) implementation COMPLETE on branch
+  `feat/webui-v2-phase2`: the three zero-backend views are live — Fleet Health (tiles + 8-pack
+  board + 24h sparkline), Alerts (capacity ladder + temp zones + cell-imbalance, per-pack
+  acknowledge in `localStorage`), Settings (units, map trail color, theme — segmented toggles).
+  A read-only `GET /web/history` endpoint (30-min bucketed per-pack SOC) was added to back the
+  sparkline. Full-suite verification passed (web 109 vitest + tsc clean, server 107 pytest incl.
+  `test_history.py` + `test_web_history.py`); both bundles build and serve correctly; `/v2/`
+  driven end-to-end headlessly (Health/Alerts/Settings all render; v1 unaffected). Pending: final
+  review, merge, and deploy.
