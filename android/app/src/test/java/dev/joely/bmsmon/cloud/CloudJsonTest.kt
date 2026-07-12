@@ -83,6 +83,50 @@ class CloudJsonTest {
         assertTrue(s.contains("\"updated_at_ms\":123"))
     }
 
+    @Test fun tempConfig_includes_ranges_when_present() {
+        val s = CloudJson.encodeTempConfig(
+            profileId = "redodo-beken-12v100",
+            t = dev.joely.bmsmon.model.TempThresholds(),
+            env = dev.joely.bmsmon.model.TempEnvelope(),
+            unit = "F", updatedAtMs = 123L,
+            ranges = mapOf(
+                "C8:47:80:15:25:01" to dev.joely.bmsmon.model.RangeParams(
+                    whPerDay = dev.joely.bmsmon.model.Band(78f, 182f),
+                    activeW = dev.joely.bmsmon.model.Band(52.5f, 97.5f),
+                    whPerMile = dev.joely.bmsmon.model.Band(15f, 25f),
+                    learnedDays = 6, updatedMs = 456L,
+                ),
+            ),
+        )
+        assertTrue(s.contains("\"address\":\"C8:47:80:15:25:01\""))
+        assertTrue(s.contains("\"wh_per_day_lo\":78.0"))
+        assertTrue(s.contains("\"wh_per_day_hi\":182.0"))
+        assertTrue(s.contains("\"active_w_lo\":52.5"))
+        assertTrue(s.contains("\"active_w_hi\":97.5"))
+        assertTrue(s.contains("\"wh_per_mile_lo\":15.0"))
+        assertTrue(s.contains("\"wh_per_mile_hi\":25.0"))
+        assertTrue(s.contains("\"learned_days\":6"))
+        assertTrue(s.contains("\"updated_at_ms\":456"))
+    }
+
+    @Test fun tempConfig_omits_ranges_when_null_or_empty() {
+        val s1 = CloudJson.encodeTempConfig(
+            profileId = "redodo-beken-12v100",
+            t = dev.joely.bmsmon.model.TempThresholds(),
+            env = dev.joely.bmsmon.model.TempEnvelope(),
+            unit = "F", updatedAtMs = 123L,
+        )
+        assertTrue(!s1.contains("\"ranges\""))
+        val s2 = CloudJson.encodeTempConfig(
+            profileId = "redodo-beken-12v100",
+            t = dev.joely.bmsmon.model.TempThresholds(),
+            env = dev.joely.bmsmon.model.TempEnvelope(),
+            unit = "F", updatedAtMs = 123L,
+            ranges = emptyMap(),
+        )
+        assertTrue(!s2.contains("\"ranges\""))
+    }
+
     @Test fun sampleJson_omits_gps_when_null() {
         val s = CloudJson.sampleJson(
             tsMs = 1L, address = "A", advertisedName = null, alias = null, groupId = null,

@@ -26,6 +26,7 @@ import dev.joely.bmsmon.model.TempSide
 import dev.joely.bmsmon.model.TempThresholds
 import dev.joely.bmsmon.model.TempZone
 import dev.joely.bmsmon.model.pickStageAlert
+import dev.joely.bmsmon.model.RangeParams
 import dev.joely.bmsmon.model.CAP_SEVERITY_CRITICAL
 import dev.joely.bmsmon.model.CAP_SEVERITY_WARNING
 import dev.joely.bmsmon.model.SEVERITY_NONE
@@ -382,6 +383,10 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     private var autoCandidate: Mode? = null
     private var autoCandidateSince = 0L
 
+    // Last range-params map pushed to the cloud — dedups the config enqueue (the engine re-learns
+    // every 6 h; identical results must not re-POST).
+    private var lastPushedRangeParams: Map<String, RangeParams> = emptyMap()
+
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
 
@@ -498,6 +503,14 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                         lastTeleSaveAt = now
                         persistLastTelemetry()
                     }
+                }
+                // Learned range params changed → ride the one-way config push so the WebUI's
+                // formula twin uses the same bands (latest-wins per address server-side).
+                if (es.rangeParamsByAddress.isNotEmpty() &&
+                    es.rangeParamsByAddress != lastPushedRangeParams
+                ) {
+                    lastPushedRangeParams = es.rangeParamsByAddress
+                    enqueueTempConfig(_state.value.stageProfile().id)
                 }
             }
         }
@@ -1007,9 +1020,10 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         val unit = if (_state.value.tempFahrenheit) "F" else "C"
         val seizeSoc = _state.value.cloudSeizeSoc
         val alertsOn = _state.value.alertsOn
+        val ranges = engine.state.value.rangeParamsByAddress
         viewModelScope.launch {
             store.setPendingTempConfig(
-                CloudJson.encodeTempConfig(profileId, t, env, unit, clockMs(), seizeSoc, alertsOn),
+                CloudJson.encodeTempConfig(profileId, t, env, unit, clockMs(), seizeSoc, alertsOn, ranges),
             )
         }
     }

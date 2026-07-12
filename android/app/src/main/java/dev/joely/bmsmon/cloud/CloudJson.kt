@@ -1,5 +1,6 @@
 package dev.joely.bmsmon.cloud
 
+import dev.joely.bmsmon.model.RangeParams
 import dev.joely.bmsmon.model.TempEnvelope
 import dev.joely.bmsmon.model.TempThresholds
 import kotlinx.serialization.Serializable
@@ -73,6 +74,7 @@ object CloudJson {
     fun encodeTempConfig(
         profileId: String, t: TempThresholds, env: TempEnvelope, unit: String, updatedAtMs: Long,
         seizeSoc: Int? = null, alertsOn: Boolean? = null,
+        ranges: Map<String, RangeParams>? = null,
     ): String =
         json.encodeToString(
             TempConfigJson.serializer(),
@@ -83,6 +85,15 @@ object CloudJson {
                 charge_lock_cold_c = env.chargeLockColdC, charge_lock_hot_c = env.chargeLockHotC,
                 charge_resume_cold_c = env.chargeResumeColdC,
                 seize_soc = seizeSoc, alerts_on = alertsOn,
+                ranges = ranges?.takeIf { it.isNotEmpty() }?.map { (addr, r) ->
+                    RangeConfigJson(
+                        addr,
+                        r.whPerDay.lo, r.whPerDay.hi,
+                        r.activeW.lo, r.activeW.hi,
+                        r.whPerMile.lo, r.whPerMile.hi,
+                        r.learnedDays, r.updatedMs,
+                    )
+                },
             ),
         )
 }
@@ -107,4 +118,18 @@ data class TempConfigJson(
     // WebUI mirrors it to drive its own low-pack stage seize. Null on temp-only pushes.
     val seize_soc: Int? = null,
     val alerts_on: Boolean? = null,
+    // Learned discharge-range parameter bands, one row per pack (2026-07-11 design). Optional —
+    // an older app pushing a temp-only body must keep validating server-side.
+    val ranges: List<RangeConfigJson>? = null,
+)
+
+/** One pack's learned discharge-range bands, riding the one-way config push (latest-wins). */
+@Serializable
+data class RangeConfigJson(
+    val address: String,
+    val wh_per_day_lo: Float, val wh_per_day_hi: Float,
+    val active_w_lo: Float, val active_w_hi: Float,
+    val wh_per_mile_lo: Float, val wh_per_mile_hi: Float,
+    val learned_days: Int,
+    val updated_at_ms: Long,
 )
