@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { decodeSample, decodeSnapshot, decodeTempConfigs } from "./decode";
+import { decodeRangeConfigs, decodeSample, decodeSnapshot, decodeTempConfigs } from "./decode";
 
 let warn: MockInstance;
 beforeEach(() => { warn = vi.spyOn(console, "warn").mockImplementation(() => {}); });
@@ -87,6 +87,40 @@ describe("decodeTempConfigs", () => {
   it("a non-numeric envelope field invalidates the response (no coercion)", () => {
     expect(decodeTempConfigs([{ ...good, cutoff_hot_c: "65" }])).toBeNull();
     expect(decodeTempConfigs([{ ...good, charge_resume_cold_c: NaN }])).toBeNull();
+    expect(warn).toHaveBeenCalled();
+  });
+});
+
+describe("decodeRangeConfigs", () => {
+  const good = {
+    device_id: "d1", address: "A", wh_per_day_lo: 100, wh_per_day_hi: 180,
+    active_w_lo: 70, active_w_hi: 100, wh_per_mile_lo: 18, wh_per_mile_hi: 24,
+    learned_days: 10, updated_at_ms: 1719800000000,
+  };
+
+  it("valid rows pass with all fields intact (unknown keys stripped)", () => {
+    expect(decodeRangeConfigs([{ ...good, extra: 1 }])).toEqual([good]);
+    expect(decodeRangeConfigs([])).toEqual([]);
+  });
+
+  it("missing learned_days defaults to 0 (server column default)", () => {
+    const { learned_days: _drop, ...noLearned } = good;
+    expect(decodeRangeConfigs([noLearned])).toEqual([{ ...good, learned_days: 0 }]);
+    expect(decodeRangeConfigs([{ ...good, learned_days: null }]))
+      .toEqual([{ ...good, learned_days: 0 }]);
+  });
+
+  it("a non-numeric learned_days invalidates the whole response (no coercion)", () => {
+    expect(decodeRangeConfigs([{ ...good, learned_days: "garbage" }])).toBeNull();
+    expect(decodeRangeConfigs([{ ...good, learned_days: {} }])).toBeNull();
+    expect(decodeRangeConfigs([good, {}])).toBeNull(); // one bad row poisons all
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it("malformed response (not an array) → null", () => {
+    expect(decodeRangeConfigs(null)).toBeNull();
+    expect(decodeRangeConfigs({ configs: [] })).toBeNull();
+    expect(decodeRangeConfigs("x")).toBeNull();
     expect(warn).toHaveBeenCalled();
   });
 });

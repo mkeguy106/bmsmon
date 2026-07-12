@@ -98,7 +98,8 @@ const validRangeConfig = (x: unknown): x is Record<string, unknown> =>
   Number.isFinite(x.wh_per_day_lo) && Number.isFinite(x.wh_per_day_hi) &&
   Number.isFinite(x.active_w_lo) && Number.isFinite(x.active_w_hi) &&
   Number.isFinite(x.wh_per_mile_lo) && Number.isFinite(x.wh_per_mile_hi) &&
-  Number.isFinite(x.updated_at_ms);
+  Number.isFinite(x.updated_at_ms) &&
+  (x.learned_days == null || Number.isFinite(x.learned_days));
 
 /** Strict like decodeTempConfigs: any malformed row invalidates the response. */
 export function decodeRangeConfigs(x: unknown): RangeConfigRow[] | null {
