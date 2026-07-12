@@ -42,7 +42,7 @@ export function NotesCard({ baseId }: { baseId: string }) {
   // save (targeting the ORIGINAL base) instead of silently dropping it.
   useEffect(() => () => {
     if (timer.current && pendingSave.current) {
-      putNote(pendingSave.current.base, pendingSave.current.body); // fire-and-forget
+      putNote(pendingSave.current.base, pendingSave.current.body).catch(() => {}); // fire-and-forget
       pendingSave.current = null;
     }
     if (timer.current) clearTimeout(timer.current);
