@@ -9,9 +9,11 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import dev.joely.bmsmon.model.Band
 import dev.joely.bmsmon.model.Battery
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.Group
+import dev.joely.bmsmon.model.RangeParams
 import dev.joely.bmsmon.model.Roster
 import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.Telemetry
@@ -64,6 +66,7 @@ data class Persisted(
     val importDone: Boolean,
     val tempThresholdsByProfile: Map<String, TempThresholds>,
     val chargeTailMinByAddress: Map<String, Float> = emptyMap(),
+    val rangeParamsByAddress: Map<String, RangeParams> = emptyMap(),
     val tempAlertsEnabled: Boolean,
     val showTempGauge: Boolean,
     val tempGaugeSide: String?,
@@ -114,6 +117,7 @@ class SettingsStore(private val context: Context) {
         val INSTALL_UUID = stringPreferencesKey("install_uuid")
         val TEMP_THRESHOLDS = stringPreferencesKey("temp_thresholds_by_profile")
         val CHARGE_TAIL_MIN = stringPreferencesKey("charge_tail_min_by_address")
+        val RANGE_PARAMS = stringPreferencesKey("range_params_by_address")
         val TEMP_ALERTS_ENABLED = booleanPreferencesKey("temp_alerts_enabled")
         val SHOW_TEMP_GAUGE = booleanPreferencesKey("show_temp_gauge")
         val TEMP_GAUGE_SIDE = stringPreferencesKey("temp_gauge_side")
@@ -170,6 +174,7 @@ class SettingsStore(private val context: Context) {
             importDone = p[K.IMPORT_DONE] ?: false,
             tempThresholdsByProfile = p[K.TEMP_THRESHOLDS]?.let(::decodeTempThresholds) ?: emptyMap(),
             chargeTailMinByAddress = p[K.CHARGE_TAIL_MIN]?.let(::decodeChargeTail) ?: emptyMap(),
+            rangeParamsByAddress = p[K.RANGE_PARAMS]?.let(::decodeRangeParams) ?: emptyMap(),
             tempAlertsEnabled = p[K.TEMP_ALERTS_ENABLED] ?: true,
             showTempGauge = p[K.SHOW_TEMP_GAUGE] ?: true,
             tempGaugeSide = p[K.TEMP_GAUGE_SIDE],
@@ -227,6 +232,8 @@ class SettingsStore(private val context: Context) {
             val cur = prefs[K.CHARGE_TAIL_MIN]?.let(::decodeChargeTail) ?: emptyMap()
             prefs[K.CHARGE_TAIL_MIN] = encodeChargeTail(cur + (address to minutes))
         }.let {}
+    suspend fun setRangeParams(map: Map<String, RangeParams>) =
+        context.dataStore.edit { it[K.RANGE_PARAMS] = encodeRangeParams(map) }.let {}
     suspend fun setTempAlertsEnabled(on: Boolean) = context.dataStore.edit { it[K.TEMP_ALERTS_ENABLED] = on }.let {}
     suspend fun setShowTempGauge(on: Boolean) = context.dataStore.edit { it[K.SHOW_TEMP_GAUGE] = on }.let {}
     suspend fun setTempGaugeSide(side: String) = context.dataStore.edit { it[K.TEMP_GAUGE_SIDE] = side }.let {}
@@ -311,6 +318,35 @@ private fun decodeChargeTail(json: String): Map<String, Float> = runCatching {
     val root = JSONObject(json)
     buildMap {
         root.keys().forEach { addr -> put(addr, root.getDouble(addr).toFloat()) }
+    }
+}.getOrDefault(emptyMap())
+
+/** Per-pack learned range bands (address -> the six band edges + provenance). */
+private fun encodeRangeParams(map: Map<String, RangeParams>): String {
+    val root = JSONObject()
+    map.forEach { (addr, r) ->
+        root.put(addr, JSONObject()
+            .put("wdLo", r.whPerDay.lo.jsonSafe()).put("wdHi", r.whPerDay.hi.jsonSafe())
+            .put("awLo", r.activeW.lo.jsonSafe()).put("awHi", r.activeW.hi.jsonSafe())
+            .put("wmLo", r.whPerMile.lo.jsonSafe()).put("wmHi", r.whPerMile.hi.jsonSafe())
+            .put("days", r.learnedDays).put("ts", r.updatedMs))
+    }
+    return root.toString()
+}
+
+private fun decodeRangeParams(json: String): Map<String, RangeParams> = runCatching {
+    val root = JSONObject(json)
+    buildMap {
+        root.keys().forEach { addr ->
+            val o = root.getJSONObject(addr)
+            put(addr, RangeParams(
+                whPerDay = Band(o.getDouble("wdLo").toFloat(), o.getDouble("wdHi").toFloat()),
+                activeW = Band(o.getDouble("awLo").toFloat(), o.getDouble("awHi").toFloat()),
+                whPerMile = Band(o.getDouble("wmLo").toFloat(), o.getDouble("wmHi").toFloat()),
+                learnedDays = o.optInt("days", 0),
+                updatedMs = o.optLong("ts", 0L),
+            ))
+        }
     }
 }.getOrDefault(emptyMap())
 

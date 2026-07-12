@@ -130,6 +130,9 @@ data class BatteryStatus(
     val telemetry: Telemetry? = null,
     val reachable: Boolean = false,
     val etaFullMin: Float? = null,
+    /** Discharge-remaining estimate for the latest sample — engine-computed once per poll,
+     *  same single-writer pattern as [etaFullMin]. Null while charging or with no capacity. */
+    val range: PackRange? = null,
 )
 
 /**

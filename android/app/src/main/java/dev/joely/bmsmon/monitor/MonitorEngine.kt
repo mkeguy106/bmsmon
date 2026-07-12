@@ -19,8 +19,13 @@ import dev.joely.bmsmon.model.AlertConfig
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.DEFAULT_ROSTER
+import dev.joely.bmsmon.model.PackRange
 import dev.joely.bmsmon.model.PackSoc
+import dev.joely.bmsmon.model.RangeParams
+import dev.joely.bmsmon.model.RangeRow
+import dev.joely.bmsmon.model.SEED_RANGE_PARAMS
 import dev.joely.bmsmon.model.SEED_TAIL_MIN
+import dev.joely.bmsmon.model.TodayUsage
 import dev.joely.bmsmon.model.TARGET_SOC
 import dev.joely.bmsmon.model.TempRank
 import dev.joely.bmsmon.model.TempSide
@@ -28,11 +33,14 @@ import dev.joely.bmsmon.model.TempThresholds
 import dev.joely.bmsmon.model.TempUnit
 import dev.joely.bmsmon.model.chargeSample
 import dev.joely.bmsmon.model.estimateChargeMinutes
+import dev.joely.bmsmon.model.estimatePackRange
 import dev.joely.bmsmon.model.evalStageAlert
 import dev.joely.bmsmon.model.foldTailEma
+import dev.joely.bmsmon.model.learnRangeParams
 import dev.joely.bmsmon.model.nextChargeHold
 import dev.joely.bmsmon.model.formatDelta
 import dev.joely.bmsmon.model.observedChargeTailMinutes
+import dev.joely.bmsmon.model.todayUsage
 import dev.joely.bmsmon.model.tempMarginToCutoffC
 import dev.joely.bmsmon.model.tempZone
 import dev.joely.bmsmon.model.batteryAt
@@ -48,11 +56,14 @@ import dev.joely.bmsmon.model.isRegen
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
@@ -69,6 +80,8 @@ data class MonitorState(
     val peakCurrentA: Float = 0f,
     val gpsActive: Boolean = false,
     val tailMinByAddress: Map<String, Float> = emptyMap(),
+    val rangeParamsByAddress: Map<String, RangeParams> = emptyMap(),
+    val todayUsageByAddress: Map<String, TodayUsage> = emptyMap(),
     // Cloud upload status, mirrored from the TelemetryReporter's onStatus hook. The engine owns
     // that process-lifetime hook (it already owns the reporter), so no ViewModel is ever captured
     // by it — the VM just mirrors these fields like the rest of the state.
@@ -115,6 +128,8 @@ class MonitorEngine(
     @Volatile private var tempThresholdsByProfile: Map<String, TempThresholds> = emptyMap()
     @Volatile private var tempUnit: TempUnit = TempUnit.F
     private val lastTailLearnAt = HashMap<String, Long>()
+    private var rangeJob: Job? = null
+    @Volatile private var lastRangeLearnAt = 0L
 
     // BLE-10: react to Bluetooth off→on. Without this, a BT toggle leaves every pack sitting out
     // its climbed backoff (up to 2 min each) before reconnecting — bad while backgrounded, where
@@ -200,10 +215,14 @@ class MonitorEngine(
         registerBtReceiver()  // BLE-10: BT off→on clears every backoff via kickAll
         scope.launch {
             runCatching {
-                val saved = settings.load().chargeTailMinByAddress
-                if (saved.isNotEmpty()) _state.update { it.copy(tailMinByAddress = saved) }
+                val saved = settings.load()
+                if (saved.chargeTailMinByAddress.isNotEmpty())
+                    _state.update { it.copy(tailMinByAddress = saved.chargeTailMinByAddress) }
+                if (saved.rangeParamsByAddress.isNotEmpty())
+                    _state.update { it.copy(rangeParamsByAddress = saved.rangeParamsByAddress) }
             }
         }
+        startRangeLoop()
     }
 
     /**
@@ -244,6 +263,8 @@ class MonitorEngine(
         if (!_state.value.monitoring && _state.value.fleet.isEmpty()) return
         repository.finalizeOpenSessions()
         unregisterBtReceiver()
+        rangeJob?.cancel()
+        rangeJob = null
         ble.stop()
         locationSource.stop()
         alertNotifier.clear()
@@ -255,6 +276,7 @@ class MonitorEngine(
                 cloudLastUploadMs = st.cloudLastUploadMs,
                 cloudUploadKbps = st.cloudUploadKbps,
                 cloudAuthFailed = st.cloudAuthFailed,
+                rangeParamsByAddress = st.rangeParamsByAddress,
             )
         }
     }
@@ -401,9 +423,16 @@ class MonitorEngine(
         val etaFullMin = estimateChargeMinutes(
             t.state, t.soc, t.current, t.fullChargeAh, t.capacityAh, regen, tailMin,
         )
+        // Discharge-range estimate — same single-writer pattern as the charge ETA: computed once
+        // per poll here, carried on BatteryStatus, only displayed by the UI.
+        val range = estimatePackRange(
+            t.state, t.capacityAh,
+            st0.rangeParamsByAddress[addr] ?: SEED_RANGE_PARAMS,
+            st0.todayUsageByAddress[addr],
+        )
         _state.update { st ->
             val fleet = st.fleet + (addr to (st.fleet[addr] ?: BatteryStatus())
-                .copy(telemetry = t, reachable = true, etaFullMin = etaFullMin))
+                .copy(telemetry = t, reachable = true, etaFullMin = etaFullMin, range = range))
             var peakP = st.peakPowerW
             var peakC = st.peakCurrentA
             if (logging && t.current < -0.05f) {  // discharging — track peak draw
@@ -467,6 +496,38 @@ class MonitorEngine(
         val next = foldTailEma(prev, observed)
         _state.update { it.copy(tailMinByAddress = it.tailMinByAddress + (addr to next)) }
         settings.setChargeTailMin(addr, next)
+    }
+
+    /** Cadence of the range pass: today-usage refresh every pass, full re-learn every 6 h. */
+    private fun startRangeLoop() {
+        rangeJob?.cancel()
+        rangeJob = scope.launch {
+            while (isActive) {
+                runCatching { rangePass() }
+                delay(5 * 60_000L)
+            }
+        }
+    }
+
+    private suspend fun rangePass() {
+        val now = now()
+        val zone = java.time.ZoneId.systemDefault()
+        val learn = now - lastRangeLearnAt > 6 * 60 * 60_000L
+        if (learn) lastRangeLearnAt = now
+        for (b in roster.batteries) {
+            val addr = b.address
+            val rows = repository.recentSamples(addr, now - 14L * 86_400_000L).map {
+                RangeRow(it.tsMs, it.state, it.powerW, it.lat, it.lon, it.gpsAccuracyM, it.regen)
+            }
+            if (rows.isEmpty()) continue
+            if (learn) {
+                val params = learnRangeParams(rows, zone, now)
+                _state.update { it.copy(rangeParamsByAddress = it.rangeParamsByAddress + (addr to params)) }
+            }
+            val today = todayUsage(rows, zone, now)
+            _state.update { it.copy(todayUsageByAddress = it.todayUsageByAddress + (addr to today)) }
+        }
+        if (learn) runCatching { settings.setRangeParams(_state.value.rangeParamsByAddress) }
     }
 
     /** Stamp each base's last-discharge time to [now] while it reads as discharging. */
