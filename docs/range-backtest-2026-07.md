@@ -65,3 +65,27 @@ mile and the estimate converges on experiential range. The seed became 51–85 W
 (= a conservative 15–25 practical miles at 100%; user was unsure of the chair's true range).
 69% now reads ~11–18 mi instead of 37–62. No qualifying outing days exist yet in the history;
 the first few real outings will start replacing the seed.
+
+## Addendum 3 (2026-07-12): windowed distance + discharge-gate vehicle exclusion
+
+The user reported real outings the learner couldn't see (Chicago ~3 mi, Milwaukee 3–4 mi).
+Root causes, verified against the cloud data:
+
+1. **Fix latching:** the fused provider (balanced power, 10 s interval) refreshes fixes every
+   ~10–30 s while telemetry samples every 1.5 s — consecutive-sample distances read as
+   freeze-then-teleport. Pairwise measurement caught 0.02 mi of a 4.8-mile day; the inflated
+   teleport "speeds" then triggered the ±3 min vehicle-context exclusion around genuine
+   driving. **Fix:** distance is measured between one representative fix per 30-s bucket
+   (accuracy < 50 m), windows of 15–90 s — recovers true speed regardless of latching.
+2. **Speed cap too low:** the chair tops out ~9 mph (4.0 m/s), over the old 4.0 cap downhill.
+   Chair band is now 0.4–4.5 m/s windowed.
+3. **Vehicle discrimination replaced:** the chair draws ZERO while in the van/on a train
+   (user-confirmed), so the discharge gate alone separates vehicle rides from driving. The
+   ±3 min context-window heuristic was removed — it erased genuine rolling adjacent to van
+   boarding.
+
+Validation (final rule replicated in SQL, pack 2012-A): Jul 11 (Milwaukee) 5.63 mi, Jul 10
+(Chicago) 2.40 mi, home days 0.3–1.0 mi — matching the user's account. Outing-day Wh/mile on
+real days: ~35 (heavy-rolling Milwaukee) to ~79 (home/mixed) per pack → ~16–37 practical
+miles per full charge; the 51–85 seed brackets this and will hand off to learned bands after
+3 qualifying days of post-v4 local GPS.

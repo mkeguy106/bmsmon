@@ -364,11 +364,15 @@ high/low line — `~37–50 mi · ~9–13h use · ~5–9 days` — under the rin
 packs are connected and not charging (charging shows the recharge ETA instead). Pure math in
 `model/RangeEstimate.kt` (estimate + live tilt + formatting) and `model/RangeLearn.kt`
 (per-day p20/p80 bands: Wh/day, active W, and **outing-day Wh/mile** — a day's TOTAL discharge
-divided by its clean outdoor miles, counted only on days with ≥0.5 mi of GPS-qualified driving,
-so indoor/idle overhead lands in the per-mile cost and the estimate converges on lived range,
-not smooth-cruise physics — with **vehicle-context exclusion**: a chair-speed segment is
-rejected if any GPS movement within ±3 min exceeds 4.5 m/s, because field data showed ~90% of
-gate-passing "drive" miles were the chair powered inside a van in slow traffic)
+divided by its chair miles, counted only on days with ≥0.5 mi of driving, so indoor/idle
+overhead lands in the per-mile cost and the estimate converges on lived range, not
+smooth-cruise physics. Chair miles are **windowed**: one fix per 30-s bucket, displacement
+between buckets at 0.4–4.5 m/s — NEVER consecutive-sample distances, because the fused
+provider refreshes fixes every ~10–30 s while telemetry samples at 1.5 s, so raw pairs read
+freeze-then-teleport (a real 4.8 mi outing measured 0.02 mi pairwise). **Vehicle rides are
+excluded by the discharge gate**: in the van/train the chair draws nothing (user-confirmed),
+so GPS movement without discharge teaches no miles — no speed-context heuristics. The chair
+tops out ~9 mph, hence the 4.5 m/s ceiling)
 with a line-for-line TS twin in `web/src/range.ts` (no tilt on web — documented divergence).
 The engine learns every 6 h from the local 14-day Room history (GPS now stored locally —
 samples db v4), refreshes today's tilt inputs every 5 min, computes the per-pack estimate once

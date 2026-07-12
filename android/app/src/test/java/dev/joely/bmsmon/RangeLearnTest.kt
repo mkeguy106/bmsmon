@@ -40,15 +40,14 @@ class RangeLearnTest {
             lat = 40.0 + i * 30 / 111_320.0, lon = -75.0, gpsAccuracyM = 10f, regen = false)
     }
 
-    /** One 8 m/s GPS hop (80 m / 10 s, Idle) continuing the drive path at [offsetS] after 9:00. */
-    private fun vehicleHop(day: Int, offsetS: Int, fromLatSteps: Int): List<RangeRow> {
-        val t0 = ts(day, 9) + offsetS * 1000L
-        val lat0 = 40.0 + fromLatSteps * 20 / 111_320.0
-        return listOf(
-            RangeRow(t0, "Idle", 0f, lat0, -75.0, gpsAccuracyM = 15f, regen = false),
-            RangeRow(t0 + 10_000L, "Idle", 0f, lat0 + 80.0 / 111_320.0, -75.0,
-                gpsAccuracyM = 15f, regen = false),
-        )
+    /** [n] vehicle-speed windows (300 m / 30 s = 10 m/s, Idle) starting [offsetS] after 9:00,
+     *  continuing the path from [fromLatSteps] 30-m drive steps. */
+    private fun vehicleRun(day: Int, offsetS: Int, fromLatSteps: Int, n: Int = 3): List<RangeRow> {
+        val lat0 = 40.0 + fromLatSteps * 30 / 111_320.0
+        return (0..n).map { i ->
+            RangeRow(ts(day, 9) + (offsetS + i * 30) * 1000L, "Idle", 0f,
+                lat = lat0 + i * 300 / 111_320.0, lon = -75.0, gpsAccuracyM = 15f, regen = false)
+        }
     }
 
     @Test fun outingDayLearnsWhPerMileFromFullDayBurn() {
@@ -79,26 +78,72 @@ class RangeLearnTest {
         assertEquals(SEED_RANGE_PARAMS.whPerMile.hi, p.whPerMile.hi, 0f)
     }
 
-    @Test fun vehicleContextExcludesDriveFromWhPerMile() {
-        // 27-segment drive (ends 9:04:30), then an 8 m/s hop at 9:04:40 — vehicle speed
-        // within ±3 min of every segment from 9:01:40 on; the surviving early segments
-        // (< 0.5 mi) leave the day under the outing bar, so whPerMile stays seeded.
+    @Test fun vehicleRideDoesNotCount() {
+        // In the van/train the chair has ZERO discharge (user-confirmed) — GPS movement
+        // without discharge is a vehicle ride, no matter the speed. Idle 10 m/s windows
+        // teach nothing; whPerMile stays seeded.
         val rows = (1..3).flatMap { d ->
-            outingDrive(d, 27) + vehicleHop(d, offsetS = 280, fromLatSteps = 27) + idleFiller(d, 10, 13)
+            vehicleRun(d, offsetS = 0, fromLatSteps = 0, n = 40) + idleFiller(d, 10, 13)
         }
         val p = learnRangeParams(rows, zone, nowMs = ts(4, 0))
         assertEquals(SEED_RANGE_PARAMS.whPerMile.lo, p.whPerMile.lo, 0f)
         assertEquals(SEED_RANGE_PARAMS.whPerMile.hi, p.whPerMile.hi, 0f)
     }
 
-    @Test fun distantVehicleMovementDoesNotDisqualify() {
-        // The same hop 20 minutes after the drive is outside the ±3 min context window —
-        // the drive still teaches Wh/mile.
+    @Test fun idleChairSpeedMovementDoesNotCount() {
+        // Chair-speed movement WITHOUT discharge (train creeping, chair pushed) is still a
+        // vehicle/passive ride — the discharge gate excludes it even inside the speed band.
         val rows = (1..3).flatMap { d ->
-            outingDrive(d, 27) + vehicleHop(d, offsetS = 1200, fromLatSteps = 27) + idleFiller(d, 10, 13)
+            (0..30).map { i ->
+                RangeRow(ts(d, 9) + i * 30_000L, "Idle", 0f,
+                    lat = 40.0 + i * 60 / 111_320.0, lon = -75.0,   // 2 m/s windowed
+                    gpsAccuracyM = 10f, regen = false)
+            } + idleFiller(d, 10, 13)
+        }
+        val p = learnRangeParams(rows, zone, nowMs = ts(4, 0))
+        assertEquals(SEED_RANGE_PARAMS.whPerMile.lo, p.whPerMile.lo, 0f)
+        assertEquals(SEED_RANGE_PARAMS.whPerMile.hi, p.whPerMile.hi, 0f)
+    }
+
+    @Test fun drivingAdjacentToVehicleRideStillCounts() {
+        // Rolling to the van and immediately riding away must not erase the rolling — the
+        // discharge gate separates them per-window; no blast radius around the vehicle ride.
+        val rows = (1..3).flatMap { d ->
+            outingDrive(d, 27) + vehicleRun(d, offsetS = 300, fromLatSteps = 27) + idleFiller(d, 10, 13)
         }
         val p = learnRangeParams(rows, zone, nowMs = ts(4, 0))
         assertEquals(10.73f, (p.whPerMile.lo + p.whPerMile.hi) / 2f, 0.3f)
+    }
+
+    @Test fun frozenFixCruiseStillMeasured() {
+        // The fused provider refreshes fixes every ~10-30 s while telemetry samples faster,
+        // so raw consecutive samples read freeze-freeze-teleport. A 3 m/s cruise whose fix
+        // only updates every 30 s (three identical fixes, then a 90 m jump) must still
+        // measure: windowed displacement recovers the true speed. 81 rows = 2430 m ≥ 0.5 mi.
+        val rows = (1..3).flatMap { d ->
+            (0..81).map { i ->
+                RangeRow(ts(d, 9) + i * 10_000L, "Discharging", 72f,
+                    lat = 40.0 + (i / 3) * 90 / 111_320.0, lon = -75.0,
+                    gpsAccuracyM = 10f, regen = false)
+            } + idleFiller(d, 10, 13)
+        }
+        val p = learnRangeParams(rows, zone, nowMs = ts(4, 0))
+        assertEquals(10.73f, (p.whPerMile.lo + p.whPerMile.hi) / 2f, 0.4f)
+    }
+
+    @Test fun fullSpeedCruiseCounts() {
+        // The chair tops out around 9 mph (~4.0 m/s, a bit more downhill) — a 4.2 m/s
+        // windowed cruise must count as chair driving, not vehicle. 126 m / 30 s steps.
+        val rows = (1..3).flatMap { d ->
+            (0..8).map { i ->
+                RangeRow(ts(d, 9) + i * 30_000L, "Discharging", 72f,
+                    lat = 40.0 + i * 126 / 111_320.0, lon = -75.0,
+                    gpsAccuracyM = 10f, regen = false)
+            } + idleFiller(d, 10, 13)
+        }
+        // 8 windows × 126 m = 1008 m = 0.6263 mi; burn = 8 × 30 s × 72 W = 4.8 Wh → 7.66 Wh/mi.
+        val p = learnRangeParams(rows, zone, nowMs = ts(4, 0))
+        assertEquals(7.66f, (p.whPerMile.lo + p.whPerMile.hi) / 2f, 0.3f)
     }
 
     @Test fun percentileInterpolatesLinearly() {

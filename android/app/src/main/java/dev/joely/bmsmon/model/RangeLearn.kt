@@ -40,19 +40,24 @@ private const val MIN_LEARN_DAYS = 3
 private const val BURN_DT_MIN_S = 0.5f
 private const val BURN_DT_MAX_S = 60f
 
-// Qualified drive segment bounds (see the spec's data findings on GPS jitter).
-private const val DRIVE_DT_MAX_S = 15f
-private const val DRIVE_MIN_POWER_W = 40f
-private const val DRIVE_MAX_ACCURACY_M = 20f
-private const val DRIVE_MIN_SPEED_MPS = 0.4f
-private const val DRIVE_MAX_SPEED_MPS = 4.0f
+// Windowed drive measurement (2026-07-12). The fused provider refreshes fixes every ~10-30 s
+// (balanced power) while telemetry samples every 1.5 s, so consecutive-sample distances read
+// as freeze-then-teleport — inflated speeds that misfiled real driving as vehicle movement
+// (a 4.8-mile Milwaukee outing measured 0.02 mi pairwise). Distance is instead taken between
+// one representative fix per 30-s bucket; displacement over such windows recovers true speed
+// regardless of fix latching.
+private const val WIN_BUCKET_MS = 30_000L
+private const val WIN_DT_MIN_S = 15f
+private const val WIN_DT_MAX_S = 90f
+private const val WIN_MAX_ACCURACY_M = 50f
 
-// Vehicle-context exclusion: 90% of gate-passing drive distance in the 2026-07 field data was
-// the chair powered (>40 W) inside a van creeping below the speed cap — vehicle miles must not
-// teach Wh/mile. Any nearby GPS movement faster than the chair can go marks the whole window.
-private const val VEHICLE_SPEED_MPS = 4.5f
-private const val VEHICLE_CONTEXT_WINDOW_MS = 180_000L
-private const val CONTEXT_MAX_ACCURACY_M = 30f
+// Chair windows: the chair tops out ~9 mph (4.0 m/s) with a little more downhill, so 4.5 is
+// the ceiling; the 0.4 floor (12 m per 30 s) sits above stationary-jitter random walk.
+// Vehicle discrimination is the DISCHARGE GATE below: in the van or on a train the chair
+// draws nothing (user-confirmed), so GPS movement without discharge is a vehicle ride —
+// no speed heuristics or context windows needed.
+private const val CHAIR_MIN_SPEED_MPS = 0.4f
+private const val CHAIR_MAX_SPEED_MPS = 4.5f
 
 private const val METERS_PER_MILE = 1609.34f
 private const val METERS_PER_DEG = 111_320.0
@@ -81,37 +86,40 @@ private fun distanceM(lat1: Double, lon1: Double, lat2: Double, lon2: Double): F
     return sqrt(dx * dx + dy * dy).toFloat()
 }
 
-/** Timestamps of GPS movement faster than the chair can go (any state) — vehicle context. */
-private fun vehicleSpeedTimestamps(rows: List<RangeRow>): LongArray {
-    val out = ArrayList<Long>()
-    for (i in 1 until rows.size) {
-        val prev = rows[i - 1]
-        val cur = rows[i]
-        val dt = (cur.tsMs - prev.tsMs) / 1000f
-        if (dt < BURN_DT_MIN_S || dt > DRIVE_DT_MAX_S) continue
-        if (cur.lat == null || cur.lon == null || prev.lat == null || prev.lon == null) continue
-        if ((cur.gpsAccuracyM ?: Float.MAX_VALUE) >= CONTEXT_MAX_ACCURACY_M) continue
-        if ((prev.gpsAccuracyM ?: Float.MAX_VALUE) >= CONTEXT_MAX_ACCURACY_M) continue
-        if (distanceM(prev.lat, prev.lon, cur.lat, cur.lon) / dt > VEHICLE_SPEED_MPS) out.add(cur.tsMs)
+private data class Fix(val tsMs: Long, val lat: Double, val lon: Double, val discharging: Boolean)
+
+/** One representative fix per 30-s bucket (the bucket's first accuracy-gated GPS row). */
+private fun bucketedFixes(rows: List<RangeRow>): List<Fix> {
+    val out = ArrayList<Fix>()
+    var lastBucket = Long.MIN_VALUE
+    for (r in rows) {
+        if (r.lat == null || r.lon == null) continue
+        if ((r.gpsAccuracyM ?: Float.MAX_VALUE) >= WIN_MAX_ACCURACY_M) continue
+        val bucket = r.tsMs / WIN_BUCKET_MS
+        if (bucket == lastBucket) continue
+        lastBucket = bucket
+        out.add(Fix(r.tsMs, r.lat, r.lon, r.state == "Discharging"))
     }
-    return out.toLongArray()
+    return out
 }
 
-/** True when any vehicle-speed movement lies within the context window of [tsMs]. */
-private fun vehicleNearby(fastTs: LongArray, tsMs: Long): Boolean {
-    if (fastTs.isEmpty()) return false
-    val from = tsMs - VEHICLE_CONTEXT_WINDOW_MS
-    var lo = 0
-    var hi = fastTs.size
-    while (lo < hi) {
-        val mid = (lo + hi) ushr 1
-        if (fastTs[mid] < from) lo = mid + 1 else hi = mid
+private data class WinSeg(val tsMs: Long, val dM: Float, val vel: Float, val discharging: Boolean)
+
+/** Displacement between consecutive bucketed fixes — immune to fix-latching teleports. */
+private fun windowedSegments(fixes: List<Fix>): List<WinSeg> {
+    val out = ArrayList<WinSeg>()
+    for (i in 1 until fixes.size) {
+        val a = fixes[i - 1]
+        val b = fixes[i]
+        val dt = (b.tsMs - a.tsMs) / 1000f
+        if (dt < WIN_DT_MIN_S || dt > WIN_DT_MAX_S) continue
+        val d = distanceM(a.lat, a.lon, b.lat, b.lon)
+        out.add(WinSeg(b.tsMs, d, d / dt, a.discharging || b.discharging))
     }
-    return lo < fastTs.size && fastTs[lo] <= tsMs + VEHICLE_CONTEXT_WINDOW_MS
+    return out
 }
 
 private fun accumulate(rows: List<RangeRow>, zone: ZoneId): Map<LocalDate, DayStats> {
-    val fastTs = vehicleSpeedTimestamps(rows)
     val days = HashMap<LocalDate, DayStats>()
     for (i in 1 until rows.size) {
         val prev = rows[i - 1]
@@ -125,24 +133,16 @@ private fun accumulate(rows: List<RangeRow>, zone: ZoneId): Map<LocalDate, DaySt
         if (cur.state == "Discharging" && !cur.regen && p != null && p.isFinite() && p > 0f) {
             s.disWh += p * dt / 3600f
             s.disS += dt
-            // Qualified drive segment: tight GPS on both fixes, wheelchair-speed movement,
-            // real draw. Anything else is indoor jitter — it must not teach Wh/mile.
-            if (dt <= DRIVE_DT_MAX_S && p > DRIVE_MIN_POWER_W &&
-                cur.lat != null && cur.lon != null && prev.lat != null && prev.lon != null &&
-                (cur.gpsAccuracyM ?: Float.MAX_VALUE) < DRIVE_MAX_ACCURACY_M &&
-                (prev.gpsAccuracyM ?: Float.MAX_VALUE) < DRIVE_MAX_ACCURACY_M
-            ) {
-                val d = distanceM(prev.lat, prev.lon, cur.lat, cur.lon)
-                val speed = d / dt
-                // Vehicle-context check: a chair-speed segment minutes from vehicle-speed
-                // movement is the chair riding IN the vehicle, not driving.
-                if (speed in DRIVE_MIN_SPEED_MPS..DRIVE_MAX_SPEED_MPS &&
-                    !vehicleNearby(fastTs, cur.tsMs)
-                ) {
-                    s.driveM += d
-                }
-            }
         }
+    }
+    // Chair distance: windowed displacement at chair speeds WHILE DISCHARGING. In the van or
+    // on a train the chair draws nothing, so GPS movement without discharge is a vehicle ride
+    // and teaches no miles, whatever its speed.
+    for (seg in windowedSegments(bucketedFixes(rows))) {
+        if (!seg.discharging) continue
+        if (seg.vel < CHAIR_MIN_SPEED_MPS || seg.vel > CHAIR_MAX_SPEED_MPS) continue
+        val day = Instant.ofEpochMilli(seg.tsMs).atZone(zone).toLocalDate()
+        days.getOrPut(day) { DayStats() }.driveM += seg.dM
     }
     return days
 }
