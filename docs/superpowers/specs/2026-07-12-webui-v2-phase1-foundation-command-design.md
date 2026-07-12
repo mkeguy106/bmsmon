@@ -38,19 +38,20 @@ It also lands a **cell-voltage telemetry pipeline** so Command shows real per-ce
 - New HTML entry: `web/v2.html` (loads `/src/v2/main.tsx`), mirroring `web/index.html`'s pre-paint
   theme script (reads resolved theme, sets `document.documentElement.dataset.theme` before mount).
 
-### 2.2 Build (separate Vite build, `base: '/v2/'`)
-- New `web/vite.v2.config.ts`: `base: '/v2/'`, `root` resolves `v2.html` as the entry,
-  `build.outDir: 'dist/v2'`, `build.emptyOutDir: true`. Shares the React plugin + dev proxy config.
-- `web/package.json` `build` script becomes:
-  `tsc -b && vite build && vite build -c vite.v2.config.ts`
-  (v1 first — it empties `dist/` — then v2 into `dist/v2/`).
+### 2.2 Build (single multi-page Vite build)
+- Add a **second rollup input** to the existing `web/vite.config.ts`:
+  `build.rollupOptions.input = { main: 'index.html', v2: 'v2/index.html' }` (shared `base: '/'`).
+  New source entry `web/v2/index.html` → emitted as `dist/v2/index.html`; v1 stays `dist/index.html`;
+  both share `dist/assets/` (assets referenced absolute from `/assets`, which resolves for a
+  sub-path-served SPA). This is simpler than a separate config and needs no `package.json` change
+  (`npm run build` is unchanged).
 - **No Dockerfile change needed:** `RUN npm run build` already emits `web/dist`, and
   `COPY --from=web /web/dist ./web/dist` carries `dist/v2` into the image.
 - **No server change needed:** the existing `StaticFiles(directory=web_dist, html=True)` mount at
   `/` serves `web/dist/v2/index.html` for `GET /v2/` (Starlette serves the directory's `index.html`
-  with `html=True`). All v2 asset URLs are `/v2/...` via the base.
-- **Dev:** `vite --config vite.v2.config.ts` (or a `dev:v2` script) serves v2 at `/v2/` locally with
-  the same `/web`, `/api`, `/ws` proxy to `localhost:8000`.
+  with `html=True`).
+- **Dev:** `npm run dev` (the same Vite dev server) serves v2 at `http://localhost:5173/v2/` with the
+  existing `/web`, `/api`, `/ws` proxy to `localhost:8000`.
 - **Verify** during implementation: build locally, confirm `GET /v2/` serves the shell and `/`
   still serves v1 from the same `dist/`.
 
