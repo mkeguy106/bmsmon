@@ -1,8 +1,9 @@
-import { decodeSnapshot, decodeTempConfigs, decodeRangeConfigs, decodeHistory } from "./decode";
+import { decodeSnapshot, decodeTempConfigs, decodeRangeConfigs, decodeHistory, decodeTrends, decodeChargeSessions, decodeNotes } from "./decode";
 import type { DeviceRow, FleetItem } from "./types";
 import type { TempConfig } from "./temp";
 import type { RangeConfigRow } from "./range";
 import type { HistSeries } from "./v2/history";
+import type { TrendSeries, ChargeSession, NoteRow } from "./v2/trends";
 
 const j = async (r: Response): Promise<unknown> => {
   if (!r.ok) throw new Error(String(r.status));
@@ -88,3 +89,28 @@ export const getHistory = async (hours = 24): Promise<{ series: HistSeries[] }> 
   if (!series) throw new Error("malformed /web/history response");
   return { series };
 };
+
+export const getTrends = async (address: string, fromMs: number, toMs: number): Promise<TrendSeries> => {
+  const r = await fetch(`/web/trends?address=${encodeURIComponent(address)}&from_ms=${fromMs}&to_ms=${toMs}`).then(j);
+  const s = decodeTrends(r);
+  if (!s) throw new Error("malformed /web/trends response");
+  return s;
+};
+
+export const getChargeSessions = async (address: string, days = 30): Promise<{ sessions: ChargeSession[] }> => {
+  const r = await fetch(`/web/charge-sessions?address=${encodeURIComponent(address)}&days=${days}`).then(j);
+  const sessions = isObj(r) ? decodeChargeSessions((r as { sessions?: unknown }).sessions) : null;
+  if (!sessions) throw new Error("malformed /web/charge-sessions response");
+  return { sessions };
+};
+
+export const getNotes = async (): Promise<{ notes: NoteRow[] }> => {
+  const r = await fetch("/web/notes").then(j);
+  const notes = isObj(r) ? decodeNotes((r as { notes?: unknown }).notes) : null;
+  if (!notes) throw new Error("malformed /web/notes response");
+  return { notes };
+};
+
+export const putNote = (baseId: string, body: string): Promise<unknown> =>
+  fetch("/web/notes", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ base_id: baseId, body }) }).then(j);

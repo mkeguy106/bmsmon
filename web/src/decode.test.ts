@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { decodeHistory, decodeRangeConfigs, decodeSample, decodeSnapshot, decodeTempConfigs } from "./decode";
+import { decodeHistory, decodeRangeConfigs, decodeSample, decodeSnapshot, decodeTempConfigs, decodeTrends, decodeChargeSessions, decodeNotes } from "./decode";
 
 let warn: MockInstance;
 beforeEach(() => { warn = vi.spyOn(console, "warn").mockImplementation(() => {}); });
@@ -154,5 +154,33 @@ describe("decodeHistory", () => {
 
   it("returns null for a non-array", () => {
     expect(decodeHistory({ nope: true })).toBeNull();
+  });
+});
+
+describe("decodeTrends", () => {
+  it("decodes a trend series (nullable metrics)", () => {
+    const s = decodeTrends({ address: "AA", bucket_ms: 1800000, first_ms: 100,
+      points: [{ t: 100, soh: 99, cell_spread_mv: 30, temp_avg: 20, temp_min: 18, temp_max: 22 },
+               { t: 200, soh: null, cell_spread_mv: null, temp_avg: null, temp_min: null, temp_max: null }] });
+    expect(s?.address).toBe("AA");
+    expect(s?.points.length).toBe(2);
+    expect(s?.points[1].soh).toBeNull();
+  });
+  it("decodeTrends returns null for a malformed root", () => {
+    expect(decodeTrends({ address: 5 })).toBeNull();
+  });
+});
+
+describe("decodeChargeSessions", () => {
+  it("decodes charge sessions, dropping malformed rows", () => {
+    const s = decodeChargeSessions([{ start_ms: 1, end_ms: 2, from_soc: 60, duration_min: 3, cv_tail_min: 1, peak_temp_c: 30 },
+                                    { start_ms: "x" }]);
+    expect(s?.length).toBe(1);
+  });
+});
+
+describe("decodeNotes", () => {
+  it("decodes notes", () => {
+    expect(decodeNotes([{ base_id: "2012", body: "hi", updated_at_ms: 5 }])?.[0].base_id).toBe("2012");
   });
 });

@@ -8,6 +8,7 @@ import type { FleetItem, Sample } from "./types";
 import type { TempConfig } from "./temp";
 import type { RangeConfigRow } from "./range";
 import type { HistSeries } from "./v2/history";
+import type { TrendSeries, ChargeSession, NoteRow } from "./v2/trends";
 
 // Explicit whitelists mirroring types.ts / temp.ts — when a field the UI reads
 // is added there, add it here too or the decoder will strip it.
@@ -134,6 +135,53 @@ export function decodeHistory(x: unknown): HistSeries[] | null {
         isObj(p) && Number.isFinite(p.t) && Number.isFinite(p.soc),
     );
     out.push({ address: s.address, points });
+  }
+  return out;
+}
+
+// WEB-8: nullable per-bucket trend metrics — null means "no samples in this
+// bucket" (a real, expected gap), while a non-finite/non-null value is
+// malformed and drops the whole point (undefined sentinel below).
+const numOrNull = (v: unknown): number | null | undefined =>
+  v == null ? null : (Number.isFinite(v) ? (v as number) : undefined);
+
+/** null when the series itself is malformed; individually bad points are dropped. */
+export function decodeTrends(x: unknown): TrendSeries | null {
+  if (!isObj(x) || typeof x.address !== "string" || !Number.isFinite(x.bucket_ms) || !Array.isArray(x.points))
+    return warn("trends", x);
+  const first_ms = x.first_ms == null ? null : (Number.isFinite(x.first_ms) ? (x.first_ms as number) : null);
+  const points = [];
+  for (const p of x.points) {
+    if (!isObj(p) || !Number.isFinite(p.t)) continue;
+    const soh = numOrNull(p.soh), csm = numOrNull(p.cell_spread_mv),
+      ta = numOrNull(p.temp_avg), tmn = numOrNull(p.temp_min), tmx = numOrNull(p.temp_max);
+    if ([soh, csm, ta, tmn, tmx].some((v) => v === undefined)) continue;
+    points.push({ t: p.t as number, soh, cell_spread_mv: csm, temp_avg: ta, temp_min: tmn, temp_max: tmx } as TrendSeries["points"][number]);
+  }
+  return { address: x.address, bucket_ms: x.bucket_ms as number, first_ms, points };
+}
+
+/** Tolerant like decodeHistory: individually malformed sessions are dropped, not fatal. */
+export function decodeChargeSessions(x: unknown): ChargeSession[] | null {
+  if (!Array.isArray(x)) return warn("charge-sessions", x);
+  const out: ChargeSession[] = [];
+  for (const s of x) {
+    if (!isObj(s) || !Number.isFinite(s.start_ms) || !Number.isFinite(s.end_ms) ||
+        !Number.isFinite(s.duration_min) || !Number.isFinite(s.cv_tail_min)) continue;
+    out.push({ start_ms: s.start_ms as number, end_ms: s.end_ms as number,
+      from_soc: numOrNull(s.from_soc) ?? null, duration_min: s.duration_min as number,
+      cv_tail_min: s.cv_tail_min as number, peak_temp_c: numOrNull(s.peak_temp_c) ?? null });
+  }
+  return out;
+}
+
+/** Tolerant: individually malformed notes are dropped, not fatal. */
+export function decodeNotes(x: unknown): NoteRow[] | null {
+  if (!Array.isArray(x)) return warn("notes", x);
+  const out: NoteRow[] = [];
+  for (const n of x) {
+    if (isObj(n) && typeof n.base_id === "string" && typeof n.body === "string" && Number.isFinite(n.updated_at_ms))
+      out.push({ base_id: n.base_id, body: n.body, updated_at_ms: n.updated_at_ms as number });
   }
   return out;
 }
