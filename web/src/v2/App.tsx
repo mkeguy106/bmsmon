@@ -1,3 +1,58 @@
+import { useCallback } from "react";
+import { useLocalStorage, type Codec } from "../useLocalStorage";
+import { useV2Settings } from "./useV2Settings";
+import { useTheme, type ThemeMode } from "./useTheme";
+import { useWinWidth } from "./useWinWidth";
+import { resolveMobile } from "./settings";
+import { Nav } from "./components/Nav";
+import { TopBar } from "./components/TopBar";
+import { BottomTabs } from "./components/BottomTabs";
+import { Placeholder } from "./components/Placeholder";
+import type { V2View } from "./nav";
+
+const viewCodec: Codec<V2View> = {
+  decode: (r) => (["command","health","journey","history","alerts","settings"].includes(r) ? (r as V2View) : null),
+  encode: (v) => v,
+};
+const boolCodec: Codec<boolean> = { decode: (r) => (r === "1" ? true : r === "0" ? false : null), encode: (v) => (v ? "1" : "0") };
+const THEME_CYCLE: ThemeMode[] = ["system", "light", "dark"];
+
 export default function App() {
-  return <div style={{ padding: 24, fontFamily: "Inter, sans-serif" }}>bmsmon v2 — shell coming online</div>;
+  const [settings, patch] = useV2Settings();
+  useTheme(settings.themeMode);
+  const [view, setView] = useLocalStorage<V2View>("bmsmon-v2-view", () => "command", viewCodec);
+  const [collapsed, setCollapsed] = useLocalStorage<boolean>("bmsmon-v2-nav", () => false, boolCodec);
+  const mobile = resolveMobile(settings.deviceMode, useWinWidth());
+  const cycleTheme = useCallback(() => patch({
+    themeMode: THEME_CYCLE[(THEME_CYCLE.indexOf(settings.themeMode) + 1) % 3],
+  }), [patch, settings.themeMode]);
+  const toggleDevice = useCallback(() => patch({
+    deviceMode: settings.deviceMode === "mobile" ? "desktop" : "mobile",
+  }), [patch, settings.deviceMode]);
+
+  const unacked = 0; // wired in Phase 2
+
+  const content =
+    view === "command" ? <Placeholder title="COMMAND" /> : // replaced in Task 16
+    view === "health" ? <Placeholder title="FLEET HEALTH" /> :
+    view === "journey" ? <Placeholder title="JOURNEY" /> :
+    view === "history" ? <Placeholder title="HISTORY" /> :
+    view === "alerts" ? <Placeholder title="ALERTS" /> :
+    <Placeholder title="SETTINGS" />;
+
+  return (
+    <div style={{ display: "flex", minHeight: "100vh" }}>
+      {!mobile && (
+        <Nav view={view} collapsed={collapsed} unackedCount={unacked}
+          onSelect={setView} onToggleCollapse={() => setCollapsed((c) => !c)} />
+      )}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+        <TopBar view={view} live={false} gps={false} synced={false}
+          themeMode={settings.themeMode} mobile={mobile}
+          onCycleTheme={cycleTheme} onToggleDevice={toggleDevice} onSelectView={setView} />
+        <main style={{ padding: mobile ? "16px 14px 76px" : 18, flex: 1 }}>{content}</main>
+      </div>
+      {mobile && <BottomTabs view={view} unackedCount={unacked} onSelect={setView} />}
+    </div>
+  );
 }
