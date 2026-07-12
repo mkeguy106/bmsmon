@@ -42,7 +42,7 @@ createRoot(document.getElementById("root")!).render(
     ) : (
       <>
         <MainStage items={stageItems} staleAddrs={stale} thr={REDODO_DEFAULTS} env={DEFAULT_ENV}
-          unit="F" config={config} now={NOW} pinned={pinned} onTogglePin={noop} />
+          unit="F" config={config} now={NOW} pinned={pinned} onTogglePin={noop} rangeParams={new Map()} />
         <div style={{ height: 24 }} />
         <AllBatteries items={items} staleAddrs={stale} thr={REDODO_DEFAULTS} env={DEFAULT_ENV}
           unit="F" now={NOW} pinned={pinned} onTogglePin={noop} />

@@ -1,6 +1,7 @@
-import { decodeSnapshot, decodeTempConfigs } from "./decode";
+import { decodeSnapshot, decodeTempConfigs, decodeRangeConfigs } from "./decode";
 import type { DeviceRow, FleetItem } from "./types";
 import type { TempConfig } from "./temp";
+import type { RangeConfigRow } from "./range";
 
 const j = async (r: Response): Promise<unknown> => {
   if (!r.ok) throw new Error(String(r.status));
@@ -23,6 +24,13 @@ export const getTempConfig = async (): Promise<{ configs: TempConfig[] }> => {
   const r = await fetch("/web/temp-config").then(j);
   const configs = isObj(r) ? decodeTempConfigs(r.configs) : null;
   if (!configs) throw new Error("malformed /web/temp-config response");
+  return { configs };
+};
+
+export const getRangeConfig = async (): Promise<{ configs: RangeConfigRow[] }> => {
+  const r = await fetch("/web/range-config").then(j);
+  const configs = isObj(r) ? decodeRangeConfigs(r.configs) : null;
+  if (!configs) throw new Error("malformed /web/range-config response");
   return { configs };
 };
 

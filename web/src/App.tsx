@@ -3,7 +3,7 @@ import { AdminDevices } from "./components/AdminDevices";
 import { AllBatteries } from "./components/AllBatteries";
 import { MainStage } from "./components/MainStage";
 import { BatteryProfilePanel } from "./components/BatteryProfilePanel";
-import { getFleet, getTempConfig, getAlertConfig, DEFAULT_ALERT_CONFIG, type AlertConfig } from "./api";
+import { getFleet, getTempConfig, getAlertConfig, getRangeConfig, DEFAULT_ALERT_CONFIG, type AlertConfig } from "./api";
 import { connectLive } from "./ws";
 import { createStore } from "./store";
 import { selectStageItems } from "./stage";
@@ -11,6 +11,7 @@ import {
   envelopeFromConfig, selectActiveConfig, thresholdsFromConfig,
   type TempConfig, type TempUnit,
 } from "./temp";
+import { selectRangeParams, type RangeParams } from "./range";
 import { readStored, useLocalStorage, type Codec } from "./useLocalStorage";
 import type { FleetItem } from "./types";
 
@@ -91,6 +92,18 @@ export default function App() {
   // Alerts off → no seize; otherwise the pushed value, default 30 when absent.
   const seizeThreshold: number | null =
     alertConfig.alerts_on === false ? null : (alertConfig.seize_soc ?? 30);
+
+  // Learned discharge-range bands synced from the phone (read-only mirror).
+  const [rangeParams, setRangeParams] = useState<Map<string, RangeParams>>(new Map());
+  useEffect(() => {
+    let alive = true;
+    const load = () => getRangeConfig()
+      .then((r) => { if (alive) setRangeParams(selectRangeParams(r.configs)); })
+      .catch(() => { /* keep last */ });
+    load();
+    const t = setInterval(load, 60_000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
 
   const [unit, setUnit, setUnitLocal] = useLocalStorage<TempUnit>("bmsmon-temp-unit", () => "F", unitCodec);
   // WEB-3: default to the phone's synced unit. The lazy initializer above runs
@@ -232,7 +245,7 @@ export default function App() {
       <div style={{ display: "grid", gap: 24 }}>
         <MainStage items={stageItems} staleAddrs={staleAddrs}
           thr={thr} env={env} unit={unit} config={tempConfig} now={now}
-          pinned={pinned} onTogglePin={togglePin} lowSeized={lowSeized} />
+          pinned={pinned} onTogglePin={togglePin} lowSeized={lowSeized} rangeParams={rangeParams} />
         <AllBatteries items={items} staleAddrs={staleAddrs} thr={thr} env={env} unit={unit}
           now={now} pinned={pinned} onTogglePin={togglePin} />
       </div>

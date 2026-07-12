@@ -12,6 +12,9 @@ import { TempOverlay } from "./TempOverlay";
 import { SyncedIndicator } from "./SyncedIndicator";
 import { ConditionsSimulator } from "./ConditionsSimulator";
 import { PinButton } from "./PinButton";
+import {
+  SEED_RANGE_PARAMS, estimatePackRange, formatRangeLine, minRange, type RangeParams,
+} from "../range";
 
 // WEB-7: the drag-to-fake-temperature simulator can trigger the full CRITICAL
 // overlay, so keep it out of the production dashboard. Dev builds keep it;
@@ -23,10 +26,11 @@ const SIM_ENABLED: boolean =
 // fresh sample every ~1.5 s and disconnected packs render a live "updated ago"
 // from `now`, so it re-renders every tick anyway; at ≤ a base of packs that is
 // cheap. Memoization is applied where it pays: the All-Batteries grid cards.
-export function MainStage({ items, staleAddrs, thr, env, unit, config, now, pinned, onTogglePin, lowSeized }: {
+export function MainStage({ items, staleAddrs, thr, env, unit, config, now, pinned, onTogglePin, lowSeized, rangeParams }: {
   items: FleetItem[]; staleAddrs: Set<string>;
   thr: TempThresholds; env: TempEnvelope; unit: TempUnit; config: TempConfig | null; now: number;
   pinned: Set<string>; onTogglePin: (addr: string) => void; lowSeized?: boolean;
+  rangeParams: Map<string, RangeParams>;
 }) {
   const group = items[0]?.group_id;
   const featuredAddr = items[0]?.address;
@@ -64,6 +68,20 @@ export function MainStage({ items, staleAddrs, thr, env, unit, config, now, pinn
 
   const flashing = worst != null && worst.zone.rank >= OVERLAY_RANK && effectiveAck !== worst.key;
   const bannerColor = worst && worst.zone.rank > 0 ? zoneColorVar(worst.zone.key) : "var(--safe)";
+
+  // Base-level discharge-remaining line — the twin of the Android stage line. Hidden when any
+  // staged pack is disconnected (no fake numbers), charging (the recharge ETA owns the slot),
+  // or missing remaining_ah. History band only — no live tilt on the web (documented divergence).
+  const rangeLine = (() => {
+    if (rows.length === 0 || rows.some((r) => !r.connected)) return null;
+    const ranges = rows.map(({ it }) => estimatePackRange(
+      (it.current_a ?? 0) > 0.1,
+      it.remaining_ah,
+      rangeParams.get(it.address) ?? SEED_RANGE_PARAMS,
+    ));
+    if (ranges.some((r) => r == null)) return null;
+    return formatRangeLine(minRange(ranges as NonNullable<typeof ranges[number]>[]));
+  })();
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
@@ -144,6 +162,13 @@ export function MainStage({ items, staleAddrs, thr, env, unit, config, now, pinn
             );
           })}
         </div>
+
+        {rangeLine && (
+          <div className="mono" style={{ textAlign: "center", color: "var(--text2)",
+            fontSize: 12, marginTop: 12 }}>
+            {rangeLine}
+          </div>
+        )}
 
         {SIM_ENABLED && featuredAddr && (
           <ConditionsSimulator
