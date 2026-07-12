@@ -137,4 +137,21 @@ class CloudJsonTest {
         assertTrue(!s.contains("\"lon\""))
         assertTrue(!s.contains("\"gps_accuracy_m\""))
     }
+
+    @Test fun sampleJson_includes_cells_when_present() {
+        val js = CloudJson.sampleJson(
+            1L, "AA", null, null, null, "Discharging", 88f, -4f, -51f, 13.2f, 24f,
+            null, 99, 100f, 88f, 12, 3.31f, 3.34f, false, null,
+            cells = listOf(3.32f, 3.31f, 3.34f, 3.33f),
+        )
+        assertTrue(js.contains("\"cells\":[3.32,3.31,3.34,3.33]"))
+    }
+
+    @Test fun sampleJson_omits_cells_when_null() {
+        val js = CloudJson.sampleJson(
+            1L, "AA", null, null, null, "Idle", 88f, 0f, 0f, 13.2f, 24f,
+            null, 99, 100f, 88f, 12, 3.31f, 3.34f, false, null,
+        )
+        assertTrue(!js.contains("\"cells\""))
+    }
 }

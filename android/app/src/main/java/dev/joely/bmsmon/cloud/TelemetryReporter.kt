@@ -124,6 +124,7 @@ class TelemetryReporter(
             t.soh, t.fullChargeAh, t.capacityAh, t.cycles,
             t.cells.minOrNull(), t.cells.maxOrNull(), regen, null,
             lat, lon, gpsAccuracyM, etaFullMin,
+            cells = t.cells.takeIf { it.isNotEmpty() },
         )
         enqueueChannel.trySend(OutboxEntity(payload = payload, enqueuedAt = tsMs))
     }
