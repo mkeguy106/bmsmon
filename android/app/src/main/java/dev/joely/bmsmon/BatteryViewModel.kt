@@ -231,7 +231,8 @@ data class UiState(
             // The ETA is computed by the engine (once per poll — the exact value that is uploaded)
             // and carried on BatteryStatus; the stage only displays it.
             val eta = if (connected) status?.etaFullMin else null
-            StageItem(tel, regen = regenFlag, connected = connected, etaFullMin = eta)
+            val range = if (connected) status?.range else null
+            StageItem(tel, regen = regenFlag, connected = connected, etaFullMin = eta, range = range)
         }
     }
 

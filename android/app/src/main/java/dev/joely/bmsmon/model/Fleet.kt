@@ -184,7 +184,20 @@ data class StageItem(
     val regen: Boolean,
     val connected: Boolean = true,
     val etaFullMin: Float? = null,
+    val range: PackRange? = null,
 )
+
+/**
+ * The stage's base-level discharge line ("~37–50 mi · ~9–13h use · ~5–9 days"), or null when it
+ * doesn't apply: empty stage, any staged pack disconnected (no fake numbers — DISCONNECTED
+ * semantics), or any pack without an estimate (charging: the recharge ETA owns the slot).
+ * Min across packs: the weaker pack of a series pair ends the trip.
+ */
+fun stageRangeLine(items: List<StageItem>): String? {
+    if (items.isEmpty() || items.any { !it.connected }) return null
+    val ranges = items.map { it.range ?: return null }
+    return formatRangeLine(minRange(ranges))
+}
 
 fun hasReachable(group: BatteryGroup, fleet: Map<String, BatteryStatus>): Boolean =
     group.targets.any { fleet[it.address]?.reachable == true }

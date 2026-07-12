@@ -39,6 +39,7 @@ import dev.joely.bmsmon.model.TempUnit
 import dev.joely.bmsmon.model.cToF
 import dev.joely.bmsmon.model.formatEtaMinutes
 import dev.joely.bmsmon.model.formatTemp
+import dev.joely.bmsmon.model.stageRangeLine
 import dev.joely.bmsmon.model.tempZone
 import dev.joely.bmsmon.ui.ChargingBolt
 import dev.joely.bmsmon.ui.gauge.DualRingGauge
@@ -79,21 +80,32 @@ fun StageScreen(
         }
         return
     }
-    if (items.size > 2) {
-        Row(modifier.fillMaxSize().horizontalScroll(rememberScrollState()),
-            verticalAlignment = Alignment.CenterVertically) {
-            items.forEach { item ->
-                BatteryBlock(item, tempInF, showTempGauge, tempGaugeSide, thresholds, envelope,
-                    Modifier.width(320.dp))
+    Column(modifier.fillMaxSize()) {
+        if (items.size > 2) {
+            Row(Modifier.weight(1f).fillMaxWidth().horizontalScroll(rememberScrollState()),
+                verticalAlignment = Alignment.CenterVertically) {
+                items.forEach { item ->
+                    BatteryBlock(item, tempInF, showTempGauge, tempGaugeSide, thresholds, envelope,
+                        Modifier.width(320.dp))
+                }
+            }
+        } else {
+            // Sit the packs up near the top bar rather than vertically centered in the page.
+            Column(Modifier.weight(1f).padding(top = 6.dp)) {
+                items.forEach { item ->
+                    BatteryBlock(item, tempInF, showTempGauge, tempGaugeSide, thresholds, envelope,
+                        Modifier.weight(1f))
+                }
             }
         }
-    } else {
-        // Sit the packs up near the top bar rather than vertically centered in the page.
-        Column(modifier.fillMaxSize().padding(top = 6.dp)) {
-            items.forEach { item ->
-                BatteryBlock(item, tempInF, showTempGauge, tempGaugeSide, thresholds, envelope,
-                    Modifier.weight(1f))
-            }
+        stageRangeLine(items)?.let { line ->
+            Text(
+                line,
+                color = Bm.colors.text2,
+                fontFamily = MonoFont,
+                fontSize = 12.sp,
+                modifier = Modifier.align(Alignment.CenterHorizontally).padding(bottom = 8.dp),
+            )
         }
     }
 }
