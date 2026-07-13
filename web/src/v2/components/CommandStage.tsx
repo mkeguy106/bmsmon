@@ -1,5 +1,6 @@
 import type { Base, BasePack, BaseStatus } from "../fleet";
-import { DAILY_DRIVER_BASE, isCharging } from "../fleet";
+import { DAILY_DRIVER_BASE, baseLastSeenMs, isCharging } from "../fleet";
+import { relAgo } from "../../util";
 import type { FleetItem } from "../../types";
 import { estimatePackRange, minRange, SEED_RANGE_PARAMS, type PackRange, type RangeParams } from "../../range";
 import { Ring } from "./Ring";
@@ -74,8 +75,8 @@ function FlowTile({ label, value, sub }: { label: string; value: string; sub?: s
   );
 }
 
-export function CommandStage({ base, rangeParams, tempF, mobile }: {
-  base: Base; rangeParams: Map<string, RangeParams>; tempF: boolean; mobile: boolean;
+export function CommandStage({ base, rangeParams, tempF, mobile, now }: {
+  base: Base; rangeParams: Map<string, RangeParams>; tempF: boolean; mobile: boolean; now: number;
 }) {
   const live = base.packs.filter((p) => p.connected);
   const charging = base.status === "charging";
@@ -132,6 +133,7 @@ export function CommandStage({ base, rangeParams, tempF, mobile }: {
           {live.length === 0 ? (
             <div className="mono" style={{ fontSize: 13, color: "var(--text-4)", padding: "24px 0" }}>
               Base {base.id} is disconnected.
+              {baseLastSeenMs(base) != null && ` Last seen ${relAgo(baseLastSeenMs(base)!, now)}.`}
             </div>
           ) : (
             live.map((p) => <PackCard key={p.item.address} item={p.item} letter={p.letter} tempF={tempF} />)

@@ -44,3 +44,9 @@ export function groupBases(items: FleetItem[], staleAddrs: Set<string>): Base[] 
   return bases.sort((a, b) =>
     a.id === DAILY_DRIVER_BASE ? -1 : b.id === DAILY_DRIVER_BASE ? 1 : a.id.localeCompare(b.id));
 }
+
+/** Newest telemetry timestamp across a base's packs — "last seen" for offline bases. */
+export function baseLastSeenMs(base: Base): number | null {
+  const ts = base.packs.map((p) => p.item.ts_ms).filter((t) => Number.isFinite(t));
+  return ts.length ? Math.max(...ts) : null;
+}
