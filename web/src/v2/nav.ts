@@ -14,7 +14,6 @@ export const NAV_GROUPS: NavGroup[] = [
   ] },
   { label: "MANAGE", items: [
     { view: "alerts", label: "Alerts", icon: "bell", badge: true },
-    { view: "command" as V2View, label: "Devices", icon: "cpu", disabled: true },
     { view: "settings", label: "Settings", icon: "gear" },
   ] },
 ];

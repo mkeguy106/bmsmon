@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { useV2Settings } from "../useV2Settings";
 import { Segmented } from "../components/Segmented";
+import { DevicesPanel } from "../components/DevicesPanel";
 
 function SettingRow<T extends string>({ label, options, value, onChange }: {
   label: string; options: { value: T; label: string }[]; value: T; onChange: (v: T) => void;
@@ -54,6 +55,10 @@ export function SettingsView() {
             { value: "dark", label: "DARK" },
           ]}
           value={settings.themeMode} onChange={(themeMode) => patch({ themeMode })} />
+      </SettingsCard>
+
+      <SettingsCard title="Devices">
+        <DevicesPanel />
       </SettingsCard>
 
       <SettingsCard title="About">
