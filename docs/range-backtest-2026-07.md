@@ -54,6 +54,23 @@ Genuine chair driving adjacent to van boarding is also discarded — the safe di
 Note: the genuine chair-context sample (0.10 mi, ~21 Wh/mi) is too small to re-derive the
 Wh/mile seed yet. Re-derive from clean accumulated data at the accuracy check-in.
 
+## Addendum 4 (2026-07-13): track-cleaning backtest
+
+Ran the production `cleanTrack` (web/src/v2/model/cleanTrack.ts, via esbuild+node) against the
+real 2026-07-12 15-s-bucket track for 2012-A (5,759 points):
+
+| stage | miles |
+|---|---|
+| raw (what the v2 map used to draw/sum) | 9.78 |
+| after spike rejection (9 fixes dropped) | 9.02 |
+| after stay-point snapping | 7.22 |
+| fully cleaned (with smoothing) | **5.38** |
+
+~4.4 phantom miles removed; the map loses the off-track spurs and the parked caterpillar.
+Kotlin learner gets the same spike rejection (bridged windows recover real distance across a
+dropped fix). Capture is now always-on PRIORITY_HIGH_ACCURACY GNSS (5 s), so future raw
+tracks start far cleaner than this one.
+
 ## Addendum 2 (2026-07-12): miles switched to outing-day semantics
 
 The user (correctly) rejected the cruise-physics range reading (37–62 mi at 69%): the original

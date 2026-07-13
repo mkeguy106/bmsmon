@@ -375,7 +375,13 @@ provider refreshes fixes every ~10–30 s while telemetry samples at 1.5 s, so r
 freeze-then-teleport (a real 4.8 mi outing measured 0.02 mi pairwise). **Vehicle rides are
 excluded by the discharge gate**: in the van/train the chair draws nothing (user-confirmed),
 so GPS movement without discharge teaches no miles — no speed-context heuristics. The chair
-tops out ~9 mph, hence the 4.5 m/s ceiling)
+tops out ~9 mph, hence the 4.5 m/s ceiling. Bucketed fixes additionally pass **out-and-back
+spike rejection** (impossible speed in AND out at the context bound — 4.5 m/s discharging /
+45 m/s otherwise, 60 m/s absurd cap — while the neighbors agree; the dropped fix's window is
+bridged so real distance survives). The TS sibling `web/src/v2/model/cleanTrack.ts` adds
+stay-point snapping + smoothing for the v2 Journey map (backtest: the Jul-12 raw track's
+9.78 mi cleaned to 5.38 — see docs/range-backtest-2026-07.md Addendum 4). Location capture is
+**always-on PRIORITY_HIGH_ACCURACY GNSS** (5 s) — the phone rides the chair on USB power)
 with a line-for-line TS twin in `web/src/range.ts` (no tilt on web — documented divergence).
 The engine learns every 6 h from the local 14-day Room history (GPS now stored locally —
 samples db v4), refreshes today's tilt inputs every 5 min, computes the per-pack estimate once
