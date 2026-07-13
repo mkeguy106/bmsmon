@@ -9,6 +9,7 @@ import {
   haversineMi, classifySegment, cumulativeMiles, detectHotspots, energySeries, tripSummary,
   type SegKind,
 } from "../model/journey";
+import { cleanTrack } from "../model/cleanTrack";
 import { JourneyMap } from "../components/JourneyMap";
 import { EnergyDistanceChart } from "../components/EnergyDistanceChart";
 import { Ring } from "../components/Ring";
@@ -119,7 +120,10 @@ export function JourneyView({ data, theme, unit: _unit, mobile }: {
   const base = bases.find((b) => b.id === DAILY_DRIVER_BASE) ?? bases[0];
   const addresses = useMemo(() => (base ? base.packs.map((p) => p.item.address) : []), [base]);
 
-  const points = useTrack(addresses, fromMs, toMs);
+  const rawPoints = useTrack(addresses, fromMs, toMs);
+  // Cleaned at render time (spike rejection / stay snapping / smoothing) — raw data stays
+  // raw in the DB; the map, miles, energy chart, and playback all consume the cleaned track.
+  const points = useMemo(() => cleanTrack(rawPoints), [rawPoints]);
 
   // ── Derived geometry/energy (memoized on the merged track). ──
   const cumMi = useMemo(() => cumulativeMiles(points), [points]);
