@@ -18,9 +18,14 @@ export function Chip({ tone = "var(--text-3)", children }: { tone?: string; chil
     borderRadius: 5, color: tone, border: `1px solid ${tone}`, textTransform: "uppercase" }}>{children}</span>;
 }
 
+/** Below this cell-voltage spread the per-cell bars carry no real signal — min-max scaling
+ *  just amplifies noise — so they fade out. (The imbalance WARN threshold is 40 mV.) */
+const TRIVIAL_SPREAD_MV = 10;
+
 export function CellTiles({ item }: { item: FleetItem }) {
   const delta = deltaMv(item);
   if (delta == null) return null;
+  const trivial = delta < TRIVIAL_SPREAD_MV;
 
   const cells = item.cells;
   const hasCells = !!cells && cells.length > 0;
@@ -44,7 +49,8 @@ export function CellTiles({ item }: { item: FleetItem }) {
             <div className="eyebrow">{t.label}</div>
             <div className="mono" style={{ fontSize: 14, marginTop: 4 }}>{t.v.toFixed(3)} V</div>
             {t.bar && (
-              <div style={{ marginTop: 6 }}>
+              <div style={{ marginTop: 6, opacity: trivial ? 0.2 : 1, transition: "opacity .4s ease" }}
+                title={trivial ? `Cells within ${TRIVIAL_SPREAD_MV} mV — balanced; bars carry no signal` : undefined}>
                 <Bar frac={span > 0 ? (t.v - lo) / span : 0} color="var(--text-3)" />
               </div>
             )}
