@@ -477,8 +477,16 @@ per-pack GPS + discharge series). Journey goes **live** when the selected window
 the trail re-polls every 15 s (`useTrack` refreshMs), a pulsing ♿ marker tracks the chair off
 the live WS fleet feed (hidden when the freshest fix is >120 s old), the camera follows until
 the user pans (dragstart breaks follow unconditionally — Leaflet dragstart is user-only; a
-⌖ FOLLOW button re-locks), and map fit is keyed to the selected window so live refreshes never
-yank pan/zoom (`web/src/v2/model/live.ts` + `cleanTrack` still applies). `leaflet` is now a `web/` dependency (its CSS ships only in the
+persistent crosshair **re-center** button re-locks — on both platforms, replacing the old
+⌖ FOLLOW), and map fit is keyed to the selected window so live refreshes never yank pan/zoom
+(`web/src/v2/model/live.ts` + `cleanTrack` still applies). **Mobile Journey is map-first**
+(2026-07-13, from the user's design handoff): a non-scrolling 100dvh column — toolbar, map
+filling everything, and a compact line dock (`JourneyDock.tsx` + tested `model/dock.ts`):
+trip line (DIST·ACT·TRN·PEAK), pair CAP bar (weaker pack, alert-band colors), and a
+single-direction FLOW bar (|Σ power| vs 600 W; amber→red = OUT, green = REGEN/CHG). Playback,
+energy chart, and the side dock are desktop-only; mobile gets on-map overlays instead
+(TRAIL·metric chip, LIVE·GPS badge, legend). `settings.mapMetricPref` now actually colors the
+trail (`socColor`, alert bands) so the chip is honest. `leaflet` is now a `web/` dependency (its CSS ships only in the
 `/v2/` chunk; v1 carries zero leaflet references). **Device admin** (enroll-code QR, device list,
 revoke — a port of v1's `AdminDevices`, reusing the admin `/web/devices` + `/web/enroll-codes`
 endpoints) lives as a **Devices section inside Settings** (`DevicesPanel.tsx`), not a separate nav
