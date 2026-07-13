@@ -473,7 +473,12 @@ editable per-base notes, backed by `GET /web/trends`, `GET /web/charge-sessions`
 date nav, a Leaflet base map with CARTO dark/light tiles, a discharge-colored trail
 green/amber/red by |power|, dashed transit legs, hotspot markers, playback scrubber, and an
 energy-over-distance chart, backed by the new read-only `GET /web/track` endpoint — 15 s-bucketed
-per-pack GPS + discharge series). `leaflet` is now a `web/` dependency (its CSS ships only in the
+per-pack GPS + discharge series). Journey goes **live** when the selected window includes now:
+the trail re-polls every 15 s (`useTrack` refreshMs), a pulsing ♿ marker tracks the chair off
+the live WS fleet feed (hidden when the freshest fix is >120 s old), the camera follows until
+the user pans (dragstart breaks follow unconditionally — Leaflet dragstart is user-only; a
+⌖ FOLLOW button re-locks), and map fit is keyed to the selected window so live refreshes never
+yank pan/zoom (`web/src/v2/model/live.ts` + `cleanTrack` still applies). `leaflet` is now a `web/` dependency (its CSS ships only in the
 `/v2/` chunk; v1 carries zero leaflet references). **Device admin** (enroll-code QR, device list,
 revoke — a port of v1's `AdminDevices`, reusing the admin `/web/devices` + `/web/enroll-codes`
 endpoints) lives as a **Devices section inside Settings** (`DevicesPanel.tsx`), not a separate nav
