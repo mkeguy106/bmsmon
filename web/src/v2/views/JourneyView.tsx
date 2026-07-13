@@ -159,6 +159,7 @@ export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
   const summary = useMemo(() => tripSummary(points, cumMi), [points, cumMi]);
 
   const hasTrip = points.length > 0;
+  const hasMapOverlayContent = points.length > 0 || live != null;
 
   // Clamp the cursor into range whenever the track changes (0 when empty).
   useEffect(() => {
@@ -176,7 +177,7 @@ export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
   const cur = points[ci];
   const curKind: SegKind = segKinds[ci] ?? "idle";
 
-  const mapHeight = mobile ? 380 : 480;
+  const mapHeight = 480;
 
   return (
     <div style={mobile
@@ -226,30 +227,40 @@ export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
 
       {mobile ? (
         <>
-          <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+          <div style={{ flex: 1, minHeight: 0, position: "relative", overflow: "hidden" }}>
             <JourneyMap points={points} segKinds={segKinds} hotspots={hotspots}
               cursorIndex={Math.max(0, points.length - 1)} theme={theme} live={live} fitKey={fitKey}
-              metric={mapMetric} emptyText={isLive ? "Waiting for GPS…" : "No GPS trip recorded"} />
-            <span className="mono" style={{ ...overlayChrome, top: 12, left: 12, color: "var(--text-2)" }}>
-              TRAIL · {mapMetric.toUpperCase()}
-            </span>
+              metric={mapMetric} emptyText={isLive ? "Waiting for GPS…" : "No GPS trip recorded"} fill />
+            {hasMapOverlayContent && (
+              <>
+                {/* Overlay chrome is intentionally dark in both themes, so its text is pinned light. */}
+                <span className="mono" style={{ ...overlayChrome, top: 12, left: 12, color: "#d4d4d8" }}>
+                  TRAIL · {mapMetric.toUpperCase()}
+                </span>
+                <span className="mono" style={{ ...overlayChrome, bottom: 12, left: 12, color: "#a1a1aa",
+                  display: "flex", gap: 9 }}>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                    <span style={{ width: 12, height: 3, borderRadius: 2, background: "#71717a" }} />transit
+                  </span>
+                  {(mapMetric === "soc"
+                    ? ([["ok", "var(--ok)"], ["low", "var(--warn)"], ["crit", "var(--live)"]] as const)
+                    : ([["light", "var(--ok)"], ["mod", "var(--warn)"], ["heavy", "var(--live)"]] as const))
+                    .map(([label, color]) => (
+                      <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                        <span style={{ width: 12, height: 3, borderRadius: 2, background: color }} />{label}
+                      </span>
+                    ))}
+                </span>
+              </>
+            )}
             {isLive && (
-              <span className="mono" style={{ ...overlayChrome, top: 12, right: 12, color: "var(--text)",
+              <span className="mono" style={{ ...overlayChrome, top: 12, right: 12, color: "#e4e4e7",
                 display: "flex", alignItems: "center", gap: 6 }}>
                 <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--ok)",
                   boxShadow: "0 0 0 3px rgba(34,197,94,.2)" }} />
                 LIVE · GPS
               </span>
             )}
-            <span className="mono" style={{ ...overlayChrome, bottom: 12, left: 12, color: "var(--text-3)",
-              display: "flex", gap: 9 }}>
-              {([["transit", "var(--text-4)"], ["light", "var(--ok)"], ["mod", "var(--warn)"], ["heavy", "var(--live)"]] as const)
-                .map(([label, color]) => (
-                  <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                    <span style={{ width: 12, height: 3, borderRadius: 2, background: color }} />{label}
-                  </span>
-                ))}
-            </span>
           </div>
           <JourneyDock summary={summary} packs={base?.packs ?? []} />
         </>

@@ -29,6 +29,11 @@ describe("dockCapacity", () => {
     expect(dockCapacity([pack("A", { soc: 24 })]).band).toBe("warn");
     expect(dockCapacity([pack("A", { soc: 12 })]).band).toBe("crit");
   });
+  it("bands from raw soc before rounding: 30.4 rounds to pct 30 but bands ok (raw > 30)", () => {
+    const c = dockCapacity([pack("A", { soc: 30.4 })]);
+    expect(c.pct).toBe(30);
+    expect(c.band).toBe("ok");
+  });
   it("disconnected packs don't drive pct but still show in detail with a dash", () => {
     const c = dockCapacity([pack("A", { soc: 69 }), pack("B", { soc: null }, false)]);
     expect(c.pct).toBe(69);

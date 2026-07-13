@@ -29,10 +29,10 @@ function tileUrl(theme: "dark" | "light"): string {
 }
 const TILE_ATTRIB = "© OpenStreetMap contributors © CARTO";
 
-export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, live, fitKey, metric, emptyText }: {
+export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, live, fitKey, metric, emptyText, fill }: {
   points: TrackPoint[]; segKinds: SegKind[]; hotspots: Hotspot[]; cursorIndex: number;
   theme: "dark" | "light"; live: LivePos | null; fitKey: string;
-  metric: "power" | "soc"; emptyText?: string;
+  metric: "power" | "soc"; emptyText?: string; fill?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -51,11 +51,13 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
   const hasMapContent = hasPoints || live != null;
 
   // --- Map lifecycle: init when we have a trip (or a live fix), tear down on unmount / going empty.
+  //     Mobile (fill) disables the zoom control — the TRAIL chip overlay sits where it would
+  //     render, and pinch-zoom covers the gesture anyway.
   useEffect(() => {
     if (!hasMapContent) return;
     const el = containerRef.current;
     if (!el) return;
-    const map = L.map(el, { zoomControl: true, attributionControl: true });
+    const map = L.map(el, { zoomControl: !fill, attributionControl: true });
     // harmless default; fitBounds/follow overrides once the trail draws or a live fix arrives
     map.setView(live ? [live.lat, live.lon] : [0, 0], live ? 17 : 2);
     mapRef.current = map;
@@ -247,7 +249,7 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
   if (!hasMapContent) {
     return (
       <div style={{
-        height: "100%", minHeight: 360, display: "flex", alignItems: "center",
+        height: "100%", minHeight: fill ? 0 : 360, display: "flex", alignItems: "center",
         justifyContent: "center", background: "var(--panel-3)", border: "1px solid var(--border)",
         borderRadius: 8, color: "var(--text-4)", fontSize: 13,
       }}>
@@ -259,7 +261,7 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
   return (
     <div style={{ position: "relative", height: "100%" }}>
       <div ref={containerRef} style={{
-        height: "100%", minHeight: 360, borderRadius: 8, overflow: "hidden",
+        height: "100%", minHeight: fill ? 0 : 360, borderRadius: 8, overflow: "hidden",
         border: "1px solid var(--border)", background: "var(--panel-3)",
       }} />
       <button className="recenter-btn" aria-label="Re-center map" onClick={recenter}>

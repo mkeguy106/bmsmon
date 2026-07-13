@@ -13,11 +13,13 @@ export interface DockCap { pct: number | null; detail: string; band: "ok" | "war
 /** Pair capacity: the weaker reachable pack ends the trip; per-pack detail keeps A/B visible. */
 export function dockCapacity(packs: BasePack[]): DockCap {
   const reachable = packs.filter((p) => p.connected && p.item.soc != null);
-  const pct = reachable.length ? Math.round(Math.min(...reachable.map((p) => p.item.soc!))) : null;
+  const rawMin = reachable.length ? Math.min(...reachable.map((p) => p.item.soc!)) : null;
+  const pct = rawMin != null ? Math.round(rawMin) : null;
   const detail = packs.length > 1
     ? packs.map((p) => `${p.letter}${p.item.soc != null ? Math.round(p.item.soc) : "—"}`).join("·")
     : "";
-  const band = pct == null || pct > 30 ? "ok" : pct > 15 ? "warn" : "crit";
+  // Band from the RAW min soc (pre-rounding) so CAP and socColor agree at boundaries.
+  const band = rawMin == null || rawMin > 30 ? "ok" : rawMin > 15 ? "warn" : "crit";
   return { pct, detail, band };
 }
 
