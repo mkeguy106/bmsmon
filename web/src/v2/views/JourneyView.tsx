@@ -121,7 +121,7 @@ export function JourneyView({ data, theme, unit: _unit, mobile }: {
   const base = bases.find((b) => b.id === DAILY_DRIVER_BASE) ?? bases[0];
   const addresses = useMemo(() => (base ? base.packs.map((p) => p.item.address) : []), [base]);
 
-  const isLive = isWindowLive(toMs, data.now);
+  const isLive = isWindowLive(fromMs, toMs, data.now);
   const rawPoints = useTrack(addresses, fromMs, toMs, isLive ? LIVE_REFRESH_MS : undefined);
   // Cleaned at render time (spike rejection / stay snapping / smoothing) — raw data stays
   // raw in the DB; the map, miles, energy chart, and playback all consume the cleaned track.

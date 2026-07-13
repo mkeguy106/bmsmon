@@ -9,10 +9,14 @@ import { mergeBaseTracks } from "./model/journey";
  * Fetches `getTrack` for each address in parallel, with a per-address `.catch(() => null)`
  * so one failing pack doesn't sink the whole trip. Surviving tracks are combined with
  * `mergeBaseTracks` (align by t, sum power/current, mean coords, min soc). Refetch fires
- * whenever the address set OR the window changes (keyed on
- * `addresses.join(",") + ":" + fromMs + ":" + toMs`). An `alive` guard drops a response
- * from a superseded request, and the last good track is kept on total failure so a
- * transient fetch error doesn't blank the chart. When [refreshMs] is set, the same window is refetched on that interval (live mode); cleanup clears the timer.
+ * whenever the address set, window, or `refreshMs` changes (keyed on
+ * `addresses.join(",") + ":" + fromMs + ":" + toMs + ":" + refreshMs`). Each such key change
+ * also clears `points` to `[]` immediately, before the new fetch resolves, so consumers never
+ * draw/fit the previous window's track against the new one. An `alive` guard drops a response
+ * from a superseded request, and the last good track is kept on total failure — but only
+ * *within* a window: interval refetch failures (same key) keep the last good track, while a
+ * window/address change always clears first. When `refreshMs` is set, the same window is
+ * refetched on that interval (live mode); cleanup clears the timer.
  */
 export function useTrack(
   addresses: string[],
@@ -29,6 +33,10 @@ export function useTrack(
       setPoints([]);
       return;
     }
+    // Window/addresses changed: drop the previous window's track immediately so consumers
+    // never fit/draw the old day against the new window. (The refresh interval reuses this
+    // effect only via key changes, so live re-polls do NOT pass here.)
+    setPoints([]);
     const load = () => {
       Promise.all(
         addresses.map((a) => getTrack(a, fromMs, toMs).catch(() => null)),

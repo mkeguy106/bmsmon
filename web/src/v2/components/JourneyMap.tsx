@@ -40,6 +40,9 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
   const cursorRef = useRef<L.CircleMarker | null>(null);
   const liveMarkerRef = useRef<L.Marker | null>(null);
   const programmaticMove = useRef(false);
+  const lastFitKeyRef = useRef<string | null>(null);
+  const lastFitPointsRef = useRef<TrackPoint[] | null>(null);
+  const engagedKeyRef = useRef<string | null>(null);
   const [mapReady, setMapReady] = useState(false);
   const [following, setFollowing] = useState(false);
 
@@ -63,6 +66,9 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
       trailRef.current = null;
       cursorRef.current = null;
       liveMarkerRef.current = null;
+      lastFitKeyRef.current = null;
+      lastFitPointsRef.current = null;
+      engagedKeyRef.current = null;
       setMapReady(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -83,8 +89,15 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
     return () => { map.off("dragstart", onDragStart); map.off("zoomstart", onZoomStart); };
   }, [mapReady]);
 
-  // Going live (or coming back to a live day) re-engages follow; leaving live disengages.
-  useEffect(() => { setFollowing(live != null); }, [live != null, fitKey]);
+  // Follow engages once per window when live begins — NOT on every stale→fresh recovery,
+  // which would re-seize a camera the user deliberately panned away mid-session.
+  useEffect(() => {
+    if (live == null) { setFollowing(false); return; }
+    if (engagedKeyRef.current !== fitKey) {
+      engagedKeyRef.current = fitKey;
+      setFollowing(true);
+    }
+  }, [live == null, fitKey]);
 
   // --- Theme tiles: swap the CARTO layer when the app theme flips.
   useEffect(() => {
@@ -134,11 +147,20 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
 
   }, [points, segKinds, hotspots, theme, mapReady]);
 
-  // --- Fit the map to the trip once per selected window — NOT on theme flip, so a
-  //     light/dark toggle re-tiles/re-colors without discarding the user's pan/zoom.
+  // --- Fit the map to the trip once per selected window, when that window's OWN points
+  //     arrive. Three renders must NOT fit: (1) a live refresh of an already-fitted window
+  //     (lastFitKeyRef === fitKey); (2) the stale render right after a window change, where
+  //     `points` is still the previous window's array — useTrack keeps the last-good track
+  //     while the new fetch is in flight, so keying on fitKey alone would fit to the OLD
+  //     day's bounds (same array identity we already fitted, caught via lastFitPointsRef);
+  //     (3) empty points.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || points.length === 0) return;
+    if (lastFitKeyRef.current === fitKey) return;
+    if (points === lastFitPointsRef.current) return;
+    lastFitKeyRef.current = fitKey;
+    lastFitPointsRef.current = points;
     map.invalidateSize();
     const bounds = L.latLngBounds(points.map((p) => [p.lat, p.lon] as [number, number]));
     if (bounds.isValid()) {
@@ -146,10 +168,7 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
       map.fitBounds(bounds, { padding: [24, 24], maxZoom: 17 });
       map.once("moveend", () => { programmaticMove.current = false; });
     }
-    // Fit once per selected window (fitKey) — NEVER per live refresh of `points`, which
-    // would yank the user's pan/zoom every 15 s.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fitKey, mapReady]);
+  }, [points, fitKey, mapReady]);
 
   // --- Playback cursor: a single marker walked to points[cursorIndex].
   useEffect(() => {

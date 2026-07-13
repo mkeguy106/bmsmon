@@ -6,10 +6,17 @@ const item = (address: string, ts_ms: number, lat: number | null): FleetItem =>
   ({ address, ts_ms, lat, lon: lat == null ? null : -75 } as FleetItem);
 
 describe("isWindowLive", () => {
-  it("live only while the window extends past now", () => {
-    expect(isWindowLive(1000, 999)).toBe(true);
-    expect(isWindowLive(1000, 1000)).toBe(false);
-    expect(isWindowLive(1000, 1001)).toBe(false);
+  it("true when the window contains now", () => {
+    expect(isWindowLive(500, 1500, 1000)).toBe(true);
+  });
+  it("false when now equals the window end (toMs)", () => {
+    expect(isWindowLive(500, 1000, 1000)).toBe(false);
+  });
+  it("false for a fully future window", () => {
+    expect(isWindowLive(1001, 2000, 1000)).toBe(false);
+  });
+  it("false for a fully past window", () => {
+    expect(isWindowLive(0, 500, 1000)).toBe(false);
   });
 });
 

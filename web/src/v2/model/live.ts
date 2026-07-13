@@ -11,9 +11,10 @@ export const LIVE_STALE_MS = 120_000;
 
 export interface LivePos { lat: number; lon: number; tsMs: number }
 
-/** Live = the selected window extends past now (day = today, or a range ending today). */
-export function isWindowLive(toMs: number, nowMs: number): boolean {
-  return toMs > nowMs;
+/** Live = the selected window CONTAINS now (day = today, or a range spanning today). A
+ *  fully-future window (e.g. tomorrow) is NOT live — there's nothing to poll yet. */
+export function isWindowLive(fromMs: number, toMs: number, nowMs: number): boolean {
+  return fromMs <= nowMs && nowMs < toMs;
 }
 
 /** Freshest GPS-carrying sample among the base's packs, or null when stale/absent. */
