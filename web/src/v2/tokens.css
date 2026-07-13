@@ -22,3 +22,27 @@ body { margin:0; background:var(--app-bg); color:var(--text);
 .eyebrow { font-family:"JetBrains Mono",monospace; font-size:9.5px; letter-spacing:.13em;
   text-transform:uppercase; color:var(--text-4); }
 .card { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:16px; }
+
+/* Journey live marker: wheelchair badge + pulse ring (Leaflet divIcon content). */
+.chair-marker {
+  display: flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; border-radius: 50%;
+  background: var(--ok); color: #fff; font-size: 18px; line-height: 1;
+  border: 2px solid #fff; box-shadow: 0 1px 6px rgba(0, 0, 0, 0.45);
+  position: relative;
+}
+.chair-marker::after {
+  content: ""; position: absolute; inset: -6px; border-radius: 50%;
+  border: 2px solid var(--ok); opacity: 0;
+  animation: chair-pulse 2s ease-out infinite;
+}
+@keyframes chair-pulse {
+  0% { transform: scale(0.7); opacity: 0.8; }
+  70% { transform: scale(1.25); opacity: 0; }
+  100% { opacity: 0; }
+}
+.follow-btn {
+  position: absolute; right: 10px; bottom: 10px; z-index: 1000;
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 10px; font-size: 12px; cursor: pointer;
+}

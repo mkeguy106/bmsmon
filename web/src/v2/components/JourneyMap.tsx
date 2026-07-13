@@ -3,6 +3,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import type { TrackPoint } from "../track";
 import { dischargeColor, type SegKind, type Hotspot } from "../model/journey";
+import type { LivePos } from "../model/live";
 
 /** Resolve a CSS custom property off :root to its concrete computed value. */
 function cssVar(name: string): string {
@@ -28,25 +29,31 @@ function tileUrl(theme: "dark" | "light"): string {
 }
 const TILE_ATTRIB = "© OpenStreetMap contributors © CARTO";
 
-export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme }: {
-  points: TrackPoint[]; segKinds: SegKind[]; hotspots: Hotspot[]; cursorIndex: number; theme: "dark" | "light";
+export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, live = null, fitKey = "" }: {
+  points: TrackPoint[]; segKinds: SegKind[]; hotspots: Hotspot[]; cursorIndex: number;
+  theme: "dark" | "light"; live?: LivePos | null; fitKey?: string;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
   const tileRef = useRef<L.TileLayer | null>(null);
   const trailRef = useRef<L.LayerGroup | null>(null);
   const cursorRef = useRef<L.CircleMarker | null>(null);
+  const liveMarkerRef = useRef<L.Marker | null>(null);
+  const programmaticMove = useRef(false);
   const [mapReady, setMapReady] = useState(false);
+  const [following, setFollowing] = useState(false);
 
   const hasPoints = points.length > 0;
+  const hasMapContent = hasPoints || live != null;
 
-  // --- Map lifecycle: init when we have a trip, tear down on unmount / going empty.
+  // --- Map lifecycle: init when we have a trip (or a live fix), tear down on unmount / going empty.
   useEffect(() => {
-    if (!hasPoints) return;
+    if (!hasMapContent) return;
     const el = containerRef.current;
     if (!el) return;
     const map = L.map(el, { zoomControl: true, attributionControl: true });
-    map.setView([0, 0], 2); // harmless default; fitBounds overrides once the trail draws
+    // harmless default; fitBounds/follow overrides once the trail draws or a live fix arrives
+    map.setView(live ? [live.lat, live.lon] : [0, 0], live ? 17 : 2);
     mapRef.current = map;
     setMapReady(true);
     return () => {
@@ -55,9 +62,25 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme }: {
       tileRef.current = null;
       trailRef.current = null;
       cursorRef.current = null;
+      liveMarkerRef.current = null;
       setMapReady(false);
     };
-  }, [hasPoints]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasMapContent]);
+
+  // User-initiated pan/zoom breaks follow. Programmatic moves are guarded so panTo/fitBounds
+  // never count as the user grabbing the map.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    const breakFollow = () => { if (!programmaticMove.current) setFollowing(false); };
+    map.on("dragstart", breakFollow);
+    map.on("zoomstart", breakFollow);
+    return () => { map.off("dragstart", breakFollow); map.off("zoomstart", breakFollow); };
+  }, [mapReady]);
+
+  // Going live (or coming back to a live day) re-engages follow; leaving live disengages.
+  useEffect(() => { setFollowing(live != null); }, [live != null, fitKey]);
 
   // --- Theme tiles: swap the CARTO layer when the app theme flips.
   useEffect(() => {
@@ -107,15 +130,22 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme }: {
 
   }, [points, segKinds, hotspots, theme, mapReady]);
 
-  // --- Fit the map to the trip once per track change — NOT on theme flip, so a
+  // --- Fit the map to the trip once per selected window — NOT on theme flip, so a
   //     light/dark toggle re-tiles/re-colors without discarding the user's pan/zoom.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || points.length === 0) return;
     map.invalidateSize();
     const bounds = L.latLngBounds(points.map((p) => [p.lat, p.lon] as [number, number]));
-    if (bounds.isValid()) map.fitBounds(bounds, { padding: [24, 24], maxZoom: 17 });
-  }, [points, mapReady]);
+    if (bounds.isValid()) {
+      programmaticMove.current = true;
+      map.fitBounds(bounds, { padding: [24, 24], maxZoom: 17 });
+      map.once("moveend", () => { programmaticMove.current = false; });
+    }
+    // Fit once per selected window (fitKey) — NEVER per live refresh of `points`, which
+    // would yank the user's pan/zoom every 15 s.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fitKey, mapReady]);
 
   // --- Playback cursor: a single marker walked to points[cursorIndex].
   useEffect(() => {
@@ -139,7 +169,36 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme }: {
     }
   }, [cursorIndex, points, mapReady, theme]);
 
-  if (!hasPoints) {
+  // --- Live marker: the wheelchair's current position, walked as fresh fixes arrive.
+  //     Pans the map to follow while `following` is engaged (guarded so the pan itself
+  //     doesn't get mistaken for a user drag and break follow).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (!live) {
+      if (liveMarkerRef.current) { map.removeLayer(liveMarkerRef.current); liveMarkerRef.current = null; }
+      return;
+    }
+    const latlng: [number, number] = [live.lat, live.lon];
+    if (liveMarkerRef.current) {
+      liveMarkerRef.current.setLatLng(latlng);
+    } else {
+      const icon = L.divIcon({
+        className: "",                    // suppress Leaflet's default divIcon box styling
+        html: '<div class="chair-marker">♿</div>',
+        iconSize: [34, 34], iconAnchor: [17, 17],
+      });
+      liveMarkerRef.current = L.marker(latlng, { icon, interactive: false, zIndexOffset: 1000 }).addTo(map);
+    }
+    if (following) {
+      programmaticMove.current = true;
+      map.panTo(latlng);
+      // Leaflet fires moveend after the pan settles; clearing on it re-arms the guard.
+      map.once("moveend", () => { programmaticMove.current = false; });
+    }
+  }, [live, following, mapReady]);
+
+  if (!hasMapContent) {
     return (
       <div style={{
         height: "100%", minHeight: 360, display: "flex", alignItems: "center",
@@ -152,9 +211,14 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme }: {
   }
 
   return (
-    <div ref={containerRef} style={{
-      height: "100%", minHeight: 360, borderRadius: 8, overflow: "hidden",
-      border: "1px solid var(--border)", background: "var(--panel-3)",
-    }} />
+    <div style={{ position: "relative", height: "100%" }}>
+      <div ref={containerRef} style={{
+        height: "100%", minHeight: 360, borderRadius: 8, overflow: "hidden",
+        border: "1px solid var(--border)", background: "var(--panel-3)",
+      }} />
+      {live != null && !following && (
+        <button className="follow-btn mono" onClick={() => setFollowing(true)}>⌖ FOLLOW</button>
+      )}
+    </div>
   );
 }
