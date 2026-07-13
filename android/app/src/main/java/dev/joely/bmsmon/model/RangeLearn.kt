@@ -59,6 +59,10 @@ private const val WIN_MAX_ACCURACY_M = 50f
 private const val CHAIR_MIN_SPEED_MPS = 0.4f
 private const val CHAIR_MAX_SPEED_MPS = 4.5f
 
+// Spike rejection bounds (TS sibling: web/src/v2/model/cleanTrack.ts — keep in sync).
+private const val VEHICLE_MAX_MPS = 45f
+private const val ABSURD_MPS = 60f
+
 private const val METERS_PER_MILE = 1609.34f
 private const val METERS_PER_DEG = 111_320.0
 
@@ -119,6 +123,33 @@ private fun windowedSegments(fixes: List<Fix>): List<WinSeg> {
     return out
 }
 
+private fun speedMps(a: Fix, b: Fix): Float {
+    val dtS = (b.tsMs - a.tsMs) / 1000f
+    if (dtS <= 0f) return Float.POSITIVE_INFINITY
+    return distanceM(a.lat, a.lon, b.lat, b.lon) / dtS
+}
+
+/** Drop out-and-back spike fixes: a fix demanding impossible speed both to reach AND to
+ *  leave — at chair speed while discharging, vehicle speed otherwise — while its neighbors
+ *  agree with each other, is a GPS lie. Sustained movement (vehicle legs, reacquires) keeps. */
+private fun rejectSpikes(fixes: List<Fix>): List<Fix> {
+    val out = ArrayList<Fix>(fixes.size)
+    for (i in fixes.indices) {
+        val b = fixes[i]
+        if (out.isEmpty()) { out.add(b); continue }
+        val a = out.last()
+        val vIn = speedMps(a, b)
+        if (vIn > ABSURD_MPS) continue
+        val bound = if (a.discharging || b.discharging) CHAIR_MAX_SPEED_MPS else VEHICLE_MAX_MPS
+        if (vIn > bound) {
+            val c = fixes.getOrNull(i + 1)
+            if (c != null && speedMps(b, c) > bound && speedMps(a, c) <= bound) continue
+        }
+        out.add(b)
+    }
+    return out
+}
+
 private fun accumulate(rows: List<RangeRow>, zone: ZoneId): Map<LocalDate, DayStats> {
     val days = HashMap<LocalDate, DayStats>()
     for (i in 1 until rows.size) {
@@ -138,7 +169,7 @@ private fun accumulate(rows: List<RangeRow>, zone: ZoneId): Map<LocalDate, DaySt
     // Chair distance: windowed displacement at chair speeds WHILE DISCHARGING. In the van or
     // on a train the chair draws nothing, so GPS movement without discharge is a vehicle ride
     // and teaches no miles, whatever its speed.
-    for (seg in windowedSegments(bucketedFixes(rows))) {
+    for (seg in windowedSegments(rejectSpikes(bucketedFixes(rows)))) {
         if (!seg.discharging) continue
         if (seg.vel < CHAIR_MIN_SPEED_MPS || seg.vel > CHAIR_MAX_SPEED_MPS) continue
         val day = Instant.ofEpochMilli(seg.tsMs).atZone(zone).toLocalDate()

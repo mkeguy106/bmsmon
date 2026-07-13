@@ -131,6 +131,27 @@ class RangeLearnTest {
         assertEquals(10.73f, (p.whPerMile.lo + p.whPerMile.hi) / 2f, 0.4f)
     }
 
+    @Test fun teleportSpikeIsBridgedNotCounted() {
+        // 90 m / 30 s cruise (10 fixes, 810 m total) with the 9:02:30 fix teleported 500 m
+        // off-path. In/out speeds ~20/14 m/s are impossible for a discharging chair while
+        // the neighbors agree with each other (180 m / 60 s), so the spike fix is DROPPED
+        // and the bridged A→C window keeps the real distance — the day still qualifies and
+        // learns the clean 10.73 Wh/mi. Without rejection, the two spike-adjacent windows
+        // fall outside the chair speed band and their real distance is lost: the day drops
+        // under the 0.5 mi outing bar and stays seeded. This pins the recovery behavior.
+        val rows = (1..3).flatMap { d ->
+            (0..9).map { k ->
+                val onPathM = k * 90
+                val m = if (k == 5) onPathM + 500 else onPathM
+                RangeRow(ts(d, 9) + k * 30_000L, "Discharging", 72f,
+                    lat = 40.0 + m / 111_320.0, lon = -75.0, gpsAccuracyM = 10f, regen = false)
+            } + idleFiller(d, 10, 13)
+        }
+        val p = learnRangeParams(rows, zone, nowMs = ts(4, 0))
+        // Burn: 9 × 30 s × 72 W = 5.4 Wh; distance after bridging: 810 m = 0.50331 mi → 10.73.
+        assertEquals(10.73f, (p.whPerMile.lo + p.whPerMile.hi) / 2f, 0.3f)
+    }
+
     @Test fun fullSpeedCruiseCounts() {
         // The chair tops out around 9 mph (~4.0 m/s, a bit more downhill) — a 4.2 m/s
         // windowed cruise must count as chair driving, not vehicle. 126 m / 30 s steps.
