@@ -29,10 +29,10 @@ function tileUrl(theme: "dark" | "light"): string {
 }
 const TILE_ATTRIB = "© OpenStreetMap contributors © CARTO";
 
-export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, live, fitKey, metric, emptyText, fill }: {
+export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, live, liveStale, fitKey, metric, emptyText, fill, showTrail = true }: {
   points: TrackPoint[]; segKinds: SegKind[]; hotspots: Hotspot[]; cursorIndex: number;
-  theme: "dark" | "light"; live: LivePos | null; fitKey: string;
-  metric: "power" | "soc"; emptyText?: string; fill?: boolean;
+  theme: "dark" | "light"; live: LivePos | null; liveStale?: boolean; fitKey: string;
+  metric: "power" | "soc"; emptyText?: string; fill?: boolean; showTrail?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -116,7 +116,8 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
     const map = mapRef.current;
     if (!map) return;
     if (trailRef.current) { map.removeLayer(trailRef.current); trailRef.current = null; }
-    if (points.length === 0) return;
+    // Trail toggled off: the map keeps the live/last-known marker but draws no history.
+    if (!showTrail || points.length === 0) return;
 
     const group = L.layerGroup();
     for (let i = 1; i < points.length; i++) {
@@ -151,7 +152,7 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
     group.addTo(map);
     trailRef.current = group;
 
-  }, [points, segKinds, hotspots, theme, metric, mapReady]);
+  }, [points, segKinds, hotspots, theme, metric, showTrail, mapReady]);
 
   // --- Fit the map to the trip once per selected window, when that window's OWN points
   //     arrive. Three renders must NOT fit: (1) a live refresh of an already-fitted window
@@ -209,14 +210,16 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
       return;
     }
     const latlng: [number, number] = [live.lat, live.lon];
+    // Stale ("last known") renders the chair grey and un-pulsed; fresh renders it live.
+    const icon = L.divIcon({
+      className: "",                      // suppress Leaflet's default divIcon box styling
+      html: `<div class="chair-marker${liveStale ? " chair-marker-stale" : ""}">♿</div>`,
+      iconSize: [34, 34], iconAnchor: [17, 17],
+    });
     if (liveMarkerRef.current) {
       liveMarkerRef.current.setLatLng(latlng);
+      liveMarkerRef.current.setIcon(icon);
     } else {
-      const icon = L.divIcon({
-        className: "",                    // suppress Leaflet's default divIcon box styling
-        html: '<div class="chair-marker">♿</div>',
-        iconSize: [34, 34], iconAnchor: [17, 17],
-      });
       liveMarkerRef.current = L.marker(latlng, { icon, interactive: false, zIndexOffset: 1000 }).addTo(map);
     }
     if (following) {
@@ -225,7 +228,7 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
       // Leaflet fires moveend after the pan settles; clearing on it re-arms the guard.
       map.once("moveend", () => { programmaticMove.current = false; });
     }
-  }, [live, following, mapReady]);
+  }, [live, liveStale, following, mapReady]);
 
   // Re-center: on the chair when live (re-engaging follow), else refit to the trail.
   const recenter = () => {

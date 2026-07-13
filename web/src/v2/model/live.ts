@@ -30,3 +30,15 @@ export function livePosition(
   }
   return best ? { lat: best.lat!, lon: best.lon!, tsMs: best.ts_ms } : null;
 }
+
+/** Freshest GPS fix among the base's packs regardless of age — the "last known" position
+ *  shown (dimmed, with its age) when no fix is fresh enough for [livePosition]. */
+export function lastKnownPosition(items: FleetItem[], addresses: string[]): LivePos | null {
+  const addrs = new Set(addresses);
+  let best: FleetItem | null = null;
+  for (const it of items) {
+    if (!addrs.has(it.address) || it.lat == null || it.lon == null) continue;
+    if (!best || it.ts_ms > best.ts_ms) best = it;
+  }
+  return best ? { lat: best.lat!, lon: best.lon!, tsMs: best.ts_ms } : null;
+}

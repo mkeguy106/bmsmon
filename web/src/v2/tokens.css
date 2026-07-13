@@ -49,3 +49,6 @@ body { margin:0; background:var(--app-bg); color:var(--text);
   /* Chrome is intentionally dark in both themes, so its icon color is pinned light. */
   color: #d4d4d8; cursor: pointer;
 }
+/* "Last known" chair marker: grey, no pulse — the position is history, not live. */
+.chair-marker-stale { background: #52525b; }
+.chair-marker-stale::after { animation: none; }

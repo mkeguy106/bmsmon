@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { FleetItem } from "../../types";
-import { LIVE_STALE_MS, isWindowLive, livePosition } from "./live";
+import { LIVE_STALE_MS, isWindowLive, lastKnownPosition, livePosition } from "./live";
 
 const item = (address: string, ts_ms: number, lat: number | null): FleetItem =>
   ({ address, ts_ms, lat, lon: lat == null ? null : -75 } as FleetItem);
@@ -46,5 +46,21 @@ describe("livePosition", () => {
   it("null for empty addresses or no matches", () => {
     expect(livePosition([item("A", now, 40)], [], now)).toBeNull();
     expect(livePosition([], ["A"], now)).toBeNull();
+  });
+});
+
+describe("lastKnownPosition", () => {
+  const now = 1_000_000;
+  it("returns the freshest GPS fix regardless of age", () => {
+    const items = [
+      item("A", now - LIVE_STALE_MS * 10, 40.1),
+      item("B", now - LIVE_STALE_MS * 3, 40.2),
+    ];
+    const p = lastKnownPosition(items, ["A", "B"]);
+    expect(p).toEqual({ lat: 40.2, lon: -75, tsMs: now - LIVE_STALE_MS * 3 });
+  });
+  it("null when no pack has a fix or addresses empty", () => {
+    expect(lastKnownPosition([item("A", now, null)], ["A"])).toBeNull();
+    expect(lastKnownPosition([item("A", now, 40)], [])).toBeNull();
   });
 });

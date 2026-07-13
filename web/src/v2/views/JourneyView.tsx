@@ -10,7 +10,8 @@ import {
   type SegKind,
 } from "../model/journey";
 import { cleanTrack } from "../model/cleanTrack";
-import { LIVE_REFRESH_MS, isWindowLive, livePosition, type LivePos } from "../model/live";
+import { LIVE_REFRESH_MS, isWindowLive, lastKnownPosition, livePosition, type LivePos } from "../model/live";
+import { relAgo } from "../../util";
 import { JourneyMap } from "../components/JourneyMap";
 import { EnergyDistanceChart } from "../components/EnergyDistanceChart";
 import { Ring } from "../components/Ring";
@@ -19,7 +20,7 @@ import { JourneyDock } from "../components/JourneyDock";
 
 // ── Persisted control state ────────────────────────────────────────────────
 type DateMode = "day" | "range";
-interface JourneyState { dateMode: DateMode; day: string; from: string; to: string }
+interface JourneyState { dateMode: DateMode; day: string; from: string; to: string; showTrail: boolean }
 
 /** Local YYYY-MM-DD for a Date (native <input type="date"> format). */
 function fmtDay(d: Date): string {
@@ -48,7 +49,7 @@ function shiftDay(s: string, delta: number): string {
 }
 
 const DEFAULT_JOURNEY: JourneyState = {
-  dateMode: "day", day: todayStr(), from: todayStr(), to: todayStr(),
+  dateMode: "day", day: todayStr(), from: todayStr(), to: todayStr(), showTrail: true,
 };
 
 const journeyCodec = {
@@ -61,6 +62,7 @@ const journeyCodec = {
         day: typeof o.day === "string" && dayBounds(o.day) ? o.day : todayStr(),
         from: typeof o.from === "string" && dayBounds(o.from) ? o.from : todayStr(),
         to: typeof o.to === "string" && dayBounds(o.to) ? o.to : todayStr(),
+        showTrail: typeof o.showTrail === "boolean" ? o.showTrail : true,
       };
     } catch { return null; }
   },
@@ -132,19 +134,26 @@ export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
   // Cleaned at render time (spike rejection / stay snapping / smoothing) — raw data stays
   // raw in the DB; the map, miles, energy chart, and playback all consume the cleaned track.
   const points = useMemo(() => cleanTrack(rawPoints), [rawPoints]);
-  // Identity-stable live fix: livePosition allocates per call and data.now ticks at 1 Hz,
+  // Identity-stable live fix: the selectors allocate per call and data.now ticks at 1 Hz,
   // so return the PREVIOUS object while the values are unchanged — the map's live-marker
-  // effect then only fires on real movement (or the stale→null hide), not every second.
+  // effect then only fires on real movement (or a fresh↔stale flip), not every second.
+  // Fresh fix wins; otherwise fall back to the LAST KNOWN position (any age), rendered
+  // dimmed with its age in the badge — better than a marker that silently vanishes.
   const liveRef = useRef<LivePos | null>(null);
+  const fresh = isLive ? livePosition(data.items, addresses, data.now) : null;
+  const liveStale = isLive && fresh == null;
   const live = useMemo(() => {
-    const next = isLive ? livePosition(data.items, addresses, data.now) : null;
+    const next = isLive
+      ? (fresh ?? lastKnownPosition(data.items, addresses))
+      : null;
     const prev = liveRef.current;
     if (next && prev && next.lat === prev.lat && next.lon === prev.lon && next.tsMs === prev.tsMs) {
       return prev;
     }
     liveRef.current = next;
     return next;
-  }, [isLive, data.items, addresses, data.now]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLive, fresh, data.items, addresses, data.now]);
   const fitKey = addresses.join(",") + ":" + fromMs + ":" + toMs;
 
   // ── Derived geometry/energy (memoized on the merged track). ──
@@ -229,15 +238,19 @@ export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
         <>
           <div style={{ flex: 1, minHeight: 0, position: "relative", overflow: "hidden" }}>
             <JourneyMap points={points} segKinds={segKinds} hotspots={hotspots}
-              cursorIndex={Math.max(0, points.length - 1)} theme={theme} live={live} fitKey={fitKey}
-              metric={mapMetric} emptyText={isLive ? "Waiting for GPS…" : "No GPS trip recorded"} fill />
+              cursorIndex={Math.max(0, points.length - 1)} theme={theme} live={live}
+              liveStale={liveStale} fitKey={fitKey} metric={mapMetric} showTrail={st.showTrail}
+              emptyText={isLive ? "Waiting for GPS…" : "No GPS trip recorded"} fill />
             {hasMapOverlayContent && (
               <>
                 {/* Overlay chrome is intentionally dark in both themes, so its text is pinned light. */}
-                <span className="mono" style={{ ...overlayChrome, top: 12, left: 12, color: "#d4d4d8" }}>
-                  TRAIL · {mapMetric.toUpperCase()}
-                </span>
-                <span className="mono" style={{ ...overlayChrome, bottom: 12, left: 12, color: "#a1a1aa",
+                <button className="mono" aria-pressed={st.showTrail}
+                  onClick={() => set({ showTrail: !st.showTrail })}
+                  style={{ ...overlayChrome, top: 12, left: 12, cursor: "pointer",
+                    color: st.showTrail ? "#d4d4d8" : "#71717a", font: "inherit" }}>
+                  TRAIL · {st.showTrail ? mapMetric.toUpperCase() : "OFF"}
+                </button>
+                {st.showTrail && <span className="mono" style={{ ...overlayChrome, bottom: 12, left: 12, color: "#a1a1aa",
                   display: "flex", gap: 9 }}>
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
                     <span style={{ width: 14, height: 4, borderRadius: 2, background: "#71717a" }} />transit
@@ -250,15 +263,24 @@ export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
                         <span style={{ width: 14, height: 4, borderRadius: 2, background: color }} />{label}
                       </span>
                     ))}
-                </span>
+                </span>}
               </>
             )}
             {isLive && (
               <span className="mono" style={{ ...overlayChrome, top: 12, right: 12, color: "#e4e4e7",
                 display: "flex", alignItems: "center", gap: 6 }}>
-                <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--ok)",
-                  boxShadow: "0 0 0 3px rgba(34,197,94,.2)" }} />
-                LIVE · GPS
+                {liveStale ? (
+                  <>
+                    <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--warn)" }} />
+                    LAST KNOWN{live ? ` · ${relAgo(live.tsMs, data.now)}` : ""}
+                  </>
+                ) : (
+                  <>
+                    <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--ok)",
+                      boxShadow: "0 0 0 3px rgba(34,197,94,.2)" }} />
+                    LIVE · GPS
+                  </>
+                )}
               </span>
             )}
           </div>
@@ -268,9 +290,18 @@ export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
         <>
           {/* ── Map + dock ── */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 264px", gap: 16 }}>
-            <div style={{ height: mapHeight }}>
+            <div style={{ height: mapHeight, position: "relative" }}>
               <JourneyMap points={points} segKinds={segKinds} hotspots={hotspots}
-                cursorIndex={ci} theme={theme} live={live} fitKey={fitKey} metric={mapMetric} />
+                cursorIndex={ci} theme={theme} live={live} liveStale={liveStale} fitKey={fitKey}
+                metric={mapMetric} showTrail={st.showTrail} />
+              {(points.length > 0 || live != null) && (
+                <button className="mono" aria-pressed={st.showTrail}
+                  onClick={() => set({ showTrail: !st.showTrail })}
+                  style={{ ...overlayChrome, top: 12, right: 12, cursor: "pointer",
+                    color: st.showTrail ? "#d4d4d8" : "#71717a", font: "inherit" }}>
+                  TRAIL · {st.showTrail ? mapMetric.toUpperCase() : "OFF"}
+                </button>
+              )}
             </div>
 
             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
