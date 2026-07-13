@@ -219,7 +219,7 @@ export function JourneyView({ data, theme, unit: _unit, mobile }: {
       <div style={{ display: "grid", gridTemplateColumns: mobile ? "1fr" : "1fr 264px", gap: 16 }}>
         <div style={{ height: mapHeight }}>
           <JourneyMap points={points} segKinds={segKinds} hotspots={hotspots}
-            cursorIndex={ci} theme={theme} live={live} fitKey={fitKey} />
+            cursorIndex={ci} theme={theme} live={live} fitKey={fitKey} metric="power" />
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>

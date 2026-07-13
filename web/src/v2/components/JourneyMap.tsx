@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import type { TrackPoint } from "../track";
-import { dischargeColor, type SegKind, type Hotspot } from "../model/journey";
+import { dischargeColor, socColor, type SegKind, type Hotspot } from "../model/journey";
 import type { LivePos } from "../model/live";
 
 /** Resolve a CSS custom property off :root to its concrete computed value. */
@@ -29,9 +29,10 @@ function tileUrl(theme: "dark" | "light"): string {
 }
 const TILE_ATTRIB = "© OpenStreetMap contributors © CARTO";
 
-export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, live, fitKey }: {
+export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, live, fitKey, metric, emptyText }: {
   points: TrackPoint[]; segKinds: SegKind[]; hotspots: Hotspot[]; cursorIndex: number;
   theme: "dark" | "light"; live: LivePos | null; fitKey: string;
+  metric: "power" | "soc"; emptyText?: string;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -122,7 +123,10 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
       const prev = points[i - 1], cur = points[i];
       const line: [number, number][] = [[prev.lat, prev.lon], [cur.lat, cur.lon]];
       if (kind === "active") {
-        L.polyline(line, { color: trailColor(cur.power_w), weight: 4, opacity: 0.95 }).addTo(group);
+        const color = metric === "soc"
+          ? resolveColor(socColor(cur.soc))
+          : trailColor(cur.power_w);
+        L.polyline(line, { color, weight: 4, opacity: 0.95 }).addTo(group);
       } else {
         L.polyline(line, {
           color: resolveColor("var(--text-4)"), weight: 3, opacity: 0.8, dashArray: "4 6",
@@ -145,7 +149,7 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
     group.addTo(map);
     trailRef.current = group;
 
-  }, [points, segKinds, hotspots, theme, mapReady]);
+  }, [points, segKinds, hotspots, theme, metric, mapReady]);
 
   // --- Fit the map to the trip once per selected window, when that window's OWN points
   //     arrive. Three renders must NOT fit: (1) a live refresh of an already-fitted window
@@ -221,6 +225,25 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
     }
   }, [live, following, mapReady]);
 
+  // Re-center: on the chair when live (re-engaging follow), else refit to the trail.
+  const recenter = () => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (live) {
+      setFollowing(true);
+      programmaticMove.current = true;
+      map.panTo([live.lat, live.lon]);
+      map.once("moveend", () => { programmaticMove.current = false; });
+    } else if (points.length > 0) {
+      const bounds = L.latLngBounds(points.map((p) => [p.lat, p.lon] as [number, number]));
+      if (bounds.isValid()) {
+        programmaticMove.current = true;
+        map.fitBounds(bounds, { padding: [24, 24], maxZoom: 17 });
+        map.once("moveend", () => { programmaticMove.current = false; });
+      }
+    }
+  };
+
   if (!hasMapContent) {
     return (
       <div style={{
@@ -228,7 +251,7 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
         justifyContent: "center", background: "var(--panel-3)", border: "1px solid var(--border)",
         borderRadius: 8, color: "var(--text-4)", fontSize: 13,
       }}>
-        No GPS trip recorded
+        {emptyText ?? "No GPS trip recorded"}
       </div>
     );
   }
@@ -239,9 +262,12 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
         height: "100%", minHeight: 360, borderRadius: 8, overflow: "hidden",
         border: "1px solid var(--border)", background: "var(--panel-3)",
       }} />
-      {live != null && !following && (
-        <button className="follow-btn mono" onClick={() => setFollowing(true)}>⌖ FOLLOW</button>
-      )}
+      <button className="recenter-btn" aria-label="Re-center map" onClick={recenter}>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <circle cx="12" cy="12" r="7" /><circle cx="12" cy="12" r="1.6" fill="currentColor" />
+          <path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
+        </svg>
+      </button>
     </div>
   );
 }
