@@ -10,6 +10,7 @@ import {
   type SegKind,
 } from "../model/journey";
 import { cleanTrack } from "../model/cleanTrack";
+import { LIVE_REFRESH_MS, isWindowLive, livePosition } from "../model/live";
 import { JourneyMap } from "../components/JourneyMap";
 import { EnergyDistanceChart } from "../components/EnergyDistanceChart";
 import { Ring } from "../components/Ring";
@@ -120,10 +121,16 @@ export function JourneyView({ data, theme, unit: _unit, mobile }: {
   const base = bases.find((b) => b.id === DAILY_DRIVER_BASE) ?? bases[0];
   const addresses = useMemo(() => (base ? base.packs.map((p) => p.item.address) : []), [base]);
 
-  const rawPoints = useTrack(addresses, fromMs, toMs);
+  const isLive = isWindowLive(toMs, data.now);
+  const rawPoints = useTrack(addresses, fromMs, toMs, isLive ? LIVE_REFRESH_MS : undefined);
   // Cleaned at render time (spike rejection / stay snapping / smoothing) — raw data stays
   // raw in the DB; the map, miles, energy chart, and playback all consume the cleaned track.
   const points = useMemo(() => cleanTrack(rawPoints), [rawPoints]);
+  const live = useMemo(
+    () => (isLive ? livePosition(data.items, addresses, data.now) : null),
+    [isLive, data.items, addresses, data.now],
+  );
+  const fitKey = addresses.join(",") + ":" + fromMs + ":" + toMs;
 
   // ── Derived geometry/energy (memoized on the merged track). ──
   const cumMi = useMemo(() => cumulativeMiles(points), [points]);
@@ -185,13 +192,25 @@ export function JourneyView({ data, theme, unit: _unit, mobile }: {
         <Segmented<DateMode>
           options={[{ value: "day", label: "DAY" }, { value: "range", label: "RANGE" }]}
           value={st.dateMode} onChange={(v) => set({ dateMode: v })} />
+        {isLive && (
+          <span className="mono" style={{
+            display: "inline-flex", alignItems: "center", gap: 6,
+            color: "var(--live)", fontSize: 11, letterSpacing: 1,
+          }}>
+            <span style={{
+              width: 8, height: 8, borderRadius: "50%", background: "var(--live)",
+              animation: "chair-pulse 2s ease-out infinite",
+            }} />
+            LIVE
+          </span>
+        )}
       </div>
 
       {/* ── Map + dock ── */}
       <div style={{ display: "grid", gridTemplateColumns: mobile ? "1fr" : "1fr 264px", gap: 16 }}>
         <div style={{ height: mapHeight }}>
           <JourneyMap points={points} segKinds={segKinds} hotspots={hotspots}
-            cursorIndex={ci} theme={theme} />
+            cursorIndex={ci} theme={theme} live={live} fitKey={fitKey} />
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -260,7 +279,7 @@ export function JourneyView({ data, theme, unit: _unit, mobile }: {
         </>
       ) : (
         <div className="mono" style={{ fontSize: 12, color: "var(--text-4)" }}>
-          No GPS trip recorded for this day.
+          {isLive ? "Waiting for GPS…" : "No GPS trip recorded for this day."}
         </div>
       )}
     </div>

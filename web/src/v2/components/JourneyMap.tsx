@@ -29,9 +29,9 @@ function tileUrl(theme: "dark" | "light"): string {
 }
 const TILE_ATTRIB = "© OpenStreetMap contributors © CARTO";
 
-export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, live = null, fitKey = "" }: {
+export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, live, fitKey }: {
   points: TrackPoint[]; segKinds: SegKind[]; hotspots: Hotspot[]; cursorIndex: number;
-  theme: "dark" | "light"; live?: LivePos | null; fitKey?: string;
+  theme: "dark" | "light"; live: LivePos | null; fitKey: string;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -68,15 +68,19 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasMapContent]);
 
-  // User-initiated pan/zoom breaks follow. Programmatic moves are guarded so panTo/fitBounds
-  // never count as the user grabbing the map.
+  // User-initiated pan/zoom breaks follow. dragstart fires ONLY from user input — Leaflet's
+  // programmatic panTo/fitBounds move the map via movestart, never dragstart — so it's always
+  // safe to break follow on it unconditionally (no guard needed, and no race against an
+  // in-flight animated follow-pan). zoomstart, by contrast, DOES fire for programmatic zooms
+  // (e.g. fitBounds), so it stays guarded on the programmatic-move flag.
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-    const breakFollow = () => { if (!programmaticMove.current) setFollowing(false); };
-    map.on("dragstart", breakFollow);
-    map.on("zoomstart", breakFollow);
-    return () => { map.off("dragstart", breakFollow); map.off("zoomstart", breakFollow); };
+    const onDragStart = () => setFollowing(false);
+    const onZoomStart = () => { if (!programmaticMove.current) setFollowing(false); };
+    map.on("dragstart", onDragStart);
+    map.on("zoomstart", onZoomStart);
+    return () => { map.off("dragstart", onDragStart); map.off("zoomstart", onZoomStart); };
   }, [mapReady]);
 
   // Going live (or coming back to a live day) re-engages follow; leaving live disengages.
