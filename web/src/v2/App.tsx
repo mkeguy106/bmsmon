@@ -57,13 +57,15 @@ export default function App() {
   const content =
     view === "command" ? <CommandView data={data} mobile={mobile} onOpen={setView} tempF={tempF} /> :
     view === "health" ? <HealthView data={data} history={history} unit={settings.tempUnitPref} mobile={mobile} /> :
-    view === "journey" ? <JourneyView data={data} theme={resolvedTheme} unit={settings.tempUnitPref} mobile={mobile} /> :
+    view === "journey" ? <JourneyView data={data} theme={resolvedTheme} unit={settings.tempUnitPref} mobile={mobile} mapMetric={settings.mapMetricPref} /> :
     view === "history" ? <HistoryView data={data} unit={settings.tempUnitPref} mobile={mobile} /> :
     view === "alerts" ? <AlertsView alerts={alerts} acked={acked} onAck={ack} now={data.now} /> :
     <SettingsView />;
 
+  const journeyMobile = mobile && view === "journey";
+
   return (
-    <div style={{ display: "flex", minHeight: "100vh" }}>
+    <div style={{ display: "flex", ...(journeyMobile ? { height: "100dvh", overflow: "hidden" } : { minHeight: "100vh" }) }}>
       {!mobile && (
         <Nav view={view} collapsed={collapsed} unackedCount={unacked}
           onSelect={setView} onToggleCollapse={() => setCollapsed((c) => !c)} />
@@ -72,7 +74,9 @@ export default function App() {
         <TopBar view={view} live={data.live} gps={data.gps} synced={data.live}
           themeMode={settings.themeMode} mobile={mobile}
           onCycleTheme={cycleTheme} onToggleDevice={toggleDevice} onSelectView={setView} />
-        <main style={{ padding: mobile ? "16px 14px 76px" : 18, flex: 1 }}>{content}</main>
+        <main style={journeyMobile
+          ? { padding: "0 0 76px", flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }
+          : { padding: mobile ? "16px 14px 76px" : 18, flex: 1 }}>{content}</main>
       </div>
       {mobile && <BottomTabs view={view} unackedCount={unacked} onSelect={setView} />}
     </div>

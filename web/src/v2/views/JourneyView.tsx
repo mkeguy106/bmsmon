@@ -15,6 +15,7 @@ import { JourneyMap } from "../components/JourneyMap";
 import { EnergyDistanceChart } from "../components/EnergyDistanceChart";
 import { Ring } from "../components/Ring";
 import { Segmented } from "../components/Segmented";
+import { JourneyDock } from "../components/JourneyDock";
 
 // ── Persisted control state ────────────────────────────────────────────────
 type DateMode = "day" | "range";
@@ -95,8 +96,13 @@ function Readout({ label, value }: { label: string; value: string }) {
   );
 }
 
-export function JourneyView({ data, theme, unit: _unit, mobile }: {
-  data: FleetData; theme: "dark" | "light"; unit: TempUnit; mobile: boolean;
+const overlayChrome: CSSProperties = {
+  position: "absolute", background: "rgba(9,9,11,.72)", border: "1px solid var(--border-strong)",
+  borderRadius: 6, padding: "5px 9px", fontSize: 9, letterSpacing: ".12em", zIndex: 1000,
+};
+
+export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
+  data: FleetData; theme: "dark" | "light"; unit: TempUnit; mobile: boolean; mapMetric: "power" | "soc";
 }) {
   const [st, setSt] = useLocalStorage<JourneyState>("bmsmon-v2-journey", () => DEFAULT_JOURNEY, journeyCodec);
   const [cursorIndex, setCursorIndex] = useState(0);
@@ -173,9 +179,12 @@ export function JourneyView({ data, theme, unit: _unit, mobile }: {
   const mapHeight = mobile ? 380 : 480;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+    <div style={mobile
+      ? { flex: 1, display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }
+      : { display: "flex", flexDirection: "column", gap: 16 }}>
       {/* ── Date toolbar ── */}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center",
+        ...(mobile && { padding: "12px 14px 8px", flexShrink: 0 }) }}>
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
           <button aria-label="Previous day" style={stepBtnStyle()}
             onClick={() => (st.dateMode === "range"
@@ -201,7 +210,7 @@ export function JourneyView({ data, theme, unit: _unit, mobile }: {
         <Segmented<DateMode>
           options={[{ value: "day", label: "DAY" }, { value: "range", label: "RANGE" }]}
           value={st.dateMode} onChange={(v) => set({ dateMode: v })} />
-        {isLive && (
+        {!mobile && isLive && (
           <span className="mono" style={{
             display: "inline-flex", alignItems: "center", gap: 6,
             color: "var(--live)", fontSize: 11, letterSpacing: 1,
@@ -215,81 +224,114 @@ export function JourneyView({ data, theme, unit: _unit, mobile }: {
         )}
       </div>
 
-      {/* ── Map + dock ── */}
-      <div style={{ display: "grid", gridTemplateColumns: mobile ? "1fr" : "1fr 264px", gap: 16 }}>
-        <div style={{ height: mapHeight }}>
-          <JourneyMap points={points} segKinds={segKinds} hotspots={hotspots}
-            cursorIndex={ci} theme={theme} live={live} fitKey={fitKey} metric="power" />
-        </div>
-
-        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <div className="card" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <div className="eyebrow" style={{ color: "var(--text-4)" }}>
-              {base ? `BASE ${base.id}` : "FLEET"}
-            </div>
-            <div style={{ display: "flex", gap: 14, flexWrap: "wrap", justifyContent: "center" }}>
-              {base?.packs.map((p) => (
-                <div key={p.item.address} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
-                  <Ring soc={p.item.soc} power={p.item.power_w} current={p.item.current_a}
-                    connected={p.connected} size={104} />
-                  <span className="mono" style={{ fontSize: 11, color: "var(--text-3)" }}>{p.letter}</span>
-                </div>
-              ))}
-              {!base && (
-                <span className="mono" style={{ fontSize: 12, color: "var(--text-4)" }}>no fleet</span>
-              )}
-            </div>
-          </div>
-
-          {/* Trip strip */}
-          <div className="card" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <div className="eyebrow" style={{ color: "var(--text-4)" }}>TRIP</div>
-            <Readout label="DISTANCE" value={`${summary.miles.toFixed(1)} mi`} />
-            <div style={{ display: "flex", gap: 16 }}>
-              <Readout label="ACTIVE" value={`${summary.activeMiles.toFixed(1)} mi`} />
-              <Readout label="TRANSIT" value={`${summary.transitMiles.toFixed(1)} mi`} />
-            </div>
-            <Readout label="PEAK" value={`${Math.round(summary.peakW)} W`} />
-          </div>
-        </div>
-      </div>
-
-      {/* ── Playback bar + energy chart (only with a trip) ── */}
-      {hasTrip ? (
+      {mobile ? (
         <>
-          <div className="card" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              <button aria-label={playing ? "Pause" : "Play"} onClick={() => setPlaying((p) => !p)}
-                style={{
-                  width: 36, height: 36, borderRadius: 8, border: "1px solid var(--border)",
-                  background: "var(--panel-2)", color: "var(--text)", cursor: "pointer",
-                  fontSize: 14, display: "inline-flex", alignItems: "center", justifyContent: "center",
-                }}>
-                {playing ? "⏸" : "▶"}
-              </button>
-              <input type="range" min={0} max={Math.max(0, points.length - 1)} value={ci}
-                onChange={(e) => { setPlaying(false); setCursorIndex(Number(e.target.value)); }}
-                style={{ flex: 1, accentColor: "var(--warn)" }} />
-            </div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 20 }}>
-              <Readout label="SOC" value={cur?.soc != null ? `${Math.round(cur.soc)}%` : "—"} />
-              <Readout label="DRAW" value={`${Math.round(Math.abs(cur?.power_w ?? 0))} W`} />
-              <Readout label="DIST" value={`${(cumMi[ci] ?? 0).toFixed(2)} mi`} />
-              <Readout label="STATE" value={STATE_LABEL[curKind]} />
-            </div>
+          <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+            <JourneyMap points={points} segKinds={segKinds} hotspots={hotspots}
+              cursorIndex={Math.max(0, points.length - 1)} theme={theme} live={live} fitKey={fitKey}
+              metric={mapMetric} emptyText={isLive ? "Waiting for GPS…" : "No GPS trip recorded"} />
+            <span className="mono" style={{ ...overlayChrome, top: 12, left: 12, color: "var(--text-2)" }}>
+              TRAIL · {mapMetric.toUpperCase()}
+            </span>
+            {isLive && (
+              <span className="mono" style={{ ...overlayChrome, top: 12, right: 12, color: "var(--text)",
+                display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--ok)",
+                  boxShadow: "0 0 0 3px rgba(34,197,94,.2)" }} />
+                LIVE · GPS
+              </span>
+            )}
+            <span className="mono" style={{ ...overlayChrome, bottom: 12, left: 12, color: "var(--text-3)",
+              display: "flex", gap: 9 }}>
+              {([["transit", "var(--text-4)"], ["light", "var(--ok)"], ["mod", "var(--warn)"], ["heavy", "var(--live)"]] as const)
+                .map(([label, color]) => (
+                  <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                    <span style={{ width: 12, height: 3, borderRadius: 2, background: color }} />{label}
+                  </span>
+                ))}
+            </span>
           </div>
-
-          <div className="card">
-            <div className="eyebrow" style={{ color: "var(--text-4)", marginBottom: 10 }}>
-              ENERGY OVER DISTANCE
-            </div>
-            <EnergyDistanceChart energy={energy} cursorIndex={ci} distUnit="mi" />
-          </div>
+          <JourneyDock summary={summary} packs={base?.packs ?? []} />
         </>
       ) : (
-        <div className="mono" style={{ fontSize: 12, color: "var(--text-4)" }}>
-          {isLive ? "Waiting for GPS…" : "No GPS trip recorded for this day."}
-        </div>
+        <>
+          {/* ── Map + dock ── */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 264px", gap: 16 }}>
+            <div style={{ height: mapHeight }}>
+              <JourneyMap points={points} segKinds={segKinds} hotspots={hotspots}
+                cursorIndex={ci} theme={theme} live={live} fitKey={fitKey} metric={mapMetric} />
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              <div className="card" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                <div className="eyebrow" style={{ color: "var(--text-4)" }}>
+                  {base ? `BASE ${base.id}` : "FLEET"}
+                </div>
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", justifyContent: "center" }}>
+                  {base?.packs.map((p) => (
+                    <div key={p.item.address} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                      <Ring soc={p.item.soc} power={p.item.power_w} current={p.item.current_a}
+                        connected={p.connected} size={104} />
+                      <span className="mono" style={{ fontSize: 11, color: "var(--text-3)" }}>{p.letter}</span>
+                    </div>
+                  ))}
+                  {!base && (
+                    <span className="mono" style={{ fontSize: 12, color: "var(--text-4)" }}>no fleet</span>
+                  )}
+                </div>
+              </div>
+
+              {/* Trip strip */}
+              <div className="card" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <div className="eyebrow" style={{ color: "var(--text-4)" }}>TRIP</div>
+                <Readout label="DISTANCE" value={`${summary.miles.toFixed(1)} mi`} />
+                <div style={{ display: "flex", gap: 16 }}>
+                  <Readout label="ACTIVE" value={`${summary.activeMiles.toFixed(1)} mi`} />
+                  <Readout label="TRANSIT" value={`${summary.transitMiles.toFixed(1)} mi`} />
+                </div>
+                <Readout label="PEAK" value={`${Math.round(summary.peakW)} W`} />
+              </div>
+            </div>
+          </div>
+
+          {/* ── Playback bar + energy chart (only with a trip) ── */}
+          {hasTrip ? (
+            <>
+              <div className="card" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <button aria-label={playing ? "Pause" : "Play"} onClick={() => setPlaying((p) => !p)}
+                    style={{
+                      width: 36, height: 36, borderRadius: 8, border: "1px solid var(--border)",
+                      background: "var(--panel-2)", color: "var(--text)", cursor: "pointer",
+                      fontSize: 14, display: "inline-flex", alignItems: "center", justifyContent: "center",
+                    }}>
+                    {playing ? "⏸" : "▶"}
+                  </button>
+                  <input type="range" min={0} max={Math.max(0, points.length - 1)} value={ci}
+                    onChange={(e) => { setPlaying(false); setCursorIndex(Number(e.target.value)); }}
+                    style={{ flex: 1, accentColor: "var(--warn)" }} />
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 20 }}>
+                  <Readout label="SOC" value={cur?.soc != null ? `${Math.round(cur.soc)}%` : "—"} />
+                  <Readout label="DRAW" value={`${Math.round(Math.abs(cur?.power_w ?? 0))} W`} />
+                  <Readout label="DIST" value={`${(cumMi[ci] ?? 0).toFixed(2)} mi`} />
+                  <Readout label="STATE" value={STATE_LABEL[curKind]} />
+                </div>
+              </div>
+
+              <div className="card">
+                <div className="eyebrow" style={{ color: "var(--text-4)", marginBottom: 10 }}>
+                  ENERGY OVER DISTANCE
+                </div>
+                <EnergyDistanceChart energy={energy} cursorIndex={ci} distUnit="mi" />
+              </div>
+            </>
+          ) : (
+            <div className="mono" style={{ fontSize: 12, color: "var(--text-4)" }}>
+              {isLive ? "Waiting for GPS…" : "No GPS trip recorded for this day."}
+            </div>
+          )}
+        </>
       )}
     </div>
   );
