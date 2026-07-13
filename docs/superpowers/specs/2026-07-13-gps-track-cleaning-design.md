@@ -44,9 +44,10 @@ Three passes:
    - if speed(A→B) > bound AND speed(B→C) > bound AND speed(A→C) ≤ bound → drop B
      (the out-and-back spike test);
    - speed(A→B) > 60 m/s → drop B unconditionally (absurd even for a vehicle).
-2. **Stay-point clamping.** Consecutive points that never leave a 30 m radius around their
-   running centroid collapse to a single centroid point (keeping first/last timestamps) —
-   parked drift becomes one dot and contributes zero distance.
+2. **Stay-point snapping.** Consecutive points that never leave a 30 m radius of the
+   cluster's first point are all SNAPPED to the cluster centroid (points are kept, not
+   removed — the playback timeline, SOC readouts, and energy series must survive intact).
+   Parked drift becomes one dot on the map and contributes zero distance.
 3. **Smoothing.** 3-point moving average over surviving points (endpoints untouched).
 
 ### 3. v2 Journey wiring
