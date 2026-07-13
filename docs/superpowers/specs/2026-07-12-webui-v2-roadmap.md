@@ -161,3 +161,18 @@ or wire a real map lib (**Leaflet / MapLibre** with a dark/light style). Either 
   should still do a full click-through before merge. **All six v2 views are now live — Command,
   Fleet Health, Journey, History, Alerts, Settings — the v2 design is fully implemented** (Devices
   admin view stays "SOON"). Pending: final review, merge, and deploy.
+
+## Post-roadmap follow-ons (2026-07-12, after all 4 phases deployed)
+
+- **All four phases merged to `main` and deployed to prod.** The "pending review/merge/deploy" notes
+  above are historical — Phases 1–4 are live at `bmsmon.covert.life/v2/`.
+- **Backlog sweep** (commit `71d29e3`, deployed): shared `web/src/v2/colors.ts` (DRY'd `socColor`/
+  `sohColor`), alerts epsilon-compare (dropped the ~0.5 mV round-then-compare shift), `NoteBody.base_id`
+  length cap, Journey-map theme polish (fitBounds decoupled from theme so a light/dark flip preserves
+  pan/zoom; cursor recolors on theme). CSRF on `/web` writes assessed as already-mitigated (no CORS
+  middleware + the JSON-body requirement blocks cross-site writes) — no code change.
+- **Devices → Settings** (commit `ddbc1b1`, deployed): device admin (enroll-code QR, device list,
+  revoke) folded into the Settings view as a `DevicesPanel` section rather than a standalone nav
+  destination — the last "SOON" nav item is gone. Port of v1 `AdminDevices` restyled in v2 tokens,
+  reusing the existing admin endpoints; no new backend or npm dep.
+- **Outstanding:** a ~2-min in-browser smoke of the Journey Leaflet map (never headless-driven).

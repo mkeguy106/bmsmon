@@ -455,8 +455,8 @@ screenshots; it is **not** in the production bundle (`vite build` emits only `in
 
 A v2 dashboard runs alongside v1, served at `/v2/` (React, `web/src/v2/`) via a second Vite
 rollup input into `web/dist/v2/` — no server change; both bundles share `web/dist/assets`. Phases
-1–4 (branches `feat/webui-v2-phase1..4`, implementation complete, pending review/merge/deploy)
-have landed all six planned views: **Command** (fleet rail, stage, range/recharge, aside, bound to
+1–4 are all **merged to `main` and deployed to prod** (`bmsmon.covert.life/v2/`), landing all six
+planned views: **Command** (fleet rail, stage, range/recharge, aside, bound to
 `/web/fleet` + `/ws`, plus a per-cell-voltage pipeline android `cells[]` → server `samples.cellN_v`
 → fleet snapshot `cells` → web), **Fleet Health** (tiles + 8-pack board + 24h sparkline off
 `GET /web/history`), **Alerts** (capacity ladder + temp zones + cell imbalance, `localStorage`
@@ -468,8 +468,11 @@ date nav, a Leaflet base map with CARTO dark/light tiles, a discharge-colored tr
 green/amber/red by |power|, dashed transit legs, hotspot markers, playback scrubber, and an
 energy-over-distance chart, backed by the new read-only `GET /web/track` endpoint — 15 s-bucketed
 per-pack GPS + discharge series). `leaflet` is now a `web/` dependency (its CSS ships only in the
-`/v2/` chunk; v1 carries zero leaflet references). **Devices** (admin device management) is the
-only nav entry still "SOON." Roadmap/spec: `docs/superpowers/specs/2026-07-12-webui-v2-roadmap.md`.
+`/v2/` chunk; v1 carries zero leaflet references). **Device admin** (enroll-code QR, device list,
+revoke — a port of v1's `AdminDevices`, reusing the admin `/web/devices` + `/web/enroll-codes`
+endpoints) lives as a **Devices section inside Settings** (`DevicesPanel.tsx`), not a separate nav
+entry — so there is no longer any "SOON" item. Roadmap/spec:
+`docs/superpowers/specs/2026-07-12-webui-v2-roadmap.md`.
 
 **Local dev/test:** `docker compose -f server/docker-compose.dev.yml up -d` brings up a Postgres on
 `localhost:5432` (user/pw/db all `bmsmon`, matching the default `DATABASE_URL`). Run server tests
