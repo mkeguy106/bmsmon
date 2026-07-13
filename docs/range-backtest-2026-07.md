@@ -67,6 +67,10 @@ real 2026-07-12 15-s-bucket track for 2012-A (5,759 points):
 | fully cleaned (with smoothing) | **5.38** |
 
 ~4.4 phantom miles removed; the map loses the off-track spurs and the parked caterpillar.
+The 5.38 mi still likely overstates the true distance somewhat: on this day's ~90 m
+balanced-power fixes, parked jitter wider than the 30 m stay radius and latched (repeated)
+spike coordinates survive the cleaner — both shrink sharply under the new GNSS capture, so
+don't treat 5.38 as clean truth at the 2026-07-15 check-in.
 Kotlin learner gets the same spike rejection (bridged windows recover real distance across a
 dropped fix). Capture is now always-on PRIORITY_HIGH_ACCURACY GNSS (5 s), so future raw
 tracks start far cleaner than this one.

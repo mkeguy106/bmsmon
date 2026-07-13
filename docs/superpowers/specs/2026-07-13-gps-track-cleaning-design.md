@@ -63,9 +63,10 @@ The same impossible-speed spike rejection inserted after `bucketedFixes()` and b
 4.5 m/s while speed(A→C) does not (A = previous kept fix, C = next fix). Stay-point
 clamping is NOT added (the 0.4 m/s window floor already ignores parked jitter).
 
-Known limitation (accepted): an out-and-back spike at *plausible* speed over a 30-s window
-is mathematically indistinguishable from genuinely rolling out and back; the GNSS capture
-upgrade — not inference — is what eliminates those.
+Known limitations (accepted): an out-and-back spike at *plausible* speed over a 30-s window
+is mathematically indistinguishable from genuinely rolling out and back; and a spike whose
+coordinate repeats across consecutive fixes (fix latching) evades the one-point-lookahead
+out-and-back test. The GNSS capture upgrade — not inference — is what eliminates both.
 
 ### 5. Unchanged
 
