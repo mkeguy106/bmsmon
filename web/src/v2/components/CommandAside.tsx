@@ -51,7 +51,7 @@ export function CommandAside({ bases, now, onOpen }: {
   ].filter((s) => s.n > 0);
 
   return (
-    <div style={{ width: 340, flex: "0 0 340px", display: "flex", flexDirection: "column",
+    <div style={{ width: "100%", display: "flex", flexDirection: "column",
       gap: 12, overflowY: "auto", padding: "2px 2px 12px" }}>
       <Section title="Recharge plan">
         {charging.length === 0 ? (

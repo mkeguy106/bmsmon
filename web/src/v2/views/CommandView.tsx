@@ -64,7 +64,7 @@ export function CommandView({ data, mobile, onOpen, tempF }: {
         <CommandFleetRail bases={bases} stageBaseId={staged.id} onStage={setStageBaseId} />
       </div>
       <div style={{ order: mobile ? 1 : 0, minWidth: 0, display: "flex", flexDirection: "column", gap: 16 }}>
-        <CommandStage base={staged} rangeParams={data.rangeParams} tempF={tempF} />
+        <CommandStage base={staged} rangeParams={data.rangeParams} tempF={tempF} mobile={mobile} />
         <CommandRange base={staged} rangeParams={data.rangeParams} trips={trips} onEditTrips={onEditTrips} />
       </div>
       <div style={{ order: mobile ? 4 : 0, minWidth: 0 }}>

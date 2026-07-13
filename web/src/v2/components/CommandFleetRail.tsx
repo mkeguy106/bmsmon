@@ -50,7 +50,7 @@ export function CommandFleetRail({ bases, stageBaseId, onStage }: {
   bases: Base[]; stageBaseId: string; onStage: (id: string) => void;
 }) {
   return (
-    <div style={{ width: 252, flex: "0 0 252px", display: "flex", flexDirection: "column",
+    <div style={{ width: "100%", display: "flex", flexDirection: "column",
       gap: 12, overflowY: "auto", padding: "2px 2px 12px" }}>
       <div className="eyebrow" style={{ padding: "0 4px" }}>Fleet</div>
       {bases.map((base) => {

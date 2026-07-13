@@ -74,8 +74,8 @@ function FlowTile({ label, value, sub }: { label: string; value: string; sub?: s
   );
 }
 
-export function CommandStage({ base, rangeParams, tempF }: {
-  base: Base; rangeParams: Map<string, RangeParams>; tempF: boolean;
+export function CommandStage({ base, rangeParams, tempF, mobile }: {
+  base: Base; rangeParams: Map<string, RangeParams>; tempF: boolean; mobile: boolean;
 }) {
   const live = base.packs.filter((p) => p.connected);
   const charging = base.status === "charging";
@@ -127,7 +127,8 @@ export function CommandStage({ base, rangeParams, tempF }: {
           </span>
         </div>
 
-        <div style={{ display: "flex", gap: 20 }}>
+        {/* Real phone widths cannot fit two full pack columns side by side — stack them. */}
+        <div style={{ display: "flex", gap: 20, flexDirection: mobile ? "column" : "row" }}>
           {live.length === 0 ? (
             <div className="mono" style={{ fontSize: 13, color: "var(--text-4)", padding: "24px 0" }}>
               Base {base.id} is disconnected.
@@ -137,7 +138,7 @@ export function CommandStage({ base, rangeParams, tempF }: {
           )}
         </div>
 
-        <div style={{ display: "flex", gap: 12 }}>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
           <FlowTile label={flowLabel} value={flowValue} />
           <FlowTile label={runtimeLabel} value={runtimeValue} />
           <FlowTile label="DRIVEN TODAY" value="—" sub="Phase 4" />
