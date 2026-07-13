@@ -40,8 +40,11 @@ class LocationSource(private val context: Context) {
         client.lastLocation.addOnSuccessListener { loc ->
             loc?.let { cache.set(GpsFix(it.latitude, it.longitude, if (it.hasAccuracy()) it.accuracy else null)) }
         }
-        val req = LocationRequest.Builder(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 10_000L)
-            .setMinUpdateIntervalMillis(5_000L)
+        // Always-on GNSS (2026-07-13): balanced-power WiFi/cell fixes averaged ~90 m and
+        // spawned the phantom map spikes; the phone rides the chair on constant USB power,
+        // so there is no battery reason to accept coarse fixes — high accuracy, always.
+        val req = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 5_000L)
+            .setMinUpdateIntervalMillis(2_000L)
             .build()
         client.requestLocationUpdates(req, callback, null)
     }
