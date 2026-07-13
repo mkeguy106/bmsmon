@@ -98,7 +98,7 @@ function Readout({ label, value }: { label: string; value: string }) {
 
 const overlayChrome: CSSProperties = {
   position: "absolute", background: "rgba(9,9,11,.72)", border: "1px solid var(--border-strong)",
-  borderRadius: 6, padding: "5px 9px", fontSize: 9, letterSpacing: ".12em", zIndex: 1000,
+  borderRadius: 6, padding: "6px 10px", fontSize: 11, letterSpacing: ".12em", zIndex: 1000,
 };
 
 export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
@@ -240,14 +240,14 @@ export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
                 <span className="mono" style={{ ...overlayChrome, bottom: 12, left: 12, color: "#a1a1aa",
                   display: "flex", gap: 9 }}>
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                    <span style={{ width: 12, height: 3, borderRadius: 2, background: "#71717a" }} />transit
+                    <span style={{ width: 14, height: 4, borderRadius: 2, background: "#71717a" }} />transit
                   </span>
                   {(mapMetric === "soc"
                     ? ([["ok", "var(--ok)"], ["low", "var(--warn)"], ["crit", "var(--live)"]] as const)
                     : ([["light", "var(--ok)"], ["mod", "var(--warn)"], ["heavy", "var(--live)"]] as const))
                     .map(([label, color]) => (
                       <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                        <span style={{ width: 12, height: 3, borderRadius: 2, background: color }} />{label}
+                        <span style={{ width: 14, height: 4, borderRadius: 2, background: color }} />{label}
                       </span>
                     ))}
                 </span>

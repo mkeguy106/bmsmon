@@ -265,7 +265,7 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
         border: "1px solid var(--border)", background: "var(--panel-3)",
       }} />
       <button className="recenter-btn" aria-label="Re-center map" onClick={recenter}>
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
           <circle cx="12" cy="12" r="7" /><circle cx="12" cy="12" r="1.6" fill="currentColor" />
           <path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
         </svg>

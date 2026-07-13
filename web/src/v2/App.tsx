@@ -6,7 +6,7 @@ import { useWinWidth } from "./useWinWidth";
 import { resolveMobile } from "./settings";
 import { Nav } from "./components/Nav";
 import { TopBar } from "./components/TopBar";
-import { BottomTabs } from "./components/BottomTabs";
+import { BAR_H, BottomTabs } from "./components/BottomTabs";
 import { CommandView } from "./views/CommandView";
 import { HealthView } from "./views/HealthView";
 import { HistoryView } from "./views/HistoryView";
@@ -75,8 +75,10 @@ export default function App() {
           themeMode={settings.themeMode} mobile={mobile}
           onCycleTheme={cycleTheme} onToggleDevice={toggleDevice} onSelectView={setView} />
         <main style={journeyMobile
-          ? { padding: "0 0 76px", flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }
-          : { padding: mobile ? "16px 14px 76px" : 18, flex: 1 }}>{content}</main>
+          ? { padding: `0 0 calc(${BAR_H}px + env(safe-area-inset-bottom))`, flex: 1,
+              display: "flex", flexDirection: "column", minHeight: 0 }
+          : { padding: mobile ? `16px 14px calc(${BAR_H + 12}px + env(safe-area-inset-bottom))` : 18,
+              flex: 1 }}>{content}</main>
       </div>
       {mobile && <BottomTabs view={view} unackedCount={unacked} onSelect={setView} />}
     </div>

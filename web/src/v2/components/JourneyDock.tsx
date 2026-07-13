@@ -4,15 +4,15 @@ import type { TripSummary } from "../model/journey";
 import { dockCapacity, dockFlow, type FlowKind } from "../model/dock";
 
 const eyebrow: CSSProperties = {
-  fontSize: 9, letterSpacing: ".14em", color: "var(--text-4)", width: 40, flexShrink: 0,
+  fontSize: 10, letterSpacing: ".14em", color: "var(--text-4)", width: 46, flexShrink: 0,
 };
 const rowStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 9 };
 const barStyle: CSSProperties = {
-  position: "relative", flex: 1, height: 8, borderRadius: 4,
+  position: "relative", flex: 1, height: 10, borderRadius: 5,
   background: "var(--track)", overflow: "hidden",
 };
 const valStyle: CSSProperties = {
-  width: 96, flexShrink: 0, textAlign: "right", fontSize: 12, fontWeight: 700, color: "var(--text)",
+  width: 112, flexShrink: 0, textAlign: "right", fontSize: 14, fontWeight: 700, color: "var(--text)",
 };
 
 const CAP_FILL: Record<"ok" | "warn" | "crit", string> = {
@@ -27,7 +27,7 @@ const FLOW_LABEL: Record<FlowKind, string> = { out: "OUT", regen: "REGEN", chg: 
 
 function Fill({ frac, background }: { frac: number; background: string }) {
   return <div style={{ position: "absolute", inset: "0 auto 0 0", width: `${frac * 100}%`,
-    borderRadius: 4, background, transition: "width .6s ease" }} />;
+    borderRadius: 5, background, transition: "width .6s ease" }} />;
 }
 
 /** Mobile Journey dock: one trip line + pair-capacity line + single-direction flow line. */
@@ -35,14 +35,14 @@ export function JourneyDock({ summary, packs }: { summary: TripSummary; packs: B
   const cap = dockCapacity(packs);
   const flow = dockFlow(packs);
   const sep = <span style={{ color: "var(--text-4)" }}>·</span>;
-  const b = (t: string) => <b style={{ color: "var(--text)", fontSize: 12 }}>{t}</b>;
+  const b = (t: string) => <b style={{ color: "var(--text)", fontSize: 14 }}>{t}</b>;
   return (
     <div className="mono" style={{
       padding: "12px 14px", display: "flex", flexDirection: "column", gap: 9, flexShrink: 0,
       borderTop: "1px solid var(--border)", background: "var(--panel-3)",
       fontVariantNumeric: "tabular-nums",
     }}>
-      <div style={{ fontSize: 11, color: "var(--text-2)", display: "flex", gap: 6,
+      <div style={{ fontSize: 13, color: "var(--text-2)", display: "flex", gap: 6,
         flexWrap: "wrap", alignItems: "baseline" }}>
         {b(`${summary.miles.toFixed(1)} mi`)}{sep}
         <span>ACT {b(summary.activeMiles.toFixed(1))}</span>{sep}
@@ -56,7 +56,7 @@ export function JourneyDock({ summary, packs }: { summary: TripSummary; packs: B
         </div>
         <span style={valStyle}>
           {cap.pct != null ? `${cap.pct}%` : "—"}
-          {cap.detail && <small style={{ color: "var(--text-3)", fontWeight: 400, fontSize: 9 }}> {cap.detail}</small>}
+          {cap.detail && <small style={{ color: "var(--text-3)", fontWeight: 400, fontSize: 10 }}> {cap.detail}</small>}
         </span>
       </div>
       <div style={rowStyle}>
@@ -66,7 +66,7 @@ export function JourneyDock({ summary, packs }: { summary: TripSummary; packs: B
         </div>
         <span style={valStyle}>
           {flow.watts} W
-          <small style={{ color: "var(--text-3)", fontWeight: 400, fontSize: 9 }}> {FLOW_LABEL[flow.kind]}</small>
+          <small style={{ color: "var(--text-3)", fontWeight: 400, fontSize: 10 }}> {FLOW_LABEL[flow.kind]}</small>
         </span>
       </div>
     </div>

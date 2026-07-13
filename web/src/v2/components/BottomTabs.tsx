@@ -1,7 +1,9 @@
 import { Icon } from "./icons";
 import { NAV_GROUPS, type V2View } from "../nav";
 
-const BAR_H = 56;
+/** Content height of the bar; the rendered bar adds the iOS home-indicator safe-area below.
+ *  Exported so the App shell reserves matching bottom padding. */
+export const BAR_H = 68;
 
 /** All six real views, in NAV_GROUPS order (the disabled "Devices" placeholder is skipped). */
 const TAB_ITEMS = NAV_GROUPS.flatMap((g) => g.items).filter((i) => !i.disabled);
@@ -16,7 +18,8 @@ export function BottomTabs({ view, unackedCount, onSelect }: {
         left: 0,
         right: 0,
         bottom: 0,
-        height: BAR_H,
+        height: `calc(${BAR_H}px + env(safe-area-inset-bottom))`,
+        paddingBottom: "env(safe-area-inset-bottom)",
         display: "flex",
         background: "var(--nav-bg)",
         borderTop: "1px solid var(--border)",
@@ -49,7 +52,7 @@ export function BottomTabs({ view, unackedCount, onSelect }: {
             }}
           >
             <span style={{ position: "relative" }}>
-              <Icon name={item.icon} size={18} />
+              <Icon name={item.icon} size={24} />
               {showBadge && (
                 <span
                   style={{
@@ -59,13 +62,13 @@ export function BottomTabs({ view, unackedCount, onSelect }: {
                     display: "inline-flex",
                     alignItems: "center",
                     justifyContent: "center",
-                    minWidth: 14,
-                    height: 14,
-                    padding: "0 3px",
-                    borderRadius: 7,
+                    minWidth: 16,
+                    height: 16,
+                    padding: "0 4px",
+                    borderRadius: 8,
                     background: "var(--live)",
                     color: "var(--badge-text)",
-                    fontSize: 9,
+                    fontSize: 10,
                     fontWeight: 600,
                   }}
                 >
@@ -73,7 +76,7 @@ export function BottomTabs({ view, unackedCount, onSelect }: {
                 </span>
               )}
             </span>
-            <span style={{ fontSize: 9.5, whiteSpace: "nowrap" }}>{item.label}</span>
+            <span style={{ fontSize: 12, whiteSpace: "nowrap" }}>{item.label}</span>
           </button>
         );
       })}
