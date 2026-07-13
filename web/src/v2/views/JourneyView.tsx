@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { TempUnit } from "../../temp";
 import { useLocalStorage } from "../../useLocalStorage";
@@ -10,7 +10,7 @@ import {
   type SegKind,
 } from "../model/journey";
 import { cleanTrack } from "../model/cleanTrack";
-import { LIVE_REFRESH_MS, isWindowLive, livePosition } from "../model/live";
+import { LIVE_REFRESH_MS, isWindowLive, livePosition, type LivePos } from "../model/live";
 import { JourneyMap } from "../components/JourneyMap";
 import { EnergyDistanceChart } from "../components/EnergyDistanceChart";
 import { Ring } from "../components/Ring";
@@ -126,10 +126,19 @@ export function JourneyView({ data, theme, unit: _unit, mobile }: {
   // Cleaned at render time (spike rejection / stay snapping / smoothing) — raw data stays
   // raw in the DB; the map, miles, energy chart, and playback all consume the cleaned track.
   const points = useMemo(() => cleanTrack(rawPoints), [rawPoints]);
-  const live = useMemo(
-    () => (isLive ? livePosition(data.items, addresses, data.now) : null),
-    [isLive, data.items, addresses, data.now],
-  );
+  // Identity-stable live fix: livePosition allocates per call and data.now ticks at 1 Hz,
+  // so return the PREVIOUS object while the values are unchanged — the map's live-marker
+  // effect then only fires on real movement (or the stale→null hide), not every second.
+  const liveRef = useRef<LivePos | null>(null);
+  const live = useMemo(() => {
+    const next = isLive ? livePosition(data.items, addresses, data.now) : null;
+    const prev = liveRef.current;
+    if (next && prev && next.lat === prev.lat && next.lon === prev.lon && next.tsMs === prev.tsMs) {
+      return prev;
+    }
+    liveRef.current = next;
+    return next;
+  }, [isLive, data.items, addresses, data.now]);
   const fitKey = addresses.join(",") + ":" + fromMs + ":" + toMs;
 
   // ── Derived geometry/energy (memoized on the merged track). ──
