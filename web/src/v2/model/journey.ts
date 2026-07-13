@@ -34,6 +34,14 @@ export function dischargeColor(powerW: number): string {
   return "var(--ok)";
 }
 
+/** Trail/capacity color by SOC, on the alert bands: ok > 30, warn ≤ 30, live ≤ 15. */
+export function socColor(soc: number | null | undefined): string {
+  if (soc == null) return "var(--text-4)";
+  if (soc <= 15) return "var(--live)";
+  if (soc <= 30) return "var(--warn)";
+  return "var(--ok)";
+}
+
 export function cumulativeMiles(points: TrackPoint[]): number[] {
   const out: number[] = [];
   let acc = 0;
