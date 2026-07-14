@@ -72,6 +72,8 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
       trailRef.current = null;
       cursorRef.current = null;
       liveMarkerRef.current = null;
+      guestRef.current = null;
+      guestLineRef.current = null;
       lastFitKeyRef.current = null;
       lastFitPointsRef.current = null;
       engagedKeyRef.current = null;
@@ -234,21 +236,36 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
   }, [live, liveStale, following, mapReady]);
 
   // Guest marker + bearing line (share page only): where the viewer is, and a dashed
-  // line from them to the chair so "which way do I walk" is visible on the map.
+  // line from them to the chair so "which way do I walk" is visible on the map. Walked
+  // in place like the cursor/live-marker effects above, not destroyed and recreated.
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-    if (guestRef.current) { map.removeLayer(guestRef.current); guestRef.current = null; }
-    if (guestLineRef.current) { map.removeLayer(guestLineRef.current); guestLineRef.current = null; }
-    if (!guest) return;
-    guestRef.current = L.circleMarker([guest.lat, guest.lon], {
-      radius: 7, color: "#fff", weight: 2, fillColor: "#3b82f6", fillOpacity: 1,
-    }).addTo(map);
+    if (!guest) {
+      if (guestRef.current) { map.removeLayer(guestRef.current); guestRef.current = null; }
+      if (guestLineRef.current) { map.removeLayer(guestLineRef.current); guestLineRef.current = null; }
+      return;
+    }
+    const latlng: [number, number] = [guest.lat, guest.lon];
+    if (guestRef.current) {
+      guestRef.current.setLatLng(latlng);
+    } else {
+      guestRef.current = L.circleMarker(latlng, {
+        radius: 7, color: "#fff", weight: 2, fillColor: "#3b82f6", fillOpacity: 1,
+      }).addTo(map);
+    }
     if (live) {
-      guestLineRef.current = L.polyline(
-        [[guest.lat, guest.lon], [live.lat, live.lon]],
-        { color: "#3b82f6", weight: 2, dashArray: "6 6", opacity: 0.8 },
-      ).addTo(map);
+      const line: [number, number][] = [[guest.lat, guest.lon], [live.lat, live.lon]];
+      if (guestLineRef.current) {
+        guestLineRef.current.setLatLngs(line);
+      } else {
+        guestLineRef.current = L.polyline(line, {
+          color: "#3b82f6", weight: 2, dashArray: "6 6", opacity: 0.8,
+        }).addTo(map);
+      }
+    } else if (guestLineRef.current) {
+      map.removeLayer(guestLineRef.current);
+      guestLineRef.current = null;
     }
   }, [guest, live, mapReady]);
 
