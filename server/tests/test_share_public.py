@@ -146,7 +146,11 @@ async def test_feed_today_only_no_battery_fields(app, client):
     body = r.json()
     assert set(body.keys()) == {"points", "last", "expires_at", "now", "owner", "status"}
     assert len(body["points"]) == 1
-    assert set(body["points"][0].keys()) == {"t", "lat", "lon"}
+    # trail-detail relaxation (2026-07-14): per-bucket discharge context rides along —
+    # exactly these keys, still never per-point SOC/voltage/temp/cells
+    assert set(body["points"][0].keys()) == {"t", "lat", "lon", "power_w", "current_a"}
+    assert body["points"][0]["power_w"] == -60.0
+    assert body["points"][0]["current_a"] == -4.0
     assert body["last"]["lat"] == 43.0
     # guest dock status: deliberate, minimal battery surface — exact key sets pinned
     status = body["status"]

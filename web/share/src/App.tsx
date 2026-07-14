@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { JourneyMap } from "../../src/v2/components/JourneyMap";
 import { cleanTrack } from "../../src/v2/model/cleanTrack";
-import type { SegKind } from "../../src/v2/model/journey";
 import type { LivePos } from "../../src/v2/model/live";
 import type { TrackPoint } from "../../src/v2/track";
 import { relAgo } from "../../src/util";
@@ -11,6 +10,7 @@ import {
 import { ArrowPanel } from "./Arrow";
 import { Dock } from "./Dock";
 import { loadShareTheme, saveShareTheme, type ShareTheme } from "./theme";
+import { loadTrailMode, saveTrailMode, trailProps, type TrailMode } from "./trail";
 
 type Status = "loading" | "ok" | "ended" | "expired" | "error";
 
@@ -21,11 +21,13 @@ export default function App() {
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [guest, setGuest] = useState<LivePos | null>(null);
   const [theme, setTheme] = useState<ShareTheme>(() => loadShareTheme(localStorage));
+  const [trailMode, setTrailMode] = useState<TrailMode>(() => loadTrailMode(localStorage));
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     saveShareTheme(localStorage, theme);
   }, [theme]);
+  useEffect(() => { saveTrailMode(localStorage, trailMode); }, [trailMode]);
 
   useEffect(() => {
     if (!token) { setStatus("ended"); return; }
@@ -58,10 +60,10 @@ export default function App() {
   if (status === "error") return <Message text="Can't reach the server — check your connection." />;
   if (status === "loading" || !feed) return <Message text="Loading…" />;
 
-  const points: TrackPoint[] = cleanTrack(feed.points.map((p) => ({
-    t: p.t, lat: p.lat, lon: p.lon, power_w: null, current_a: null, soc: null,
+  const cleaned: TrackPoint[] = cleanTrack(feed.points.map((p) => ({
+    t: p.t, lat: p.lat, lon: p.lon, power_w: p.power_w, current_a: p.current_a, soc: null,
   })));
-  const segKinds: SegKind[] = points.map(() => "active");
+  const { points, segKinds } = trailProps(cleaned, trailMode);
   const live: LivePos | null = feed.last
     ? { lat: feed.last.lat, lon: feed.last.lon, tsMs: feed.last.t } : null;
   const stale = isStale(feed.last, feed.now);
@@ -99,11 +101,38 @@ export default function App() {
             LIVE
           </>)}
         </span>
+        <div style={{ position: "absolute", bottom: 12, left: 12, zIndex: 1000,
+          display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-start" }}>
+          {trailMode === "detail" && (
+            <span className="mono" style={{ ...mapChip, gap: 8 }}>
+              <span style={{ display: "inline-flex", gap: 3, alignItems: "center" }}>
+                <Swatch color="var(--ok)" /><Swatch color="var(--warn)" /><Swatch color="var(--live)" />
+              </span>
+              EFFORT
+              <span aria-hidden style={{ color: "#a1a1aa", letterSpacing: 2 }}>╌╌</span>
+              VEHICLE
+            </span>
+          )}
+          <button className="mono" aria-label="Toggle trail detail"
+            onClick={() => setTrailMode(trailMode === "detail" ? "plain" : "detail")}
+            style={{ ...mapChip, border: "1px solid var(--border-strong)", cursor: "pointer" }}>
+            TRAIL · {trailMode === "detail" ? "DETAIL" : "PLAIN"}
+          </button>
+        </div>
       </div>
       <Dock status={feed.status} />
       <ArrowPanel target={live} onGuest={setGuest} />
     </div>
   );
+}
+
+const mapChip = {
+  display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderRadius: 8,
+  background: "rgba(9,9,11,.72)", color: "#e4e4e7", fontSize: 11, letterSpacing: 1,
+} as const;
+
+function Swatch({ color }: { color: string }) {
+  return <span style={{ width: 8, height: 8, borderRadius: "50%", background: color }} />;
 }
 
 function Message({ text }: { text: string }) {

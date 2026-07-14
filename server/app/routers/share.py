@@ -53,6 +53,10 @@ def day_window_ms(now: datetime) -> tuple[int, int]:
 STATUS_STALE_MS = 120_000  # mirrors the web LIVE_STALE_MS
 
 
+def _f(v):
+    return float(v) if v is not None else None
+
+
 def _pack_label(row: dict) -> str:
     """'2012 · A' -> 'A'; fall back to the address tail for unaliased packs."""
     alias = (row.get("alias") or "")
@@ -129,7 +133,8 @@ async def share_feed(token: str, request: Request, pool=Depends(get_pool)):
         rows = await q.gps_track_all(conn, from_ms, now_ms + 1)
         snapshot = await q.fleet_snapshot(conn)
         await q.touch_location_share(conn, share["id"], now_ms)
-    points = [{"t": int(r["bucket_ms"]), "lat": r["lat"], "lon": r["lon"]} for r in rows]
+    points = [{"t": int(r["bucket_ms"]), "lat": r["lat"], "lon": r["lon"],
+               "power_w": _f(r["power_w"]), "current_a": _f(r["current_a"])} for r in rows]
     return JSONResponse(
         {"points": points, "last": points[-1] if points else None,
          "expires_at": share["expires_at"], "now": now_ms, "owner": settings.share_owner,

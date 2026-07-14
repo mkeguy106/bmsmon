@@ -1,6 +1,13 @@
 /** Guest feed client + pure state helpers for the public find-me page. */
 
-export interface FeedPoint { t: number; lat: number; lon: number }
+export interface FeedPoint {
+  t: number;
+  lat: number;
+  lon: number;
+  /** Per-bucket discharge context (2026-07-14 trail-detail relaxation); nullable. */
+  power_w: number | null;
+  current_a: number | null;
+}
 
 export interface GuestPack { label: string; soc: number }
 

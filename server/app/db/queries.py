@@ -443,11 +443,14 @@ async def revoke_location_share(conn, share_id: int, now_ms: int) -> None:
 
 
 async def gps_track_all(conn, from_ms: int, to_ms: int) -> list[dict]:
-    """15-second buckets of GPS fixes across the whole fleet — coordinates only.
-    Feeds the public location-share guest page: deliberately no battery columns."""
+    """15-second buckets of GPS fixes across the whole fleet. Feeds the public
+    location-share guest page: coordinates plus per-bucket discharge context
+    (power/current — the 2026-07-14 trail-detail relaxation) and deliberately
+    nothing else (no SOC, voltage, temperature, or cells)."""
     rows = await conn.fetch(
         """SELECT (ts_ms / 15000) * 15000 AS bucket_ms,
-                  avg(lat)::double precision AS lat, avg(lon)::double precision AS lon
+                  avg(lat)::double precision AS lat, avg(lon)::double precision AS lon,
+                  avg(power_w)::real AS power_w, avg(current_a)::real AS current_a
              FROM samples
             WHERE ts_ms >= $1 AND ts_ms < $2
               AND link_event IS NULL AND lat IS NOT NULL AND lon IS NOT NULL

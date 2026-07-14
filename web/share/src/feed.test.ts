@@ -15,8 +15,8 @@ describe("feed model", () => {
 
   it("isStale after 120s or with no fix", () => {
     expect(isStale(null, 1_000_000)).toBe(true);
-    expect(isStale({ t: 1_000_000 - 119_000, lat: 0, lon: 0 }, 1_000_000)).toBe(false);
-    expect(isStale({ t: 1_000_000 - 121_000, lat: 0, lon: 0 }, 1_000_000)).toBe(true);
+    expect(isStale({ t: 1_000_000 - 119_000, lat: 0, lon: 0, power_w: null, current_a: null }, 1_000_000)).toBe(false);
+    expect(isStale({ t: 1_000_000 - 121_000, lat: 0, lon: 0, power_w: null, current_a: null }, 1_000_000)).toBe(true);
   });
 
   it("remainingLabel formats h/m/d", () => {
