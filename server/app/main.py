@@ -9,7 +9,7 @@ from app.config import settings
 from app.db.partitions import ensure_partitions_for_range
 from app.db.pool import create_pool
 from app.db.queries import scrub_expired_gps
-from app.routers import api_device, web, ws
+from app.routers import api_device, share, web, ws
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,10 @@ def create_app() -> FastAPI:
     app.include_router(api_device.router)
     app.include_router(web.router)
     app.include_router(ws.router)
+    # Per-IP limiter for the public /share zone: a guest page polls ~6-8/min, so
+    # 60/min is invisible to legitimate use and throttles token scanning.
+    app.state.share_limiter = RateLimiter(max_attempts=60, window_s=60)
+    app.include_router(share.router)
     import os
     from fastapi.staticfiles import StaticFiles
     web_dist = os.environ.get("BMSMON_WEB_DIST", "/app/web/dist")

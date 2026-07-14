@@ -53,6 +53,7 @@ class Settings:
             os.environ.get("BMSMON_DEV_GROUPS", "Covert.life - Full App Access - User Group")
         )
     )
+    share_owner: str = os.environ.get("BMSMON_SHARE_OWNER", "Joely")
 
 
 settings = Settings()

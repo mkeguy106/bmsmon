@@ -432,3 +432,18 @@ async def revoke_location_share(conn, share_id: int, now_ms: int) -> None:
     await conn.execute(
         "UPDATE location_shares SET revoked_at = $2 WHERE id = $1 AND revoked_at IS NULL",
         share_id, now_ms)
+
+
+async def gps_track_all(conn, from_ms: int, to_ms: int) -> list[dict]:
+    """15-second buckets of GPS fixes across the whole fleet — coordinates only.
+    Feeds the public location-share guest page: deliberately no battery columns."""
+    rows = await conn.fetch(
+        """SELECT (ts_ms / 15000) * 15000 AS bucket_ms,
+                  avg(lat)::double precision AS lat, avg(lon)::double precision AS lon
+             FROM samples
+            WHERE ts_ms >= $1 AND ts_ms < $2
+              AND link_event IS NULL AND lat IS NOT NULL AND lon IS NOT NULL
+            GROUP BY bucket_ms ORDER BY bucket_ms""",
+        from_ms, to_ms,
+    )
+    return [dict(r) for r in rows]
