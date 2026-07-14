@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8" /><title>Live location</title>
+    <!-- REQUIRED (v2 mobile lesson): without this, phones lay out a virtual 980px
+         viewport scaled to ~40% — microscopic text. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="darkreader-lock" />
+    <meta name="robots" content="noindex, nofollow" />
+    <script>
+      try {
+        document.documentElement.dataset.theme =
+          matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      } catch (e) { document.documentElement.dataset.theme = "dark"; }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  </head>
+  <body><div id="root"></div><script type="module" src="./src/main.tsx"></script></body>
+</html>
