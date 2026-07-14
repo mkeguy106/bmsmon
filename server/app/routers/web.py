@@ -1,3 +1,4 @@
+import secrets
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -8,7 +9,7 @@ from app.auth.enroll import generate_code, hash_code
 from app.charge_sessions import detect_charge_sessions
 from app.db import queries as q
 from app.db.pool import get_pool
-from app.models import MintCodeResponse, NoteBody, OkResponse
+from app.models import MintCodeResponse, NoteBody, OkResponse, ShareCreateBody, ShareCreateResponse
 from app.util import jsonable
 
 router = APIRouter(prefix="/web")
@@ -149,3 +150,38 @@ async def revoke(device_id: str, user: AuthUser = Depends(require_admin), pool=D
     async with pool.acquire() as conn:
         await q.revoke_device(conn, device_id)
     return {"revoked": device_id}
+
+
+_SHARE_DURATION_MS = {"1h": 3_600_000, "1d": 86_400_000, "1w": 7 * 86_400_000}
+SHARE_LIST_KEEP_MS = 7 * 86_400_000  # ended shares stay listed for 7 days
+
+
+@router.post("/shares", response_model=ShareCreateResponse)
+async def create_share(body: ShareCreateBody, user: AuthUser = Depends(require_admin),
+                       pool=Depends(get_pool)):
+    """Mint a public location-share link. Admin-gated: a share grants unauthenticated
+    access, same trust class as an enroll code. The token leaves the server only here."""
+    token = secrets.token_urlsafe(24)
+    now_ms = int(time.time() * 1000)
+    expires_at = now_ms + _SHARE_DURATION_MS[body.duration]
+    async with pool.acquire() as conn:
+        share_id = await q.create_location_share(
+            conn, hash_code(token), body.name, user.username, now_ms, expires_at)
+    return ShareCreateResponse(id=share_id, name=body.name, expires_at=expires_at,
+                               path=f"/share/{token}")
+
+
+@router.get("/shares")
+async def list_shares(user: AuthUser = Depends(require_admin), pool=Depends(get_pool)):
+    now_ms = int(time.time() * 1000)
+    async with pool.acquire() as conn:
+        return {"shares": jsonable(
+            await q.list_location_shares(conn, now_ms, SHARE_LIST_KEEP_MS))}
+
+
+@router.delete("/shares/{share_id}")
+async def revoke_share(share_id: int, user: AuthUser = Depends(require_admin),
+                       pool=Depends(get_pool)):
+    async with pool.acquire() as conn:
+        await q.revoke_location_share(conn, share_id, int(time.time() * 1000))
+    return {"revoked": share_id}

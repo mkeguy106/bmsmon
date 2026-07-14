@@ -117,3 +117,19 @@ CREATE TABLE IF NOT EXISTS web_notes (
   updated_at_ms bigint NOT NULL,
   received_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- Time-limited public location-share links (capability URLs; the /share/ Traefik zone
+-- bypasses Authentik). Only sha256(token) is stored — the full URL is returned once at
+-- creation and never again. Guests get today's GPS trail only; feed queries clamp
+-- server-side and never return battery fields. revoked_at NULL = not revoked.
+CREATE TABLE IF NOT EXISTS location_shares (
+  id bigserial PRIMARY KEY,
+  token_hash text NOT NULL UNIQUE,
+  name text NOT NULL,
+  created_at bigint NOT NULL,
+  expires_at bigint NOT NULL,
+  revoked_at bigint,
+  created_by text,
+  last_access_ms bigint,
+  access_count bigint NOT NULL DEFAULT 0
+);

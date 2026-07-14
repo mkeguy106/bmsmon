@@ -134,3 +134,30 @@ class OkResponse(BaseModel):
 class MintCodeResponse(BaseModel):
     code: str
     expires_at: str
+
+
+class ShareCreateBody(BaseModel):
+    name: str
+    duration: str  # "1h" | "1d" | "1w"
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v: str) -> str:
+        v = v.strip()
+        if not v or len(v) > 80:
+            raise ValueError("invalid name")
+        return v
+
+    @field_validator("duration")
+    @classmethod
+    def _duration(cls, v: str) -> str:
+        if v not in ("1h", "1d", "1w"):
+            raise ValueError("duration must be 1h, 1d or 1w")
+        return v
+
+
+class ShareCreateResponse(BaseModel):
+    id: int
+    name: str
+    expires_at: int
+    path: str  # "/share/<token>" — the client prepends window.location.origin

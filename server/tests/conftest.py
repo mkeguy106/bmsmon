@@ -30,7 +30,8 @@ async def app():
         async with pool.acquire() as conn:
             await conn.execute(
                 "TRUNCATE samples, batteries, enrollment_codes, devices, device_temp_config, "
-                "device_alert_config, device_range_config, web_notes RESTART IDENTITY CASCADE"
+                "device_alert_config, device_range_config, web_notes, location_shares "
+                "RESTART IDENTITY CASCADE"
             )
         yield application
 

@@ -392,3 +392,43 @@ async def upsert_note(conn, base_id: str, body: str, updated_at_ms: int) -> None
         """INSERT INTO web_notes (base_id, body, updated_at_ms) VALUES ($1, $2, $3)
            ON CONFLICT (base_id) DO UPDATE SET body = EXCLUDED.body, updated_at_ms = EXCLUDED.updated_at_ms""",
         base_id, body, updated_at_ms)
+
+
+async def create_location_share(conn, token_hash: str, name: str, created_by: str,
+                                created_at_ms: int, expires_at_ms: int) -> int:
+    row = await conn.fetchrow(
+        """INSERT INTO location_shares (token_hash, name, created_by, created_at, expires_at)
+           VALUES ($1, $2, $3, $4, $5) RETURNING id""",
+        token_hash, name, created_by, created_at_ms, expires_at_ms)
+    return int(row["id"])
+
+
+async def get_location_share(conn, token_hash: str) -> dict | None:
+    row = await conn.fetchrow(
+        """SELECT id, name, created_at, expires_at, revoked_at
+             FROM location_shares WHERE token_hash = $1""", token_hash)
+    return dict(row) if row else None
+
+
+async def touch_location_share(conn, share_id: int, now_ms: int) -> None:
+    await conn.execute(
+        """UPDATE location_shares
+              SET last_access_ms = $2, access_count = access_count + 1
+            WHERE id = $1""", share_id, now_ms)
+
+
+async def list_location_shares(conn, now_ms: int, keep_ended_ms: int) -> list[dict]:
+    """Active shares plus anything that ended (revoked or expired) within keep_ended_ms.
+    end-of-life = revoked_at when revoked, else expires_at — COALESCE covers both."""
+    rows = await conn.fetch(
+        """SELECT id, name, created_at, expires_at, revoked_at, last_access_ms, access_count
+             FROM location_shares
+            WHERE COALESCE(revoked_at, expires_at) > $1::bigint - $2::bigint
+            ORDER BY created_at DESC""", now_ms, keep_ended_ms)
+    return [dict(r) for r in rows]
+
+
+async def revoke_location_share(conn, share_id: int, now_ms: int) -> None:
+    await conn.execute(
+        "UPDATE location_shares SET revoked_at = $2 WHERE id = $1 AND revoked_at IS NULL",
+        share_id, now_ms)
