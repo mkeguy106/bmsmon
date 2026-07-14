@@ -53,7 +53,7 @@ def day_window_ms(now: datetime) -> tuple[int, int]:
 async def _resolve(request: Request, token: str, pool) -> tuple[str, dict | None]:
     key = client_key(request.client.host if request.client else None, request.headers)
     if not request.app.state.share_limiter.allow(key):
-        raise HTTPException(429, "too many requests")
+        raise HTTPException(429, "too many requests", headers=_SEC_HEADERS)
     async with pool.acquire() as conn:
         share = await q.get_location_share(conn, hash_code(token))
     return share_status(share, int(time.time() * 1000)), share
@@ -63,7 +63,7 @@ async def _resolve(request: Request, token: str, pool) -> tuple[str, dict | None
 async def share_page(token: str, request: Request, pool=Depends(get_pool)):
     status, _share = await _resolve(request, token, pool)
     if status == "gone":
-        raise HTTPException(404, "Not Found")
+        raise HTTPException(404, "Not Found", headers=_SEC_HEADERS)
     if status == "expired":
         return HTMLResponse(_EXPIRED_HTML, headers=_SEC_HEADERS)
     index = os.path.join(os.environ.get("BMSMON_WEB_DIST", "/app/web/dist"),
@@ -75,9 +75,9 @@ async def share_page(token: str, request: Request, pool=Depends(get_pool)):
 async def share_feed(token: str, request: Request, pool=Depends(get_pool)):
     status, share = await _resolve(request, token, pool)
     if status == "gone":
-        raise HTTPException(404, "Not Found")
+        raise HTTPException(404, "Not Found", headers=_SEC_HEADERS)
     if status == "expired":
-        raise HTTPException(410, "share expired")
+        raise HTTPException(410, "share expired", headers=_SEC_HEADERS)
     from_ms, now_ms = day_window_ms(datetime.now(timezone.utc))
     async with pool.acquire() as conn:
         rows = await q.gps_track_all(conn, from_ms, now_ms + 1)

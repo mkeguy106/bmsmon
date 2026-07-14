@@ -58,6 +58,9 @@ async def test_unknown_and_revoked_are_identical_404(app, client):
         revoked = await client.get(path.format(t="tok-revoked"))
         assert unknown.status_code == revoked.status_code == 404
         assert unknown.content == revoked.content
+        for r in (unknown, revoked):
+            assert r.headers["cache-control"] == "no-store"
+            assert r.headers["referrer-policy"] == "no-referrer"
 
 
 async def test_expired_page_and_feed(app, client):
@@ -67,7 +70,10 @@ async def test_expired_page_and_feed(app, client):
     page = await client.get("/share/tok-exp")
     assert page.status_code == 200
     assert b"expired" in page.content.lower()
-    assert (await client.get("/share/tok-exp/feed")).status_code == 410
+    feed_resp = await client.get("/share/tok-exp/feed")
+    assert feed_resp.status_code == 410
+    assert feed_resp.headers["cache-control"] == "no-store"
+    assert feed_resp.headers["referrer-policy"] == "no-referrer"
 
 
 async def test_feed_today_only_no_battery_fields(app, client):
