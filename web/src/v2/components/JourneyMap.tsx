@@ -29,10 +29,11 @@ function tileUrl(theme: "dark" | "light"): string {
 }
 const TILE_ATTRIB = "© OpenStreetMap contributors © CARTO";
 
-export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, live, liveStale, fitKey, metric, emptyText, fill, showTrail = true }: {
+export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, live, liveStale, fitKey, metric, emptyText, fill, showTrail = true, guest = null }: {
   points: TrackPoint[]; segKinds: SegKind[]; hotspots: Hotspot[]; cursorIndex: number;
   theme: "dark" | "light"; live: LivePos | null; liveStale?: boolean; fitKey: string;
   metric: "power" | "soc"; emptyText?: string; fill?: boolean; showTrail?: boolean;
+  guest?: LivePos | null;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -40,6 +41,8 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
   const trailRef = useRef<L.LayerGroup | null>(null);
   const cursorRef = useRef<L.CircleMarker | null>(null);
   const liveMarkerRef = useRef<L.Marker | null>(null);
+  const guestRef = useRef<L.CircleMarker | null>(null);
+  const guestLineRef = useRef<L.Polyline | null>(null);
   const programmaticMove = useRef(false);
   const lastFitKeyRef = useRef<string | null>(null);
   const lastFitPointsRef = useRef<TrackPoint[] | null>(null);
@@ -229,6 +232,25 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
       map.once("moveend", () => { programmaticMove.current = false; });
     }
   }, [live, liveStale, following, mapReady]);
+
+  // Guest marker + bearing line (share page only): where the viewer is, and a dashed
+  // line from them to the chair so "which way do I walk" is visible on the map.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (guestRef.current) { map.removeLayer(guestRef.current); guestRef.current = null; }
+    if (guestLineRef.current) { map.removeLayer(guestLineRef.current); guestLineRef.current = null; }
+    if (!guest) return;
+    guestRef.current = L.circleMarker([guest.lat, guest.lon], {
+      radius: 7, color: "#fff", weight: 2, fillColor: "#3b82f6", fillOpacity: 1,
+    }).addTo(map);
+    if (live) {
+      guestLineRef.current = L.polyline(
+        [[guest.lat, guest.lon], [live.lat, live.lon]],
+        { color: "#3b82f6", weight: 2, dashArray: "6 6", opacity: 0.8 },
+      ).addTo(map);
+    }
+  }, [guest, live, mapReady]);
 
   // Re-center: on the chair when live (re-engaging follow), else refit to the trail.
   const recenter = () => {
