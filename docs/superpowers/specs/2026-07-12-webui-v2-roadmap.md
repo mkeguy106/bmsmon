@@ -64,7 +64,7 @@ Includes one added workstream: a **cell-voltage telemetry pipeline** (android al
 CELL VOLTAGES section shows real C1–C4. Additive schema; falls back to min/max until packs report.
 
 **Backend:** additive `samples` cell columns + ingest model + snapshot select (small, additive).
-GPS-derived Command bits (DRIVEN TODAY, Today's Route mini-map) are **stubbed** here, wired in Phase 4.
+GPS-derived Command bits (DRIVEN TODAY, Today's Route mini-map) are **stubbed** here, wired in Phase 4. *(Wired 2026-07-13 — DRIVEN TODAY from the cleaned today-track's driven miles; route sketch as a tile-free SVG in the aside.)*
 
 ### Phase 2 — Fleet Health + Alerts + Settings  ← **done**
 The three remaining zero-backend views. All drive off `/web/fleet` + `/ws` + `/web/{temp,alert,range}-config`:
