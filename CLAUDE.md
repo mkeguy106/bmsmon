@@ -504,6 +504,33 @@ endpoints) lives as a **Devices section inside Settings** (`DevicesPanel.tsx`), 
 entry — so there is no longer any "SOON" item. Roadmap/spec:
 `docs/superpowers/specs/2026-07-12-webui-v2-roadmap.md`.
 
+### Location sharing (public /share/ zone)
+
+Time-limited public share links let a named guest follow the chair live:
+`https://bmsmon.covert.life/share/<token>` (token = `secrets.token_urlsafe(24)`; only
+sha256 stored in `location_shares`; link recoverable ONLY at creation). Traefik has a
+third zone — `PathPrefix(/share/)`, priority 100, `bmsmon-header` + `bmsmon-proxy-secret`
+(no Authentik; the proxy secret is there ONLY so the rate limiter can trust XFF for
+per-IP keying — `/share` endpoints never read identity headers) — and the guest page is
+a **third Vite build** (`web/share/`, `vite.config.share.ts`, `base:"/share/"`) so its
+assets stay inside the public zone. Server: `app/routers/share.py` —
+`GET /share/{token}` (active → guest shell; expired → friendly "ask for a new link"
+page; unknown/REVOKED → identical bare 404) and `GET /share/{token}/feed` (today-only
+fleet GPS via `q.gps_track_all`, fields t/lat/lon ONLY — never battery data; day window
+clamped server-side in the container TZ; 410 when expired; updates
+last_access/access_count; no-store + no-referrer on every response incl. errors; per-IP
+`share_limiter` 60/min). Admin CRUD on the Authentik zone: `POST/GET /web/shares`,
+`DELETE /web/shares/{id}` (require_admin — a share grants unauthenticated access, same
+trust class as enroll codes; listing keeps ended shares 7 days). WebUI: Journey toolbar
+↗ opens `ShareDialog` (name + 1h/1d/1w → native share sheet, else clipboard);
+`Settings › Location shares` (`SharesPanel`) lists name/remaining/last-opened/×count +
+Revoke (kills a live guest within one 10 s poll; the guest page stops polling once
+terminally ended/expired). Guest page (`web/share/src/`): map + today's neutral-green
+trail + pulsing/stale chair marker + "Following <owner>" (`BMSMON_SHARE_OWNER`, default
+"Joely") + countdown, and a "Point me there" panel — geolocation distance/cardinal +
+dashed guest→chair map line everywhere, compass-rotated arrow where device orientation
+is available (iOS needs the permission tap).
+
 **Local dev/test:** `docker compose -f server/docker-compose.dev.yml up -d` brings up a Postgres on
 `localhost:5432` (user/pw/db all `bmsmon`, matching the default `DATABASE_URL`). Run server tests
 with the venv: `cd server && .venv/bin/python -m pytest` (bare `python` lacks the deps).

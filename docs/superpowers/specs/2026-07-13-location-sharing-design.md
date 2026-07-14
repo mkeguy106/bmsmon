@@ -43,8 +43,11 @@ One new Traefik router on `bmsmon-api` in `bmsmon/docker-compose.yml`:
 
 - `bmsmon-share`: `Host(bmsmon.covert.life) && PathPrefix(/share/)`, priority 100,
   entrypoint websecure, TLS letsencrypt, service `bmsmon`.
-- Middlewares: `bmsmon-header@docker` **only** — no `authentik@docker`, no
-  `bmsmon-proxy-secret@docker`. Mirrors the existing `/api/` zone exactly.
+- Middlewares: `bmsmon-header@docker` + `bmsmon-proxy-secret@docker` — no
+  `authentik@docker`. (Final-review amendment: the proxy secret rides along ONLY so
+  the app's rate limiter can trust `X-Forwarded-For` for true per-IP keying; the
+  `/share` endpoints never read identity headers. Without it, all guests and
+  scanners would share one global rate bucket keyed on Traefik's container IP.)
 
 Deploys via the qnap-nas-docker repo's push-to-master self-hosted runner (compose
 changes restart the changed service automatically).
