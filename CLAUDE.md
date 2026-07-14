@@ -552,6 +552,18 @@ group from `fleet_snapshot`, 120 s staleness → null; ungrouped packs never mer
 `localhost:5432` (user/pw/db all `bmsmon`, matching the default `DATABASE_URL`). Run server tests
 with the venv: `cd server && .venv/bin/python -m pytest` (bare `python` lacks the deps).
 
+**WebUI smoke test (Playwright, local):** seed the dev DB with a synthetic 4-pack fleet
+(`server/.venv/bin/python server/scripts/seed_dev.py` — TRUNCATES the dev DB, never point it at
+prod), run the API with the built-in local identity (`BMSMON_DEV_TRUST_HEADERS=1
+server/.venv/bin/uvicorn app.main:app --port 8000` — dev-trust refuses non-local DATABASE_URLs, and
+without it /web/* 401s and the /ws close-after-accept loop starves the REST fallback), start
+`npx vite dev --port 5173` in `web/`, then `node scripts/smoke.mjs` (from `web/`). It screenshots
+v1 + all six v2 views + preview.html into `web/smoke-shots/` (gitignored) and exits non-zero on any
+console error or page crash. `playwright` is a web devDependency; browsers via
+`npx playwright install chromium`. The server Dockerfile sets `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`
+so CI image builds never pull browsers. Re-run the seeder to reset pack staleness (data >90 s old
+renders as DISCONNECTED — useful for testing that state deliberately).
+
 ### Image build (GitHub Actions)
 
 `.github/workflows/build-server.yml` builds the multi-stage image (Node builds `web/dist` → Python
