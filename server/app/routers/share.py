@@ -77,7 +77,12 @@ def pick_guest_status(rows: list[dict], now_ms: int) -> dict | None:
     if not fresh:
         return None
     newest = max(fresh, key=lambda r: r["ts_ms"])
-    group = [r for r in fresh if r.get("group_id") == newest.get("group_id")]
+    # Group key falls back to the address so two ungrouped packs (group_id NULL, e.g. a
+    # battery not yet aliased) never merge into one false "base" with summed flow.
+    def _group_key(r: dict):
+        return r.get("group_id") or r.get("address")
+
+    group = [r for r in fresh if _group_key(r) == _group_key(newest)]
     packs = sorted(
         ({"label": _pack_label(r), "soc": int(round(float(r["soc"])))} for r in group),
         key=lambda p: p["label"])

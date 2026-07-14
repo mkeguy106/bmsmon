@@ -62,6 +62,18 @@ def test_pick_guest_status_regen_and_stale_pack_excluded():
     assert s["regen"] is True
 
 
+def test_pick_guest_status_ungrouped_packs_never_merge():
+    now = 10_000_000
+    rows = [
+        _snap_row("AA", None, "", now - 1_000, 80.0, -4.0, -50.0),
+        _snap_row("BB", None, "", now - 2_000, 60.0, -3.0, -40.0),  # separate base
+    ]
+    s = pick_guest_status(rows, now)
+    assert s["packs"] == [{"label": "AA"[-2:], "soc": 80}]
+    assert s["current_a"] == -4.0
+    assert s["power_w"] == -50.0
+
+
 def test_pick_guest_status_stale_or_empty_is_none():
     now = 10_000_000
     assert pick_guest_status([], now) is None

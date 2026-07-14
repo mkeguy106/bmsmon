@@ -16,6 +16,8 @@ export function guestCap(status: GuestStatus | null): GuestCap {
   const detail = status.packs.length > 1
     ? status.packs.map((p) => `${p.label}${p.soc}`).join("·")
     : "";
+  // Band from the server's ROUNDED soc (v2's dock uses the raw min) — intentional:
+  // the feed only carries integers, and a ±0.5% band shift is invisible to a guest.
   const band = status.soc > 30 ? "ok" : status.soc > 15 ? "warn" : "crit";
   return { pct: status.soc, detail, band };
 }
