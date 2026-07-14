@@ -311,13 +311,17 @@ async def history_series(conn, since_ms: int) -> list[dict]:
     """Per-pack 30-minute-bucketed average SOC since since_ms (real telemetry only).
 
     Returns flat rows {address, bucket_ms, soc} ordered by address, bucket_ms — the
-    route groups them into one series per pack. Bounded by the window, not row-capped."""
+    route groups them into one series per pack. Bounded by the window, not row-capped.
+
+    The ts predicate mirrors the ts_ms one (ts is derived from ts_ms at insert time) so
+    the planner can prune the monthly RANGE(ts) partitions — ts_ms alone can't."""
     rows = await conn.fetch(
         """SELECT address,
                   (ts_ms / $2) * $2 AS bucket_ms,
                   avg(soc)::real AS soc
              FROM samples
-            WHERE ts_ms >= $1 AND link_event IS NULL AND soc IS NOT NULL
+            WHERE ts_ms >= $1 AND ts >= to_timestamp($1::double precision / 1000.0)
+              AND link_event IS NULL AND soc IS NOT NULL
             GROUP BY address, bucket_ms
             ORDER BY address, bucket_ms""",
         since_ms, HISTORY_BUCKET_MS,
@@ -326,12 +330,14 @@ async def history_series(conn, since_ms: int) -> list[dict]:
 
 
 async def charge_session_buckets(conn, address: str, since_ms: int) -> list[dict]:
-    """1-minute buckets of charging-only rows (current_a > 0.1) since since_ms."""
+    """1-minute buckets of charging-only rows (current_a > 0.1) since since_ms.
+    The redundant ts predicate exists purely for partition pruning (see history_series)."""
     rows = await conn.fetch(
         """SELECT (ts_ms / 60000) * 60000 AS bucket_ms,
                   avg(soc)::real AS soc, max(temp_c)::real AS temp_max
              FROM samples
-            WHERE address = $1 AND ts_ms >= $2 AND link_event IS NULL AND current_a > 0.1
+            WHERE address = $1 AND ts_ms >= $2 AND ts >= to_timestamp($2::double precision / 1000.0)
+              AND link_event IS NULL AND current_a > 0.1
             GROUP BY bucket_ms ORDER BY bucket_ms""",
         address, since_ms,
     )
@@ -352,14 +358,18 @@ def trend_bucket_ms(span_ms: int) -> int:
 
 
 async def trend_series(conn, address: str, from_ms: int, to_ms: int, bucket_ms: int) -> list[dict]:
-    """Per-pack bucketed SOH / cell-spread / temperature trend for /web/trends."""
+    """Per-pack bucketed SOH / cell-spread / temperature trend for /web/trends.
+    The redundant ts predicates exist purely for partition pruning (see history_series)."""
     rows = await conn.fetch(
         """SELECT (ts_ms / $4) * $4 AS bucket_ms,
                   avg(soh)::real AS soh,
                   avg((cell_max_v - cell_min_v) * 1000)::real AS cell_spread_mv,
                   avg(temp_c)::real AS temp_avg, min(temp_c)::real AS temp_min, max(temp_c)::real AS temp_max
              FROM samples
-            WHERE address = $1 AND ts_ms >= $2 AND ts_ms < $3 AND link_event IS NULL
+            WHERE address = $1 AND ts_ms >= $2 AND ts_ms < $3
+              AND ts >= to_timestamp($2::double precision / 1000.0)
+              AND ts < to_timestamp($3::double precision / 1000.0)
+              AND link_event IS NULL
             GROUP BY bucket_ms ORDER BY bucket_ms""",
         address, from_ms, to_ms, bucket_ms,
     )
@@ -368,13 +378,16 @@ async def trend_series(conn, address: str, from_ms: int, to_ms: int, bucket_ms: 
 
 async def track_series(conn, address: str, from_ms: int, to_ms: int) -> list[dict]:
     """15-second buckets of GPS-carrying real telemetry (lat/lon present) with discharge context.
-    Coarse fixes (accuracy radius > GPS_ACCURACY_MAX_M) are gated out; NULL accuracy passes."""
+    Coarse fixes (accuracy radius > GPS_ACCURACY_MAX_M) are gated out; NULL accuracy passes.
+    The redundant ts predicates exist purely for partition pruning (see history_series)."""
     rows = await conn.fetch(
         """SELECT (ts_ms / 15000) * 15000 AS bucket_ms,
                   avg(lat)::double precision AS lat, avg(lon)::double precision AS lon,
                   avg(power_w)::real AS power_w, avg(current_a)::real AS current_a, avg(soc)::real AS soc
              FROM samples
             WHERE address = $1 AND ts_ms >= $2 AND ts_ms < $3
+              AND ts >= to_timestamp($2::double precision / 1000.0)
+              AND ts < to_timestamp($3::double precision / 1000.0)
               AND link_event IS NULL AND lat IS NOT NULL AND lon IS NOT NULL
               AND (gps_accuracy_m IS NULL OR gps_accuracy_m <= $4)
             GROUP BY bucket_ms ORDER BY bucket_ms""",
@@ -385,9 +398,12 @@ async def track_series(conn, address: str, from_ms: int, to_ms: int) -> list[dic
 
 async def first_sample_ms(conn, address: str) -> int | None:
     """Earliest real-telemetry timestamp for a pack, used by /web/trends to bound the
-    selectable history range on the client."""
+    selectable history range on the client. Written as an ORDER BY address, ts LIMIT 1
+    lookup (a backward descent of samples_addr_ts) instead of min(ts_ms), which would
+    seq-scan every partition."""
     return await conn.fetchval(
-        "SELECT min(ts_ms) FROM samples WHERE address = $1 AND link_event IS NULL", address)
+        """SELECT ts_ms FROM samples WHERE address = $1 AND link_event IS NULL
+           ORDER BY address ASC, ts ASC LIMIT 1""", address)
 
 
 async def get_notes(conn) -> list[dict]:
@@ -446,13 +462,16 @@ async def gps_track_all(conn, from_ms: int, to_ms: int) -> list[dict]:
     """15-second buckets of GPS fixes across the whole fleet. Feeds the public
     location-share guest page: coordinates plus per-bucket discharge context
     (power/current — the 2026-07-14 trail-detail relaxation) and deliberately
-    nothing else (no SOC, voltage, temperature, or cells)."""
+    nothing else (no SOC, voltage, temperature, or cells).
+    The redundant ts predicates exist purely for partition pruning (see history_series)."""
     rows = await conn.fetch(
         """SELECT (ts_ms / 15000) * 15000 AS bucket_ms,
                   avg(lat)::double precision AS lat, avg(lon)::double precision AS lon,
                   avg(power_w)::real AS power_w, avg(current_a)::real AS current_a
              FROM samples
             WHERE ts_ms >= $1 AND ts_ms < $2
+              AND ts >= to_timestamp($1::double precision / 1000.0)
+              AND ts < to_timestamp($2::double precision / 1000.0)
               AND link_event IS NULL AND lat IS NOT NULL AND lon IS NOT NULL
               AND (gps_accuracy_m IS NULL OR gps_accuracy_m <= $3)
             GROUP BY bucket_ms ORDER BY bucket_ms""",

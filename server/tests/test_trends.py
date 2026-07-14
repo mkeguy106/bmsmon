@@ -45,3 +45,20 @@ async def test_trend_series_aggregates(app):
         assert round(p["cell_spread_mv"]) == 30   # avg of 40mV and 20mV
         assert p["temp_min"] == 20.0 and p["temp_max"] == 30.0
         assert await q.first_sample_ms(conn, address) == base + 1000
+
+
+async def test_first_sample_ms_earliest_and_absent(app):
+    pool = app.state.pool
+    async with pool.acquire() as conn:
+        device_id, address = await _device_and_battery(conn)
+        assert await q.first_sample_ms(conn, address) is None
+        base = int(datetime(2026, 7, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        rows = [
+            q.sample_row(device_id, address, {"ts_ms": base + 5000, "soc": 80}),
+            q.sample_row(device_id, address, {"ts_ms": base + 1000, "soc": 81}),
+            # link events are not telemetry and must not count as the first sample
+            q.sample_row(device_id, address, {"ts_ms": base, "link_event": "Connected"}),
+        ]
+        await q.insert_samples(conn, rows)
+        assert await q.first_sample_ms(conn, address) == base + 1000
+        assert await q.first_sample_ms(conn, "C8:47:80:00:00:00") is None

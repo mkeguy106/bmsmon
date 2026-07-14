@@ -67,6 +67,11 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="bmsmon", lifespan=lifespan)
+    # Compress large JSON responses (fleet/history/track payloads). Websockets are
+    # skipped by GZipMiddleware itself, and ingest is unaffected — its gzipped
+    # *request* bodies are decompressed in the router, not by middleware.
+    from starlette.middleware.gzip import GZipMiddleware
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
     from app.auth.device_jwt import JtiCache
     from app.live.bus import LiveBus
     from app.ratelimit import RateLimiter
