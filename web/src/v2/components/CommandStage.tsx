@@ -3,6 +3,7 @@ import { DAILY_DRIVER_BASE, baseLastSeenMs, isCharging } from "../fleet";
 import { relAgo } from "../../util";
 import type { FleetItem } from "../../types";
 import { estimatePackRange, minRange, SEED_RANGE_PARAMS, type PackRange, type RangeParams } from "../../range";
+import type { TripSummary } from "../model/journey";
 import { Ring } from "./Ring";
 import { StatTile, CellTiles, Chip } from "./Atoms";
 import { sohColor } from "../colors";
@@ -75,8 +76,9 @@ function FlowTile({ label, value, sub }: { label: string; value: string; sub?: s
   );
 }
 
-export function CommandStage({ base, rangeParams, tempF, mobile, now }: {
+export function CommandStage({ base, rangeParams, tempF, mobile, now, drivenToday }: {
   base: Base; rangeParams: Map<string, RangeParams>; tempF: boolean; mobile: boolean; now: number;
+  drivenToday: TripSummary;
 }) {
   const live = base.packs.filter((p) => p.connected);
   const charging = base.status === "charging";
@@ -143,7 +145,9 @@ export function CommandStage({ base, rangeParams, tempF, mobile, now }: {
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
           <FlowTile label={flowLabel} value={flowValue} />
           <FlowTile label={runtimeLabel} value={runtimeValue} />
-          <FlowTile label="DRIVEN TODAY" value="—" sub="Phase 4" />
+          <FlowTile label="DRIVEN TODAY"
+            value={drivenToday.miles > 0.05 ? `${drivenToday.activeMiles.toFixed(1)} mi` : "—"}
+            sub={drivenToday.transitMiles > 0.05 ? `+${drivenToday.transitMiles.toFixed(1)} transit` : undefined} />
         </div>
       </div>
     </div>

@@ -2,6 +2,8 @@ import type { ReactNode } from "react";
 import type { Base } from "../fleet";
 import type { FleetItem } from "../../types";
 import { Bar } from "./Atoms";
+import { RouteSketch } from "./RouteSketch";
+import type { TrackPoint } from "../track";
 import { socColor } from "../colors";
 
 function fmtEta(min: number): string {
@@ -24,8 +26,8 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-export function CommandAside({ bases, now, onOpen }: {
-  bases: Base[]; now: number; onOpen: (v: "journey" | "history") => void;
+export function CommandAside({ bases, now, onOpen, todayPoints }: {
+  bases: Base[]; now: number; onOpen: (v: "journey" | "history") => void; todayPoints: TrackPoint[];
 }) {
   const allPacks: Row[] = bases.flatMap((b) =>
     b.packs.map((p) => ({ label: `Base ${b.id} · ${p.letter}`, item: p.item })));
@@ -98,10 +100,7 @@ export function CommandAside({ bases, now, onOpen }: {
       </Section>
 
       <Section title="Today's route">
-        <div style={{ height: 120, borderRadius: 6, background: "var(--panel-2)",
-          display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <span className="eyebrow">Route map — Phase 4</span>
-        </div>
+        <RouteSketch points={todayPoints} />
         <div style={{ display: "flex", gap: 8 }}>
           <AsideButton onClick={() => onOpen("journey")}>Open Journey ›</AsideButton>
           <AsideButton onClick={() => onOpen("history")}>History ›</AsideButton>
