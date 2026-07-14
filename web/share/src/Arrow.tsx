@@ -14,29 +14,41 @@ export function ArrowPanel({ target, onGuest }: {
 }) {
   const [on, setOn] = useState(false);
   const [denied, setDenied] = useState(false);
+  const [waiting, setWaiting] = useState(false);
   const [pos, setPos] = useState<{ lat: number; lon: number } | null>(null);
   const [heading, setHeading] = useState<number | null>(null);
   const watchId = useRef<number | null>(null);
+  const orientHandler = useRef<((e: DeviceOrientationEvent) => void) | null>(null);
 
   const listen = () => {
+    if (orientHandler.current) return; // already registered
     const onOrient = (e: DeviceOrientationEvent) => {
       const webkit = (e as DeviceOrientationEvent & { webkitCompassHeading?: number })
         .webkitCompassHeading;
       if (webkit != null) setHeading(webkit);
       else if (e.absolute && e.alpha != null) setHeading((360 - e.alpha) % 360);
     };
+    orientHandler.current = onOrient;
     window.addEventListener("deviceorientationabsolute", onOrient as EventListener);
     window.addEventListener("deviceorientation", onOrient as EventListener);
   };
 
   const start = () => {
     setOn(true);
+    if (!navigator.geolocation) {
+      setDenied(true);
+      return;
+    }
     watchId.current = navigator.geolocation.watchPosition(
       (p) => {
+        setWaiting(false);
         setPos({ lat: p.coords.latitude, lon: p.coords.longitude });
         onGuest({ lat: p.coords.latitude, lon: p.coords.longitude, tsMs: Date.now() });
       },
-      () => setDenied(true),
+      (err) => {
+        if (err.code === err.PERMISSION_DENIED) setDenied(true);
+        else setWaiting(true);
+      },
       { enableHighAccuracy: true, maximumAge: 5000 },
     );
     const dm = DeviceOrientationEvent as unknown as { requestPermission?: () => Promise<string> };
@@ -47,6 +59,11 @@ export function ArrowPanel({ target, onGuest }: {
 
   useEffect(() => () => {
     if (watchId.current != null) navigator.geolocation.clearWatch(watchId.current);
+    if (orientHandler.current) {
+      window.removeEventListener("deviceorientationabsolute", orientHandler.current as EventListener);
+      window.removeEventListener("deviceorientation", orientHandler.current as EventListener);
+      orientHandler.current = null;
+    }
   }, []);
 
   if (!on) {
@@ -69,7 +86,13 @@ export function ArrowPanel({ target, onGuest }: {
     );
   }
   if (!pos || !target) {
-    return <div style={panel}><span style={{ color: "var(--text-3)", fontSize: 12 }}>Locating…</span></div>;
+    return (
+      <div style={panel}>
+        <span style={{ color: "var(--text-3)", fontSize: 12 }}>
+          {waiting ? "Locating… (waiting for GPS)" : "Locating…"}
+        </span>
+      </div>
+    );
   }
 
   const meters = haversineMeters(pos.lat, pos.lon, target.lat, target.lon);
