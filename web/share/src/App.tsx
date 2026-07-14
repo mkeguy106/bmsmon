@@ -8,6 +8,7 @@ import { relAgo } from "../../src/util";
 import {
   FEED_POLL_MS, fetchFeed, isStale, remainingLabel, tokenFromPath, type Feed,
 } from "./feed";
+import { ArrowPanel } from "./Arrow";
 
 type Status = "loading" | "ok" | "ended" | "expired" | "error";
 
@@ -76,10 +77,7 @@ export default function App() {
           </>)}
         </span>
       </div>
-      {/* Task 7 mounts <ArrowPanel target={live} onGuest={setGuest} /> here. */}
-      {/* `false` (not `null`) — TS 5.9's TS2873 "always falsy" check rejects a literal
-          `null` operand here; `false` renders nothing in JSX just the same. */}
-      {false && guest}
+      <ArrowPanel target={live} onGuest={setGuest} />
     </div>
   );
 }
