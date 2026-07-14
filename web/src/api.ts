@@ -122,3 +122,35 @@ export const getTrack = async (address: string, fromMs: number, toMs: number): P
   if (!t) throw new Error("malformed /web/track response");
   return t;
 };
+
+export interface ShareRow {
+  id: number;
+  name: string;
+  created_at: number;
+  expires_at: number;
+  revoked_at: number | null;
+  last_access_ms: number | null;
+  access_count: number;
+}
+
+export const createShare = async (
+  name: string,
+  duration: "1h" | "1d" | "1w",
+): Promise<{ id: number; name: string; expires_at: number; path: string }> => {
+  const r = await fetch("/web/shares", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, duration }),
+  }).then(j);
+  if (!isObj(r) || typeof r.path !== "string") throw new Error("malformed /web/shares response");
+  return r as { id: number; name: string; expires_at: number; path: string };
+};
+
+export const getShares = async (): Promise<{ shares: ShareRow[] }> => {
+  const r = await fetch("/web/shares").then(j);
+  if (!isObj(r) || !Array.isArray(r.shares)) throw new Error("malformed /web/shares response");
+  return { shares: r.shares as ShareRow[] };
+};
+
+export const revokeShare = async (id: number): Promise<unknown> =>
+  fetch(`/web/shares/${id}`, { method: "DELETE" }).then(j);

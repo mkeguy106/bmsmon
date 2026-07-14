@@ -17,6 +17,7 @@ import { EnergyDistanceChart } from "../components/EnergyDistanceChart";
 import { Ring } from "../components/Ring";
 import { Segmented } from "../components/Segmented";
 import { JourneyDock } from "../components/JourneyDock";
+import { ShareDialog } from "../components/ShareDialog";
 
 // ── Persisted control state ────────────────────────────────────────────────
 type DateMode = "day" | "range";
@@ -109,6 +110,7 @@ export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
   const [st, setSt] = useLocalStorage<JourneyState>("bmsmon-v2-journey", () => DEFAULT_JOURNEY, journeyCodec);
   const [cursorIndex, setCursorIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
 
   const set = (patch: Partial<JourneyState>) => setSt((s) => ({ ...s, ...patch }));
 
@@ -220,6 +222,8 @@ export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
         <Segmented<DateMode>
           options={[{ value: "day", label: "DAY" }, { value: "range", label: "RANGE" }]}
           value={st.dateMode} onChange={(v) => set({ dateMode: v })} />
+        <button aria-label="Share live location" title="Share live location"
+          style={stepBtnStyle()} onClick={() => setShareOpen(true)}>↗</button>
         {!mobile && isLive && (
           <span className="mono" style={{
             display: "inline-flex", alignItems: "center", gap: 6,
@@ -233,6 +237,8 @@ export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
           </span>
         )}
       </div>
+
+      {shareOpen && <ShareDialog onClose={() => setShareOpen(false)} />}
 
       {mobile ? (
         <>
