@@ -8,6 +8,12 @@ _COLS = ["state", "soc", "current_a", "power_w", "voltage_v", "temp_c", "mosfet_
          "soh", "full_charge_ah", "remaining_ah", "cycles", "cell_min_v", "cell_max_v",
          "link_event", "lat", "lon", "gps_accuracy_m", "eta_full_min"]
 
+# Fixes with a larger claimed accuracy radius than this are coarse network/cell fallbacks
+# (fused provider without GNSS lock, e.g. right after a phone reboot — observed 363-636 m
+# jumps ~433 m off) and are excluded from rendered tracks. Real fixes run <=200 m even in a
+# vehicle without GNSS; raw samples keep every fix regardless.
+GPS_ACCURACY_MAX_M = 250
+
 
 def sample_row(device_id: str, address: str, s: dict) -> dict:
     ts_ms = int(s["ts_ms"])
@@ -361,7 +367,8 @@ async def trend_series(conn, address: str, from_ms: int, to_ms: int, bucket_ms: 
 
 
 async def track_series(conn, address: str, from_ms: int, to_ms: int) -> list[dict]:
-    """15-second buckets of GPS-carrying real telemetry (lat/lon present) with discharge context."""
+    """15-second buckets of GPS-carrying real telemetry (lat/lon present) with discharge context.
+    Coarse fixes (accuracy radius > GPS_ACCURACY_MAX_M) are gated out; NULL accuracy passes."""
     rows = await conn.fetch(
         """SELECT (ts_ms / 15000) * 15000 AS bucket_ms,
                   avg(lat)::double precision AS lat, avg(lon)::double precision AS lon,
@@ -369,8 +376,9 @@ async def track_series(conn, address: str, from_ms: int, to_ms: int) -> list[dic
              FROM samples
             WHERE address = $1 AND ts_ms >= $2 AND ts_ms < $3
               AND link_event IS NULL AND lat IS NOT NULL AND lon IS NOT NULL
+              AND (gps_accuracy_m IS NULL OR gps_accuracy_m <= $4)
             GROUP BY bucket_ms ORDER BY bucket_ms""",
-        address, from_ms, to_ms,
+        address, from_ms, to_ms, GPS_ACCURACY_MAX_M,
     )
     return [dict(r) for r in rows]
 
@@ -443,7 +451,8 @@ async def gps_track_all(conn, from_ms: int, to_ms: int) -> list[dict]:
              FROM samples
             WHERE ts_ms >= $1 AND ts_ms < $2
               AND link_event IS NULL AND lat IS NOT NULL AND lon IS NOT NULL
+              AND (gps_accuracy_m IS NULL OR gps_accuracy_m <= $3)
             GROUP BY bucket_ms ORDER BY bucket_ms""",
-        from_ms, to_ms,
+        from_ms, to_ms, GPS_ACCURACY_MAX_M,
     )
     return [dict(r) for r in rows]

@@ -473,7 +473,10 @@ editable per-base notes, backed by `GET /web/trends`, `GET /web/charge-sessions`
 date nav, a Leaflet base map with CARTO dark/light tiles, a discharge-colored trail
 green/amber/red by |power|, dashed transit legs, hotspot markers, playback scrubber, and an
 energy-over-distance chart, backed by the new read-only `GET /web/track` endpoint — 15 s-bucketed
-per-pack GPS + discharge series). Journey goes **live** when the selected window includes now:
+per-pack GPS + discharge series; both this and the share feed gate out coarse fixes with
+`gps_accuracy_m > 250` server-side (`GPS_ACCURACY_MAX_M`, queries.py) — a post-reboot fused
+network fix (363–636 m accuracy, 433 m off) drew a phantom jump on 2026-07-14; real fixes ran
+≤200 m even in a vehicle pre-GNSS, and raw samples keep every fix). Journey goes **live** when the selected window includes now:
 the trail re-polls every 15 s (`useTrack` refreshMs), a pulsing ♿ marker tracks the chair off
 the live WS fleet feed (hidden when the freshest fix is >120 s old), the camera follows until
 the user pans (dragstart breaks follow unconditionally — Leaflet dragstart is user-only; a

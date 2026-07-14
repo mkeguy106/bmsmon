@@ -37,9 +37,11 @@ async def _mk_share(conn, token: str, created_ms: int, expires_ms: int,
     return sid
 
 
-async def _seed_fix(conn, ts_ms: int, lat: float, lon: float):
+async def _seed_fix(conn, ts_ms: int, lat: float, lon: float,
+                    accuracy_m: float | None = None):
     rows = [q.sample_row(DEV, A, {"ts_ms": ts_ms, "lat": lat, "lon": lon,
-                                  "power_w": -60.0, "current_a": -4.0, "soc": 88})]
+                                  "power_w": -60.0, "current_a": -4.0, "soc": 88,
+                                  "gps_accuracy_m": accuracy_m})]
     assert await q.insert_samples(conn, rows) == 1
 
 
@@ -98,6 +100,21 @@ async def test_feed_today_only_no_battery_fields(app, client):
         listing = await q.list_location_shares(conn, now_ms, 86_400_000)
     assert listing[0]["access_count"] == 1
     assert listing[0]["last_access_ms"] is not None
+
+
+async def test_feed_excludes_coarse_fixes(app, client):
+    """The guest trail must not jump to a coarse network fix (huge accuracy radius)."""
+    now_ms = int(time.time() * 1000)
+    async with app.state.pool.acquire() as conn:
+        await _seed_device(conn)
+        await _mk_share(conn, "tok-acc", now_ms, now_ms + 3_600_000)
+        await _seed_fix(conn, now_ms - 90_000, 43.0, -87.9, accuracy_m=16.0)
+        await _seed_fix(conn, now_ms - 60_000, 43.03, -87.905, accuracy_m=400.0)  # dropped
+    r = await client.get("/share/tok-acc/feed")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["points"]) == 1
+    assert body["last"]["lat"] == 43.0
 
 
 async def test_feed_rate_limited_per_ip(app):
