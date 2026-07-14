@@ -138,6 +138,36 @@ class CloudJsonTest {
         assertTrue(!s.contains("\"gps_accuracy_m\""))
     }
 
+    @Test fun sampleJson_rounds_gps_for_upload() {
+        // Upload-path GPS rounding (bandwidth): 6 dp ≈ 0.11 m (real accuracy is 8–15 m), accuracy
+        // to 1 dp. Local Room logging keeps full precision — only the cloud payload is rounded.
+        val s = CloudJson.sampleJson(
+            tsMs = 1L, address = "A", advertisedName = null, alias = null, groupId = null,
+            state = null, soc = null, currentA = null, powerW = null, voltageV = null, tempC = null,
+            mosfetTempC = null, soh = null, fullChargeAh = null, remainingAh = null, cycles = null,
+            cellMinV = null, cellMaxV = null, regen = false, linkEvent = null,
+            lat = 41.88183209876543, lon = -87.62317701234567, gpsAccuracyM = 12.3456f)
+        assertTrue(s.contains("\"lat\":41.881832"))
+        assertTrue(!s.contains("41.8818320"))          // full-precision tail must be gone
+        assertTrue(s.contains("\"lon\":-87.623177"))
+        assertTrue(!s.contains("-87.6231770"))
+        assertTrue(s.contains("\"gps_accuracy_m\":12.3"))
+        assertTrue(!s.contains("12.3456"))
+    }
+
+    @Test fun roundCoord_is_plain_decimal_rounding_to_6_places() {
+        assertEquals(41.881832, CloudJson.roundCoord(41.88183209876543), 0.0)
+        assertEquals(-87.623177, CloudJson.roundCoord(-87.62317701234567), 0.0)
+        assertEquals(41.8781, CloudJson.roundCoord(41.8781), 0.0)   // already short: unchanged
+        assertEquals(0.0, CloudJson.roundCoord(0.0), 0.0)
+    }
+
+    @Test fun roundAccuracy_is_plain_decimal_rounding_to_1_place() {
+        assertEquals(12.3f, CloudJson.roundAccuracy(12.3456f), 0f)
+        assertEquals(7.5f, CloudJson.roundAccuracy(7.5f), 0f)
+        assertEquals(0.1f, CloudJson.roundAccuracy(0.06f), 0f)
+    }
+
     @Test fun sampleJson_includes_cells_when_present() {
         val js = CloudJson.sampleJson(
             1L, "AA", null, null, null, "Discharging", 88f, -4f, -51f, 13.2f, 24f,

@@ -44,6 +44,15 @@ object CloudJson {
     private fun Float?.finiteOrNull(): Float? = this?.takeIf { it.isFinite() }
     private fun Double?.finiteOrNull(): Double? = this?.takeIf { it.isFinite() }
 
+    /**
+     * Upload-path GPS rounding (bandwidth): full-precision doubles serialize to ~17 significant
+     * digits; 6 decimal places ≈ 0.11 m, far below the 8–15 m real fix accuracy. Plain decimal
+     * rounding, applied ONLY here at the serialization boundary — local Room logging keeps full
+     * precision. Internal for unit tests.
+     */
+    internal fun roundCoord(v: Double): Double = Math.round(v * 1e6) / 1e6
+    internal fun roundAccuracy(v: Float): Float = Math.round(v * 10f) / 10f
+
     @Suppress("LongParameterList")
     fun sampleJson(
         tsMs: Long, address: String, advertisedName: String?, alias: String?, groupId: String?,
@@ -60,7 +69,8 @@ object CloudJson {
             voltageV.finiteOrNull(), tempC.finiteOrNull(), mosfetTempC, soh,
             fullChargeAh.finiteOrNull(), remainingAh.finiteOrNull(), cycles,
             cellMinV.finiteOrNull(), cellMaxV.finiteOrNull(), regen, linkEvent,
-            lat.finiteOrNull(), lon.finiteOrNull(), gpsAccuracyM.finiteOrNull(),
+            lat.finiteOrNull()?.let { roundCoord(it) }, lon.finiteOrNull()?.let { roundCoord(it) },
+            gpsAccuracyM.finiteOrNull()?.let { roundAccuracy(it) },
             etaFullMin.finiteOrNull(),
             cells?.filter { it.isFinite() }?.takeIf { it.isNotEmpty() }),
     )

@@ -30,6 +30,25 @@ private const val OUTBOX_MAX = 200_000
 private const val IMPORT_PAGE = 500
 
 /**
+ * Batch accumulation (bandwidth): don't POST the moment the outbox is non-empty — that turned
+ * BATCH=200 into an effective ~2 rows across ~3,000 POSTs/hour, paying ~470 B of per-POST
+ * overhead (unique JWT + headers) and a poor gzip ratio on tiny bodies. Flush only once
+ * [MIN_BATCH] rows are queued OR the oldest queued row is [FLUSH_AGE_MS] old (bounds latency),
+ * then drain to empty. Internal for unit tests.
+ */
+internal const val MIN_BATCH = 20
+internal const val FLUSH_AGE_MS = 15_000L
+
+/**
+ * Pure flush decision for the upload loop: flush when the queue is deep enough ([MIN_BATCH]), the
+ * head row is old enough ([FLUSH_AGE_MS] — fires AT the threshold), or a drain is already in
+ * progress ([draining] — a 250-deep queue goes 200+50 without re-waiting). [oldestAgeMs] is null
+ * when the queue emptied between reads; a negative value (clock skew) never triggers the age arm.
+ */
+internal fun shouldFlush(depth: Int, oldestAgeMs: Long?, draining: Boolean): Boolean =
+    depth > 0 && (draining || depth >= MIN_BATCH || (oldestAgeMs != null && oldestAgeMs >= FLUSH_AGE_MS))
+
+/**
  * How many enqueue-path inserts may pass between outbox-cap checks (DATA-5). An exact COUNT per
  * insert would double the write path's DB work for no benefit, so the cap is enforced amortized:
  * the drain loop re-counts every [CAP_CHECK_EVERY] inserts (and once at startup) and drops the
@@ -225,17 +244,21 @@ class TelemetryReporter(
         }
     }
 
-    /** Sign [body] with the device key and POST to [url], gzipped. Classified by HTTP status. */
-    private fun postSigned(url: String, deviceId: String, body: ByteArray): PostResult =
+    /**
+     * Sign [body] with the device key and POST [wire] (its gzipped form) to [url]. Classified by
+     * HTTP status. [wire] defaults to gzipping here; the upload loop passes it precomputed so the
+     * same bytes feed both the request body and the upload-rate indicator (gzip once).
+     */
+    private fun postSigned(url: String, deviceId: String, body: ByteArray, wire: ByteArray = gzip(body)): PostResult =
         try {
             // Sign the PLAINTEXT body (the server's body-hash is over the decompressed JSON), then
-            // gzip it as a transport layer to cut upload bandwidth (~85% on this repetitive JSON).
+            // send the gzipped wire bytes as a transport layer (~85% saved on this repetitive JSON).
             val token = Jwt.signEs256(DeviceKeys.privateKey(), deviceId, body, System.currentTimeMillis())
             val req = Request.Builder()
                 .url(url)
                 .header("Authorization", "Bearer $token")
                 .header("Content-Encoding", "gzip")
-                .post(gzip(body).toRequestBody("application/json".toMediaType()))
+                .post(wire.toRequestBody("application/json".toMediaType()))
                 .build()
             http.newCall(req).execute().use { classifyPost(it.code) }
         } catch (e: CancellationException) {
@@ -247,6 +270,9 @@ class TelemetryReporter(
     private suspend fun uploadLoop() {
         var backoff = 1000L
         var seq = 0
+        // True while a started flush is draining the queue to empty (see shouldFlush). Stays true
+        // across transient/auth retries so a failed batch's remainder never re-waits FLUSH_AGE_MS.
+        var draining = false
         while (true) {
             try {
                 // Hot path (DATA-7): read the flow-fed snapshot — no per-iteration Persisted decode.
@@ -277,26 +303,41 @@ class TelemetryReporter(
                 val depth = db.outbox().count()
                 if (depth > OUTBOX_MAX) db.outbox().dropOldest(depth - OUTBOX_MAX)
                 if (!conn.online.value || depth == 0) {
+                    if (depth == 0) draining = false
                     onStatus?.invoke(depth.toLong(), lastUploadMs, uploadRate.kbps(System.currentTimeMillis()), authFailed)
                     delay(1500)
                     continue
                 }
+                // Batch accumulation: wait for MIN_BATCH rows or a FLUSH_AGE_MS-old head before
+                // flushing (then drain to empty). Rows sit durably in the Room outbox meanwhile.
+                val oldestAgeMs = db.outbox().oldestEnqueuedAt()
+                    ?.let { System.currentTimeMillis() - it }
+                if (!shouldFlush(depth, oldestAgeMs, draining)) {
+                    onStatus?.invoke(depth.toLong(), lastUploadMs, uploadRate.kbps(System.currentTimeMillis()), authFailed)
+                    delay(1500)
+                    continue
+                }
+                draining = true
                 val rows = db.outbox().peek(BATCH)
                 if (rows.isEmpty()) {
                     delay(1500)
                     continue
                 }
                 seq += 1
-                // The SAME body bytes are used for both signing and POSTing.
+                // The SAME body bytes are used for both signing and POSTing; gzip ONCE so the
+                // rate indicator records the actual wire bytes, not the plaintext size.
                 val body = CloudJson.encodeBatch(seq, rows.map { it.payload })
-                when (postSigned(CloudConfig(base).ingestUrl, p.deviceId, body)) {
+                val wire = gzip(body)
+                when (postSigned(CloudConfig(base).ingestUrl, p.deviceId, body, wire)) {
                     PostResult.Ok -> {
                         authFailed = false
                         db.outbox().deleteUpTo(rows.last().id)
                         val now = System.currentTimeMillis()
                         lastUploadMs = now
-                        uploadRate.record(now, body.size)
-                        onStatus?.invoke(db.outbox().count().toLong(), lastUploadMs, uploadRate.kbps(now), authFailed)
+                        uploadRate.record(now, wire.size)
+                        val remaining = db.outbox().count()
+                        if (remaining == 0) draining = false
+                        onStatus?.invoke(remaining.toLong(), lastUploadMs, uploadRate.kbps(now), authFailed)
                         backoff = 1000L
                     }
                     PostResult.Poison -> {
@@ -311,8 +352,10 @@ class TelemetryReporter(
                                 "(${rows.size} rows, outbox ids ${rows.first().id}..${rows.last().id}) — skipping past it",
                         )
                         db.outbox().deleteUpTo(rows.last().id)
+                        val remaining = db.outbox().count()
+                        if (remaining == 0) draining = false
                         onStatus?.invoke(
-                            db.outbox().count().toLong(), lastUploadMs,
+                            remaining.toLong(), lastUploadMs,
                             uploadRate.kbps(System.currentTimeMillis()), authFailed,
                         )
                         backoff = 1000L

@@ -4,8 +4,9 @@ import java.util.ArrayDeque
 
 /**
  * Smoothed upload throughput in KB/s over a rolling time window. Each successful POST records its
- * body size; [kbps] sums the bytes still inside the window and divides by the window length, so a
- * steady drip of small batches reads as a steady rate instead of flickering to zero between posts.
+ * WIRE size (the gzipped bytes actually sent, not the plaintext JSON); [kbps] sums the bytes still
+ * inside the window and divides by the window length, so a steady drip of small batches reads as a
+ * steady rate instead of flickering to zero between posts.
  *
  * Single-threaded by contract — only the reporter's upload loop touches it, so no synchronization.
  */

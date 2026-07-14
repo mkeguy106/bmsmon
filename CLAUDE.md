@@ -273,7 +273,11 @@ SOC ring on the stage (toggle + L/R position in settings), plus a `TEMP` stat ti
 **Cloud config push (one-way):** when temp thresholds change (and cloud sync is on), the phone
 uploads the profile's threshold config — signed + gzipped like telemetry, durable/latest-wins — to
 `POST /api/v1/config`; the WebUI mirrors it read-only. Telemetry uploads are **gzip-compressed**
-(`Content-Encoding: gzip`; server decompresses before the JWT body-hash verify).
+(`Content-Encoding: gzip`; server decompresses before the JWT body-hash verify) and **batched**:
+the uploader flushes only at ≥`MIN_BATCH` (20) queued rows or a `FLUSH_AGE_MS` (15 s)-old head,
+then drains to empty (`shouldFlush()` in `TelemetryReporter.kt`) — never per-sample POSTs, which
+paid ~470 B of JWT/header overhead each and defeated gzip on tiny bodies (~9× bandwidth combined
+with the GPS dedup below). Every sample is still uploaded; worst-case live-feed latency is ~15 s.
 
 **Usage logging is intentionally ON right now — do not turn it off.** Every telemetry
 sample is recorded to the phone's Room DB (`bms.db`, `samples` table, columns incl.
@@ -347,8 +351,11 @@ alerts are fleet-wide") — the ladder is the single source of truth for all thr
 
 **GPS telemetry (cloud upload).** When cloud sync is enrolled, the app captures the phone's
 location (`location/LocationSource.kt`, fused provider) and attaches `lat`/`lon`/`gps_accuracy_m`
-to **every** uploaded telemetry sample — it rides the same offline-durable outbox, so offline
-driving is buffered and synced on reconnect. `gpsEnabled` defaults **on with cloud sync**
+to uploaded telemetry samples — **only when the fix is new for that pack** (deduped per address on
+`GpsFix.timeMs` = `Location.getTime()`, never coordinate equality — stationary fixes jitter;
+`isNewFixForPack()` in `MonitorEngine.kt`), coordinates rounded to 6 dp (~0.11 m) on the upload
+path only (`CloudJson.roundCoord`). Local Room logging keeps full precision on every sample. GPS
+rides the same offline-durable outbox, so offline driving is buffered and synced on reconnect. `gpsEnabled` defaults **on with cloud sync**
 (reducer `p.gpsEnabled ?: p.cloudEnabled`), toggled in Cloud sync settings ("Send GPS location").
 The engine's effective GPS-active = `monitoring && gpsEnabled && enrolled && cloudEnabled`.
 Needs `ACCESS_FINE/COARSE_LOCATION` + `ACCESS_BACKGROUND_LOCATION` + a `location` FGS type
@@ -359,7 +366,7 @@ explicit design choice for pocket/driving capture.
 **Main-stage upload indicator.** The Home top bar shows a small glanceable cloud-upload status
 next to the stage label, only when cloud sync is enrolled: `↑ X.X KB/s` (green) while uploading,
 `↑ synced` when caught up, `↑ N queued` (amber) when buffering/offline. The rate comes from
-`cloud/UploadRate.kt` (a pure, unit-tested 5 s rolling window of actual POST body bytes →
+`cloud/UploadRate.kt` (a pure, unit-tested 5 s rolling window of gzipped wire bytes →
 smoothed KB/s) surfaced through the reporter's `onStatus` into `UiState.cloudUploadKbps`.
 
 **Discharge estimate (miles + time remaining).** The stage shows a base-level learned

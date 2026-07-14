@@ -12,8 +12,13 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import java.util.concurrent.atomic.AtomicReference
 
-/** A single cached GPS fix attached to outgoing telemetry. */
-data class GpsFix(val lat: Double, val lon: Double, val accuracyM: Float?)
+/**
+ * A single cached GPS fix attached to outgoing telemetry. [timeMs] is the fix timestamp
+ * ([android.location.Location.getTime], UTC epoch ms) — the upload path dedups on it so a fix
+ * re-read between provider refreshes uploads once per pack (coordinates jitter while stationary,
+ * so identity is the fix TIME, never coordinate equality).
+ */
+data class GpsFix(val lat: Double, val lon: Double, val accuracyM: Float?, val timeMs: Long)
 
 /**
  * Thin wrapper over the fused location provider. Holds the latest fix in an atomic reference;
@@ -28,7 +33,7 @@ class LocationSource(private val context: Context) {
     private val callback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
             result.lastLocation?.let {
-                cache.set(GpsFix(it.latitude, it.longitude, if (it.hasAccuracy()) it.accuracy else null))
+                cache.set(GpsFix(it.latitude, it.longitude, if (it.hasAccuracy()) it.accuracy else null, it.time))
             }
         }
     }
@@ -38,7 +43,7 @@ class LocationSource(private val context: Context) {
         if (requesting || !hasLocationPermission(context)) return
         requesting = true
         client.lastLocation.addOnSuccessListener { loc ->
-            loc?.let { cache.set(GpsFix(it.latitude, it.longitude, if (it.hasAccuracy()) it.accuracy else null)) }
+            loc?.let { cache.set(GpsFix(it.latitude, it.longitude, if (it.hasAccuracy()) it.accuracy else null, it.time)) }
         }
         // Always-on GNSS (2026-07-13): balanced-power WiFi/cell fixes averaged ~90 m and
         // spawned the phantom map spikes; the phone rides the chair on constant USB power,

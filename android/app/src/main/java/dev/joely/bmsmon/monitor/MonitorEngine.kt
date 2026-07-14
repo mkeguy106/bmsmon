@@ -67,6 +67,16 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
+ * Upload-path GPS dedup (bandwidth): attach lat/lon to a pack's uploaded sample only when the
+ * cached fix is NEW for that pack, keyed on the fix timestamp ([lastUploadedFixMs] vs
+ * [fixTimeMs] = [dev.joely.bmsmon.location.GpsFix.timeMs]). Never key on coordinate equality —
+ * the fused provider re-fires with jittering coordinates while stationary. Staged packs poll at
+ * 1.5 s vs the ~5 s fix cadence, so ~1-in-3 samples carry GPS; every pack still uploads every fix.
+ */
+internal fun isNewFixForPack(lastUploadedFixMs: Long?, fixTimeMs: Long): Boolean =
+    lastUploadedFixMs == null || fixTimeMs > lastUploadedFixMs
+
+/**
  * The BLE-derived state the engine maintains, independent of any UI lifecycle. Mirrored into the
  * ViewModel's UiState while the app is foregrounded, and read by the foreground-service
  * notification while it isn't.
@@ -128,6 +138,9 @@ class MonitorEngine(
     @Volatile private var tempThresholdsByProfile: Map<String, TempThresholds> = emptyMap()
     @Volatile private var tempUnit: TempUnit = TempUnit.F
     private val lastTailLearnAt = HashMap<String, Long>()
+    // Last-uploaded GPS fix time per address (see isNewFixForPack). Upload path only — local Room
+    // logging keeps attaching the full-precision fix to every sample.
+    private val lastGpsFixUploaded = HashMap<String, Long>()
     private var rangeJob: Job? = null
     @Volatile private var lastRangeLearnAt = 0L
 
@@ -451,9 +464,12 @@ class MonitorEngine(
             )
         }
         val fix = if (_state.value.gpsActive) locationSource.current() else null
+        // Upload GPS only when the fix is new for this pack (bandwidth — see isNewFixForPack).
+        val uploadFix = fix?.takeIf { isNewFixForPack(lastGpsFixUploaded[addr], it.timeMs) }
+        if (uploadFix != null) lastGpsFixUploaded[addr] = uploadFix.timeMs
         reporter?.report(
             addr, roster.batteryAt(addr)?.advertisedName, roster.batteryAt(addr)?.alias,
-            group?.id, t, now, regen, fix?.lat, fix?.lon, fix?.accuracyM, etaFullMin,
+            group?.id, t, now, regen, uploadFix?.lat, uploadFix?.lon, uploadFix?.accuracyM, etaFullMin,
         )
         if (logging) {
             val header = (ProfileRegistry.profileFor(roster.batteryAt(addr)?.advertisedName)
