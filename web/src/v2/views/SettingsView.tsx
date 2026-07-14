@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { useV2Settings } from "../useV2Settings";
 import { Segmented } from "../components/Segmented";
 import { DevicesPanel } from "../components/DevicesPanel";
+import { SharesPanel } from "../components/SharesPanel";
 
 function SettingRow<T extends string>({ label, options, value, onChange }: {
   label: string; options: { value: T; label: string }[]; value: T; onChange: (v: T) => void;
@@ -59,6 +60,10 @@ export function SettingsView() {
 
       <SettingsCard title="Devices">
         <DevicesPanel />
+      </SettingsCard>
+
+      <SettingsCard title="Location shares">
+        <SharesPanel />
       </SettingsCard>
 
       <SettingsCard title="About">
