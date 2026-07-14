@@ -9,6 +9,8 @@ import {
   FEED_POLL_MS, fetchFeed, isStale, remainingLabel, tokenFromPath, type Feed,
 } from "./feed";
 import { ArrowPanel } from "./Arrow";
+import { Dock } from "./Dock";
+import { loadShareTheme, saveShareTheme, type ShareTheme } from "./theme";
 
 type Status = "loading" | "ok" | "ended" | "expired" | "error";
 
@@ -18,6 +20,12 @@ export default function App() {
   const [status, setStatus] = useState<Status>("loading");
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [guest, setGuest] = useState<LivePos | null>(null);
+  const [theme, setTheme] = useState<ShareTheme>(() => loadShareTheme(localStorage));
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    saveShareTheme(localStorage, theme);
+  }, [theme]);
 
   useEffect(() => {
     if (!token) { setStatus("ended"); return; }
@@ -57,7 +65,6 @@ export default function App() {
   const live: LivePos | null = feed.last
     ? { lat: feed.last.lat, lon: feed.last.lon, tsMs: feed.last.t } : null;
   const stale = isStale(feed.last, feed.now);
-  const theme = document.documentElement.dataset.theme === "light" ? "light" : "dark";
 
   return (
     <div style={{ height: "100dvh", display: "flex", flexDirection: "column", overflow: "hidden" }}>
@@ -67,6 +74,13 @@ export default function App() {
         <span className="mono" style={{ marginLeft: "auto", fontSize: 11, color: "var(--text-3)" }}>
           {remainingLabel(feed.expires_at, nowMs)}
         </span>
+        <button aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+          style={{ background: "var(--nav-active)", border: "1px solid var(--border)",
+            color: "var(--text)", fontSize: 14, lineHeight: 1, padding: "6px 9px",
+            borderRadius: 7, cursor: "pointer" }}>
+          {theme === "dark" ? "☀" : "☾"}
+        </button>
       </div>
       <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
         <JourneyMap points={points} segKinds={segKinds} hotspots={[]}
@@ -86,6 +100,7 @@ export default function App() {
           </>)}
         </span>
       </div>
+      <Dock status={feed.status} />
       <ArrowPanel target={live} onGuest={setGuest} />
     </div>
   );

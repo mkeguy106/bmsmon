@@ -5,7 +5,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.auth.enroll import hash_code
 from app.db import queries as q
-from app.routers.share import day_window_ms, share_status
+from app.routers.share import STATUS_STALE_MS, day_window_ms, pick_guest_status, share_status
 
 DEV = "00000000-0000-0000-0000-000000000002"
 A = "C8:47:80:15:67:44"
@@ -26,6 +26,47 @@ def test_day_window_is_local_midnight_to_now():
     start = datetime.fromtimestamp(from_ms / 1000).astimezone()
     assert (start.hour, start.minute, start.second) == (0, 0, 0)
     assert 0 < to_ms - from_ms <= 25 * 3600 * 1000  # <= a DST-long day
+
+
+def _snap_row(addr, group, alias, ts_ms, soc, cur=0.0, pw=0.0, regen=None):
+    return {"address": addr, "group_id": group, "alias": alias, "ts_ms": ts_ms,
+            "soc": soc, "current_a": cur, "power_w": pw, "regen": regen}
+
+
+def test_pick_guest_status_aggregates_freshest_group():
+    now = 10_000_000
+    rows = [
+        _snap_row("AA", "2012", "2012 · A", now - 5_000, 98.0, -4.0, -50.0),
+        _snap_row("BB", "2012", "2012 · B", now - 8_000, 97.0, -3.5, -45.0),
+        _snap_row("CC", "2016", "2016 · A", now - 60_000, 55.0),  # other base: ignored
+    ]
+    s = pick_guest_status(rows, now)
+    assert set(s.keys()) == {"ts", "soc", "packs", "current_a", "power_w", "regen"}
+    assert s["ts"] == now - 5_000
+    assert s["soc"] == 97
+    assert s["packs"] == [{"label": "A", "soc": 98}, {"label": "B", "soc": 97}]
+    assert s["current_a"] == -7.5
+    assert s["power_w"] == -95.0
+    assert s["regen"] is False
+
+
+def test_pick_guest_status_regen_and_stale_pack_excluded():
+    now = 10_000_000
+    rows = [
+        _snap_row("AA", "2012", "2012 · A", now - 1_000, 80.0, 5.0, 60.0, regen=True),
+        _snap_row("BB", "2012", "2012 · B", now - STATUS_STALE_MS - 1, 10.0, -9.0, -100.0),
+    ]
+    s = pick_guest_status(rows, now)
+    assert s["soc"] == 80          # the stale pack's 10% must not drag the min down
+    assert s["packs"] == [{"label": "A", "soc": 80}]
+    assert s["regen"] is True
+
+
+def test_pick_guest_status_stale_or_empty_is_none():
+    now = 10_000_000
+    assert pick_guest_status([], now) is None
+    rows = [_snap_row("AA", "2012", "2012 · A", now - STATUS_STALE_MS - 1, 98.0)]
+    assert pick_guest_status(rows, now) is None
 
 
 async def _mk_share(conn, token: str, created_ms: int, expires_ms: int,
@@ -82,6 +123,7 @@ async def test_feed_today_only_no_battery_fields(app, client):
     now_ms = int(time.time() * 1000)
     async with app.state.pool.acquire() as conn:
         await _seed_device(conn)
+        await q.upsert_battery(conn, A, "R-12100", "2012 · A", "2012", now_ms)
         await _mk_share(conn, "tok-live", now_ms, now_ms + 3_600_000)
         await _seed_fix(conn, now_ms - 60_000, 43.0, -87.9)          # today
         await _seed_fix(conn, now_ms - 2 * 86_400_000, 44.0, -88.9)  # 2 days ago: clamped out
@@ -90,10 +132,17 @@ async def test_feed_today_only_no_battery_fields(app, client):
     assert r.headers["cache-control"] == "no-store"
     assert r.headers["referrer-policy"] == "no-referrer"
     body = r.json()
-    assert set(body.keys()) == {"points", "last", "expires_at", "now", "owner"}
+    assert set(body.keys()) == {"points", "last", "expires_at", "now", "owner", "status"}
     assert len(body["points"]) == 1
     assert set(body["points"][0].keys()) == {"t", "lat", "lon"}
     assert body["last"]["lat"] == 43.0
+    # guest dock status: deliberate, minimal battery surface — exact key sets pinned
+    status = body["status"]
+    assert set(status.keys()) == {"ts", "soc", "packs", "current_a", "power_w", "regen"}
+    assert status["soc"] == 88
+    assert status["packs"] == [{"label": "A", "soc": 88}]
+    assert status["current_a"] == -4.0
+    assert status["power_w"] == -60.0
     # access tracking
     listing = None
     async with app.state.pool.acquire() as conn:

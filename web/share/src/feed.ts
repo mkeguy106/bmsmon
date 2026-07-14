@@ -2,12 +2,26 @@
 
 export interface FeedPoint { t: number; lat: number; lon: number }
 
+export interface GuestPack { label: string; soc: number }
+
+/** Deliberately minimal battery surface (2026-07-14 spec amendment): the active
+ *  base's SOC + net flow so a guest can see active discharge — nothing else. */
+export interface GuestStatus {
+  ts: number;
+  soc: number;
+  packs: GuestPack[];
+  current_a: number;
+  power_w: number;
+  regen: boolean;
+}
+
 export interface Feed {
   points: FeedPoint[];
   last: FeedPoint | null;
   expires_at: number;
   now: number;
   owner: string;
+  status: GuestStatus | null;
 }
 
 export type FeedResult =

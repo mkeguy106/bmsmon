@@ -7,11 +7,13 @@
     <meta name="color-scheme" content="light dark" />
     <meta name="darkreader-lock" />
     <meta name="robots" content="noindex, nofollow" />
+    <!-- Guests default to LIGHT; the in-page toggle persists to localStorage and this
+         pre-hydration read prevents a theme flash on reload. -->
     <script>
       try {
-        document.documentElement.dataset.theme =
-          matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-      } catch (e) { document.documentElement.dataset.theme = "dark"; }
+        var t = localStorage.getItem("bmsmon-share-theme");
+        document.documentElement.dataset.theme = t === "dark" ? "dark" : "light";
+      } catch (e) { document.documentElement.dataset.theme = "light"; }
     </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />

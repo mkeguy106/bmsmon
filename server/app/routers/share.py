@@ -50,6 +50,47 @@ def day_window_ms(now: datetime) -> tuple[int, int]:
     return int(start.timestamp() * 1000), int(local.timestamp() * 1000)
 
 
+STATUS_STALE_MS = 120_000  # mirrors the web LIVE_STALE_MS
+
+
+def _pack_label(row: dict) -> str:
+    """'2012 · A' -> 'A'; fall back to the address tail for unaliased packs."""
+    alias = (row.get("alias") or "")
+    if "·" in alias:
+        tail = alias.split("·")[-1].strip()
+        if tail:
+            return tail
+    return (row.get("address") or "??")[-2:]
+
+
+def pick_guest_status(rows: list[dict], now_ms: int) -> dict | None:
+    """Aggregate the active base's latest telemetry into the guest dock payload.
+
+    Active base = group of the freshest sample (the staged base polls at 1.5 s, so it
+    is effectively always freshest). Rows older than STATUS_STALE_MS are ignored; no
+    fresh rows -> None (the guest dock renders empty). Deliberate, minimal battery
+    surface (2026-07-14 spec amendment): only soc/current/power/regen ever leave the
+    server here — never voltage, temperature, cells, or cycles."""
+    fresh = [r for r in rows
+             if r.get("ts_ms") and r["ts_ms"] >= now_ms - STATUS_STALE_MS
+             and r.get("soc") is not None]
+    if not fresh:
+        return None
+    newest = max(fresh, key=lambda r: r["ts_ms"])
+    group = [r for r in fresh if r.get("group_id") == newest.get("group_id")]
+    packs = sorted(
+        ({"label": _pack_label(r), "soc": int(round(float(r["soc"])))} for r in group),
+        key=lambda p: p["label"])
+    return {
+        "ts": int(newest["ts_ms"]),
+        "soc": min(p["soc"] for p in packs),
+        "packs": packs,
+        "current_a": round(sum(float(r.get("current_a") or 0.0) for r in group), 2),
+        "power_w": round(sum(float(r.get("power_w") or 0.0) for r in group), 1),
+        "regen": any(bool(r.get("regen")) for r in group),
+    }
+
+
 async def _resolve(request: Request, token: str, pool) -> tuple[str, dict | None]:
     key = client_key(request.client.host if request.client else None, request.headers)
     if not request.app.state.share_limiter.allow(key):
@@ -81,9 +122,11 @@ async def share_feed(token: str, request: Request, pool=Depends(get_pool)):
     from_ms, now_ms = day_window_ms(datetime.now(timezone.utc))
     async with pool.acquire() as conn:
         rows = await q.gps_track_all(conn, from_ms, now_ms + 1)
+        snapshot = await q.fleet_snapshot(conn)
         await q.touch_location_share(conn, share["id"], now_ms)
     points = [{"t": int(r["bucket_ms"]), "lat": r["lat"], "lon": r["lon"]} for r in rows]
     return JSONResponse(
         {"points": points, "last": points[-1] if points else None,
-         "expires_at": share["expires_at"], "now": now_ms, "owner": settings.share_owner},
+         "expires_at": share["expires_at"], "now": now_ms, "owner": settings.share_owner,
+         "status": pick_guest_status(snapshot, now_ms)},
         headers=_SEC_HEADERS)
