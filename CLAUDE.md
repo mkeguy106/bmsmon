@@ -532,7 +532,14 @@ terminally ended/expired). Guest page (`web/share/src/`): map + today's neutral-
 trail + pulsing/stale chair marker + "Following <owner>" (`BMSMON_SHARE_OWNER`, default
 "Joely") + countdown, and a "Point me there" panel — geolocation distance/cardinal +
 dashed guest→chair map line everywhere, compass-rotated arrow where device orientation
-is available (iOS needs the permission tap).
+is available (iOS needs the permission tap). **2026-07-14 amendments:** the guest page
+defaults to **light** mode with a persisted top-right sun/moon toggle
+(`localStorage["bmsmon-share-theme"]`; pre-hydration script in `web/share/index.html`),
+and shows a 2-line **guest dock** (CAP/FLOW, twin of the mobile Journey dock) — a
+deliberate, minimal relaxation of the no-battery-data rule: the feed's `status` object
+carries ONLY the active base's soc/packs/current/power/regen (never voltage, temps,
+cells, cycles), aggregated by the pure `pick_guest_status()` in `share.py` (freshest
+group from `fleet_snapshot`, 120 s staleness → null; ungrouped packs never merge).
 
 **Local dev/test:** `docker compose -f server/docker-compose.dev.yml up -d` brings up a Postgres on
 `localhost:5432` (user/pw/db all `bmsmon`, matching the default `DATABASE_URL`). Run server tests
