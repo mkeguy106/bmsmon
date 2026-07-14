@@ -22,15 +22,24 @@ export default function App() {
   useEffect(() => {
     if (!token) { setStatus("ended"); return; }
     let alive = true;
+    let stopped = false;
+    let t: ReturnType<typeof setInterval>;
+    // Once a poll resolves "ended"/"expired" the share is terminally over: stop
+    // polling so a later network blip can never flip the sticky terminal status
+    // to "error" (or a stray "ok").
     const load = () => fetchFeed(token).then((r) => {
-      if (!alive) return;
+      if (!alive || stopped) return;
       setNowMs(Date.now());
       if (r.kind === "ok") { setFeed(r.feed); setStatus("ok"); }
       else if (r.kind === "error") setStatus((s) => (s === "ok" ? "ok" : "error"));
-      else setStatus(r.kind);
+      else {
+        stopped = true;
+        clearInterval(t);
+        setStatus(r.kind);
+      }
     });
     load();
-    const t = setInterval(load, FEED_POLL_MS);
+    t = setInterval(load, FEED_POLL_MS);
     return () => { alive = false; clearInterval(t); };
   }, [token]);
 
