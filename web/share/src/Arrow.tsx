@@ -22,11 +22,15 @@ export function ArrowPanel({ target, onGuest }: {
 
   const listen = () => {
     if (orientHandler.current) return; // already registered
+    // deviceorientation can fire at up to 60 Hz with fresh floats every event — quantize
+    // to 2° before setState so identical readings bail out of re-rendering entirely
+    // (with the CSS transform transition this is visually identical).
+    const quantize = (deg: number) => (Math.round(deg / 2) * 2) % 360;
     const onOrient = (e: DeviceOrientationEvent) => {
       const webkit = (e as DeviceOrientationEvent & { webkitCompassHeading?: number })
         .webkitCompassHeading;
-      if (webkit != null) setHeading(webkit);
-      else if (e.absolute && e.alpha != null) setHeading((360 - e.alpha) % 360);
+      if (webkit != null) setHeading(quantize(webkit));
+      else if (e.absolute && e.alpha != null) setHeading(quantize((360 - e.alpha) % 360));
     };
     orientHandler.current = onOrient;
     window.addEventListener("deviceorientationabsolute", onOrient as EventListener);

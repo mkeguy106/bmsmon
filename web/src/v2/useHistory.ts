@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getHistory } from "../api";
+import { visibleInterval } from "../visiblePoll";
 import type { HistPoint } from "./history";
 
 const REFRESH_MS = 180_000;
@@ -12,8 +13,8 @@ export function useHistory(): Map<string, HistPoint[]> {
       .then((r) => { if (alive) setMap(new Map(r.series.map((s) => [s.address, s.points]))); })
       .catch(() => { /* keep last */ });
     load();
-    const t = setInterval(load, REFRESH_MS);
-    return () => { alive = false; clearInterval(t); };
+    const stop = visibleInterval(load, REFRESH_MS); // hidden tabs don't poll; refocus catches up
+    return () => { alive = false; stop(); };
   }, []);
   return map;
 }

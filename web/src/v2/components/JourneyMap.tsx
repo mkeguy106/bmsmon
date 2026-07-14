@@ -18,9 +18,15 @@ function resolveColor(spec: string): string {
   return m ? cssVar(m[1]) : spec;
 }
 
-/** Concrete discharge color for an active segment (mirrors the model's thresholds). */
-function trailColor(powerW: number | null): string {
-  return resolveColor(dischargeColor(powerW ?? 0));
+/** Per-rebuild memo around [resolveColor]: the trail uses only 3-4 distinct colors, so
+ *  one getComputedStyle per color per rebuild instead of one per segment. */
+function makeColorCache(): (spec: string) => string {
+  const cache = new Map<string, string>();
+  return (spec: string) => {
+    let v = cache.get(spec);
+    if (v == null) { v = resolveColor(spec); cache.set(spec, v); }
+    return v;
+  };
 }
 
 function tileUrl(theme: "dark" | "light"): string {
@@ -125,24 +131,41 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
     if (!showTrail || points.length === 0) return;
 
     const group = L.layerGroup();
+    const resolve = makeColorCache();
+    // Group contiguous same-style (kind + color) segments into ONE multi-point polyline —
+    // a full day is thousands of segments but only a handful of style runs, so this cuts
+    // the SVG node count by orders of magnitude. Trail lines are non-interactive (no
+    // tooltips/handlers on them), which also skips Leaflet's per-layer event plumbing.
+    let run: [number, number][] = [];
+    let runKind: SegKind | null = null;
+    let runColor = "";
+    const flush = () => {
+      if (run.length >= 2 && runKind != null) {
+        const opts: L.PolylineOptions = runKind === "active"
+          ? { color: runColor, weight: 4, opacity: 0.95, interactive: false }
+          : { color: runColor, weight: 3, opacity: 0.8, dashArray: "4 6", interactive: false };
+        L.polyline(run, opts).addTo(group);
+      }
+      run = []; runKind = null; runColor = "";
+    };
     for (let i = 1; i < points.length; i++) {
       const kind = segKinds[i] ?? "idle";
-      if (kind === "idle") continue;
-      const prev = points[i - 1], cur = points[i];
-      const line: [number, number][] = [[prev.lat, prev.lon], [cur.lat, cur.lon]];
-      if (kind === "active") {
-        const color = metric === "soc"
-          ? resolveColor(socColor(cur.soc))
-          : trailColor(cur.power_w);
-        L.polyline(line, { color, weight: 4, opacity: 0.95 }).addTo(group);
-      } else {
-        L.polyline(line, {
-          color: resolveColor("var(--text-4)"), weight: 3, opacity: 0.8, dashArray: "4 6",
-        }).addTo(group);
+      if (kind === "idle") { flush(); continue; }
+      const cur = points[i];
+      const color = kind === "active"
+        ? resolve(metric === "soc" ? socColor(cur.soc) : dischargeColor(cur.power_w ?? 0))
+        : resolve("var(--text-4)");
+      if (kind !== runKind || color !== runColor) {
+        flush();
+        const prev = points[i - 1];
+        run.push([prev.lat, prev.lon]);
+        runKind = kind; runColor = color;
       }
+      run.push([cur.lat, cur.lon]);
     }
+    flush();
 
-    const halo = resolveColor("var(--live)");
+    const halo = resolve("var(--live)");
     for (const h of hotspots) {
       const pt = points[h.index];
       if (!pt) continue;

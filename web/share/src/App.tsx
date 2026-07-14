@@ -4,6 +4,7 @@ import { cleanTrack } from "../../src/v2/model/cleanTrack";
 import type { LivePos } from "../../src/v2/model/live";
 import type { TrackPoint } from "../../src/v2/track";
 import { relAgo } from "../../src/util";
+import { visibleInterval } from "../../src/visiblePoll";
 import {
   FEED_POLL_MS, fetchFeed, isStale, remainingLabel, tokenFromPath, type Feed,
 } from "./feed";
@@ -33,7 +34,7 @@ export default function App() {
     if (!token) { setStatus("ended"); return; }
     let alive = true;
     let stopped = false;
-    let t: ReturnType<typeof setInterval>;
+    let stopPolling: (() => void) | null = null;
     // Once a poll resolves "ended"/"expired" the share is terminally over: stop
     // polling so a later network blip can never flip the sticky terminal status
     // to "error" (or a stray "ok").
@@ -44,14 +45,26 @@ export default function App() {
       else if (r.kind === "error") setStatus((s) => (s === "ok" ? "ok" : "error"));
       else {
         stopped = true;
-        clearInterval(t);
+        stopPolling?.();
         setStatus(r.kind);
       }
     });
     load();
-    t = setInterval(load, FEED_POLL_MS);
-    return () => { alive = false; clearInterval(t); };
+    // Visibility-gated: a backgrounded guest tab stops polling and catches up on refocus.
+    stopPolling = visibleInterval(load, FEED_POLL_MS);
+    return () => { alive = false; stopPolling?.(); };
   }, [token]);
+
+  // cleanTrack + trailProps are O(points) passes; memoize so the guest's geolocation
+  // watcher (which can re-render ~1/s via onGuest) doesn't rebuild the trail — with
+  // stable identities the JourneyMap trail effect no-ops between feed polls. Hooks stay
+  // above the early returns; feed is null until the first poll lands.
+  const cleaned = useMemo<TrackPoint[]>(() => (feed
+    ? cleanTrack(feed.points.map((p) => ({
+        t: p.t, lat: p.lat, lon: p.lon, power_w: p.power_w, current_a: p.current_a, soc: null,
+      })))
+    : []), [feed]);
+  const trail = useMemo(() => trailProps(cleaned, trailMode), [cleaned, trailMode]);
 
   if (!token || status === "ended") return <Message text="This share link isn't available." />;
   if (status === "expired") {
@@ -60,10 +73,7 @@ export default function App() {
   if (status === "error") return <Message text="Can't reach the server — check your connection." />;
   if (status === "loading" || !feed) return <Message text="Loading…" />;
 
-  const cleaned: TrackPoint[] = cleanTrack(feed.points.map((p) => ({
-    t: p.t, lat: p.lat, lon: p.lon, power_w: p.power_w, current_a: p.current_a, soc: null,
-  })));
-  const { points, segKinds } = trailProps(cleaned, trailMode);
+  const { points, segKinds } = trail;
   const live: LivePos | null = feed.last
     ? { lat: feed.last.lat, lon: feed.last.lon, tsMs: feed.last.t } : null;
   const stale = isStale(feed.last, feed.now);

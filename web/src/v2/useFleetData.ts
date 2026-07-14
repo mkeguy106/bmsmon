@@ -4,6 +4,7 @@ import { connectLive } from "../ws";
 import { getFleet, getRangeConfig } from "../api";
 import { selectRangeParams, type RangeParams } from "../range";
 import { stableSet } from "../util";
+import { visibleInterval } from "../visiblePoll";
 import type { FleetItem } from "../types";
 
 // A pack is stale (treated as offline) if we haven't heard from it in 90 s —
@@ -42,15 +43,16 @@ export function useFleetData(): FleetData {
   useEffect(() => connectLive((f) => store.applySnapshot(f), store.applySample, setLive), [store]);
   useEffect(() => {
     if (live) return;
-    const t = setInterval(() => { getFleet().then((r) => store.applySnapshot(r.fleet)).catch(() => {}); }, REST_FALLBACK_MS);
-    return () => clearInterval(t);
+    // Visibility-gated: a hidden tab skips the fallback poll and catches up on refocus
+    // (the WS reconnect path in ws.ts handles its own visibilitychange).
+    return visibleInterval(() => { getFleet().then((r) => store.applySnapshot(r.fleet)).catch(() => {}); }, REST_FALLBACK_MS);
   }, [live, store]);
   useEffect(() => {
     let alive = true;
     const load = () => getRangeConfig().then((r) => { if (alive) setRangeParams(selectRangeParams(r.configs)); }).catch(() => {});
     load();
-    const t = setInterval(load, 60_000);
-    return () => { alive = false; clearInterval(t); };
+    const stop = visibleInterval(load, 60_000);
+    return () => { alive = false; stop(); };
   }, []);
 
   // v (the store version) is the real dependency: the fleet only changes when it bumps.

@@ -13,7 +13,7 @@ export const DEFAULT_V2_SETTINGS: V2Settings = {
   distUnit: "mi", tempUnitPref: "F", mapMetricPref: "power", themeMode: "system", deviceMode: null,
 };
 
-const MOBILE_MAX = 820;
+export const MOBILE_MAX = 820;
 export function resolveMobile(deviceMode: V2Settings["deviceMode"], winW: number): boolean {
   if (deviceMode === "mobile") return true;
   if (deviceMode === "desktop") return false;

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { Suspense, lazy, useCallback, useMemo, useState } from "react";
 import { useLocalStorage, type Codec } from "../useLocalStorage";
 import { useV2Settings } from "./useV2Settings";
 import { useTheme, type ThemeMode } from "./useTheme";
@@ -12,7 +12,6 @@ import { HealthView } from "./views/HealthView";
 import { HistoryView } from "./views/HistoryView";
 import { AlertsView } from "./views/AlertsView";
 import { SettingsView } from "./views/SettingsView";
-import { JourneyView } from "./views/JourneyView";
 import { useFleetData } from "./useFleetData";
 import { useV2Configs } from "./useV2Configs";
 import { useHistory } from "./useHistory";
@@ -25,6 +24,23 @@ const viewCodec: Codec<V2View> = {
 };
 const boolCodec: Codec<boolean> = { decode: (r) => (r === "1" ? true : r === "0" ? false : null), encode: (v) => (v ? "1" : "0") };
 const THEME_CYCLE: ThemeMode[] = ["system", "light", "dark"];
+
+// Journey is the only view that pulls in Leaflet (~150 kB min) — load it on demand so a
+// Command-only session never downloads it. JourneyMap is imported ONLY by JourneyView
+// (the share page has its own build with a static import), so the whole map stack splits
+// cleanly into this lazy chunk.
+const JourneyView = lazy(() =>
+  import("./views/JourneyView").then((m) => ({ default: m.JourneyView })));
+
+/** Suspense fallback while the Journey chunk loads — mirrors the app's CONNECTING style. */
+function ViewLoading() {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10,
+      padding: "96px 0", color: "var(--text-3)" }}>
+      <span className="mono" style={{ fontSize: 12, letterSpacing: 2 }}>LOADING…</span>
+    </div>
+  );
+}
 
 export default function App() {
   const [settings, patch] = useV2Settings();
@@ -57,7 +73,11 @@ export default function App() {
   const content =
     view === "command" ? <CommandView data={data} mobile={mobile} onOpen={setView} tempF={tempF} /> :
     view === "health" ? <HealthView data={data} history={history} unit={settings.tempUnitPref} mobile={mobile} /> :
-    view === "journey" ? <JourneyView data={data} theme={resolvedTheme} unit={settings.tempUnitPref} mobile={mobile} mapMetric={settings.mapMetricPref} /> :
+    view === "journey" ? (
+      <Suspense fallback={<ViewLoading />}>
+        <JourneyView data={data} theme={resolvedTheme} unit={settings.tempUnitPref} mobile={mobile} mapMetric={settings.mapMetricPref} />
+      </Suspense>
+    ) :
     view === "history" ? <HistoryView data={data} unit={settings.tempUnitPref} mobile={mobile} /> :
     view === "alerts" ? <AlertsView alerts={alerts} acked={acked} onAck={ack} /> :
     <SettingsView />;

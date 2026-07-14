@@ -14,6 +14,7 @@ import {
 import { selectRangeParams, type RangeParams } from "./range";
 import { readStored, useLocalStorage, type Codec } from "./useLocalStorage";
 import { stableSet } from "./util";
+import { visibleInterval } from "./visiblePoll";
 import type { FleetItem } from "./types";
 
 // The phone polls background packs slowly (a pack can go ~a minute between reports), so only
@@ -73,8 +74,8 @@ export default function App() {
       .then((r) => { if (alive) setTempConfig(selectActiveConfig(r.configs)); })
       .catch(() => { /* keep last */ });
     load();
-    const t = setInterval(load, 60_000);
-    return () => { alive = false; clearInterval(t); };
+    const stop = visibleInterval(load, 60_000); // hidden tabs don't poll; refocus catches up
+    return () => { alive = false; stop(); };
   }, []);
   const thr = useMemo(() => thresholdsFromConfig(tempConfig), [tempConfig]);
   const env = useMemo(() => envelopeFromConfig(tempConfig), [tempConfig]);
@@ -89,8 +90,8 @@ export default function App() {
       .then((c) => { if (alive) setAlertConfig(c); })
       .catch(() => { if (alive) setAlertConfig(DEFAULT_ALERT_CONFIG); });
     load();
-    const t = setInterval(load, 60_000);
-    return () => { alive = false; clearInterval(t); };
+    const stop = visibleInterval(load, 60_000);
+    return () => { alive = false; stop(); };
   }, []);
   // Alerts off → no seize; otherwise the pushed value, default 30 when absent.
   const seizeThreshold: number | null =
@@ -104,8 +105,8 @@ export default function App() {
       .then((r) => { if (alive) setRangeParams(selectRangeParams(r.configs)); })
       .catch(() => { /* keep last */ });
     load();
-    const t = setInterval(load, 60_000);
-    return () => { alive = false; clearInterval(t); };
+    const stop = visibleInterval(load, 60_000);
+    return () => { alive = false; stop(); };
   }, []);
 
   const [unit, setUnit, setUnitLocal] = useLocalStorage<TempUnit>("bmsmon-temp-unit", () => "F", unitCodec);
@@ -133,7 +134,9 @@ export default function App() {
   useEffect(() => {
     if (live) return;
     let alive = true;
-    const t = setInterval(() => {
+    // Visibility-gated: a hidden tab skips the fallback poll and catches up on refocus
+    // (the WS reconnect path in ws.ts handles its own visibilitychange).
+    const stop = visibleInterval(() => {
       getFleet()
         .then((r) => {
           if (!alive) return;
@@ -142,7 +145,7 @@ export default function App() {
         })
         .catch(() => { /* still down — retry on the next tick */ });
     }, REST_FALLBACK_MS);
-    return () => { alive = false; clearInterval(t); };
+    return () => { alive = false; stop(); };
   }, [live, store]);
 
   // v (the store version) is the real dependency: the fleet only changes when it bumps.

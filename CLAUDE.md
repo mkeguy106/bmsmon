@@ -507,8 +507,14 @@ has NO viewport meta (it has no mobile layout, so scaled-desktop is the better f
 Bottom tabs are 68 px + home-indicator safe-area (`BAR_H` exported; App pads by it); Command
 stacks pack cards vertically on mobile. The roadmap's deferred Phase-4 Command bits are wired:
 **DRIVEN TODAY** (cleaned today-track driven miles, 60 s refresh) and a tile-free SVG
-**route sketch** (`RouteSketch.tsx`) in the aside; cell-voltage bars fade below a 10 mV spread. `leaflet` is now a `web/` dependency (its CSS ships only in the
-`/v2/` chunk; v1 carries zero leaflet references). **Device admin** (enroll-code QR, device list,
+**route sketch** (`RouteSketch.tsx`) in the aside; cell-voltage bars fade below a 10 mV spread. `leaflet` is now a `web/` dependency, and since the 2026-07-14
+perf sprint `JourneyView` (and leaflet+its CSS with it) is a `React.lazy` chunk loaded only when
+Journey opens — v1 and Command-only v2 sessions carry zero leaflet; `qrcode` is likewise a dynamic
+import inside the enroll-QR mint paths. Live Journey re-polls are **incremental** (`useTrack`
+fetches `[lastBucketT, now)` and splices via the tested `appendTrack`; unchanged responses keep the
+previous array identity so the map effect no-ops; 10-min full-refetch safety net), the trail
+renders as one polyline per same-color run (`interactive: false`), and every REST poller is
+visibility-gated (`web/src/visiblePoll.ts` — hidden tabs skip ticks, refocus catches up). **Device admin** (enroll-code QR, device list,
 revoke — a port of v1's `AdminDevices`, reusing the admin `/web/devices` + `/web/enroll-codes`
 endpoints) lives as a **Devices section inside Settings** (`DevicesPanel.tsx`), not a separate nav
 entry — so there is no longer any "SOON" item. Roadmap/spec:

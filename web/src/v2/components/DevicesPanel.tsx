@@ -1,5 +1,4 @@
 import { useEffect, useState, type CSSProperties } from "react";
-import QRCode from "qrcode";
 import { getDevices, mintCode, revokeDevice } from "../../api";
 import type { DeviceRow } from "../../types";
 
@@ -39,10 +38,17 @@ export function DevicesPanel() {
       : "Couldn't revoke the device — check the connection and try again."));
 
   // Encode { base, code } so the phone gets the server URL AND the one-time code in one scan.
+  // qrcode is imported LAZILY here (its ~168 kB source otherwise lands in the shared chunk
+  // every visitor loads) — it's only needed once an admin actually mints an enroll code.
   useEffect(() => {
     if (!code) { setQr(""); return; }
+    let alive = true;
     const payload = JSON.stringify({ base: window.location.origin, code });
-    QRCode.toDataURL(payload, { width: 260, margin: 1 }).then(setQr).catch(() => setQr(""));
+    import("qrcode")
+      .then((m) => m.default.toDataURL(payload, { width: 260, margin: 1 }))
+      .then((url) => { if (alive) setQr(url); })
+      .catch(() => { if (alive) setQr(""); });
+    return () => { alive = false; };
   }, [code]);
 
   return (
