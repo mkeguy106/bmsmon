@@ -1,4 +1,7 @@
 import asyncio
+import json
+
+from app.util import jsonable
 
 # Per-subscriber buffer. A browser only needs to absorb short stalls (GC, tab
 # switch); a client that falls this many events behind is closed and re-snapshots.
@@ -34,8 +37,13 @@ class LiveBus:
         return self._subs.get(q, False)
 
     async def publish(self, event: dict) -> None:
+        # Serialize ONCE per event, not once per subscriber: the queues carry the final
+        # wire text and the WS loop send_text()s it. json.dumps kwargs match starlette's
+        # WebSocket.send_json exactly (compact separators, ensure_ascii=False), so the
+        # frames are byte-identical to the old per-subscriber jsonable+send_json path.
+        text = json.dumps(jsonable([event])[0], separators=(",", ":"), ensure_ascii=False)
         for q in list(self._subs):
             try:
-                q.put_nowait(event)
+                q.put_nowait(text)
             except asyncio.QueueFull:
                 self._subs[q] = True  # slow consumer: the WS loop closes the socket

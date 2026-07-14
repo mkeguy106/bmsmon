@@ -52,6 +52,20 @@ def day_window_ms(now: datetime) -> tuple[int, int]:
 
 STATUS_STALE_MS = 120_000  # mirrors the web LIVE_STALE_MS
 
+# Guest polls arrive every ~10 s per guest; the fleet GPS track query is the expensive
+# part (~200 ms over today's whole window in prod). Cache it process-wide for one poll
+# period so N guests collapse onto <=1 query per TRACK_TTL_S. The cache key is the day
+# window's START (local midnight, epoch ms): to_ms is "now" and changes every request,
+# but the trail is append-only within a day, so a <=10 s-stale tail is fine — and a new
+# day means a new from_ms, so the cache can never serve yesterday's trail past midnight.
+TRACK_CACHE_TTL_S = 10.0
+# last_access/access_count exist for the owner's Settings list ("last opened", "x N") —
+# purely informational. Nothing security-relevant reads them (revocation checks
+# revoked_at, expiry checks expires_at), so throttling the touch UPDATE to once per
+# share per interval just makes access_count approximate (undercounts rapid polls)
+# while cutting a dead tuple per guest poll.
+TOUCH_INTERVAL_S = 60.0
+
 
 def _f(v):
     return float(v) if v is not None else None
@@ -129,12 +143,20 @@ async def share_feed(token: str, request: Request, pool=Depends(get_pool)):
     if status == "expired":
         raise HTTPException(410, "share expired", headers=_SEC_HEADERS)
     from_ms, now_ms = day_window_ms(datetime.now(timezone.utc))
+    state = request.app.state
+    # Per-share state above (expiry/410/revocation) and the guest *status* below stay
+    # per-request; only the fleet-wide GPS trail — identical for every guest — is cached.
+    points = state.share_track_cache.get(from_ms)
     async with pool.acquire() as conn:
-        rows = await q.gps_track_all(conn, from_ms, now_ms + 1)
+        if points is None:
+            rows = await q.gps_track_all(conn, from_ms, now_ms + 1)
+            points = [{"t": int(r["bucket_ms"]), "lat": r["lat"], "lon": r["lon"],
+                       "power_w": _f(r["power_w"]), "current_a": _f(r["current_a"])}
+                      for r in rows]
+            state.share_track_cache.put(from_ms, points)
         snapshot = await q.fleet_snapshot(conn)
-        await q.touch_location_share(conn, share["id"], now_ms)
-    points = [{"t": int(r["bucket_ms"]), "lat": r["lat"], "lon": r["lon"],
-               "power_w": _f(r["power_w"]), "current_a": _f(r["current_a"])} for r in rows]
+        if state.share_touch.should_touch(share["id"]):
+            await q.touch_location_share(conn, share["id"], now_ms)
     return JSONResponse(
         {"points": points, "last": points[-1] if points else None,
          "expires_at": share["expires_at"], "now": now_ms, "owner": settings.share_owner,

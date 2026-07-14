@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.db.partitions import ensure_partitions_for_range
@@ -41,6 +42,27 @@ async def _gps_scrub_loop(pool) -> None:
         await asyncio.sleep(GPS_SCRUB_INTERVAL_S)
 
 
+# Vite emits content-hashed filenames into these dirs (one shared assets/ chunk pool for
+# the v1 + v2 bundles — dist/v2 holds only its index.html — plus the share zone's own
+# dist/share/assets, which reaches this mount because /share/{token} routes never match
+# two-segment paths). Hashed content is safe to cache forever; the HTML shells must
+# always revalidate so a deploy's new hashes land (no-cache still allows 304s via ETag).
+_HASHED_ASSET_PREFIXES = ("assets/", "v2/assets/", "share/assets/")
+
+
+class CachedStaticFiles(StaticFiles):
+    """StaticFiles + Cache-Control: immutable for content-hashed assets, no-cache else."""
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        if response.status_code in (200, 304):
+            if path.startswith(_HASHED_ASSET_PREFIXES):
+                response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            else:
+                response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.pool = await create_pool()
@@ -73,10 +95,18 @@ def create_app() -> FastAPI:
     from starlette.middleware.gzip import GZipMiddleware
     app.add_middleware(GZipMiddleware, minimum_size=1024)
     from app.auth.device_jwt import JtiCache
+    from app.caching import TouchThrottle, TtlCache
     from app.live.bus import LiveBus
     from app.ratelimit import RateLimiter
     app.state.jti_cache = JtiCache()
     app.state.bus = LiveBus()
+    # Process-local perf state (single worker, SRV-8; app-scoped like the limiters so
+    # each test app starts fresh). See routers/share.py for the TTL/interval rationale.
+    from app.routers.share import TOUCH_INTERVAL_S, TRACK_CACHE_TTL_S
+    app.state.share_track_cache = TtlCache(ttl_s=TRACK_CACHE_TTL_S)
+    app.state.share_touch = TouchThrottle(interval_s=TOUCH_INTERVAL_S)
+    # devices.last_seen_at write throttle (see routers/api_device.py).
+    app.state.device_touch = TouchThrottle(interval_s=60.0)
     # SEC-4: per-IP limiter for the unauthenticated /api/v1/enroll (see app/ratelimit.py).
     app.state.enroll_limiter = RateLimiter()
     app.include_router(api_device.router)
@@ -87,10 +117,9 @@ def create_app() -> FastAPI:
     app.state.share_limiter = RateLimiter(max_attempts=60, window_s=60)
     app.include_router(share.router)
     import os
-    from fastapi.staticfiles import StaticFiles
     web_dist = os.environ.get("BMSMON_WEB_DIST", "/app/web/dist")
     if os.path.isdir(web_dist):
-        app.mount("/", StaticFiles(directory=web_dist, html=True), name="web")
+        app.mount("/", CachedStaticFiles(directory=web_dist, html=True), name="web")
     return app
 
 

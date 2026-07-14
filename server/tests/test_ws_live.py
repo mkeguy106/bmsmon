@@ -45,6 +45,31 @@ def _ingest(tc, priv, device_id, samples, batch_seq=1):
     return tc.post("/api/v1/ingest", content=body, headers={"Authorization": f"Bearer {tok}"})
 
 
+async def test_bus_carries_preserialized_wire_text():
+    """Fan-out serializes ONCE at publish: the queue item is the final wire text,
+    byte-identical to what starlette's send_json produced per-subscriber before
+    (compact separators, ensure_ascii=False, jsonable datetime/UUID coercion)."""
+    from datetime import datetime, timezone
+
+    from app.live.bus import LiveBus
+    from app.util import jsonable
+
+    bus = LiveBus()
+    q1, q2 = bus.subscribe(), bus.subscribe()
+    event = {"type": "sample", "address": A, "soc": 55.0, "alias": "2012 · A",
+             "ts": datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc)}
+    await bus.publish(event)
+    item = q1.get_nowait()
+    assert isinstance(item, str)
+    assert item == json.dumps(jsonable([event])[0], separators=(",", ":"),
+                              ensure_ascii=False)
+    assert q2.get_nowait() is item  # same object fanned out, no re-serialization
+    parsed = json.loads(item)
+    assert parsed["type"] == "sample" and parsed["soc"] == 55.0
+    assert parsed["alias"] == "2012 · A"  # ensure_ascii=False: UTF-8 as before
+    assert parsed["ts"] == "2026-07-14T12:00:00+00:00"  # jsonable ISO coercion kept
+
+
 def test_ws_snapshot_then_live_sample():
     with TestClient(create_app()) as tc:
         priv, device_id = _enroll(tc)

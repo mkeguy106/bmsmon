@@ -1,8 +1,10 @@
+import asyncio
+import json
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 
 from app.auth.authentik import AuthUser, current_user, require_admin
 from app.auth.enroll import generate_code, hash_code
@@ -125,9 +127,18 @@ async def samples(address: str, from_ms: int = Query(...), to_ms: int = Query(..
     """Admin-only: full sample history includes GPS coordinates.
 
     Bounded (SRV-11): the range is clamped to the last 7 days before to_ms and the
-    result is hard-capped at SAMPLES_MAX_ROWS rows (see queries.samples_range)."""
+    result is hard-capped at SAMPLES_MAX_ROWS rows (see queries.samples_range).
+
+    Serialization of up to SAMPLES_MAX_ROWS full-width rows runs in a thread (the
+    single-worker event loop must keep serving ingest/WS/share polls meanwhile);
+    the json.dumps kwargs match FastAPI's JSONResponse so the body is unchanged."""
     async with pool.acquire() as conn:
-        return {"samples": jsonable(await q.samples_range(conn, address, from_ms, to_ms))}
+        rows = await q.samples_range(conn, address, from_ms, to_ms)
+    payload = await asyncio.get_running_loop().run_in_executor(
+        None,
+        lambda: json.dumps({"samples": jsonable(rows)}, ensure_ascii=False,
+                           allow_nan=False, separators=(",", ":")))
+    return Response(payload, media_type="application/json")
 
 
 @router.get("/devices")

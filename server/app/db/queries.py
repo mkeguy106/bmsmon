@@ -246,8 +246,11 @@ async def scrub_expired_gps(conn, retention_days: int) -> int:
 # SRV-11 bounds for /web/samples: cap the caller-chosen range at 7 days (a wider
 # request gets its start clamped up to end-7d) and hard-LIMIT the row count so an
 # admin typo can't materialize millions of partition rows in one response.
+# 20k full-width rows is already ~8 h of one pack at the 1.5 s stage rate and keeps the
+# single-worker event loop responsive (100k rows serialized for seconds, starving
+# ingest/WS/share); no WebUI consumer needs more (nothing in web/src calls /web/samples).
 SAMPLES_MAX_RANGE_MS = 7 * 24 * 3600 * 1000
-SAMPLES_MAX_ROWS = 100_000
+SAMPLES_MAX_ROWS = 20_000
 
 
 async def samples_range(conn, address: str, from_ms: int, to_ms: int,

@@ -181,7 +181,11 @@ async def ingest(request: Request, pool=Depends(get_pool)):
                 len(bad_addr), len(samples), device_id,
                 [a[:40].encode("ascii", "backslashreplace").decode() for a in bad_addr[:10]])
         samples = kept
-        rows = [q.sample_row(device_id, s.address, s.model_dump()) for s in samples]
+        # model_dump() once per sample, reused for both the DB row and the WS publish
+        # below (it used to run twice per sample on the ingest hot path). sample_row
+        # and publish both only READ the dict, so sharing it is safe.
+        dumped = [s.model_dump() for s in samples]
+        rows = [q.sample_row(device_id, s.address, d) for s, d in zip(samples, dumped)]
         # SRV-13: one registry upsert per unique address per batch (not per sample).
         # Dict insertion order keeps the LAST-seen sample's alias/group per address.
         by_addr = {s.address: s for s in samples}
@@ -190,12 +194,17 @@ async def ingest(request: Request, pool=Depends(get_pool)):
                 await q.upsert_battery(conn, s.address, s.advertised_name, s.alias,
                                        s.group_id, s.ts_ms)
             accepted = await q.insert_samples(conn, rows)
-        await conn.execute("UPDATE devices SET last_seen_at=now() WHERE id=$1", device_id)
+        # last_seen_at is informational (device-list display). Batches land every ~15-20 s,
+        # so an unconditional UPDATE is a dead tuple per batch for a value nobody reads at
+        # that resolution — throttle to once per device per interval (timestamp becomes
+        # approximate within ~60 s, which is fine).
+        if request.app.state.device_touch.should_touch(device_id):
+            await conn.execute("UPDATE devices SET last_seen_at=now() WHERE id=$1", device_id)
     # batch_seq < 0 (-1) marks a historical-import batch (see IngestBody): store it,
     # but don't flood the live WS dashboards with thousands of stale frames (WEB-5).
     if body.batch_seq >= 0:
-        for s in samples:
-            await request.app.state.bus.publish({"type": "sample", **s.model_dump()})
+        for d in dumped:
+            await request.app.state.bus.publish({"type": "sample", **d})
     return IngestResponse(accepted=accepted, last_seq=body.batch_seq)
 
 

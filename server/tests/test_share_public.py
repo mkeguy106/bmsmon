@@ -167,6 +167,65 @@ async def test_feed_today_only_no_battery_fields(app, client):
     assert listing[0]["last_access_ms"] is not None
 
 
+async def test_feed_track_cached_between_rapid_polls(app, client):
+    """Two rapid polls return identical trail points even though a new fix landed in
+    between (the fleet GPS query is TTL-cached per poll period), and the throttled
+    touch bookkeeping counts the burst as one access. Clearing the cache (= TTL lapse)
+    makes the next poll pick up the new fix."""
+    now_ms = int(time.time() * 1000)
+    async with app.state.pool.acquire() as conn:
+        await _seed_device(conn)
+        await _mk_share(conn, "tok-cache", now_ms, now_ms + 3_600_000)
+        await _seed_fix(conn, now_ms - 90_000, 43.0, -87.9)
+    r1 = await client.get("/share/tok-cache/feed")
+    async with app.state.pool.acquire() as conn:
+        await _seed_fix(conn, now_ms - 30_000, 43.5, -87.5)
+    r2 = await client.get("/share/tok-cache/feed")
+    assert r1.status_code == r2.status_code == 200
+    assert r1.json()["points"] == r2.json()["points"]  # cache hit: new fix not yet visible
+    assert len(r2.json()["points"]) == 1
+    # touch throttle: the rapid second poll didn't bump access_count (approximate by design)
+    async with app.state.pool.acquire() as conn:
+        listing = await q.list_location_shares(conn, now_ms, 86_400_000)
+    assert listing[0]["access_count"] == 1
+    app.state.share_track_cache.clear()  # simulate TTL expiry
+    r3 = await client.get("/share/tok-cache/feed")
+    assert len(r3.json()["points"]) == 2  # fresh query sees the new fix
+
+
+async def test_feed_cache_never_leaks_into_expired_or_gone_shares(app, client):
+    """Per-share state (expiry, revocation) stays per-request: a warm track cache from
+    an active share must not resurrect an expired (410) or revoked (404) link."""
+    now_ms = int(time.time() * 1000)
+    async with app.state.pool.acquire() as conn:
+        await _seed_device(conn)
+        await _mk_share(conn, "tok-warm", now_ms, now_ms + 3_600_000)
+        await _mk_share(conn, "tok-dead", now_ms - 7_200_000, now_ms - 3_600_000)
+        await _seed_fix(conn, now_ms - 60_000, 43.0, -87.9)
+    assert (await client.get("/share/tok-warm/feed")).status_code == 200  # warms the cache
+    assert (await client.get("/share/tok-dead/feed")).status_code == 410
+    assert (await client.get("/share/tok-nope/feed")).status_code == 404
+
+
+async def test_feed_status_stays_live_despite_track_cache(app, client):
+    """The guest dock status is computed from a fresh fleet snapshot per request —
+    only the GPS trail is cached."""
+    now_ms = int(time.time() * 1000)
+    async with app.state.pool.acquire() as conn:
+        await _seed_device(conn)
+        await q.upsert_battery(conn, A, "R-12100", "2012 · A", "2012", now_ms)
+        await _mk_share(conn, "tok-live2", now_ms, now_ms + 3_600_000)
+        await _seed_fix(conn, now_ms - 60_000, 43.0, -87.9)
+    r1 = await client.get("/share/tok-live2/feed")
+    assert r1.json()["status"]["soc"] == 88
+    async with app.state.pool.acquire() as conn:
+        await _seed_fix(conn, now_ms, 43.0, -87.9)  # helper seeds soc=88; tweak below
+        await conn.execute("UPDATE samples SET soc=42 WHERE ts_ms=$1", now_ms)
+    r2 = await client.get("/share/tok-live2/feed")
+    assert r2.json()["status"]["soc"] == 42          # live snapshot moved...
+    assert r2.json()["points"] == r1.json()["points"]  # ...while the trail stayed cached
+
+
 async def test_feed_excludes_coarse_fixes(app, client):
     """The guest trail must not jump to a coarse network fix (huge accuracy radius)."""
     now_ms = int(time.time() * 1000)

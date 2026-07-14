@@ -52,11 +52,14 @@ async def ws(sock: WebSocket):
                 await sock.close(code=WS_OVERFLOW)
                 break
             try:
-                event = await asyncio.wait_for(queue.get(), timeout=KEEPALIVE_S)
+                # The bus queue carries pre-serialized wire text (one json.dumps per
+                # event at publish, byte-identical to send_json — see LiveBus.publish),
+                # so fan-out to N subscribers no longer re-serializes N times.
+                text = await asyncio.wait_for(queue.get(), timeout=KEEPALIVE_S)
             except asyncio.TimeoutError:
                 await sock.send_json({"type": "ping"})
                 continue
-            await sock.send_json(jsonable([event])[0])
+            await sock.send_text(text)
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
     finally:
