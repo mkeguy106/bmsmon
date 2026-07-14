@@ -486,7 +486,18 @@ trip line (DIST·ACT·TRN·PEAK), pair CAP bar (weaker pack, alert-band colors),
 single-direction FLOW bar (|Σ power| vs 600 W; amber→red = OUT, green = REGEN/CHG). Playback,
 energy chart, and the side dock are desktop-only; mobile gets on-map overlays instead
 (TRAIL·metric chip, LIVE·GPS badge, legend). `settings.mapMetricPref` now actually colors the
-trail (`socColor`, alert bands) so the chip is honest. `leaflet` is now a `web/` dependency (its CSS ships only in the
+trail (`socColor`, alert bands) so the chip is honest. The TRAIL chip is a **persisted toggle**
+(both platforms; off hides trail/transit/hotspots/legend, keeping the live marker). When no
+fix is fresher than 120 s the chair marker goes **grey/un-pulsed at the LAST KNOWN position**
+with its age in the badge (amber) instead of vanishing; Command mirrors this with "last seen"
+ages on offline bases. **CRITICAL mobile lesson (2026-07-13): `web/v2/index.html` carries the
+viewport meta tag** — without it, phones rendered a virtual 980 px scaled to ~40% (microscopic
+text) AND `innerWidth` defeated the <820 px auto-mobile detection; v1's index.html deliberately
+has NO viewport meta (it has no mobile layout, so scaled-desktop is the better fallback).
+Bottom tabs are 68 px + home-indicator safe-area (`BAR_H` exported; App pads by it); Command
+stacks pack cards vertically on mobile. The roadmap's deferred Phase-4 Command bits are wired:
+**DRIVEN TODAY** (cleaned today-track driven miles, 60 s refresh) and a tile-free SVG
+**route sketch** (`RouteSketch.tsx`) in the aside; cell-voltage bars fade below a 10 mV spread. `leaflet` is now a `web/` dependency (its CSS ships only in the
 `/v2/` chunk; v1 carries zero leaflet references). **Device admin** (enroll-code QR, device list,
 revoke — a port of v1's `AdminDevices`, reusing the admin `/web/devices` + `/web/enroll-codes`
 endpoints) lives as a **Devices section inside Settings** (`DevicesPanel.tsx`), not a separate nav
