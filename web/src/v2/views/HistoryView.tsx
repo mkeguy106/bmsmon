@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
 import type { TempUnit } from "../../temp";
 import { useLocalStorage } from "../../useLocalStorage";
+import { useNow } from "../../useNow";
 import { groupBases, DAILY_DRIVER_BASE, type BasePack } from "../fleet";
 import type { FleetData } from "../useFleetData";
 import type { TrendSeries } from "../trends";
@@ -45,6 +46,15 @@ const SPAN_MS: Record<Exclude<HistRange, "all" | "custom">, number> = {
 };
 
 type Metric = "soh" | "cell_spread_mv" | "temp_avg" | "temp_min" | "temp_max";
+
+// Module-level chart chrome: stable identities so the memoized LineChart never
+// re-renders for a freshly allocated (but identical) bands/watchLine object.
+const SOH_BANDS = [
+  { from: 90, to: 100, color: "var(--ok)" },
+  { from: 80, to: 90, color: "var(--warn)" },
+  { from: 70, to: 80, color: "var(--live)" },
+];
+const SPREAD_WATCH = { v: 40, color: "var(--live)", label: "40 mV" };
 
 /** "YYYY-MM-DD" → epoch-ms (UTC midnight), or null when unparseable. */
 function parseDay(s: string): number | null {
@@ -131,9 +141,9 @@ export function HistoryView({ data, unit, mobile }: {
   // window-independent, so it converges in one extra fetch).
   const [allFromMs, setAllFromMs] = useState<number | null>(null);
 
-  // Quantize now to the minute so the [from,to] window (and thus the fetch key)
-  // doesn't churn on the 1 s `data.now` tick — trends refetch at most once/min.
-  const nowMs = Math.floor(data.now / 60_000) * 60_000;
+  // Minute-resolution local clock, quantized so the [from,to] window (and thus
+  // the fetch key) only changes once a minute — trends refetch at most once/min.
+  const nowMs = Math.floor(useNow(60_000) / 60_000) * 60_000;
   const [fromMs, toMs] = useMemo<[number, number]>(() => {
     if (hist.range === "custom") {
       const cFrom = parseDay(hist.from);
@@ -161,27 +171,31 @@ export function HistoryView({ data, unit, mobile }: {
     [addresses, trends]);
 
   // Build the LineChart series for a metric (group = one averaged line; A/B = the
-  // selected pack). `transform` converts unit (temperature °C→°F).
-  const buildSeries = (metric: Metric, color: string, transform?: (v: number) => number): ChartSeries[] => {
-    const tf = transform ?? ((v: number) => v);
-    if (groupMode) {
-      if (seriesList.length === 0) return [];
-      return [{
-        points: mergedAvg(seriesList, metric).map((p) => ({ t: p.t, v: p.v == null ? null : tf(p.v) })),
-        color, label: base ? `Base ${base.id}` : undefined,
-      }];
-    }
-    return selectedPacks
-      .map((p) => {
-        const s = trends.get(p.item.address);
-        const pts = (s?.points ?? []).map((pt) => {
-          const raw = pt[metric];
-          return { t: pt.t, v: raw == null ? null : tf(raw) };
-        });
-        return { points: pts, color, label: p.letter };
-      })
-      .filter((cs) => cs.points.length > 0);
-  };
+  // selected pack). `transform` converts unit (temperature °C→°F). Stable via
+  // useCallback so the per-chart useMemos below only recompute when the trends
+  // data / selection actually change — these walk up to a year of buckets × packs
+  // and must never run in the bare render body.
+  const buildSeries = useCallback(
+    (metric: Metric, color: string, transform?: (v: number) => number): ChartSeries[] => {
+      const tf = transform ?? ((v: number) => v);
+      if (groupMode) {
+        if (seriesList.length === 0) return [];
+        return [{
+          points: mergedAvg(seriesList, metric).map((p) => ({ t: p.t, v: p.v == null ? null : tf(p.v) })),
+          color, label: base ? `Base ${base.id}` : undefined,
+        }];
+      }
+      return selectedPacks
+        .map((p) => {
+          const s = trends.get(p.item.address);
+          const pts = (s?.points ?? []).map((pt) => {
+            const raw = pt[metric];
+            return { t: pt.t, v: raw == null ? null : tf(raw) };
+          });
+          return { points: pts, color, label: p.letter };
+        })
+        .filter((cs) => cs.points.length > 0);
+    }, [groupMode, seriesList, selectedPacks, trends, base]);
 
   // ── Header: per-pack "since {year}" (differing years read as "replaced"). ──
   const headerLine = useMemo(() => {
@@ -201,23 +215,21 @@ export function HistoryView({ data, unit, mobile }: {
   }, [selectedPacks, trends]);
 
   // ── Capacity fade (SOH) ──
-  const sohChart = buildSeries("soh", "var(--ok)");
-  const projPoints = (sohChart[0]?.points ?? []).map((p) => ({ t: p.t, soh: p.v }));
-  const months = projectMonthsTo80(projPoints);
+  const sohChart = useMemo(() => buildSeries("soh", "var(--ok)"), [buildSeries]);
+  const months = useMemo(
+    () => projectMonthsTo80((sohChart[0]?.points ?? []).map((p) => ({ t: p.t, soh: p.v }))),
+    [sohChart]);
   const capCaption = months == null ? "insufficient data" : `≈ ${Math.round(months)} mo to 80%`;
-  const sohBands = [
-    { from: 90, to: 100, color: "var(--ok)" },
-    { from: 80, to: 90, color: "var(--warn)" },
-    { from: 70, to: 80, color: "var(--live)" },
-  ];
 
   // ── Cell imbalance ──
-  const spreadChart = buildSeries("cell_spread_mv", "var(--warn)");
+  const spreadChart = useMemo(() => buildSeries("cell_spread_mv", "var(--warn)"), [buildSeries]);
 
   // ── Temperature: convert °C→°F when the unit is F so the axis reads true. ──
   const toUnit = (c: number) => (unit === "F" ? c * 9 / 5 + 32 : c);
   const unitLabel = unit === "F" ? "°F" : "°C";
-  const tempChart = buildSeries("temp_avg", "var(--text-3)", toUnit);
+  const tempChart = useMemo(
+    () => buildSeries("temp_avg", "var(--text-3)", (c) => (unit === "F" ? c * 9 / 5 + 32 : c)),
+    [buildSeries, unit]);
   const tempRibbon = useMemo(() => {
     const list = groupMode ? seriesList : selectedPacks.map((p) => trends.get(p.item.address)).filter((s): s is TrendSeries => !!s);
     if (list.length === 0) return undefined;
@@ -289,11 +301,11 @@ export function HistoryView({ data, unit, mobile }: {
       {/* ── Capacity + imbalance (side-by-side on desktop) ── */}
       <div style={{ display: "grid", gridTemplateColumns: mobile ? "1fr" : "1fr 1fr", gap: 16 }}>
         <ChartCard title="Capacity fade · SOH" caption={capCaption}>
-          <LineChart series={sohChart} bands={sohBands} yMin={70} yMax={100} unitLabel="%" />
+          <LineChart series={sohChart} bands={SOH_BANDS} yMin={70} yMax={100} unitLabel="%" />
         </ChartCard>
         <ChartCard title="Cell imbalance · spread">
           <LineChart series={spreadChart}
-            watchLine={{ v: 40, color: "var(--live)", label: "40 mV" }} unitLabel=" mV" />
+            watchLine={SPREAD_WATCH} unitLabel=" mV" />
         </ChartCard>
       </div>
 

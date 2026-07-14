@@ -1,6 +1,7 @@
 import { memo } from "react";
 import { formatTemp, tempZone, type TempEnvelope, type TempThresholds, type TempUnit } from "../temp";
 import type { FleetItem } from "../types";
+import { Ago } from "./Ago";
 import { PinButton } from "./PinButton";
 import { Ring } from "./Ring";
 
@@ -12,12 +13,12 @@ const Stat = ({ label, value, color }: { label: string; value: string; color: st
 );
 
 // WEB-8: memoized so per-sample re-renders don't redraw the whole grid. The
-// 1 s "ago" clock is deliberately NOT a `now` prop: the parent precomputes
-// `lastSeen` (only for stale packs), so connected cards skip every tick and a
-// stale card re-renders only when its coarse "Xm ago" string actually changes.
+// 1 s "ago" clock is deliberately NOT a `now` prop: the card takes the stable
+// `lastSeenMs` (only for stale packs) and the self-ticking <Ago> leaf renders
+// the live age text, so the memoized card itself never re-renders on the tick.
 // `onTogglePin` takes the address so the parent can pass one stable callback.
-export const PackCard = memo(function PackCard({ item, stale, lastSeen, thr, env, unit, pinned, onTogglePin }:
-  { item: FleetItem; stale: boolean; lastSeen: string | null; thr: TempThresholds; env: TempEnvelope;
+export const PackCard = memo(function PackCard({ item, stale, lastSeenMs, thr, env, unit, pinned, onTogglePin }:
+  { item: FleetItem; stale: boolean; lastSeenMs: number | null; thr: TempThresholds; env: TempEnvelope;
     unit: TempUnit; pinned: boolean; onTogglePin: (addr: string) => void }) {
   const connected = !stale;
   const n = (v: number | null | undefined, d = 1) => (v == null ? "—" : v.toFixed(d));
@@ -41,9 +42,9 @@ export const PackCard = memo(function PackCard({ item, stale, lastSeen, thr, env
         connected={connected} size={120} />
       {/* Fixed-height status slot: last-seen time when disconnected, so the layout never reflows. */}
       <div style={{ height: 14, display: "flex", alignItems: "center" }}>
-        {!connected && lastSeen != null && (
+        {!connected && lastSeenMs != null && (
           <span className="mono" style={{ color: "var(--text3)", fontSize: 11, letterSpacing: 1 }}>
-            DISCONNECTED · {lastSeen}
+            DISCONNECTED · <Ago tsMs={lastSeenMs} />
           </span>
         )}
       </div>

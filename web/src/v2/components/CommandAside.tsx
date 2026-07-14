@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import type { Base } from "../fleet";
 import type { FleetItem } from "../../types";
+import { useNow } from "../../useNow";
 import { Bar } from "./Atoms";
 import { RouteSketch } from "./RouteSketch";
 import type { TrackPoint } from "../track";
@@ -26,9 +27,12 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-export function CommandAside({ bases, now, onOpen, todayPoints }: {
-  bases: Base[]; now: number; onOpen: (v: "journey" | "history") => void; todayPoints: TrackPoint[];
+export function CommandAside({ bases, onOpen, todayPoints }: {
+  bases: Base[]; onOpen: (v: "journey" | "history") => void; todayPoints: TrackPoint[];
 }) {
+  // Local clock for the "ready by <time>" line — h:mm resolution, so a 30 s
+  // tick keeps it honest without the parent carrying a hot `now`.
+  const now = useNow(30_000);
   const allPacks: Row[] = bases.flatMap((b) =>
     b.packs.map((p) => ({ label: `Base ${b.id} · ${p.letter}`, item: p.item })));
 

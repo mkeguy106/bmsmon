@@ -1,3 +1,5 @@
+import { memo } from "react";
+
 export interface ChartSeries {
   points: { t: number; v: number | null }[];
   color: string;
@@ -36,7 +38,10 @@ function fmtNum(v: number, span: number): string {
   return v.toFixed(decimals);
 }
 
-export function LineChart({
+// Memoized: callers keep `series`/`bands`/`watchLine`/`ribbon` identity-stable
+// (useMemo / module consts), so the expensive SVG path building only reruns
+// when the chart's inputs actually change.
+export const LineChart = memo(function LineChart({
   series,
   bands,
   watchLine,
@@ -256,4 +261,4 @@ export function LineChart({
       })}
     </svg>
   );
-}
+});

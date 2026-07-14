@@ -1,5 +1,6 @@
 import type { V2Alert, AlertSeverity } from "../model/alerts";
 import { CAPACITY_LADDER, CRITICAL_SOC } from "../model/alerts";
+import { useNow } from "../../useNow";
 
 /** "3s ago" / "5m ago" / "2h ago" / "1d ago". Clamps clock-skew negatives to "just now". */
 export function ago(ms: number): string {
@@ -96,9 +97,12 @@ function ThresholdsFooter() {
   );
 }
 
-export function AlertsView({ alerts, acked, onAck, now }: {
-  alerts: V2Alert[]; acked: Set<string>; onAck: (id: string) => void; now: number;
+export function AlertsView({ alerts, acked, onAck }: {
+  alerts: V2Alert[]; acked: Set<string>; onAck: (id: string) => void;
 }) {
+  // The 1 s clock lives HERE (this view renders the "Xs ago" labels), not in
+  // the fleet-data hook — only the mounted Alerts view re-renders on the tick.
+  const now = useNow(1000);
   // Stable partition: unacked first, acked last, order otherwise preserved
   // within each group (the caller has already sorted `alerts` by severity/recency).
   const ordered = [...alerts].sort((a, b) => Number(acked.has(a.id)) - Number(acked.has(b.id)));

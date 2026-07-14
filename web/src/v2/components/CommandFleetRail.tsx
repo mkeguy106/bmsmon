@@ -1,5 +1,5 @@
 import type { Base, BasePack, BaseStatus } from "../fleet";
-import { relAgo } from "../../util";
+import { Ago } from "../../components/Ago";
 import { baseLastSeenMs } from "../fleet";
 import { Bar, Chip } from "./Atoms";
 import { socColor, sohColor } from "../colors";
@@ -48,8 +48,8 @@ function PackRow({ pack, onStage }: { pack: BasePack; onStage: () => void }) {
   );
 }
 
-export function CommandFleetRail({ bases, stageBaseId, onStage, now }: {
-  bases: Base[]; stageBaseId: string; onStage: (id: string) => void; now: number;
+export function CommandFleetRail({ bases, stageBaseId, onStage }: {
+  bases: Base[]; stageBaseId: string; onStage: (id: string) => void;
 }) {
   return (
     <div style={{ width: "100%", display: "flex", flexDirection: "column",
@@ -81,7 +81,7 @@ export function CommandFleetRail({ bases, stageBaseId, onStage, now }: {
             </div>
             {base.status === "offline" && baseLastSeenMs(base) != null && (
               <div className="mono" style={{ fontSize: 10, color: "var(--text-4)", marginTop: 6 }}>
-                last seen {relAgo(baseLastSeenMs(base)!, now)}
+                last seen <Ago tsMs={baseLastSeenMs(base)!} />
               </div>
             )}
           </div>

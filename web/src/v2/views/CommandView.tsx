@@ -11,6 +11,7 @@ import { CommandRange } from "../components/CommandRange";
 import { CommandAside } from "../components/CommandAside";
 import type { V2View } from "../nav";
 import type { FleetData } from "../useFleetData";
+import { useNow } from "../../useNow";
 
 /**
  * The Command view: the 3-column mission-control grid (fleet rail · stage +
@@ -32,12 +33,14 @@ export function CommandView({ data, mobile, onOpen, tempF }: {
   // Today's GPS track for the staged base (Phase-4 wiring: DRIVEN TODAY + route sketch).
   // Local midnight → now-ish window; a gentle 60 s refresh keeps Command cheaper than
   // Journey's 15 s live cadence. Same clean pipeline as the Journey map.
+  // A minute-resolution local clock is plenty to catch the midnight rollover.
+  const nowMin = useNow(60_000);
   const [dayFromMs, dayToMs] = useMemo<[number, number]>(() => {
     const start = new Date(); start.setHours(0, 0, 0, 0);
     return [start.getTime(), start.getTime() + 86_400_000];
-    // data.now's day is what matters; recompute when the calendar day changes.
+    // The clock's day is what matters; recompute when the calendar day changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [new Date(data.now).getDate()]);
+  }, [new Date(nowMin).getDate()]);
   const addresses = useMemo(
     () => (staged ? staged.packs.map((p) => p.item.address) : []), [staged]);
   const rawTodayPoints = useTrack(addresses, dayFromMs, dayToMs, 60_000);
@@ -80,14 +83,14 @@ export function CommandView({ data, mobile, onOpen, tempF }: {
   return (
     <div style={container}>
       <div style={{ order: mobile ? 3 : 0, minWidth: 0 }}>
-        <CommandFleetRail bases={bases} stageBaseId={staged.id} onStage={setStageBaseId} now={data.now} />
+        <CommandFleetRail bases={bases} stageBaseId={staged.id} onStage={setStageBaseId} />
       </div>
       <div style={{ order: mobile ? 1 : 0, minWidth: 0, display: "flex", flexDirection: "column", gap: 16 }}>
-        <CommandStage base={staged} rangeParams={data.rangeParams} tempF={tempF} mobile={mobile} now={data.now} drivenToday={todaySummary} />
+        <CommandStage base={staged} rangeParams={data.rangeParams} tempF={tempF} mobile={mobile} drivenToday={todaySummary} />
         <CommandRange base={staged} rangeParams={data.rangeParams} trips={trips} onEditTrips={onEditTrips} />
       </div>
       <div style={{ order: mobile ? 4 : 0, minWidth: 0 }}>
-        <CommandAside bases={bases} now={data.now} onOpen={onOpen} todayPoints={todayPoints} />
+        <CommandAside bases={bases} onOpen={onOpen} todayPoints={todayPoints} />
       </div>
     </div>
   );

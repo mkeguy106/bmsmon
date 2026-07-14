@@ -13,7 +13,9 @@ if (params.get("theme") === "light") document.documentElement.dataset.theme = "l
 const scenario = params.get("s") ?? "warn";
 const featTemp = ({ safe: 22, warn: -6, crit: -14, hot: 55 } as Record<string, number>)[scenario] ?? -6;
 
-const NOW = 1782900000000;
+// Anchor mock timestamps to the real clock: the age labels ("5m ago") are now
+// rendered by self-ticking <Ago> leaves against Date.now(), not a `now` prop.
+const NOW = Date.now();
 const mk = (address: string, alias: string, soc: number, cur: number, temp: number, agoMs = 0): FleetItem => ({
   address, alias, group_id: "2012", ts_ms: NOW - agoMs, soc, current_a: cur,
   power_w: cur * 13.2, voltage_v: 13.2, temp_c: temp,
@@ -42,10 +44,10 @@ createRoot(document.getElementById("root")!).render(
     ) : (
       <>
         <MainStage items={stageItems} staleAddrs={stale} thr={REDODO_DEFAULTS} env={DEFAULT_ENV}
-          unit="F" config={config} now={NOW} pinned={pinned} onTogglePin={noop} rangeParams={new Map()} />
+          unit="F" config={config} pinned={pinned} onTogglePin={noop} rangeParams={new Map()} />
         <div style={{ height: 24 }} />
         <AllBatteries items={items} staleAddrs={stale} thr={REDODO_DEFAULTS} env={DEFAULT_ENV}
-          unit="F" now={NOW} pinned={pinned} onTogglePin={noop} />
+          unit="F" pinned={pinned} onTogglePin={noop} />
       </>
     )}
   </div>,

@@ -1,6 +1,6 @@
 import type { Base, BasePack, BaseStatus } from "../fleet";
 import { DAILY_DRIVER_BASE, baseLastSeenMs, isCharging } from "../fleet";
-import { relAgo } from "../../util";
+import { Ago } from "../../components/Ago";
 import type { FleetItem } from "../../types";
 import { estimatePackRange, minRange, SEED_RANGE_PARAMS, type PackRange, type RangeParams } from "../../range";
 import type { TripSummary } from "../model/journey";
@@ -76,8 +76,8 @@ function FlowTile({ label, value, sub }: { label: string; value: string; sub?: s
   );
 }
 
-export function CommandStage({ base, rangeParams, tempF, mobile, now, drivenToday }: {
-  base: Base; rangeParams: Map<string, RangeParams>; tempF: boolean; mobile: boolean; now: number;
+export function CommandStage({ base, rangeParams, tempF, mobile, drivenToday }: {
+  base: Base; rangeParams: Map<string, RangeParams>; tempF: boolean; mobile: boolean;
   drivenToday: TripSummary;
 }) {
   const live = base.packs.filter((p) => p.connected);
@@ -135,7 +135,7 @@ export function CommandStage({ base, rangeParams, tempF, mobile, now, drivenToda
           {live.length === 0 ? (
             <div className="mono" style={{ fontSize: 13, color: "var(--text-4)", padding: "24px 0" }}>
               Base {base.id} is disconnected.
-              {baseLastSeenMs(base) != null && ` Last seen ${relAgo(baseLastSeenMs(base)!, now)}.`}
+              {baseLastSeenMs(base) != null && <> Last seen <Ago tsMs={baseLastSeenMs(base)!} />.</>}
             </div>
           ) : (
             live.map((p) => <PackCard key={p.item.address} item={p.item} letter={p.letter} tempF={tempF} />)

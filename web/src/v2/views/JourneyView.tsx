@@ -11,7 +11,8 @@ import {
 } from "../model/journey";
 import { cleanTrack } from "../model/cleanTrack";
 import { LIVE_REFRESH_MS, isWindowLive, lastKnownPosition, livePosition, type LivePos } from "../model/live";
-import { relAgo } from "../../util";
+import { useNow } from "../../useNow";
+import { Ago } from "../../components/Ago";
 import { JourneyMap } from "../components/JourneyMap";
 import { EnergyDistanceChart } from "../components/EnergyDistanceChart";
 import { Ring } from "../components/Ring";
@@ -131,18 +132,22 @@ export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
   const base = bases.find((b) => b.id === DAILY_DRIVER_BASE) ?? bases[0];
   const addresses = useMemo(() => (base ? base.packs.map((p) => p.item.address) : []), [base]);
 
-  const isLive = isWindowLive(fromMs, toMs, data.now);
+  // Coarse local clock: window-liveness (day boundaries) and the 120 s marker
+  // staleness cutoff only need ~10 s resolution; the visible age text in the
+  // badge is a self-ticking <Ago> leaf, so nothing here needs a 1 s clock.
+  const now = useNow(10_000);
+  const isLive = isWindowLive(fromMs, toMs, now);
   const rawPoints = useTrack(addresses, fromMs, toMs, isLive ? LIVE_REFRESH_MS : undefined);
   // Cleaned at render time (spike rejection / stay snapping / smoothing) — raw data stays
   // raw in the DB; the map, miles, energy chart, and playback all consume the cleaned track.
   const points = useMemo(() => cleanTrack(rawPoints), [rawPoints]);
-  // Identity-stable live fix: the selectors allocate per call and data.now ticks at 1 Hz,
+  // Identity-stable live fix: the selectors allocate per call and `now` ticks periodically,
   // so return the PREVIOUS object while the values are unchanged — the map's live-marker
-  // effect then only fires on real movement (or a fresh↔stale flip), not every second.
+  // effect then only fires on real movement (or a fresh↔stale flip), not every tick.
   // Fresh fix wins; otherwise fall back to the LAST KNOWN position (any age), rendered
   // dimmed with its age in the badge — better than a marker that silently vanishes.
   const liveRef = useRef<LivePos | null>(null);
-  const fresh = isLive ? livePosition(data.items, addresses, data.now) : null;
+  const fresh = isLive ? livePosition(data.items, addresses, now) : null;
   const liveStale = isLive && fresh == null;
   const live = useMemo(() => {
     const next = isLive
@@ -155,7 +160,7 @@ export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
     liveRef.current = next;
     return next;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isLive, fresh, data.items, addresses, data.now]);
+  }, [isLive, fresh, data.items, addresses, now]);
   const fitKey = addresses.join(",") + ":" + fromMs + ":" + toMs;
 
   // ── Derived geometry/energy (memoized on the merged track). ──
@@ -278,7 +283,7 @@ export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
                 {liveStale ? (
                   <>
                     <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--warn)" }} />
-                    LAST KNOWN{live ? ` · ${relAgo(live.tsMs, data.now)}` : ""}
+                    LAST KNOWN{live && <> · <Ago tsMs={live.tsMs} /></>}
                   </>
                 ) : (
                   <>

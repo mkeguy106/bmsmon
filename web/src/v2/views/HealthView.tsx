@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import type { FleetItem } from "../../types";
 import type { TempUnit } from "../../temp";
 import { formatTemp } from "../../temp";
@@ -114,10 +115,15 @@ function BoardRow({ item, connected, points, unit }: {
 export function HealthView({ data, history, unit, mobile }: {
   data: FleetData; history: Map<string, HistPoint[]>; unit: TempUnit; mobile: boolean;
 }) {
-  const summary = healthSummary(data.items, data.staleAddrs);
-  const bases = groupBases(data.items, data.staleAddrs);
+  // Memoized on the actual inputs — items/staleAddrs are identity-stable in
+  // useFleetData, so these only recompute when the fleet really changed.
+  const summary = useMemo(
+    () => healthSummary(data.items, data.staleAddrs), [data.items, data.staleAddrs]);
+  const bases = useMemo(
+    () => groupBases(data.items, data.staleAddrs), [data.items, data.staleAddrs]);
   const heroBase = bases.find((b) => b.id === DAILY_DRIVER_BASE) ?? bases[0];
-  const board = healthBoardOrder(data.items, data.staleAddrs);
+  const board = useMemo(
+    () => healthBoardOrder(data.items, data.staleAddrs), [data.items, data.staleAddrs]);
 
   const boardTable = (
     <div>

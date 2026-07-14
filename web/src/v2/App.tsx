@@ -59,7 +59,7 @@ export default function App() {
     view === "health" ? <HealthView data={data} history={history} unit={settings.tempUnitPref} mobile={mobile} /> :
     view === "journey" ? <JourneyView data={data} theme={resolvedTheme} unit={settings.tempUnitPref} mobile={mobile} mapMetric={settings.mapMetricPref} /> :
     view === "history" ? <HistoryView data={data} unit={settings.tempUnitPref} mobile={mobile} /> :
-    view === "alerts" ? <AlertsView alerts={alerts} acked={acked} onAck={ack} now={data.now} /> :
+    view === "alerts" ? <AlertsView alerts={alerts} acked={acked} onAck={ack} /> :
     <SettingsView />;
 
   const journeyMobile = mobile && view === "journey";

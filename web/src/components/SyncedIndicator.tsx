@@ -1,8 +1,8 @@
 import type { TempConfig } from "../temp";
-import { relAgo } from "../util";
+import { Ago } from "./Ago";
 
 /** Read-only indicator: thresholds come from the phone; the web dashboard only mirrors them. */
-export function SyncedIndicator({ config, now }: { config: TempConfig | null; now: number }) {
+export function SyncedIndicator({ config }: { config: TempConfig | null }) {
   const synced = config != null;
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "9px 14px", borderRadius: 10,
@@ -12,7 +12,7 @@ export function SyncedIndicator({ config, now }: { config: TempConfig | null; no
       <span style={{ fontSize: 13, color: "var(--text2)" }}>
         {synced ? (
           <>Alert thresholds <strong style={{ color: "var(--text)", fontWeight: 600 }}>synced from Android</strong>
-            {" · updated "}{relAgo(config!.updated_at_ms, now)}</>
+            {" · updated "}<Ago tsMs={config!.updated_at_ms} /></>
         ) : (
           <>Waiting for the phone to sync alert thresholds — showing profile defaults.</>
         )}

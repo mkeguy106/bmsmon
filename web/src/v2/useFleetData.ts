@@ -3,6 +3,7 @@ import { createStore } from "../store";
 import { connectLive } from "../ws";
 import { getFleet, getRangeConfig } from "../api";
 import { selectRangeParams, type RangeParams } from "../range";
+import { stableSet } from "../util";
 import type { FleetItem } from "../types";
 
 // A pack is stale (treated as offline) if we haven't heard from it in 90 s —
@@ -11,6 +12,10 @@ import type { FleetItem } from "../types";
 // late/stale REST response can never regress fresher WS data.
 const STALE_MS = 90_000;
 const REST_FALLBACK_MS = 10_000;
+// Staleness only needs coarse resolution against the 90 s threshold. It is
+// re-checked on this cadence (and on every fleet change), NOT every second —
+// components that render live age text subscribe to useNow(1000) themselves.
+const STALE_TICK_MS = 5_000;
 
 export interface FleetData {
   items: FleetItem[];
@@ -18,7 +23,6 @@ export interface FleetData {
   live: boolean;
   gps: boolean;
   rangeParams: Map<string, RangeParams>;
-  now: number;
 }
 
 /**
@@ -33,11 +37,9 @@ export function useFleetData(): FleetData {
   // exactly once per change (no manual force-counter).
   const v = useSyncExternalStore(store.subscribe, store.getVersion);
   const [live, setLive] = useState(false);
-  const [now, setNow] = useState(Date.now());
   const [rangeParams, setRangeParams] = useState<Map<string, RangeParams>>(new Map());
 
   useEffect(() => connectLive((f) => store.applySnapshot(f), store.applySample, setLive), [store]);
-  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, []);
   useEffect(() => {
     if (live) return;
     const t = setInterval(() => { getFleet().then((r) => store.applySnapshot(r.fleet)).catch(() => {}); }, REST_FALLBACK_MS);
@@ -55,10 +57,29 @@ export function useFleetData(): FleetData {
   const items = useMemo(
     () => Object.values(store.getFleet()).sort((a, b) => (a.alias ?? "").localeCompare(b.alias ?? "")),
     [store, v]);
-  const staleAddrs = useMemo(
-    () => new Set(items.filter((i) => now - i.ts_ms > STALE_MS).map((i) => i.address)), [items, now]);
+
+  // Identity-stable staleness: recompute on a coarse tick (and whenever the
+  // fleet changes), but only publish a NEW Set when membership actually
+  // changed — stableSet + the functional setState make React bail out
+  // entirely otherwise, so nothing downstream re-renders on the tick.
+  const [staleAddrs, setStaleAddrs] = useState<Set<string>>(() => new Set());
+  useEffect(() => {
+    const check = () => {
+      const nowMs = Date.now();
+      const next = new Set(items.filter((i) => nowMs - i.ts_ms > STALE_MS).map((i) => i.address));
+      setStaleAddrs((prev) => stableSet(prev, next));
+    };
+    check();
+    const t = setInterval(check, STALE_TICK_MS);
+    return () => clearInterval(t);
+  }, [items]);
+
   const gps = useMemo(
     () => items.some((i) => !staleAddrs.has(i.address) && i.lat != null), [items, staleAddrs]);
 
-  return { items, staleAddrs, live, gps, rangeParams, now };
+  // Stable data-object identity: consumers (and their effects) only see a new
+  // object when one of the fields actually changed.
+  return useMemo(
+    () => ({ items, staleAddrs, live, gps, rangeParams }),
+    [items, staleAddrs, live, gps, rangeParams]);
 }

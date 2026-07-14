@@ -1,11 +1,10 @@
 import type { TempEnvelope, TempThresholds, TempUnit } from "../temp";
 import type { FleetItem } from "../types";
-import { relAgo } from "../util";
 import { PackCard } from "./PackCard";
 
-export function AllBatteries({ items, staleAddrs, thr, env, unit, now, pinned, onTogglePin }:
+export function AllBatteries({ items, staleAddrs, thr, env, unit, pinned, onTogglePin }:
   { items: FleetItem[]; staleAddrs: Set<string>; thr: TempThresholds; env: TempEnvelope;
-    unit: TempUnit; now: number; pinned: Set<string>; onTogglePin: (addr: string) => void }) {
+    unit: TempUnit; pinned: Set<string>; onTogglePin: (addr: string) => void }) {
   return (
     <div>
       <div className="mono" style={{ color: "var(--text3)", fontSize: 11, letterSpacing: 2, margin: "8px 4px 16px" }}>ALL BATTERIES</div>
@@ -14,7 +13,7 @@ export function AllBatteries({ items, staleAddrs, thr, env, unit, now, pinned, o
           const stale = staleAddrs.has(it.address);
           return (
             <PackCard key={it.address} item={it} stale={stale}
-              lastSeen={stale ? relAgo(it.ts_ms, now) : null}
+              lastSeenMs={stale ? it.ts_ms : null}
               thr={thr} env={env} unit={unit}
               pinned={pinned.has(it.address)} onTogglePin={onTogglePin} />
           );

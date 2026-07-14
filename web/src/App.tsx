@@ -13,11 +13,15 @@ import {
 } from "./temp";
 import { selectRangeParams, type RangeParams } from "./range";
 import { readStored, useLocalStorage, type Codec } from "./useLocalStorage";
+import { stableSet } from "./util";
 import type { FleetItem } from "./types";
 
 // The phone polls background packs slowly (a pack can go ~a minute between reports), so only
 // treat a pack as disconnected after a generous gap — otherwise cards flap to DISCONNECTED.
 const STALE_MS = 90_000;
+// Staleness only needs coarse resolution against that 90 s threshold: re-check on this
+// cadence (and on every fleet change). Visible age text ticks in <Ago>/useNow leaves.
+const STALE_TICK_MS = 5_000;
 
 // WEB-8: while the WS is down, fall back to REST snapshots at this cadence.
 const REST_FALLBACK_MS = 10_000;
@@ -48,7 +52,6 @@ export default function App() {
   // WEB-10: false until the first fleet snapshot (WS or REST fallback) lands —
   // distinguishes "no data yet" from a genuinely empty fleet.
   const [booted, setBooted] = useState(false);
-  const [now, setNow] = useState(Date.now());
 
   // The index.html pre-paint script applies the stored theme to <html> before
   // React mounts, so storage (validated) and the DOM fallback always agree.
@@ -122,7 +125,6 @@ export default function App() {
     store.applySample,
     setLive,
   ), [store]);
-  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, []);
 
   // WEB-8: REST fallback — if the WS stays down for a fallback period, poll the
   // fleet snapshot over REST until it reconnects. applySnapshot merges through
@@ -148,10 +150,21 @@ export default function App() {
     () => Object.values(store.getFleet()).sort((a, b) => (a.alias ?? "").localeCompare(b.alias ?? "")),
     [store, v],
   );
-  const staleAddrs = useMemo(
-    () => new Set(items.filter((i) => now - i.ts_ms > STALE_MS).map((i) => i.address)),
-    [items, now],
-  );
+  // Identity-stable staleness: recompute on a coarse tick (and whenever the fleet
+  // changes), but only publish a NEW Set when membership actually changed —
+  // stableSet + the functional setState make React bail out entirely otherwise,
+  // so the old 1 Hz whole-app re-render is gone.
+  const [staleAddrs, setStaleAddrs] = useState<Set<string>>(() => new Set());
+  useEffect(() => {
+    const check = () => {
+      const nowMs = Date.now();
+      const next = new Set(items.filter((i) => nowMs - i.ts_ms > STALE_MS).map((i) => i.address));
+      setStaleAddrs((prev) => stableSet(prev, next));
+    };
+    check();
+    const t = setInterval(check, STALE_TICK_MS);
+    return () => clearInterval(t);
+  }, [items]);
   const gpsActive = useMemo(
     () => items.some((i) => !staleAddrs.has(i.address) && i.lat != null),
     [items, staleAddrs],
@@ -244,10 +257,10 @@ export default function App() {
       ) : (
       <div style={{ display: "grid", gap: 24 }}>
         <MainStage items={stageItems} staleAddrs={staleAddrs}
-          thr={thr} env={env} unit={unit} config={tempConfig} now={now}
+          thr={thr} env={env} unit={unit} config={tempConfig}
           pinned={pinned} onTogglePin={togglePin} lowSeized={lowSeized} rangeParams={rangeParams} />
         <AllBatteries items={items} staleAddrs={staleAddrs} thr={thr} env={env} unit={unit}
-          now={now} pinned={pinned} onTogglePin={togglePin} />
+          pinned={pinned} onTogglePin={togglePin} />
       </div>
       )}
     </div>

@@ -4,7 +4,8 @@ import {
   OVERLAY_RANK, nextAckedKey, tempZone, worstOf, zoneColorVar, zoneLabel,
   type TempConfig, type TempEnvelope, type TempThresholds, type TempUnit, type Zone,
 } from "../temp";
-import { fmtEta, relAgo } from "../util";
+import { fmtEta } from "../util";
+import { Ago } from "./Ago";
 import { Ring } from "./Ring";
 import { TempGauge } from "./TempGauge";
 import { TempBanner, type PackTemp } from "./TempBanner";
@@ -23,12 +24,13 @@ const SIM_ENABLED: boolean =
   import.meta.env.DEV || new URLSearchParams(location.search).get("sim") === "1";
 
 // WEB-8 note: the stage is deliberately NOT memoized — its featured pack gets a
-// fresh sample every ~1.5 s and disconnected packs render a live "updated ago"
-// from `now`, so it re-renders every tick anyway; at ≤ a base of packs that is
-// cheap. Memoization is applied where it pays: the All-Batteries grid cards.
-export function MainStage({ items, staleAddrs, thr, env, unit, config, now, pinned, onTogglePin, lowSeized, rangeParams }: {
+// fresh sample every ~1.5 s, so it re-renders on every real update anyway; at
+// ≤ a base of packs that is cheap. The live "updated ago" text is a
+// self-ticking <Ago> leaf, so the stage no longer carries a 1 Hz `now` prop.
+// Memoization is applied where it pays: the All-Batteries grid cards.
+export function MainStage({ items, staleAddrs, thr, env, unit, config, pinned, onTogglePin, lowSeized, rangeParams }: {
   items: FleetItem[]; staleAddrs: Set<string>;
-  thr: TempThresholds; env: TempEnvelope; unit: TempUnit; config: TempConfig | null; now: number;
+  thr: TempThresholds; env: TempEnvelope; unit: TempUnit; config: TempConfig | null;
   pinned: Set<string>; onTogglePin: (addr: string) => void; lowSeized?: boolean;
   rangeParams: Map<string, RangeParams>;
 }) {
@@ -85,7 +87,7 @@ export function MainStage({ items, staleAddrs, thr, env, unit, config, now, pinn
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
-      <SyncedIndicator config={config} now={now} />
+      <SyncedIndicator config={config} />
       <TempBanner worst={worst} thr={thr} env={env} unit={unit} />
 
       <div style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 16, padding: 24 }}>
@@ -146,7 +148,7 @@ export function MainStage({ items, staleAddrs, thr, env, unit, config, now, pinn
                         {`${(it.power_w ?? 0).toFixed(0)} W · ${cur.toFixed(1)} A`}
                       </div>
                       <div className="mono" style={{ color: "var(--text3)", fontSize: 11, letterSpacing: 1, marginTop: 2 }}>
-                        DISCONNECTED · updated {relAgo(it.ts_ms, now)}
+                        DISCONNECTED · updated <Ago tsMs={it.ts_ms} />
                       </div>
                     </>
                   )}

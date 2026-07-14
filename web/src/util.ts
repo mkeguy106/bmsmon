@@ -9,6 +9,18 @@ export function relAgo(ms: number, now: number): string {
   return `${Math.round(h / 24)}d ago`;
 }
 
+/**
+ * Return [prev] unchanged when [next] has identical membership, else [next].
+ * Keeps a recomputed Set's OBJECT IDENTITY stable across ticks so memo chains
+ * keyed on it (deriveAlerts, groupBases, …) don't cascade when nothing changed.
+ */
+export function stableSet<T>(prev: Set<T>, next: Set<T>): Set<T> {
+  if (prev === next) return prev;
+  if (prev.size !== next.size) return next;
+  for (const v of next) if (!prev.has(v)) return next;
+  return prev;
+}
+
 /** Compact "2h 14m" / "45m" for a minutes estimate (clamped at 0). */
 export function fmtEta(minutes: number): string {
   const t = Math.max(0, Math.round(minutes));
