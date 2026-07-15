@@ -303,21 +303,36 @@ transient disconnect is distinguishable from a real low/idle reading. `REGEN_EPS
 ~297 W) — cleanly separated from the noise floor, so the 0.1 A threshold / 30 s window are
 left as-is.
 
-**Accuracy check-in — due 2026-07-15** (set 2026-07-01): with ~2 more weeks of accumulated
-data, re-verify against fresh telemetry (phone Room DB `bms.db` or cloud Postgres) and adjust
-constants if the larger dataset has moved them:
-- **Charge-time ETA** — the self-learning time-to-full estimate (physics coulomb for the CC bulk
-  ≤98%; a learned per-pack `tailMin` EMA for the 98→100% CV tail, seeded 58 min). Checked
-  2026-07-12 over 8 full charges: CC bulk median error 1.4 min (p90 6.1) — good. Found + fixed:
-  this BMS **never reports SOC 100 while Charging** (caps at 99; 100 appears after cutoff), so
-  the original learner/trigger never fired — tail completion is now "climbed through 98, run
-  ended ≥99" measured to charger cutoff, triggered on the Charging→other transition, and the
-  seed was re-anchored to the measured medians (53/64 min on the 2012 pair). Next check:
-  confirm the EMA is actually folding per-pack observations.
-- **Discharge + regen gauge calibration** — re-check `POWER_RING_FULL_W` (300 W) and
-  `REGEN_EPS` (0.1 A) / `REGEN_WINDOW_MS` (30 s) in `Fleet.kt` against the larger real-world set.
-- **Discharge-range bands** — re-run the backtest in docs/range-backtest-2026-07.md; check the
-  learned Wh/mile band against accumulated outdoor driving (it learns from sparse data).
+**Accuracy check-in — DONE 2026-07-15** (set 2026-07-01; next check ~2026-08-01, items below).
+All constants verified against the accumulated cloud dataset (2.0M samples; the new fortnight's
+109k discharge rows ≈ 20× the original calibration basis) — **no constant changes needed**:
+- **Charge-time ETA** — CC bulk coulomb math is essentially exact (median checkpoint error
+  ~0.3 min vs the 1.4-min bar); all visible full-ETA error was the 58-min tail seed. The tail
+  EMA **is folding and persisting** (first real folds confirmed byte-for-byte vs DataStore:
+  2012-A learned 56.8 from a 54.1-min tail at alpha 0.3). Found (not yet fixed): **tail re-fold
+  bug** — a single-sample SOC≥98 Charging blip 30 min–6 h after a real cutoff passes the
+  wall-clock dedup and `learnTail`'s 6-h lookback re-folds the SAME run (2012-B's 47.3-min tail
+  folded twice → 52.554; effective alpha 0.51, direction still correct, benign). Fix: dedup by
+  run identity (persist the learned run's end ts per pack — also covers engine restarts, since
+  `lastTailLearnAt` is in-memory). `SEED_TAIL_MIN=58`/alpha 0.3 stay.
+- **Gauge calibration** — `POWER_RING_FULL_W=300` KEEP (fortnight p98 = 301.5 W; ring pegs 2.0%
+  of discharge samples, by design; new spike record 1065 W). `REGEN_EPS=0.1`/`REGEN_WINDOW_MS=30s`
+  KEEP with a structural guarantee discovered: the BMS firmware has a **~1.04 A reporting
+  deadband** (idle reads exactly 0.000 A; smallest nonzero current in 1.9M rows = 1.044 A), so
+  any EPS in (0, 1.04) is equivalent — zero false positives/misses across 838 regen runs
+  (longest 23.2 s < the 30 s window).
+- **Range bands** — recompute reproduces `device_range_config` to float precision (whPerDay/
+  activeW healthy; background packs correctly seed-fallback via the zero-signal guard).
+  whPerMile still on seed 51–85 ONLY because GPS reached local Room at db v4 (2026-07-11) and
+  the learner needs `MIN_LEARN_DAYS=3` — expected off-seed at the first learn pass after
+  2026-07-15 (≈44–57 initially, widening toward the cloud-derived ~41–74). Seed's 15–25 mi is
+  conservative vs learned 17–31 mi — safe direction. All gates validated on real data (0.5-mi
+  outing gate rejected a 178 Wh/mi poison day; discharge gate excluded vehicle legs).
+
+Next check (~2026-08-01): (1) fix the tail re-fold, then confirm multi-observation EMA
+convergence over several charges; (2) verify whPerMile left seed and re-check its hi end once
+~7+ GNSS outing days exist (if it still tops near 74 Wh/mi, the 31-mi upper readout is real);
+(3) cosmetic: `learned_days` counts whPerDay-qualifying days even when bands are seeds.
 
 Garbage-frame guard: `parseTelemetry` realigns to the `01 93 55 AA` status header (BLE
 notification fragments can prepend stale bytes, which previously decoded as soc=0/37.6 V and
