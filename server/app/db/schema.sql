@@ -40,10 +40,70 @@ CREATE TABLE IF NOT EXISTS samples (
   regen boolean NOT NULL DEFAULT false,
   link_event text,
   received_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (device_id, address, ts_ms, ts)
+  PRIMARY KEY (address, ts, ts_ms, device_id)
 ) PARTITION BY RANGE (ts);
 
-CREATE INDEX IF NOT EXISTS samples_addr_ts ON samples (address, ts DESC);
+-- SRV-15 index diet: the PK used to be (device_id, address, ts_ms, ts) — device_id-first
+-- made it useless for every address+time access path, so a near-duplicate secondary index
+-- samples_addr_ts (address, ts DESC) (~190 MB/month in prod, indexes > heap) was carried
+-- on top. Same column SET reordered to (address, ts, ts_ms, device_id) — dedup semantics
+-- identical, and the (address, ts) prefix now serves fleet_snapshot's LATERAL latest-row
+-- probe (backward scan), first_sample_ms, samples_range and the analytics raw tails, so
+-- samples_addr_ts is dropped outright. Fresh installs get the new PK from CREATE TABLE
+-- above; the DO block migrates a legacy DB exactly once (detected via pg_index column
+-- order), in ONE transaction. NOTE: the ALTERs take ACCESS EXCLUSIVE on samples while
+-- every partition's PK index is rebuilt — seconds-to-minutes at prod volume (~2M rows);
+-- the prod deploy is done manually, watching it.
+DO $$
+DECLARE
+  pk_name text;
+  pk_cols text;
+BEGIN
+  SELECT c.relname,
+         (SELECT string_agg(a.attname, ',' ORDER BY k.ord)
+            FROM unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord)
+            JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum)
+    INTO pk_name, pk_cols
+    FROM pg_index i
+    JOIN pg_class c ON c.oid = i.indexrelid
+   WHERE i.indrelid = 'samples'::regclass AND i.indisprimary;
+  IF pk_cols = 'device_id,address,ts_ms,ts' THEN
+    EXECUTE format('ALTER TABLE samples DROP CONSTRAINT %I', pk_name);
+    ALTER TABLE samples ADD PRIMARY KEY (address, ts, ts_ms, device_id);
+    DROP INDEX IF EXISTS samples_addr_ts;
+  END IF;
+END $$;
+
+-- SRV-14: 30-minute analytics rollup of samples. history_series serves closed 30-min
+-- buckets straight from here (~48 rows/pack/day instead of ~57,600 raw rows), and
+-- trend_series re-aggregates it for any bucket that is a MULTIPLE of 30 min — which is
+-- why the table stores per-metric SUMS + COUNTS, never averages: sums re-aggregate
+-- exactly, averages of averages don't. Per-metric counts carry each consumer's NULL
+-- semantics (history's soc IS NOT NULL filter = soc_n > 0); n counts every real-telemetry
+-- row (link_event IS NULL) so a bucket whose metrics are all NULL still exists, exactly
+-- like a raw GROUP BY. Small table (fleet x 48/day), no partitioning, plain PK.
+-- Written ONLY by the background rollup task (app/db/rollup.py) — never by ingest.
+CREATE TABLE IF NOT EXISTS samples_rollup (
+  address text NOT NULL,
+  bucket_ms bigint NOT NULL,
+  n int NOT NULL,
+  soc_sum double precision, soc_n int NOT NULL,
+  soh_sum bigint, soh_n int NOT NULL,
+  spread_sum double precision, spread_n int NOT NULL,
+  temp_sum double precision, temp_n int NOT NULL,
+  temp_min real, temp_max real,
+  PRIMARY KEY (address, bucket_ms)
+);
+
+-- Rollup high-water mark (single row): every bucket with bucket_ms < high_water_ms has
+-- been rolled up for ALL packs. An explicit state row, deliberately NOT MAX(bucket_ms):
+-- MAX conflates "processed through here" with "data exists" — a quiet fleet would leave
+-- the mark stale and force queries to raw-scan known-empty buckets, and a fresh backfill
+-- could not distinguish an idle pack from an unprocessed one.
+CREATE TABLE IF NOT EXISTS samples_rollup_state (
+  id smallint PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  high_water_ms bigint NOT NULL
+);
 
 ALTER TABLE samples ADD COLUMN IF NOT EXISTS lat double precision;
 ALTER TABLE samples ADD COLUMN IF NOT EXISTS lon double precision;

@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import asyncpg
 
 from app.db.partitions import ensure_partitions_for_range
+from app.db.rollup import ROLLUP_BUCKET_MS, get_high_water_ms
 
 _COLS = ["state", "soc", "current_a", "power_w", "voltage_v", "temp_c", "mosfet_temp_c",
          "soh", "full_charge_ah", "remaining_ah", "cycles", "cell_min_v", "cell_max_v",
@@ -197,7 +198,8 @@ async def fleet_snapshot(conn) -> list[dict]:
     pack's last-known telemetry off the dashboard/WS snapshot.
 
     Driven by the small `batteries` registry with a LATERAL latest-row probe per pack
-    (T2.5/SRV-6) so each call is a handful of index descents on samples_addr_ts instead
+    (T2.5/SRV-6) so each call is a handful of backward index descents on the samples
+    PK's (address, ts) prefix (SRV-15 — formerly the samples_addr_ts secondary) instead
     of a DISTINCT ON scan across every monthly partition ever created. The INNER lateral
     join keeps the old semantics: a battery row with no real telemetry yet (or a pack
     with only link-event rows) does not appear."""
@@ -307,7 +309,50 @@ async def revoke_device(conn, device_id) -> None:
     await conn.execute("UPDATE devices SET revoked=true WHERE id=$1", device_id)
 
 
-HISTORY_BUCKET_MS = 1_800_000  # 30-minute buckets
+HISTORY_BUCKET_MS = ROLLUP_BUCKET_MS  # 30-minute buckets — history buckets ARE rollup buckets
+
+_HISTORY_RAW = """
+SELECT address,
+       (ts_ms / $2) * $2 AS bucket_ms,
+       avg(soc)::real AS soc
+  FROM samples
+ WHERE ts_ms >= $1 AND ts >= to_timestamp($1::double precision / 1000.0)
+   AND link_event IS NULL AND soc IS NOT NULL
+ GROUP BY address, bucket_ms
+ ORDER BY address, bucket_ms
+"""
+
+# SRV-14 routed variant: rollup rows for the fully-rolled middle [$2, $3), raw for the
+# partial head bucket [$1, $2) (the window start is rarely bucket-aligned; raw keeps the
+# pure-raw partial-bucket semantics) and for the live tail [$3, now). The three parts
+# are disjoint, so summing sums/counts per bucket reproduces avg(soc) exactly.
+# soc_n > 0 mirrors the raw soc IS NOT NULL filter: a bucket whose every soc was NULL
+# yields no row, same as raw.
+_HISTORY_ROUTED = """
+WITH parts AS (
+  SELECT address, (ts_ms / $4) * $4 AS bucket_ms,
+         sum(soc::float8) AS soc_sum, count(soc)::bigint AS soc_n
+    FROM samples
+   WHERE ts_ms >= $1 AND ts_ms < $2
+     AND ts >= to_timestamp($1::double precision / 1000.0)
+     AND ts < to_timestamp($2::double precision / 1000.0)
+     AND link_event IS NULL AND soc IS NOT NULL
+   GROUP BY address, bucket_ms
+  UNION ALL
+  SELECT address, bucket_ms, soc_sum, soc_n::bigint
+    FROM samples_rollup
+   WHERE bucket_ms >= $2 AND bucket_ms < $3 AND soc_n > 0
+  UNION ALL
+  SELECT address, (ts_ms / $4) * $4 AS bucket_ms,
+         sum(soc::float8), count(soc)::bigint
+    FROM samples
+   WHERE ts_ms >= $3 AND ts >= to_timestamp($3::double precision / 1000.0)
+     AND link_event IS NULL AND soc IS NOT NULL
+   GROUP BY address, bucket_ms
+)
+SELECT address, bucket_ms, (sum(soc_sum) / nullif(sum(soc_n), 0))::real AS soc
+  FROM parts GROUP BY address, bucket_ms ORDER BY address, bucket_ms
+"""
 
 
 async def history_series(conn, since_ms: int) -> list[dict]:
@@ -316,25 +361,31 @@ async def history_series(conn, since_ms: int) -> list[dict]:
     Returns flat rows {address, bucket_ms, soc} ordered by address, bucket_ms — the
     route groups them into one series per pack. Bounded by the window, not row-capped.
 
+    Buckets strictly below the rollup high-water mark are served from samples_rollup
+    (SRV-14, ~48 rows/pack/day); the partial head bucket and the live tail come from
+    raw, so results are identical to the pure-raw computation (see tests/test_rollup.py).
+
     The ts predicate mirrors the ts_ms one (ts is derived from ts_ms at insert time) so
     the planner can prune the monthly RANGE(ts) partitions — ts_ms alone can't."""
-    rows = await conn.fetch(
-        """SELECT address,
-                  (ts_ms / $2) * $2 AS bucket_ms,
-                  avg(soc)::real AS soc
-             FROM samples
-            WHERE ts_ms >= $1 AND ts >= to_timestamp($1::double precision / 1000.0)
-              AND link_event IS NULL AND soc IS NOT NULL
-            GROUP BY address, bucket_ms
-            ORDER BY address, bucket_ms""",
-        since_ms, HISTORY_BUCKET_MS,
-    )
+    hw = await get_high_water_ms(conn)
+    b = HISTORY_BUCKET_MS
+    ru_lo = -(-since_ms // b) * b  # first FULL bucket at/after since_ms
+    if hw <= ru_lo:
+        rows = await conn.fetch(_HISTORY_RAW, since_ms, b)
+    else:
+        rows = await conn.fetch(_HISTORY_ROUTED, since_ms, ru_lo, hw, b)
     return [dict(r) for r in rows]
 
 
 async def charge_session_buckets(conn, address: str, since_ms: int) -> list[dict]:
     """1-minute buckets of charging-only rows (current_a > 0.1) since since_ms.
-    The redundant ts predicate exists purely for partition pruning (see history_series)."""
+    The redundant ts predicate exists purely for partition pruning (see history_series).
+
+    Deliberately NOT routed through samples_rollup (SRV-14): session detection needs
+    1-minute granularity (the CC->CV shape and cv_tail_min), which 30-min sums can't
+    reconstruct, and the rollup doesn't segregate charging rows (current_a > 0.1)
+    anyway. Windows are single-address and partition-pruned; charging hours are a tiny
+    fraction of raw rows, so the raw scan stays cheap."""
     rows = await conn.fetch(
         """SELECT (ts_ms / 60000) * 60000 AS bucket_ms,
                   avg(soc)::real AS soc, max(temp_c)::real AS temp_max
@@ -360,22 +411,88 @@ def trend_bucket_ms(span_ms: int) -> int:
     return 604_800_000         # 7 days
 
 
+_TREND_RAW = """
+SELECT (ts_ms / $4) * $4 AS bucket_ms,
+       avg(soh)::real AS soh,
+       avg((cell_max_v - cell_min_v) * 1000)::real AS cell_spread_mv,
+       avg(temp_c)::real AS temp_avg, min(temp_c)::real AS temp_min, max(temp_c)::real AS temp_max
+  FROM samples
+ WHERE address = $1 AND ts_ms >= $2 AND ts_ms < $3
+   AND ts >= to_timestamp($2::double precision / 1000.0)
+   AND ts < to_timestamp($3::double precision / 1000.0)
+   AND link_event IS NULL
+ GROUP BY bucket_ms ORDER BY bucket_ms
+"""
+
+# SRV-14 routed variant: 30-min rollup rows for the fully-rolled middle [$3, $4)
+# re-aggregated into the request's coarser bucket $6 (sums+counts make that exact),
+# raw for the partial head [$2, $3) and tail [$4, $5). A trend bucket straddling a
+# boundary is reassembled from both sides: the parts are disjoint over samples, so
+# summing per-metric sums/counts per trend bucket reproduces the raw avg()s.
+# Raw-part expressions mirror _TREND_RAW verbatim (float4 subtraction first, float8
+# accumulation — what avg(float4) does internally); soh sums stay integer-exact and
+# the outer ::numeric division matches avg(int)'s numeric result.
+_TREND_ROUTED = """
+WITH parts AS (
+  SELECT (ts_ms / $6) * $6 AS bucket_ms,
+         sum(soh)::bigint AS soh_sum, count(soh)::bigint AS soh_n,
+         sum(((cell_max_v - cell_min_v) * 1000)::float8) AS spread_sum,
+         count(cell_max_v - cell_min_v)::bigint AS spread_n,
+         sum(temp_c::float8) AS temp_sum, count(temp_c)::bigint AS temp_n,
+         min(temp_c) AS temp_min, max(temp_c) AS temp_max
+    FROM samples
+   WHERE address = $1 AND ts_ms >= $2 AND ts_ms < $3
+     AND ts >= to_timestamp($2::double precision / 1000.0)
+     AND ts < to_timestamp($3::double precision / 1000.0)
+     AND link_event IS NULL
+   GROUP BY bucket_ms
+  UNION ALL
+  SELECT (bucket_ms / $6) * $6, soh_sum, soh_n::bigint, spread_sum, spread_n::bigint,
+         temp_sum, temp_n::bigint, temp_min, temp_max
+    FROM samples_rollup
+   WHERE address = $1 AND bucket_ms >= $3 AND bucket_ms < $4
+  UNION ALL
+  SELECT (ts_ms / $6) * $6 AS bucket_ms,
+         sum(soh)::bigint, count(soh)::bigint,
+         sum(((cell_max_v - cell_min_v) * 1000)::float8),
+         count(cell_max_v - cell_min_v)::bigint,
+         sum(temp_c::float8), count(temp_c)::bigint,
+         min(temp_c), max(temp_c)
+    FROM samples
+   WHERE address = $1 AND ts_ms >= $4 AND ts_ms < $5
+     AND ts >= to_timestamp($4::double precision / 1000.0)
+     AND ts < to_timestamp($5::double precision / 1000.0)
+     AND link_event IS NULL
+   GROUP BY bucket_ms
+)
+SELECT bucket_ms,
+       (sum(soh_sum)::numeric / nullif(sum(soh_n), 0))::real AS soh,
+       (sum(spread_sum) / nullif(sum(spread_n), 0))::real AS cell_spread_mv,
+       (sum(temp_sum) / nullif(sum(temp_n), 0))::real AS temp_avg,
+       min(temp_min)::real AS temp_min, max(temp_max)::real AS temp_max
+  FROM parts GROUP BY bucket_ms ORDER BY bucket_ms
+"""
+
+
 async def trend_series(conn, address: str, from_ms: int, to_ms: int, bucket_ms: int) -> list[dict]:
     """Per-pack bucketed SOH / cell-spread / temperature trend for /web/trends.
-    The redundant ts predicates exist purely for partition pruning (see history_series)."""
-    rows = await conn.fetch(
-        """SELECT (ts_ms / $4) * $4 AS bucket_ms,
-                  avg(soh)::real AS soh,
-                  avg((cell_max_v - cell_min_v) * 1000)::real AS cell_spread_mv,
-                  avg(temp_c)::real AS temp_avg, min(temp_c)::real AS temp_min, max(temp_c)::real AS temp_max
-             FROM samples
-            WHERE address = $1 AND ts_ms >= $2 AND ts_ms < $3
-              AND ts >= to_timestamp($2::double precision / 1000.0)
-              AND ts < to_timestamp($3::double precision / 1000.0)
-              AND link_event IS NULL
-            GROUP BY bucket_ms ORDER BY bucket_ms""",
-        address, from_ms, to_ms, bucket_ms,
-    )
+    The redundant ts predicates exist purely for partition pruning (see history_series).
+
+    Routed through samples_rollup (SRV-14) whenever the requested bucket is a multiple
+    of 30 min — every size trend_bucket_ms returns (30 min / 6 h / 1 d / 7 d) qualifies,
+    so the guard only matters for hypothetical future callers. Buckets below the
+    high-water mark come from the rollup, the partial head/tail from raw; results are
+    identical to pure raw (see tests/test_rollup.py)."""
+    if bucket_ms % ROLLUP_BUCKET_MS == 0:
+        hw = await get_high_water_ms(conn)
+        rb = ROLLUP_BUCKET_MS
+        ru_lo = -(-from_ms // rb) * rb            # first FULL 30-min bucket in-window
+        ru_hi = min(hw, (to_ms // rb) * rb)       # last FULL rolled bucket before to_ms
+        if ru_hi > ru_lo:
+            rows = await conn.fetch(_TREND_ROUTED, address, from_ms, ru_lo, ru_hi,
+                                    to_ms, bucket_ms)
+            return [dict(r) for r in rows]
+    rows = await conn.fetch(_TREND_RAW, address, from_ms, to_ms, bucket_ms)
     return [dict(r) for r in rows]
 
 
@@ -402,8 +519,8 @@ async def track_series(conn, address: str, from_ms: int, to_ms: int) -> list[dic
 async def first_sample_ms(conn, address: str) -> int | None:
     """Earliest real-telemetry timestamp for a pack, used by /web/trends to bound the
     selectable history range on the client. Written as an ORDER BY address, ts LIMIT 1
-    lookup (a backward descent of samples_addr_ts) instead of min(ts_ms), which would
-    seq-scan every partition."""
+    lookup (a forward descent of the samples PK's (address, ts) prefix, SRV-15) instead
+    of min(ts_ms), which would seq-scan every partition."""
     return await conn.fetchval(
         """SELECT ts_ms FROM samples WHERE address = $1 AND link_event IS NULL
            ORDER BY address ASC, ts ASC LIMIT 1""", address)

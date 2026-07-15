@@ -10,6 +10,7 @@ from app.config import settings
 from app.db.partitions import ensure_partitions_for_range
 from app.db.pool import create_pool
 from app.db.queries import scrub_expired_gps
+from app.db.rollup import run_rollup_pass
 from app.routers import api_device, share, web, ws
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,12 @@ logger = logging.getLogger(__name__)
 # GPS retention scrub cadence: once shortly after startup, then daily.
 GPS_SCRUB_INITIAL_DELAY_S = 30
 GPS_SCRUB_INTERVAL_S = 24 * 3600
+
+# Analytics rollup cadence (SRV-14): first pass shortly after startup (this is also
+# where the one-time backfill of an existing DB runs, chunked by month inside the
+# pass), then every 15 min. Each pass re-rolls the trailing 48 h (late-arrival heal).
+ROLLUP_INITIAL_DELAY_S = 20
+ROLLUP_INTERVAL_S = 15 * 60
 
 
 async def run_gps_scrub(pool) -> int:
@@ -40,6 +47,26 @@ async def _gps_scrub_loop(pool) -> None:
             # A DB hiccup must never crash the app or stop future runs.
             logger.exception("GPS retention scrub failed; retrying in %d s", GPS_SCRUB_INTERVAL_S)
         await asyncio.sleep(GPS_SCRUB_INTERVAL_S)
+
+
+async def run_rollup(pool) -> int:
+    """One samples_rollup pass (SRV-14): roll all closed 30-min buckets up to the
+    high-water mark + re-roll the trailing 48 h. Directly callable for tests."""
+    async with pool.acquire() as conn:
+        return await run_rollup_pass(conn)
+
+
+async def _rollup_loop(pool) -> None:
+    await asyncio.sleep(ROLLUP_INITIAL_DELAY_S)
+    while True:
+        try:
+            n = await run_rollup(pool)
+            if n > 0:
+                logger.info("samples_rollup: upserted %d bucket rows", n)
+        except Exception:
+            # A DB hiccup must never crash the app or stop future runs.
+            logger.exception("samples_rollup pass failed; retrying in %d s", ROLLUP_INTERVAL_S)
+        await asyncio.sleep(ROLLUP_INTERVAL_S)
 
 
 # Vite emits content-hashed filenames into these dirs (one shared assets/ chunk pool for
@@ -71,17 +98,17 @@ async def lifespan(app: FastAPI):
     async with app.state.pool.acquire() as conn:
         await ensure_partitions_for_range(conn, now_ms - month, now_ms + month)
     # GPS retention (SEC-12): skipped entirely when disabled (retention <= 0).
-    gps_task = (
-        asyncio.create_task(_gps_scrub_loop(app.state.pool))
-        if settings.gps_retention_days > 0 else None
-    )
+    tasks = [asyncio.create_task(_rollup_loop(app.state.pool))]
+    if settings.gps_retention_days > 0:
+        tasks.append(asyncio.create_task(_gps_scrub_loop(app.state.pool)))
     try:
         yield
     finally:
-        if gps_task is not None:
-            gps_task.cancel()
+        for t in tasks:
+            t.cancel()
+        for t in tasks:
             try:
-                await gps_task
+                await t
             except asyncio.CancelledError:
                 pass
         await app.state.pool.close()
