@@ -35,11 +35,10 @@ import dev.joely.bmsmon.model.chargeSample
 import dev.joely.bmsmon.model.estimateChargeMinutes
 import dev.joely.bmsmon.model.estimatePackRange
 import dev.joely.bmsmon.model.evalStageAlert
-import dev.joely.bmsmon.model.foldTailEma
 import dev.joely.bmsmon.model.learnRangeParams
+import dev.joely.bmsmon.model.learnTailFold
 import dev.joely.bmsmon.model.nextChargeHold
 import dev.joely.bmsmon.model.formatDelta
-import dev.joely.bmsmon.model.observedChargeTailMinutes
 import dev.joely.bmsmon.model.todayUsage
 import dev.joely.bmsmon.model.tempMarginToCutoffC
 import dev.joely.bmsmon.model.tempZone
@@ -90,6 +89,9 @@ data class MonitorState(
     val peakCurrentA: Float = 0f,
     val gpsActive: Boolean = false,
     val tailMinByAddress: Map<String, Float> = emptyMap(),
+    // End ts of the last charge run each pack's tail EMA folded — run-identity dedup for the tail
+    // learner (persisted, so neither a blip's 6-h re-scan nor an engine restart re-folds a run).
+    val tailRunEndByAddress: Map<String, Long> = emptyMap(),
     val rangeParamsByAddress: Map<String, RangeParams> = emptyMap(),
     val todayUsageByAddress: Map<String, TodayUsage> = emptyMap(),
     // Cloud upload status, mirrored from the TelemetryReporter's onStatus hook. The engine owns
@@ -217,6 +219,7 @@ class MonitorEngine(
                 peakCurrentA = 0f,
                 gpsActive = false,
                 tailMinByAddress = emptyMap(),
+                tailRunEndByAddress = emptyMap(),
             )
         }
         ble.start(
@@ -231,6 +234,8 @@ class MonitorEngine(
                 val saved = settings.load()
                 if (saved.chargeTailMinByAddress.isNotEmpty())
                     _state.update { it.copy(tailMinByAddress = saved.chargeTailMinByAddress) }
+                if (saved.chargeTailRunEndByAddress.isNotEmpty())
+                    _state.update { it.copy(tailRunEndByAddress = saved.chargeTailRunEndByAddress) }
                 if (saved.rangeParamsByAddress.isNotEmpty())
                     _state.update { it.copy(rangeParamsByAddress = saved.rangeParamsByAddress) }
             }
@@ -481,6 +486,10 @@ class MonitorEngine(
         // (it caps at 99; 100 appears only after the state flips) — so the old "100 while
         // Charging" trigger never fired and every pack sat on the seed. The Charging→other
         // transition of a pack that had climbed into the tail is the completed-charge signal.
+        // The 30-min wall-clock guard is only a cheap pre-filter against rapid-blip Room scans;
+        // correctness (never folding the same run twice — a regen blip hours later, or an
+        // engine restart, re-finds the same run in the 6-h lookback) comes from the persisted
+        // run-identity dedup inside learnTail (shouldFoldTail on tailRunEndByAddress).
         val prevTel = st0.fleet[addr]?.telemetry
         if (prevTel?.state == BatteryState.Charging && t.state != BatteryState.Charging &&
             prevTel.soc >= TAIL_START_SOC &&
@@ -509,18 +518,27 @@ class MonitorEngine(
         if (addr.uppercase() in stageAddrs) evaluateAlerts()
     }
 
-    /** Fold the just-completed charge's observed 98->100 tail into the per-pack EMA and persist it. */
+    /** Fold the just-completed charge's observed 98->100 tail into the per-pack EMA and persist it.
+     *  learnTailFold's run-identity dedup (against the persisted last-learned run end) makes a
+     *  re-scan that finds an already-folded run a no-op — the prod double-fold bug was a regen
+     *  blip 5 h after cutoff re-finding the same overnight run in this 6-h window. */
     private suspend fun learnTail(addr: String, now: Long) {
         val since = now - 6 * 60 * 60_000L   // look back 6h for the completed run
         // chargeSample drops null-SOC rows (UI-10) — they must not count as "below 98%" evidence.
         val samples = repository.recentSamples(addr, since).mapNotNull {
             chargeSample(it.tsMs, it.soc, it.state == "Charging")
         }
-        val observed = observedChargeTailMinutes(samples) ?: return
-        val prev = _state.value.tailMinByAddress[addr] ?: SEED_TAIL_MIN
-        val next = foldTailEma(prev, observed)
-        _state.update { it.copy(tailMinByAddress = it.tailMinByAddress + (addr to next)) }
-        settings.setChargeTailMin(addr, next)
+        val st = _state.value
+        val result = learnTailFold(
+            samples, st.tailMinByAddress[addr] ?: SEED_TAIL_MIN, st.tailRunEndByAddress[addr],
+        ) ?: return
+        _state.update {
+            it.copy(
+                tailMinByAddress = it.tailMinByAddress + (addr to result.tailMin),
+                tailRunEndByAddress = it.tailRunEndByAddress + (addr to result.runEndMs),
+            )
+        }
+        settings.setChargeTailLearned(addr, result.tailMin, result.runEndMs)
     }
 
     /** Cadence of the range pass: today-usage refresh every pass, full re-learn every 6 h. */

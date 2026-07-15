@@ -309,12 +309,17 @@ All constants verified against the accumulated cloud dataset (2.0M samples; the 
 - **Charge-time ETA** — CC bulk coulomb math is essentially exact (median checkpoint error
   ~0.3 min vs the 1.4-min bar); all visible full-ETA error was the 58-min tail seed. The tail
   EMA **is folding and persisting** (first real folds confirmed byte-for-byte vs DataStore:
-  2012-A learned 56.8 from a 54.1-min tail at alpha 0.3). Found (not yet fixed): **tail re-fold
-  bug** — a single-sample SOC≥98 Charging blip 30 min–6 h after a real cutoff passes the
-  wall-clock dedup and `learnTail`'s 6-h lookback re-folds the SAME run (2012-B's 47.3-min tail
-  folded twice → 52.554; effective alpha 0.51, direction still correct, benign). Fix: dedup by
-  run identity (persist the learned run's end ts per pack — also covers engine restarts, since
-  `lastTailLearnAt` is in-memory). `SEED_TAIL_MIN=58`/alpha 0.3 stay.
+  2012-A learned 56.8 from a 54.1-min tail at alpha 0.3). Found + **FIXED same day**: **tail
+  re-fold bug** — a single-sample SOC≥98 Charging blip 30 min–6 h after a real cutoff passed
+  the wall-clock dedup and `learnTail`'s 6-h lookback re-folded the SAME run (2012-B's 47.3-min
+  tail folded twice → 52.554; effective alpha 0.51, benign). Fix: **run-identity dedup** — the
+  qualifying run's last-sample ts is its identity; folds happen only for strictly-newer runs,
+  with the learned run end persisted per pack (`charge_tail_run_end_by_address`, written
+  atomically with the tail minutes), covering blips AND engine restarts. The 30-min in-memory
+  wall-clock guard remains as a cheap pre-filter, no longer load-bearing. Pure learn pass =
+  `learnTailFold()` (ChargeTailLearn.kt). Upgrade note: packs learned pre-fix have no run-end
+  entry, so at most ONE more re-fold can occur before the stamp exists. `SEED_TAIL_MIN=58`/
+  alpha 0.3 stay.
 - **Gauge calibration** — `POWER_RING_FULL_W=300` KEEP (fortnight p98 = 301.5 W; ring pegs 2.0%
   of discharge samples, by design; new spike record 1065 W). `REGEN_EPS=0.1`/`REGEN_WINDOW_MS=30s`
   KEEP with a structural guarantee discovered: the BMS firmware has a **~1.04 A reporting

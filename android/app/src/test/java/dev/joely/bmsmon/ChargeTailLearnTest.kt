@@ -3,9 +3,14 @@ package dev.joely.bmsmon
 import dev.joely.bmsmon.model.ChargeSample
 import dev.joely.bmsmon.model.chargeSample
 import dev.joely.bmsmon.model.foldTailEma
+import dev.joely.bmsmon.model.learnTailFold
+import dev.joely.bmsmon.model.observedChargeTail
 import dev.joely.bmsmon.model.observedChargeTailMinutes
+import dev.joely.bmsmon.model.shouldFoldTail
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ChargeTailLearnTest {
@@ -78,5 +83,71 @@ class ChargeTailLearnTest {
         // The old mapping (null → -1f) fabricated exactly that evidence — pin the contrast:
         val old = rows.map { (ts, soc, chg) -> ChargeSample(ts, soc ?: -1f, chg) }
         assertEquals(1.0f, observedChargeTailMinutes(old)!!, 0.001f)
+    }
+
+    // --- run-identity dedup (the 2026-07-15 prod double-fold bug) ---
+
+    @Test fun shouldFoldTailAcceptsWhenNeverLearned() {
+        // Migration/compat: pre-upgrade installs have a learned tailMin but no run-end entry —
+        // a null persisted end accepts any qualifying run.
+        assertTrue(shouldFoldTail(runEndMs = 1_000L, lastLearnedRunEndMs = null))
+    }
+
+    @Test fun shouldFoldTailAcceptsStrictlyNewerRun() {
+        assertTrue(shouldFoldTail(runEndMs = 2_000L, lastLearnedRunEndMs = 1_000L))
+    }
+
+    @Test fun shouldFoldTailSkipsSameRun() {
+        assertFalse(shouldFoldTail(runEndMs = 1_000L, lastLearnedRunEndMs = 1_000L))
+    }
+
+    @Test fun shouldFoldTailSkipsOlderRun() {
+        assertFalse(shouldFoldTail(runEndMs = 500L, lastLearnedRunEndMs = 1_000L))
+    }
+
+    @Test fun observedChargeTailCarriesTheRunEndTs() {
+        // Cutoff branch (run ends >=99, no 100): identity = the run's last charging sample.
+        val cutoff = climb(96, 99)
+        val obs = observedChargeTail(cutoff)!!
+        assertEquals(1.0f, obs.minutes, 0.001f)
+        assertEquals(cutoff.last().tsMs, obs.runEndMs)
+        // Reported-100 branch: identity is still the run's last charging sample.
+        val full = climb(96, 100)
+        assertEquals(full.last().tsMs, observedChargeTail(full)!!.runEndMs)
+    }
+
+    @Test fun blipRescanOfSameRunFoldsExactlyOnce() {
+        // Prod repro (pack 2012-B, 2026-07-15 check-in): the real charger cutoff at 05:19 folded
+        // the overnight tail once. A single-sample Charging(99)→Discharging regen blip at 10:05
+        // passed the 30-min wall-clock dedup, re-scanned the 6-h window, re-found the SAME run,
+        // and folded the SAME tail AGAIN (persisted 52.554 = exactly two folds; one = 54.796).
+        val cutoff = climb(96, 99)
+        val first = learnTailFold(cutoff, prevTailMin = 58f, lastLearnedRunEndMs = null)!!
+        assertEquals(foldTailEma(58f, 1f), first.tailMin, 0.001f)
+        assertEquals(cutoff.last().tsMs, first.runEndMs)
+        // 5 h later the blip's re-scan sees the same run plus the blip itself (a single 99%
+        // charging sample — no climb-through, not a qualifying run). Same run end → skipped.
+        val blipAt = cutoff.last().tsMs + 5 * 60 * 60_000L
+        val rescan = cutoff +
+            ChargeSample(blipAt, 99f, true) +
+            ChargeSample(blipAt + 1_500L, 99f, false)
+        assertNull(learnTailFold(rescan, prevTailMin = first.tailMin, lastLearnedRunEndMs = first.runEndMs))
+    }
+
+    @Test fun engineRestartDoesNotRefoldPersistedRun() {
+        // Fresh process: the in-memory 30-min wall-clock map is gone, but the persisted run end
+        // survives — the same run re-found after a restart must not fold again.
+        val run = climb(96, 99)
+        assertNull(learnTailFold(run, prevTailMin = 54.8f, lastLearnedRunEndMs = run.last().tsMs))
+    }
+
+    @Test fun genuinelyNewLaterRunFolds() {
+        val run1 = climb(96, 99, t0 = 0L)
+        val first = learnTailFold(run1, prevTailMin = 58f, lastLearnedRunEndMs = null)!!
+        // A real second charge hours later: qualifies, ends strictly newer → folds.
+        val run2 = climb(95, 99, t0 = 8 * 60 * 60_000L)
+        val second = learnTailFold(run1 + run2, first.tailMin, first.runEndMs)!!
+        assertEquals(run2.last().tsMs, second.runEndMs)
+        assertEquals(foldTailEma(first.tailMin, 1f), second.tailMin, 0.001f)
     }
 }

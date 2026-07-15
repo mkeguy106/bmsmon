@@ -66,6 +66,7 @@ data class Persisted(
     val importDone: Boolean,
     val tempThresholdsByProfile: Map<String, TempThresholds>,
     val chargeTailMinByAddress: Map<String, Float> = emptyMap(),
+    val chargeTailRunEndByAddress: Map<String, Long> = emptyMap(),
     val rangeParamsByAddress: Map<String, RangeParams> = emptyMap(),
     val tempAlertsEnabled: Boolean,
     val showTempGauge: Boolean,
@@ -117,6 +118,7 @@ class SettingsStore(private val context: Context) {
         val INSTALL_UUID = stringPreferencesKey("install_uuid")
         val TEMP_THRESHOLDS = stringPreferencesKey("temp_thresholds_by_profile")
         val CHARGE_TAIL_MIN = stringPreferencesKey("charge_tail_min_by_address")
+        val CHARGE_TAIL_RUN_END = stringPreferencesKey("charge_tail_run_end_by_address")
         val RANGE_PARAMS = stringPreferencesKey("range_params_by_address")
         val TEMP_ALERTS_ENABLED = booleanPreferencesKey("temp_alerts_enabled")
         val SHOW_TEMP_GAUGE = booleanPreferencesKey("show_temp_gauge")
@@ -174,6 +176,7 @@ class SettingsStore(private val context: Context) {
             importDone = p[K.IMPORT_DONE] ?: false,
             tempThresholdsByProfile = p[K.TEMP_THRESHOLDS]?.let(::decodeTempThresholds) ?: emptyMap(),
             chargeTailMinByAddress = p[K.CHARGE_TAIL_MIN]?.let(::decodeChargeTail) ?: emptyMap(),
+            chargeTailRunEndByAddress = p[K.CHARGE_TAIL_RUN_END]?.let(::decodeChargeTailRunEnd) ?: emptyMap(),
             rangeParamsByAddress = p[K.RANGE_PARAMS]?.let(::decodeRangeParams) ?: emptyMap(),
             tempAlertsEnabled = p[K.TEMP_ALERTS_ENABLED] ?: true,
             showTempGauge = p[K.SHOW_TEMP_GAUGE] ?: true,
@@ -227,10 +230,14 @@ class SettingsStore(private val context: Context) {
     suspend fun setImportDone(on: Boolean) = context.dataStore.edit { it[K.IMPORT_DONE] = on }.let {}
     suspend fun setTempThresholds(map: Map<String, TempThresholds>) =
         context.dataStore.edit { it[K.TEMP_THRESHOLDS] = encodeTempThresholds(map) }.let {}
-    suspend fun setChargeTailMin(address: String, minutes: Float) =
+    /** One accepted tail fold: the new EMA plus the learned run's end ts (run-identity dedup),
+     *  written in a single edit so the two maps can never drift apart. */
+    suspend fun setChargeTailLearned(address: String, minutes: Float, runEndMs: Long) =
         context.dataStore.edit { prefs ->
-            val cur = prefs[K.CHARGE_TAIL_MIN]?.let(::decodeChargeTail) ?: emptyMap()
-            prefs[K.CHARGE_TAIL_MIN] = encodeChargeTail(cur + (address to minutes))
+            val mins = prefs[K.CHARGE_TAIL_MIN]?.let(::decodeChargeTail) ?: emptyMap()
+            prefs[K.CHARGE_TAIL_MIN] = encodeChargeTail(mins + (address to minutes))
+            val ends = prefs[K.CHARGE_TAIL_RUN_END]?.let(::decodeChargeTailRunEnd) ?: emptyMap()
+            prefs[K.CHARGE_TAIL_RUN_END] = encodeChargeTailRunEnd(ends + (address to runEndMs))
         }.let {}
     suspend fun setRangeParams(map: Map<String, RangeParams>) =
         context.dataStore.edit { it[K.RANGE_PARAMS] = encodeRangeParams(map) }.let {}
@@ -318,6 +325,21 @@ private fun decodeChargeTail(json: String): Map<String, Float> = runCatching {
     val root = JSONObject(json)
     buildMap {
         root.keys().forEach { addr -> put(addr, root.getDouble(addr).toFloat()) }
+    }
+}.getOrDefault(emptyMap())
+
+/** Per-pack end ts (ms) of the last charge run whose tail was folded — run-identity dedup, so a
+ *  re-scan that finds the same run (blip, restart) can never fold the same tail twice. */
+private fun encodeChargeTailRunEnd(map: Map<String, Long>): String {
+    val root = JSONObject()
+    map.forEach { (addr, ts) -> root.put(addr, ts) }
+    return root.toString()
+}
+
+private fun decodeChargeTailRunEnd(json: String): Map<String, Long> = runCatching {
+    val root = JSONObject(json)
+    buildMap {
+        root.keys().forEach { addr -> put(addr, root.getLong(addr)) }
     }
 }.getOrDefault(emptyMap())
 
