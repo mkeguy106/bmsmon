@@ -4,6 +4,7 @@ import type { TempUnit } from "../../temp";
 import { formatTemp } from "../../temp";
 import type { HistPoint } from "../history";
 import type { FleetData } from "../useFleetData";
+import { useHistory } from "../useHistory";
 import { healthSummary, healthBoardOrder, packStatus, type PackStatus } from "../model/health";
 import { groupBases, DAILY_DRIVER_BASE, type BasePack } from "../fleet";
 import { Bar, StatTile, Chip } from "../components/Atoms";
@@ -112,9 +113,14 @@ function BoardRow({ item, connected, points, unit }: {
   );
 }
 
-export function HealthView({ data, history, unit, mobile }: {
-  data: FleetData; history: Map<string, HistPoint[]>; unit: TempUnit; mobile: boolean;
+export function HealthView({ data, unit, mobile }: {
+  data: FleetData; unit: TempUnit; mobile: boolean;
 }) {
+  // 24 h sparkline history is consumed ONLY by this view, so the hook lives
+  // here (not in App): sessions parked on Command never poll /web/history, and
+  // the visibility-gated 180 s poll stops when the view unmounts on nav switch.
+  // Remounting on re-entry re-fires the hook's immediate initial fetch.
+  const history = useHistory();
   // Memoized on the actual inputs — items/staleAddrs are identity-stable in
   // useFleetData, so these only recompute when the fleet really changed.
   const summary = useMemo(

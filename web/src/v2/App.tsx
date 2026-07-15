@@ -14,7 +14,6 @@ import { AlertsView } from "./views/AlertsView";
 import { SettingsView } from "./views/SettingsView";
 import { useFleetData } from "./useFleetData";
 import { useV2Configs } from "./useV2Configs";
-import { useHistory } from "./useHistory";
 import { deriveAlerts } from "./model/alerts";
 import type { V2View } from "./nav";
 
@@ -61,7 +60,6 @@ export default function App() {
   const tempF = settings.tempUnitPref === "F";
 
   const { tempConfig } = useV2Configs();
-  const history = useHistory();
   const alerts = useMemo(
     () => deriveAlerts(data.items, data.staleAddrs, tempConfig),
     [data.items, data.staleAddrs, tempConfig],
@@ -72,7 +70,7 @@ export default function App() {
 
   const content =
     view === "command" ? <CommandView data={data} mobile={mobile} onOpen={setView} tempF={tempF} /> :
-    view === "health" ? <HealthView data={data} history={history} unit={settings.tempUnitPref} mobile={mobile} /> :
+    view === "health" ? <HealthView data={data} unit={settings.tempUnitPref} mobile={mobile} /> :
     view === "journey" ? (
       <Suspense fallback={<ViewLoading />}>
         <JourneyView data={data} theme={resolvedTheme} unit={settings.tempUnitPref} mobile={mobile} mapMetric={settings.mapMetricPref} />

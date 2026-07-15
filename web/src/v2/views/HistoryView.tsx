@@ -12,10 +12,10 @@ import { Segmented } from "../components/Segmented";
 import { ChargeSessionTable } from "../components/ChargeSessionTable";
 import { NotesCard } from "../components/NotesCard";
 import { projectMonthsTo80 } from "../model/trends";
+import { trendQuantumMs, quantizeMs, type HistRange } from "../model/histWindow";
 
 // ── Persisted control state ────────────────────────────────────────────────
 type HistPack = "group" | "A" | "B";
-type HistRange = "all" | "24h" | "7d" | "1m" | "1y" | "custom";
 interface HistState { base: string; pack: HistPack; range: HistRange; from: string; to: string }
 
 const DEFAULT_HIST: HistState = {
@@ -141,9 +141,14 @@ export function HistoryView({ data, unit, mobile }: {
   // window-independent, so it converges in one extra fetch).
   const [allFromMs, setAllFromMs] = useState<number | null>(null);
 
-  // Minute-resolution local clock, quantized so the [from,to] window (and thus
-  // the fetch key) only changes once a minute — trends refetch at most once/min.
-  const nowMs = Math.floor(useNow(60_000) / 60_000) * 60_000;
+  // Local clock quantized per selected range so the [from,to] window (and thus
+  // the trends fetch key) only changes once per quantum: 60 s on 24H (live edge
+  // worth refreshing), 10 min on longer windows whose server buckets can't
+  // change minute-to-minute. useNow ticks at the same quantum, so no wasted
+  // re-renders between key changes. Switching range still refetches instantly —
+  // the fetch key includes hist.range via fromMs/toMs.
+  const quantumMs = trendQuantumMs(hist.range);
+  const nowMs = quantizeMs(useNow(quantumMs), quantumMs);
   const [fromMs, toMs] = useMemo<[number, number]>(() => {
     if (hist.range === "custom") {
       const cFrom = parseDay(hist.from);
