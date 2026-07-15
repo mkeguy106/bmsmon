@@ -1,9 +1,12 @@
 // GPS track cleaning for the Journey map + trip math. Raw fixes stay raw in the DB; this
-// runs at render time. Three passes: (1) spike rejection — a fix demanding impossible speed
+// runs at render time. Four passes: (1) spike rejection — a fix demanding impossible speed
 // both to reach AND to leave, while its neighbors agree with each other, is a lie (the chair
 // tops out ~9 mph; vehicle rides are only plausible while the chair isn't discharging);
-// (2) stay-point snapping — parked jitter collapses onto one spot WITHOUT removing points
-// (the playback timeline / energy series iterate this array); (3) 3-point smoothing.
+// (2) idle-excursion collapse — with no pack discharging the chair cannot move itself, so a
+// brief excursion that leaves a spot and returns to it is multipath (elevator shafts produce
+// fixes CLAIMING 9-32 m accuracy that are 100+ m off — no accuracy gate can catch those);
+// (3) stay-point snapping — parked jitter collapses onto one spot WITHOUT removing points
+// (the playback timeline / energy series iterate this array); (4) 3-point smoothing.
 // Design: docs/superpowers/specs/2026-07-13-gps-track-cleaning-design.md
 // Kotlin sibling (spike rejection only): android .../model/RangeLearn.kt rejectSpikes().
 import type { TrackPoint } from "../track";
@@ -41,6 +44,38 @@ export function rejectSpikes(points: TrackPoint[]): TrackPoint[] {
   return out;
 }
 
+export const IDLE_EXCURSION_MAX_MS = 5 * 60_000; // longer away-times are real trips, not jitter
+
+/** Collapse out-and-back excursions made while no pack is discharging onto the point they
+ *  left from. A parked chair can't move itself; a vehicle ride is sustained and ends
+ *  elsewhere; an excursion that leaves the anchor and comes back to it (endpoint agreement
+ *  within STAY_RADIUS_MI, ≤ IDLE_EXCURSION_MAX_MS away) is indoor/elevator multipath —
+ *  including any not-quite-home stragglers on the way back. Points are kept (same count/
+ *  order/timestamps); only their coordinates snap to the anchor. */
+export function collapseIdleExcursions(points: TrackPoint[]): TrackPoint[] {
+  const out = points.slice();
+  let i = 0;
+  outer: while (i < out.length - 1) {
+    const anchor = out[i];
+    let sawAway = false;
+    for (let k = i + 1; k < out.length; k++) {
+      if (out[k].t - out[i + 1].t > IDLE_EXCURSION_MAX_MS) break;
+      if (haversineMi(anchor, out[k]) <= STAY_RADIUS_MI) {
+        if (sawAway) {
+          for (let m = i + 1; m < k; m++) out[m] = { ...out[m], lat: anchor.lat, lon: anchor.lon };
+          i = k;
+          continue outer;
+        }
+        break; // still at the anchor; advance it
+      }
+      if (discharging(out[k])) break; // the chair is genuinely moving — not an excursion
+      sawAway = true;
+    }
+    i++;
+  }
+  return out;
+}
+
 /** Snap runs of points that never leave STAY_RADIUS_MI of the run's first point onto their
  *  centroid. Points are kept (same count/order/timestamps) so playback survives. */
 export function snapStays(points: TrackPoint[]): TrackPoint[] {
@@ -74,5 +109,5 @@ export function smoothTrack(points: TrackPoint[]): TrackPoint[] {
 }
 
 export function cleanTrack(points: TrackPoint[]): TrackPoint[] {
-  return smoothTrack(snapStays(rejectSpikes(points)));
+  return smoothTrack(snapStays(collapseIdleExcursions(rejectSpikes(points))));
 }

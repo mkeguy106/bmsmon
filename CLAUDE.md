@@ -406,7 +406,13 @@ tops out ~9 mph, hence the 4.5 m/s ceiling. Bucketed fixes additionally pass **o
 spike rejection** (impossible speed in AND out at the context bound — 4.5 m/s discharging /
 45 m/s otherwise, 60 m/s absurd cap — while the neighbors agree; the dropped fix's window is
 bridged so real distance survives). The TS sibling `web/src/v2/model/cleanTrack.ts` adds
-stay-point snapping + smoothing for the v2 Journey map (backtest: the Jul-12 raw track's
+idle-excursion collapse (an out-and-back that leaves a spot and returns to it while no pack
+discharges is elevator/indoor multipath — those fixes CLAIM 2–32 m accuracy, so no accuracy
+gate can catch them; the chair can't move itself without discharging, and vehicle rides end
+elsewhere) + stay-point snapping + smoothing for the v2 Journey map. Known residual: fixes
+biased ~40–90 m sideways while the chair is genuinely driving indoors next to the building
+(claimed-good accuracy, chair-plausible speed) are indistinguishable at render time — fixing
+those would need map-matching/geofencing (backtest: the Jul-12 raw track's
 9.78 mi cleaned to 5.38 — see docs/range-backtest-2026-07.md Addendum 4). Location capture is
 **always-on PRIORITY_HIGH_ACCURACY GNSS** (5 s) — the phone rides the chair on USB power)
 with a line-for-line TS twin in `web/src/range.ts` (no tilt on web — documented divergence).
