@@ -1,4 +1,5 @@
 import { memo, useMemo } from "react";
+import type { MouseEvent } from "react";
 import type { EnergyPoint } from "../model/journey";
 
 // Fixed viewBox: the SVG scales to its container via width:100%, preserving aspect ratio.
@@ -150,16 +151,28 @@ const ChartBody = memo(function ChartBody({ geom }: { geom: Geom }) {
   );
 });
 
+/** Nearest point index to a viewBox-x, via the pre-scaled xs. */
+function nearestIndex(xs: number[], vbX: number): number {
+  let best = 0, bestD = Infinity;
+  for (let i = 0; i < xs.length; i++) {
+    const d = Math.abs(xs[i] - vbX);
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return best;
+}
+
 /**
  * Energy-over-distance chart: x = cumulative distance, y = instantaneous power (W).
  * Contiguous `transit` legs (vehicle rides — chair idle, GPS moving) are shaded with a
- * label, and a vertical cursor line tracks `cursorIndex` for scrubbing/playback sync.
- * The body is memoized on [energy, distUnit]; only the cursor follows playback ticks.
+ * label. A vertical cursor line tracks `cursorIndex` when set; hovering the plot maps the
+ * pointer to the nearest point and reports it via `onHover` (null on leave) so the map
+ * marker and readouts follow. The body is memoized on [energy, distUnit].
  */
-export function EnergyDistanceChart({ energy, cursorIndex, distUnit }: {
+export function EnergyDistanceChart({ energy, cursorIndex, distUnit, onHover }: {
   energy: EnergyPoint[];
-  cursorIndex: number;
+  cursorIndex: number | null;
   distUnit: "mi" | "km";
+  onHover?: (index: number | null) => void;
 }) {
   const geom = useMemo(() => computeGeom(energy, distUnit), [energy, distUnit]);
 
@@ -175,17 +188,29 @@ export function EnergyDistanceChart({ energy, cursorIndex, distUnit }: {
     );
   }
 
-  // ---- Cursor: clamp so an out-of-range index never breaks the draw. ----
-  const ci = Math.max(0, Math.min(energy.length - 1, cursorIndex));
-  const cursorX = geom.xs[ci];
+  // ---- Cursor: clamp so an out-of-range index never breaks the draw; hidden when null. ----
+  const cursorX = cursorIndex != null
+    ? geom.xs[Math.max(0, Math.min(energy.length - 1, cursorIndex))]
+    : null;
+
+  // Map a pointer event to a viewBox-x, then to the nearest point index.
+  const report = (e: MouseEvent<SVGSVGElement>) => {
+    if (!onHover) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const vbX = ((e.clientX - rect.left) / rect.width) * VB_W;
+    onHover(nearestIndex(geom.xs, vbX));
+  };
 
   return (
-    <svg viewBox={`0 0 ${VB_W} ${VB_H}`} style={{ width: "100%", display: "block" }} role="img"
-      aria-label="energy over distance">
+    <svg viewBox={`0 0 ${VB_W} ${VB_H}`} style={{ width: "100%", display: "block", cursor: onHover ? "crosshair" : undefined }}
+      role="img" aria-label="energy over distance"
+      onMouseMove={report} onMouseLeave={() => onHover?.(null)}>
       <ChartBody geom={geom} />
-      {/* Playback cursor. */}
-      <line x1={cursorX} y1={PAD_T} x2={cursorX} y2={PAD_T + plotH} stroke="var(--text)" strokeWidth={1}
-        strokeDasharray="3 3" opacity={0.7} />
+      {cursorX != null && (
+        <line x1={cursorX} y1={PAD_T} x2={cursorX} y2={PAD_T + plotH} stroke="var(--text)" strokeWidth={1}
+          strokeDasharray="3 3" opacity={0.7} />
+      )}
     </svg>
   );
 }

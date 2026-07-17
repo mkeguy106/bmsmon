@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { TempUnit } from "../../temp";
 import { useLocalStorage } from "../../useLocalStorage";
-import { groupBases, DAILY_DRIVER_BASE } from "../fleet";
+import { groupBases, DAILY_DRIVER_BASE, isCharging } from "../fleet";
 import type { FleetData } from "../useFleetData";
 import { useTrack } from "../useTrack";
 import {
@@ -15,6 +15,9 @@ import { useNow } from "../../useNow";
 import { Ago } from "../../components/Ago";
 import { JourneyMap } from "../components/JourneyMap";
 import { EnergyDistanceChart } from "../components/EnergyDistanceChart";
+import { EfficiencyCard } from "../components/EfficiencyCard";
+import { efficiencySummary } from "../model/efficiency";
+import { SEED_RANGE_PARAMS } from "../../range";
 import { Ring } from "../components/Ring";
 import { Segmented } from "../components/Segmented";
 import { JourneyDock } from "../components/JourneyDock";
@@ -75,8 +78,6 @@ const STATE_LABEL: Record<SegKind, string> = {
   active: "ACTIVE", transit: "IN TRANSIT", idle: "IDLE",
 };
 
-const PLAY_STEP_MS = 280;
-
 const dateInputStyle: CSSProperties = {
   background: "var(--panel-2)", color: "var(--text)", border: "1px solid var(--border)",
   borderRadius: 6, padding: "5px 8px", fontSize: 11,
@@ -90,7 +91,7 @@ function stepBtnStyle(): CSSProperties {
   };
 }
 
-/** One labelled readout cell in the playback bar. */
+/** One labelled readout cell in the hover-inspection row. */
 function Readout({ label, value }: { label: string; value: string }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 62 }}>
@@ -109,8 +110,7 @@ export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
   data: FleetData; theme: "dark" | "light"; unit: TempUnit; mobile: boolean; mapMetric: "power" | "soc";
 }) {
   const [st, setSt] = useLocalStorage<JourneyState>("bmsmon-v2-journey", () => DEFAULT_JOURNEY, journeyCodec);
-  const [cursorIndex, setCursorIndex] = useState(0);
-  const [playing, setPlaying] = useState(false);
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
 
   const set = (patch: Partial<JourneyState>) => setSt((s) => ({ ...s, ...patch }));
@@ -177,21 +177,24 @@ export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
   const hasTrip = points.length > 0;
   const hasMapOverlayContent = points.length > 0 || live != null;
 
-  // Clamp the cursor into range whenever the track changes (0 when empty).
-  useEffect(() => {
-    setCursorIndex((i) => Math.max(0, Math.min(points.length - 1, i)));
-  }, [points.length]);
+  // Hover inspection: the energy chart reports a point index; null when not hovering.
+  // Drop a stale hover if the track shrank out from under it.
+  const hi = hoverIndex != null && hoverIndex < points.length ? hoverIndex : null;
+  const cur = hi != null ? points[hi] : undefined;
+  const curKind: SegKind = hi != null ? segKinds[hi] ?? "idle" : "idle";
 
-  // Playback: advance the cursor mod length; never runs on an empty trip.
-  useEffect(() => {
-    if (!playing || points.length === 0) return;
-    const t = setInterval(() => setCursorIndex((i) => (i + 1) % points.length), PLAY_STEP_MS);
-    return () => clearInterval(t);
-  }, [playing, points.length]);
-
-  const ci = Math.max(0, Math.min(points.length - 1, cursorIndex));
-  const cur = points[ci];
-  const curKind: SegKind = segKinds[ci] ?? "idle";
+  // ── Efficiency: this outing's real cost/mile vs the learned band (+ live projection). ──
+  const connected = base?.packs.filter((p) => p.connected) ?? [];
+  const anyCharging = connected.some((p) => isCharging(p.item));
+  const eff = useMemo(() => efficiencySummary({
+    points, activeMiles: summary.activeMiles,
+    packParams: connected.map((p) => data.rangeParams.get(p.item.address) ?? SEED_RANGE_PARAMS),
+    remainingAh: connected
+      .map((p) => p.item.remaining_ah)
+      .filter((ah): ah is number => ah != null && Number.isFinite(ah) && ah > 0),
+    charging: anyCharging, live: isLive,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [points, summary.activeMiles, connected, data.rangeParams, anyCharging, isLive]);
 
   const mapHeight = 480;
 
@@ -303,7 +306,7 @@ export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
           <div style={{ display: "grid", gridTemplateColumns: "1fr 264px", gap: 16 }}>
             <div style={{ height: mapHeight, position: "relative" }}>
               <JourneyMap points={points} segKinds={segKinds} hotspots={hotspots}
-                cursorIndex={ci} theme={theme} live={live} liveStale={liveStale} fitKey={fitKey}
+                cursorIndex={hi ?? -1} theme={theme} live={live} liveStale={liveStale} fitKey={fitKey}
                 metric={mapMetric} showTrail={st.showTrail} />
               {(points.length > 0 || live != null) && (
                 <button className="mono" aria-pressed={st.showTrail}
@@ -347,36 +350,34 @@ export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
             </div>
           </div>
 
-          {/* ── Playback bar + energy chart (only with a trip) ── */}
+          {/* ── Efficiency + energy chart (only with a trip) ── */}
           {hasTrip ? (
             <>
-              <div className="card" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                  <button aria-label={playing ? "Pause" : "Play"} onClick={() => setPlaying((p) => !p)}
-                    style={{
-                      width: 36, height: 36, borderRadius: 8, border: "1px solid var(--border)",
-                      background: "var(--panel-2)", color: "var(--text)", cursor: "pointer",
-                      fontSize: 14, display: "inline-flex", alignItems: "center", justifyContent: "center",
-                    }}>
-                    {playing ? "⏸" : "▶"}
-                  </button>
-                  <input type="range" min={0} max={Math.max(0, points.length - 1)} value={ci}
-                    onChange={(e) => { setPlaying(false); setCursorIndex(Number(e.target.value)); }}
-                    style={{ flex: 1, accentColor: "var(--warn)" }} />
+              {st.dateMode === "day" ? (
+                <EfficiencyCard summary={eff} live={isLive} charging={anyCharging} />
+              ) : (
+                <div className="card mono" style={{ fontSize: 12, color: "var(--text-4)" }}>
+                  Select a single day to see efficiency.
                 </div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 20 }}>
-                  <Readout label="SOC" value={cur?.soc != null ? `${Math.round(cur.soc)}%` : "—"} />
-                  <Readout label="DRAW" value={`${Math.round(Math.abs(cur?.power_w ?? 0))} W`} />
-                  <Readout label="DIST" value={`${(cumMi[ci] ?? 0).toFixed(2)} mi`} />
-                  <Readout label="STATE" value={STATE_LABEL[curKind]} />
-                </div>
-              </div>
+              )}
 
               <div className="card">
                 <div className="eyebrow" style={{ color: "var(--text-4)", marginBottom: 10 }}>
                   ENERGY OVER DISTANCE
                 </div>
-                <EnergyDistanceChart energy={energy} cursorIndex={ci} distUnit="mi" />
+                <EnergyDistanceChart energy={energy} cursorIndex={hi} distUnit="mi" onHover={setHoverIndex} />
+                {hi != null ? (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 20, marginTop: 12 }}>
+                    <Readout label="SOC" value={cur?.soc != null ? `${Math.round(cur.soc)}%` : "—"} />
+                    <Readout label="DRAW" value={`${Math.round(Math.abs(cur?.power_w ?? 0))} W`} />
+                    <Readout label="DIST" value={`${(cumMi[hi] ?? 0).toFixed(2)} mi`} />
+                    <Readout label="STATE" value={STATE_LABEL[curKind]} />
+                  </div>
+                ) : (
+                  <div className="mono" style={{ fontSize: 11, color: "var(--text-4)", marginTop: 12 }}>
+                    Hover the chart to inspect a point
+                  </div>
+                )}
               </div>
             </>
           ) : (
