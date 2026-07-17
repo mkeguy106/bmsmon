@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { FleetItem } from "../../types";
-import { LIVE_STALE_MS, isWindowLive, lastKnownPosition, livePosition } from "./live";
+import type { TrackPoint } from "../track";
+import {
+  LIVE_STALE_MS, isWindowLive, lastKnownPosition, livePosition,
+  lastTrackPosition, resolveChairMarker, type LivePos,
+} from "./live";
 
 const item = (address: string, ts_ms: number, lat: number | null): FleetItem =>
   ({ address, ts_ms, lat, lon: lat == null ? null : -75 } as FleetItem);
@@ -62,5 +66,43 @@ describe("lastKnownPosition", () => {
   it("null when no pack has a fix or addresses empty", () => {
     expect(lastKnownPosition([item("A", now, null)], ["A"])).toBeNull();
     expect(lastKnownPosition([item("A", now, 40)], [])).toBeNull();
+  });
+});
+
+const tp = (t: number, lat: number, lon: number): TrackPoint =>
+  ({ t, lat, lon, power_w: null, current_a: null, soc: null });
+
+describe("lastTrackPosition", () => {
+  it("returns the last GPS point of the track (the track head)", () => {
+    const pts = [tp(1000, 43.0, -87.9), tp(2000, 43.1, -87.8), tp(3000, 43.2, -87.7)];
+    expect(lastTrackPosition(pts)).toEqual({ lat: 43.2, lon: -87.7, tsMs: 3000 });
+  });
+  it("null for an empty track", () => {
+    expect(lastTrackPosition([])).toBeNull();
+  });
+});
+
+describe("resolveChairMarker", () => {
+  const now = 1_000_000;
+  const pos = (tsMs: number, lat = 40): LivePos => ({ lat, lon: -75, tsMs });
+
+  it("picks the newest candidate by timestamp", () => {
+    const r = resolveChairMarker([pos(now - 50_000, 1), pos(now - 8_000, 2), null], now);
+    expect(r.pos?.lat).toBe(2);
+    expect(r.stale).toBe(false);
+  });
+  it("shows the last-known position greyed when the newest fix is stale (never null)", () => {
+    // The real bug: the fleet snapshot's latest row lacks GPS, but a 8-min-old fix exists.
+    const r = resolveChairMarker([null, pos(now - LIVE_STALE_MS * 4)], now);
+    expect(r.pos).not.toBeNull();
+    expect(r.stale).toBe(true);
+  });
+  it("is not stale exactly at the cutoff", () => {
+    const r = resolveChairMarker([pos(now - LIVE_STALE_MS)], now);
+    expect(r.stale).toBe(false);
+  });
+  it("null pos only when every candidate is null", () => {
+    const r = resolveChairMarker([null, null], now);
+    expect(r).toEqual({ pos: null, stale: false });
   });
 });

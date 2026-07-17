@@ -10,7 +10,7 @@ import {
   type SegKind,
 } from "../model/journey";
 import { cleanTrack } from "../model/cleanTrack";
-import { LIVE_REFRESH_MS, isWindowLive, lastKnownPosition, livePosition, type LivePos } from "../model/live";
+import { LIVE_REFRESH_MS, isWindowLive, lastKnownPosition, lastTrackPosition, resolveChairMarker, type LivePos } from "../model/live";
 import { useNow } from "../../useNow";
 import { Ago } from "../../components/Ago";
 import { JourneyMap } from "../components/JourneyMap";
@@ -141,18 +141,21 @@ export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
   // Cleaned at render time (spike rejection / stay snapping / smoothing) — raw data stays
   // raw in the DB; the map, miles, energy chart, and playback all consume the cleaned track.
   const points = useMemo(() => cleanTrack(rawPoints), [rawPoints]);
-  // Identity-stable live fix: the selectors allocate per call and `now` ticks periodically,
-  // so return the PREVIOUS object while the values are unchanged — the map's live-marker
-  // effect then only fires on real movement (or a fresh↔stale flip), not every tick.
-  // Fresh fix wins; otherwise fall back to the LAST KNOWN position (any age), rendered
-  // dimmed with its age in the badge — better than a marker that silently vanishes.
+  // Chair marker position + staleness. Two GPS sources, newest wins: the fleet snapshot's
+  // last-known fix AND the track's head. The snapshot's latest row is usually a
+  // GPS-deduped, coordinate-less sample, so relying on it alone made the marker blink out
+  // between fixes; the track (GPS-only rows) keeps a real last-known position available.
+  // The marker greys only when that newest fix is genuinely >120 s old — never vanishes
+  // while any fix exists. Identity-stable: return the PREVIOUS object while lat/lon/tsMs
+  // are unchanged so the map's live-marker effect fires on real movement / stale-flips,
+  // not on every `now` tick.
+  const marker = isLive
+    ? resolveChairMarker([lastKnownPosition(data.items, addresses), lastTrackPosition(points)], now)
+    : { pos: null as LivePos | null, stale: false };
+  const liveStale = marker.stale;
   const liveRef = useRef<LivePos | null>(null);
-  const fresh = isLive ? livePosition(data.items, addresses, now) : null;
-  const liveStale = isLive && fresh == null;
   const live = useMemo(() => {
-    const next = isLive
-      ? (fresh ?? lastKnownPosition(data.items, addresses))
-      : null;
+    const next = marker.pos;
     const prev = liveRef.current;
     if (next && prev && next.lat === prev.lat && next.lon === prev.lon && next.tsMs === prev.tsMs) {
       return prev;
@@ -160,7 +163,7 @@ export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
     liveRef.current = next;
     return next;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isLive, fresh, data.items, addresses, now]);
+  }, [marker.pos?.lat, marker.pos?.lon, marker.pos?.tsMs]);
   const fitKey = addresses.join(",") + ":" + fromMs + ":" + toMs;
 
   // ── Derived geometry/energy (memoized on the merged track). ──
