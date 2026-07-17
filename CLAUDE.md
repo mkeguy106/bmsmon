@@ -504,7 +504,7 @@ capacity-fade/cell-imbalance/temperature trend charts with A/B breakdown, a char
 editable per-base notes, backed by `GET /web/trends`, `GET /web/charge-sessions`, and the
 **WebUI's first write path** `GET`/`POST /web/notes`), and **Journey** (GPS trip visualization —
 date nav, a Leaflet base map with CARTO dark/light tiles, a discharge-colored trail
-green/amber/red by |power|, dashed transit legs, hotspot markers, playback scrubber, and an
+green/amber/red by |power|, dashed transit legs, hotspot markers, an **efficiency card**, and an
 energy-over-distance chart, backed by the new read-only `GET /web/track` endpoint — 15 s-bucketed
 per-pack GPS + discharge series; both this and the share feed gate out coarse fixes with
 `gps_accuracy_m > 250` server-side (`GPS_ACCURACY_MAX_M`, queries.py) — a post-reboot fused
@@ -519,14 +519,27 @@ persistent crosshair **re-center** button re-locks — on both platforms, replac
 (2026-07-13, from the user's design handoff): a non-scrolling 100dvh column — toolbar, map
 filling everything, and a compact line dock (`JourneyDock.tsx` + tested `model/dock.ts`):
 trip line (DIST·ACT·TRN·PEAK), pair CAP bar (weaker pack, alert-band colors), and a
-single-direction FLOW bar (|Σ power| vs 600 W; amber→red = OUT, green = REGEN/CHG). Playback,
-energy chart, and the side dock are desktop-only; mobile gets on-map overlays instead
-(TRAIL·metric chip, LIVE·GPS badge, legend). `settings.mapMetricPref` now actually colors the
+single-direction FLOW bar (|Σ power| vs 600 W; amber→red = OUT, green = REGEN/CHG). The
+efficiency card, energy chart, and the side dock are desktop-only; mobile gets on-map overlays
+instead (TRAIL·metric chip, LIVE·GPS badge, legend). `settings.mapMetricPref` now actually colors the
 trail (`socColor`, alert bands) so the chip is honest. The TRAIL chip is a **persisted toggle**
 (both platforms; off hides trail/transit/hotspots/legend, keeping the live marker). When no
 fix is fresher than 120 s the chair marker goes **grey/un-pulsed at the LAST KNOWN position**
 with its age in the badge (amber) instead of vanishing; Command mirrors this with "last seen"
-ages on offline bases. **CRITICAL mobile lesson (2026-07-13): `web/v2/index.html` carries the
+ages on offline bases. **Efficiency card (2026-07-16, desktop, replaced the playback scrubber):**
+the old play/scrub bar only animated a dot along the visible track, so it's gone. In its slot
+`EfficiencyCard.tsx` (pure `model/efficiency.ts` + tests) shows the viewed outing's real
+cost-per-mile — `outingWh` (∫|power| over discharging buckets, Δt capped at 60 s) ÷
+`summary.activeMiles` — against the learned `whPerMile` band (summed across connected packs to
+match the merged track's base-total power basis). Live "today" window → **"CAN YOU MAKE IT?"**
+with `~X mi left at today's rate · ~Y at your usual` (base-total remaining Wh ÷ each rate);
+past day → **"THIS OUTING"** with DRIVEN/USED/DRAINED. Gated below `MIN_OUTING_MI` (0.5),
+projection suppressed while charging, and the band chip reads **"vs seed est."** (never a false
+comparison) until a pack has `learnedDays > 0`. Point inspection survives as **hover** on the
+energy chart (`onHover` → nearest point → map cursor marker + SOC/DRAW/DIST/STATE readouts); no
+slider, no auto-play. Mobile Journey (dock-based) is unchanged. Spec:
+`docs/superpowers/specs/2026-07-16-journey-efficiency-card-design.md`.
+**CRITICAL mobile lesson (2026-07-13): `web/v2/index.html` carries the
 viewport meta tag** — without it, phones rendered a virtual 980 px scaled to ~40% (microscopic
 text) AND `innerWidth` defeated the <820 px auto-mobile detection; v1's index.html deliberately
 has NO viewport meta (it has no mobile layout, so scaled-desktop is the better fallback).
