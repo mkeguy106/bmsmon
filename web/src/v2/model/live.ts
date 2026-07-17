@@ -2,6 +2,7 @@
 // them from useFleetData's items (live WS-updated) and its resolved window.
 // Design: docs/superpowers/specs/2026-07-13-journey-live-map-design.md
 import type { FleetItem } from "../../types";
+import type { TrackPoint } from "../track";
 
 /** Trail re-poll cadence while live: one server track bucket. */
 export const LIVE_REFRESH_MS = 15_000;
@@ -41,4 +42,27 @@ export function lastKnownPosition(items: FleetItem[], addresses: string[]): Live
     if (!best || it.ts_ms > best.ts_ms) best = it;
   }
   return best ? { lat: best.lat!, lon: best.lon!, tsMs: best.ts_ms } : null;
+}
+
+/** The track's head = the last known GPS fix for the window. The track is built from
+ *  GPS-carrying rows only, so unlike the fleet snapshot (whose latest row is usually a
+ *  GPS-deduped, coordinate-less sample) it always yields a real position when any fix
+ *  exists — this is what keeps the chair marker from vanishing between fixes. */
+export function lastTrackPosition(points: TrackPoint[]): LivePos | null {
+  if (points.length === 0) return null;
+  const p = points[points.length - 1];
+  return { lat: p.lat, lon: p.lon, tsMs: p.t };
+}
+
+/** Resolve the chair marker from all available fixes: show the NEWEST one, greyed when
+ *  that fix is older than [LIVE_STALE_MS]. Only null when no fix exists at all — the
+ *  marker must never vanish while any known position is available. Staleness is derived
+ *  from the shown fix's real age, not from "the latest fleet row happened to lack GPS". */
+export function resolveChairMarker(
+  candidates: (LivePos | null)[], nowMs: number,
+): { pos: LivePos | null; stale: boolean } {
+  let best: LivePos | null = null;
+  for (const c of candidates) if (c && (!best || c.tsMs > best.tsMs)) best = c;
+  if (!best) return { pos: null, stale: false };
+  return { pos: best, stale: nowMs - best.tsMs > LIVE_STALE_MS };
 }
