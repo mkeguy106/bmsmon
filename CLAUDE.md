@@ -515,7 +515,13 @@ the live WS fleet feed (hidden when the freshest fix is >120 s old), the camera 
 the user pans (dragstart breaks follow unconditionally — Leaflet dragstart is user-only; a
 persistent crosshair **re-center** button re-locks — on both platforms, replacing the old
 ⌖ FOLLOW), and map fit is keyed to the selected window so live refreshes never yank pan/zoom
-(`web/src/v2/model/live.ts` + `cleanTrack` still applies). **Mobile Journey is map-first**
+(`web/src/v2/model/live.ts` + `cleanTrack` still applies). **Journey date default is
+session-scoped (2026-07-20):** a fresh page session (new tab / first open) always lands on
+**today, live**; the date nav is backed by `sessionStorage` (key `bmsmon-v2-journey`), so a
+**refresh keeps whatever day you're on** but a new session resets to today. The **TRAIL** toggle
+stays cross-session in `localStorage` (same key, `{showTrail}` — the two live in separate storage
+namespaces; the local codec also migrates `showTrail` out of the legacy combined blob). Backed by
+the `kind: "local" | "session"` param added to `useLocalStorage`/`readStored`. **Mobile Journey is map-first**
 (2026-07-13, from the user's design handoff): a non-scrolling 100dvh column — toolbar, map
 filling everything, and a compact line dock (`JourneyDock.tsx` + tested `model/dock.ts`):
 trip line (DIST·ACT·TRN·PEAK), pair CAP bar (weaker pack, alert-band colors), and a

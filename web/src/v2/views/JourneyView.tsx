@@ -25,7 +25,11 @@ import { ShareDialog } from "../components/ShareDialog";
 
 // ── Persisted control state ────────────────────────────────────────────────
 type DateMode = "day" | "range";
-interface JourneyState { dateMode: DateMode; day: string; from: string; to: string; showTrail: boolean }
+/** Date navigation — session-scoped: reset to today on a fresh page session,
+ *  kept on refresh (see the sessionStorage-backed hook below). */
+interface JourneyDate { dateMode: DateMode; day: string; from: string; to: string }
+/** The merged view state the component reads; `showTrail` persists across sessions. */
+interface JourneyState extends JourneyDate { showTrail: boolean }
 
 /** Local YYYY-MM-DD for a Date (native <input type="date"> format). */
 function fmtDay(d: Date): string {
@@ -53,12 +57,15 @@ function shiftDay(s: string, delta: number): string {
   return fmtDay(base);
 }
 
-const DEFAULT_JOURNEY: JourneyState = {
-  dateMode: "day", day: todayStr(), from: todayStr(), to: todayStr(), showTrail: true,
-};
+/** Fresh page session (new tab) always opens on today, live. */
+function defaultJourneyDate(): JourneyDate {
+  return { dateMode: "day", day: todayStr(), from: todayStr(), to: todayStr() };
+}
 
-const journeyCodec = {
-  decode: (raw: string): JourneyState | null => {
+// Date state lives in sessionStorage: it survives a refresh (keep the day the
+// user is on) but a brand-new page session starts empty → defaults to today.
+const journeyDateCodec = {
+  decode: (raw: string): JourneyDate | null => {
     try {
       const o = JSON.parse(raw) as Record<string, unknown>;
       if (!o || typeof o !== "object") return null;
@@ -67,11 +74,22 @@ const journeyCodec = {
         day: typeof o.day === "string" && dayBounds(o.day) ? o.day : todayStr(),
         from: typeof o.from === "string" && dayBounds(o.from) ? o.from : todayStr(),
         to: typeof o.to === "string" && dayBounds(o.to) ? o.to : todayStr(),
-        showTrail: typeof o.showTrail === "boolean" ? o.showTrail : true,
       };
     } catch { return null; }
   },
-  encode: (v: JourneyState) => JSON.stringify(v),
+  encode: (v: JourneyDate) => JSON.stringify(v),
+};
+
+// TRAIL toggle persists across sessions in localStorage. Reads the legacy
+// combined `bmsmon-v2-journey` blob's showTrail (date fields there are ignored).
+const journeyTrailCodec = {
+  decode: (raw: string): boolean | null => {
+    try {
+      const o = JSON.parse(raw) as Record<string, unknown>;
+      return o && typeof o === "object" && typeof o.showTrail === "boolean" ? o.showTrail : null;
+    } catch { return null; }
+  },
+  encode: (showTrail: boolean) => JSON.stringify({ showTrail }),
 };
 
 const STATE_LABEL: Record<SegKind, string> = {
@@ -109,11 +127,21 @@ const overlayChrome: CSSProperties = {
 export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
   data: FleetData; theme: "dark" | "light"; unit: TempUnit; mobile: boolean; mapMetric: "power" | "soc";
 }) {
-  const [st, setSt] = useLocalStorage<JourneyState>("bmsmon-v2-journey", () => DEFAULT_JOURNEY, journeyCodec);
+  const [dateSt, setDate] = useLocalStorage<JourneyDate>(
+    "bmsmon-v2-journey", defaultJourneyDate, journeyDateCodec, "session");
+  const [showTrail, setShowTrail] = useLocalStorage<boolean>(
+    "bmsmon-v2-journey", () => true, journeyTrailCodec, "local");
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
 
-  const set = (patch: Partial<JourneyState>) => setSt((s) => ({ ...s, ...patch }));
+  // Merged view of the two stores; `set` routes each field to its backend so
+  // every `st.X` / `set({...})` call site downstream is unchanged.
+  const st: JourneyState = { ...dateSt, showTrail };
+  const set = (patch: Partial<JourneyState>) => {
+    if (patch.showTrail !== undefined) setShowTrail(patch.showTrail);
+    const { showTrail: _t, ...datePatch } = patch;
+    if (Object.keys(datePatch).length) setDate((s) => ({ ...s, ...datePatch }));
+  };
 
   // ── Resolve the [fromMs, toMs) window from the persisted date state. ──
   const [fromMs, toMs] = useMemo<[number, number]>(() => {
