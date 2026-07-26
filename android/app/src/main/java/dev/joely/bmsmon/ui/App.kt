@@ -79,7 +79,11 @@ fun App(vm: BatteryViewModel) {
     val activity = context.findActivity()
     val window = activity?.window
     // Locking forces the screen on regardless of the setting; unlocking reverts to the setting.
-    val keepOn = state.keepScreenOn || state.locked
+    // Both are gated on phone power (2026-07-25): the screen is ~136 mAh/h, far and away the app's
+    // largest drain, so it is held only on external power and above the low-battery latch. The
+    // gate wraps the WHOLE expression — unplugging always lets the display sleep, lock included.
+    // Monitoring is unaffected: MonitoringService's wakelock keeps poll cadence with the screen off.
+    val keepOn = state.screenHoldAllowed && (state.keepScreenOn || state.locked)
     DisposableEffect(window, keepOn) {
         if (keepOn) window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
