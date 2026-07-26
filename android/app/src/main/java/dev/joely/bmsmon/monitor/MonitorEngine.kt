@@ -52,6 +52,8 @@ import dev.joely.bmsmon.model.groupActivity
 import dev.joely.bmsmon.model.groupOf
 import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.model.isRegen
+import dev.joely.bmsmon.model.powerDecision
+import dev.joely.bmsmon.power.PowerMonitor
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -88,6 +90,12 @@ data class MonitorState(
     val peakPowerW: Float = 0f,
     val peakCurrentA: Float = 0f,
     val gpsActive: Boolean = false,
+    // Phone power policy (2026-07-25), single-writer: only the engine sets these. holdScreen gates
+    // FLAG_KEEP_SCREEN_ON in the UI; gpsBalanced downgrades GPS in the sub-5% emergency window;
+    // lowPower is the hysteretic latch, fed back into powerDecision on the next reading.
+    val holdScreen: Boolean = false,
+    val gpsBalanced: Boolean = false,
+    val lowPower: Boolean = false,
     val tailMinByAddress: Map<String, Float> = emptyMap(),
     // End ts of the last charge run each pack's tail EMA folded — run-identity dedup for the tail
     // learner (persisted, so neither a blip's 6-h re-scan nor an engine restart re-folds a run).
@@ -127,6 +135,8 @@ class MonitorEngine(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val ble = BmsRepository(appContext)
     private val locationSource = LocationSource(appContext)
+    private val powerMonitor = PowerMonitor(appContext)
+    private var powerJob: Job? = null
     private val repository = TelemetryRepository(db)
     private val alertNotifier = AlertNotifier(appContext)
 
@@ -229,6 +239,7 @@ class MonitorEngine(
             onReachable = ::onReachable,
         )
         registerBtReceiver()  // BLE-10: BT off→on clears every backoff via kickAll
+        startPowerLoop()  // phone power → screen-hold + GPS priority policy
         scope.launch {
             runCatching {
                 val saved = settings.load()
@@ -284,6 +295,7 @@ class MonitorEngine(
         if (!_state.value.monitoring && _state.value.fleet.isEmpty()) return
         repository.finalizeOpenSessions()
         unregisterBtReceiver()
+        stopPowerLoop()
         rangeJob?.cancel()
         rangeJob = null
         ble.stop()
@@ -412,6 +424,40 @@ class MonitorEngine(
     fun setGpsActive(active: Boolean) {
         _state.update { it.copy(gpsActive = active) }
         if (active) locationSource.start() else locationSource.stop()
+    }
+
+    /**
+     * Fold each phone power reading into the screen/GPS policy. Started with monitoring so the
+     * receiver's lifetime matches the engine's, like the Bluetooth one.
+     *
+     * The screen is the phone's dominant drain by a wide margin, so it is held only on external
+     * power and out of the low-battery latch (see PowerPolicy for why the latch exists). Note the
+     * GPS half is applied unconditionally — LocationSource.setBalanced is a no-op while GPS is
+     * inactive and remembers the mode for the next start(), so this never fights setGpsActive.
+     */
+    private fun startPowerLoop() {
+        powerJob?.cancel()
+        powerMonitor.start()
+        powerJob = scope.launch {
+            powerMonitor.status.collect { ps ->
+                val d = powerDecision(
+                    onExternal = ps.onExternal,
+                    levelPct = ps.levelPct,
+                    wasLowPower = _state.value.lowPower,
+                )
+                _state.update {
+                    it.copy(holdScreen = d.holdScreen, gpsBalanced = d.gpsBalanced, lowPower = d.lowPower)
+                }
+                locationSource.setBalanced(d.gpsBalanced)
+            }
+        }
+    }
+
+    private fun stopPowerLoop() {
+        powerJob?.cancel()
+        powerJob = null
+        powerMonitor.stop()
+        locationSource.setBalanced(false)
     }
 
     fun setLogging(enabled: Boolean) {
