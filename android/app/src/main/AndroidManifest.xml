@@ -26,6 +26,10 @@
          connectedDevice is the FGS type for an ongoing BLE link (Android 14+). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- Keeps the CPU awake for the BLE poll loop while the screen sleeps: the loop is a
+         coroutine delay(), which does not fire during CPU suspend. Held only for the
+         duration of a monitoring session. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Android 13+: runtime-granted, for the ongoing foreground-service notification. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Vibration for critical low-battery alert notifications. Install-time, auto-granted. -->

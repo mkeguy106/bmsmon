@@ -244,7 +244,7 @@ private fun SettingsHub(
                 RowHairline()
                 CategoryRow(
                     Icons.Filled.DisplaySettings, CatBlue, "Display & units",
-                    "${if (state.tempFahrenheit) "°F" else "°C"} · ${if (state.keepScreenOn) "screen stays on" else "screen times out"}",
+                    "${if (state.tempFahrenheit) "°F" else "°C"} · ${if (state.keepScreenOn) "screen stays on while charging" else "screen times out"}",
                 ) { onOpen(SettingsPage.Display) }
                 RowHairline()
                 CategoryRow(
@@ -1182,8 +1182,8 @@ private fun ColumnScope.DisplayUnitsContent(
     GroupedCard {
         ToggleRow(
             "Keep screen on",
-            "Hold the display at your set brightness while the app is open. Turn off to let the screen " +
-                "time out normally.",
+            "Hold the display at your set brightness while monitoring and plugged in. On battery, " +
+                "or below a low-charge safety cutoff, the screen sleeps normally to protect runtime.",
             state.keepScreenOn, onSetKeepScreenOn,
         )
     }

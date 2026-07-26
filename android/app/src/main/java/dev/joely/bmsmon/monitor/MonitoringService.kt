@@ -5,10 +5,12 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import dev.joely.bmsmon.BmsApp
@@ -41,6 +43,11 @@ class MonitoringService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var collectorJob: Job? = null
     private val engine get() = (application as BmsApp).engine
+    // BLE poll cadence depends on the CPU being awake: the loop is a coroutine delay(), which
+    // does not fire in suspend. Screen-on used to provide this incidentally; now that the screen
+    // is allowed to sleep on battery, this wakelock is what keeps polling, alerting and GPS
+    // capture at full cadence. Held for exactly the monitoring session.
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -60,6 +67,7 @@ class MonitoringService : Service() {
             return START_NOT_STICKY
         }
         startForegroundCompat(buildNotification(monitoringNotificationText(engine.state.value)))
+        acquireWakeLock()
         if (collectorJob == null) {
             // A null intent means a START_STICKY restart: the OS killed the process while
             // monitoring was on and brought the service back — the fresh engine is idle, so
@@ -101,13 +109,34 @@ class MonitoringService : Service() {
     }
 
     private fun stopCleanly() {
+        releaseWakeLock()
         collectorJob?.cancel()
         collectorJob = null
         if (Build.VERSION.SDK_INT >= 24) stopForeground(STOP_FOREGROUND_REMOVE) else @Suppress("DEPRECATION") stopForeground(true)
         stopSelf()
     }
 
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        // runCatching: a wakelock failure must never take monitoring down with it — worst case
+        // cadence degrades to the old screen-dependent behavior.
+        runCatching {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            val wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_TAG)
+            wl.setReferenceCounted(false)
+            wl.acquire()  // no timeout: its lifetime is the monitoring session
+            wakeLock = wl
+        }
+    }
+
+    private fun releaseWakeLock() {
+        val wl = wakeLock ?: return
+        wakeLock = null
+        runCatching { if (wl.isHeld) wl.release() }
+    }
+
     override fun onDestroy() {
+        releaseWakeLock()
         scope.cancel()
         super.onDestroy()
     }
@@ -167,6 +196,7 @@ class MonitoringService : Service() {
     companion object {
         private const val CHANNEL_ID = "monitoring"
         private const val NOTIF_ID = 1
+        private const val WAKE_TAG = "bmsmon:monitoring"
         const val ACTION_STOP = "dev.joely.bmsmon.action.STOP_MONITORING"
 
         fun start(context: android.content.Context) {
