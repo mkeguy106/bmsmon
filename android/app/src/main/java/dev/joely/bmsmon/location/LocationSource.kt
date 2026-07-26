@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Looper
 import androidx.core.content.ContextCompat
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
@@ -77,7 +78,7 @@ class LocationSource(private val context: Context) {
                 .setMinUpdateIntervalMillis(2_000L)
                 .build()
         }
-        client.requestLocationUpdates(req, callback, null)
+        client.requestLocationUpdates(req, callback, Looper.getMainLooper())
     }
 
     fun stop() {
