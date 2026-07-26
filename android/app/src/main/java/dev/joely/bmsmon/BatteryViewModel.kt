@@ -160,6 +160,9 @@ data class UiState(
     val tempGaugeSide: GaugeSide = GaugeSide.LEFT,
     val cloudSyncAlerts: Boolean = true,
     val keepScreenOn: Boolean = true,
+    // Mirrored from MonitorState (engine is the single writer): is the phone on external power and
+    // above the low-battery latch? Gates keepScreenOn AND locked in App.kt — see PowerPolicy.
+    val screenHoldAllowed: Boolean = false,
     val tempFahrenheit: Boolean = true,
     val detailAddress: String? = null,
     val reviewAddress: String? = null,     // pack open in the Health & Usage Review screen
@@ -477,6 +480,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update { s ->
                     val mirrored = s.copy(
                         monitoring = es.monitoring,
+                        screenHoldAllowed = es.holdScreen,
                         cloudOutboxDepth = es.cloudOutboxDepth,
                         cloudLastUploadMs = es.cloudLastUploadMs,
                         cloudUploadKbps = es.cloudUploadKbps,
