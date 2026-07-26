@@ -136,6 +136,7 @@ class MonitoringService : Service() {
     }
 
     override fun onDestroy() {
+        releaseWakeLock()
         scope.cancel()
         super.onDestroy()
     }
