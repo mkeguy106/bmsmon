@@ -61,11 +61,10 @@ class PowerMonitor(private val context: Context) {
         internal fun readPowerStatus(intent: Intent?): PowerStatus {
             if (intent == null) return SAFE_DEFAULT
             val plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
-            val onExternal = plugged and (
-                BatteryManager.BATTERY_PLUGGED_AC or
-                    BatteryManager.BATTERY_PLUGGED_USB or
-                    BatteryManager.BATTERY_PLUGGED_WIRELESS
-                ) != 0
+            // Any nonzero EXTRA_PLUGGED counts as external power (AC, USB, wireless, dock) —
+            // masking to the named AC|USB|WIRELESS constants missed dock chargers, which report
+            // EXTRA_PLUGGED=8 and read as unplugged.
+            val onExternal = plugged != 0
             val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
             val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
             val pct = if (level < 0 || scale <= 0) 100 else level * 100 / scale

@@ -1,6 +1,6 @@
 package dev.joely.bmsmon.model
 
-/** Battery level (%) at or below which the phone is treated as in trouble. */
+/** Battery level (%) below which the phone is treated as in trouble. */
 const val LOW_ENTER_PCT = 5
 
 /** Battery level (%) at which it is considered recovered. */
@@ -44,3 +44,11 @@ fun powerDecision(onExternal: Boolean, levelPct: Int, wasLowPower: Boolean): Pow
         lowPower = lowPower,
     )
 }
+
+/**
+ * Seed for the first reading of a power loop, where there is no previous latch value to carry.
+ * A fresh engine (app restart, or a reboot after the phone died at 0%) must not assume the
+ * phone is healthy: anything below [LOW_EXIT_PCT] starts latched, so the display load stays
+ * off until the charger has banked real capacity. Clears normally at [LOW_EXIT_PCT].
+ */
+fun seedLowPower(levelPct: Int): Boolean = levelPct.coerceIn(0, 100) < LOW_EXIT_PCT

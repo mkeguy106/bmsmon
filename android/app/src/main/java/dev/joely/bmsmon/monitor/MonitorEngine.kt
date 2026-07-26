@@ -53,6 +53,7 @@ import dev.joely.bmsmon.model.groupOf
 import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.model.isRegen
 import dev.joely.bmsmon.model.powerDecision
+import dev.joely.bmsmon.model.seedLowPower
 import dev.joely.bmsmon.power.PowerMonitor
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
@@ -91,8 +92,9 @@ data class MonitorState(
     val peakCurrentA: Float = 0f,
     val gpsActive: Boolean = false,
     // Phone power policy (2026-07-25), single-writer: only the engine sets these. holdScreen gates
-    // FLAG_KEEP_SCREEN_ON in the UI; gpsBalanced downgrades GPS in the sub-5% emergency window;
-    // lowPower is the hysteretic latch, fed back into powerDecision on the next reading.
+    // FLAG_KEEP_SCREEN_ON in the UI; gpsBalanced downgrades GPS during the low-battery window
+    // (entered below 5%, held until 15%); lowPower is the hysteretic latch, fed back into
+    // powerDecision on the next reading.
     val holdScreen: Boolean = false,
     val gpsBalanced: Boolean = false,
     val lowPower: Boolean = false,
@@ -439,16 +441,30 @@ class MonitorEngine(
         powerJob?.cancel()
         powerMonitor.start()
         powerJob = scope.launch {
+            var first = true
             powerMonitor.status.collect { ps ->
-                val d = powerDecision(
-                    onExternal = ps.onExternal,
-                    levelPct = ps.levelPct,
-                    wasLowPower = _state.value.lowPower,
-                )
-                _state.update {
-                    it.copy(holdScreen = d.holdScreen, gpsBalanced = d.gpsBalanced, lowPower = d.lowPower)
+                // runCatching: an uncaught throw here would kill the whole process (no
+                // CoroutineExceptionHandler on this scope) — and with it the foreground service,
+                // which ActivityManager may then not reschedule for up to an hour. A null-Looper
+                // NPE from this exact spot has done that once on-device; never let this collector
+                // escape.
+                runCatching {
+                    // A fresh loop (app restart, or a reboot after the phone died at 0%) has no
+                    // real latch value to carry — seed conservatively instead of trusting the
+                    // MonitorState default of false, which would let a low-but-recovering reading
+                    // hold the screen in exactly the window the latch protects.
+                    val was = if (first) seedLowPower(ps.levelPct) else _state.value.lowPower
+                    first = false
+                    val d = powerDecision(
+                        onExternal = ps.onExternal,
+                        levelPct = ps.levelPct,
+                        wasLowPower = was,
+                    )
+                    _state.update {
+                        it.copy(holdScreen = d.holdScreen, gpsBalanced = d.gpsBalanced, lowPower = d.lowPower)
+                    }
+                    locationSource.setBalanced(d.gpsBalanced)
                 }
-                locationSource.setBalanced(d.gpsBalanced)
             }
         }
     }

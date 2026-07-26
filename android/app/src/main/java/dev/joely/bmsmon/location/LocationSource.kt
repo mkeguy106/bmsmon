@@ -40,6 +40,7 @@ class LocationSource(private val context: Context) {
         }
     }
 
+    @Synchronized
     @SuppressLint("MissingPermission") // guarded by hasLocationPermission
     fun start() {
         if (requesting || !hasLocationPermission(context)) return
@@ -55,10 +56,13 @@ class LocationSource(private val context: Context) {
      *
      * High accuracy is the norm (2026-07-13): balanced-power WiFi/cell fixes averaged ~90 m and
      * spawned the phantom map spikes, and the phone normally rides the chair on USB power. The
-     * ONLY time coarse fixes are accepted is the sub-5% emergency window (2026-07-25), where the
-     * phone must claw its way back to a safe charge — brief and rare, so the still-converging
-     * Wh/mile band is never fed a meaningful amount of coarse data.
+     * ONLY time coarse fixes are accepted is the low-battery window (2026-07-25) — entered below
+     * 5%, held until 15% — where the phone must claw its way back to a safe charge. On a
+     * charging chair-mounted phone that window can run 15-30 minutes, so it is not brief, but it
+     * is rare, and the still-converging Wh/mile band is never fed a meaningful amount of coarse
+     * data.
      */
+    @Synchronized
     fun setBalanced(balanced: Boolean) {
         if (balanced == this.balanced) return
         this.balanced = balanced
@@ -81,6 +85,7 @@ class LocationSource(private val context: Context) {
         client.requestLocationUpdates(req, callback, Looper.getMainLooper())
     }
 
+    @Synchronized
     fun stop() {
         if (!requesting) return
         requesting = false

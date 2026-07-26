@@ -251,13 +251,18 @@ suspended — keep-screen-on had been load-bearing for poll cadence *by accident
 session, so cadence, alerts, logging and GPS capture are identical with the screen dark. **Do not
 remove that wakelock without replacing the timer with an `AlarmManager`-backed one.**
 
-The same latch drops GPS to `PRIORITY_BALANCED_POWER_ACCURACY` (20 s) — **only** in that sub-5%
-emergency window, never in normal unplugged use. Coarse fixes are what caused the 2026-07-13
+The same latch drops GPS to `PRIORITY_BALANCED_POWER_ACCURACY` (20 s) — **only** in that
+low-battery window (entered below 5%, held until 15% — on a charging chair-mounted phone that can
+run 15-30 minutes), never in normal unplugged use. Coarse fixes are what caused the 2026-07-13
 phantom map spikes, and the Wh/mile band is still converging off seed, so it must not learn from
 them at scale. Pitfall found on-device: `requestLocationUpdates` with a null `Looper` means "use
 the calling thread's Looper," so invoking the balanced-GPS switch from a `Dispatchers.Default`
 coroutine (no Looper) threw `NullPointerException("invalid null looper")` and killed the
 process — always pass `Looper.getMainLooper()` explicitly in `LocationSource`.
+
+The screen-hold policy only runs while monitoring is active — the power loop lives inside the
+monitoring session (started in `MonitorEngine.start()`), so with monitoring stopped the display
+sleeps normally even on external power.
 
 **Alerts (capacity + temperature):** the stage flashes a `DangerOverlay` that *names* the alert
 type (`BATTERY CAPACITY` / `TEMPERATURE`) and fires headless notifications via `AlertNotifier`
@@ -440,8 +445,8 @@ biased ~40–90 m sideways while the chair is genuinely driving indoors next to 
 those would need map-matching/geofencing (backtest: the Jul-12 raw track's
 9.78 mi cleaned to 5.38 — see docs/range-backtest-2026-07.md Addendum 4). Location capture is
 **PRIORITY_HIGH_ACCURACY GNSS** (5 s) in all normal use — the phone rides the chair on USB power;
-it drops to balanced power (20 s) ONLY inside the sub-5% low-battery latch, see the screen-policy
-section)
+it drops to balanced power (20 s) ONLY inside the low-battery latch window (below 5% until 15%),
+see the screen-policy section)
 with a line-for-line TS twin in `web/src/range.ts` (no tilt on web — documented divergence).
 The engine learns every 6 h from the local 14-day Room history (GPS now stored locally —
 samples db v4), refreshes today's tilt inputs every 5 min, computes the per-pack estimate once

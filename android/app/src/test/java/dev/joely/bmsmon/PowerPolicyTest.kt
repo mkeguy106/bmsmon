@@ -3,6 +3,7 @@ package dev.joely.bmsmon
 import dev.joely.bmsmon.model.LOW_ENTER_PCT
 import dev.joely.bmsmon.model.LOW_EXIT_PCT
 import dev.joely.bmsmon.model.powerDecision
+import dev.joely.bmsmon.model.seedLowPower
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -82,5 +83,35 @@ class PowerPolicyTest {
     @Test fun outOfRangeLevelsAreClamped() {
         assertFalse(powerDecision(onExternal = true, levelPct = 200, wasLowPower = true).lowPower)
         assertTrue(powerDecision(onExternal = true, levelPct = -3, wasLowPower = false).lowPower)
+    }
+
+    // seedLowPower: the first reading of a fresh power loop (app restart, or a reboot after the
+    // phone died at 0%) has no real latch value to carry, so anything below LOW_EXIT_PCT (15)
+    // must start latched rather than trusting a naive `false` default.
+    @Test fun seedLowPowerBelowFiveIsLatched() {
+        assertTrue(seedLowPower(0))
+        assertTrue(seedLowPower(4))
+    }
+
+    @Test fun seedLowPowerInBandIsLatched() {
+        for (level in intArrayOf(5, 8, 10, 14)) {
+            assertTrue("expected latched at $level", seedLowPower(level))
+        }
+    }
+
+    @Test fun seedLowPowerAtFifteenIsClear() {
+        assertFalse(seedLowPower(15))
+    }
+
+    @Test fun seedLowPowerAboveFifteenIsClear() {
+        for (level in intArrayOf(16, 50, 100)) {
+            assertFalse("expected clear at $level", seedLowPower(level))
+        }
+    }
+
+    // Out-of-range levels are clamped, same as powerDecision.
+    @Test fun seedLowPowerClampsOutOfRange() {
+        assertTrue(seedLowPower(-3))
+        assertFalse(seedLowPower(200))
     }
 }
