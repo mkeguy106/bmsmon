@@ -107,7 +107,16 @@ the variances meaningless (and anisotropic with latitude).
 
 **State / model.** `x = [e, n, ve, vn]`, standard discrete CV transition over the actual `dt`
 between buckets, with discrete white-noise acceleration process noise from a single tunable
-`SIGMA_ACCEL_MPS2 = 2` (covers chair maneuvering and train acceleration alike).
+`SIGMA_ACCEL_MPS2 = 0.5`.
+
+**Corrected during implementation (2026-07-29).** This constant was first specified as `2`,
+which is wrong for the track's 15 s bucket spacing: σ_a is the RMS acceleration sustained
+across a *whole sampling interval*, so 2 m/s² implies a 30 m/s velocity change and ~225 m of
+legitimate position slack per step — larger than the outliers the gate exists to catch. Measured
+on the plan's own test scenario, the gate at σ_a = 2 was **backwards**: it accepted a 500 m
+teleport (NIS 3.7) and rejected the good fix after it (NIS 29.5). At 0.5 the separation is
+clean — teleport NIS 44.2, real 1 m/s² train acceleration NIS 2.3, against a 13.8 gate. Do not
+go below 0.5: by σ_a = 0.3 genuine acceleration reaches NIS 4.7 and the margin erodes.
 
 **Measurement noise.** `R = diag(acc², acc²)` with `ACC_FLOOR_M = 5` (no fix is better than
 this in practice, and a zero would make the filter blindly trust it) and `ACC_DEFAULT_M = 30`

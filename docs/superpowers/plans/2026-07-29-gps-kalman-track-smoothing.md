@@ -22,7 +22,7 @@
 **Constants (exact values, used across tasks):**
 
 ```ts
-export const SIGMA_ACCEL_MPS2 = 2;      // process noise: allows ~2 m/s² of real acceleration
+export const SIGMA_ACCEL_MPS2 = 0.5;    // RMS accel sustained over ONE 15 s bucket (see note)
 export const ACC_FLOOR_M = 5;           // no fix is truly better than this
 export const ACC_DEFAULT_M = 30;        // when the row carries no accuracy (pre-deploy history)
 export const INIT_VEL_VAR_M2S2 = 400;   // (20 m/s)² — generous, so a train start isn't fought
@@ -365,7 +365,7 @@ Create `web/src/v2/model/kalmanTrack.ts`:
 // Design: docs/superpowers/specs/2026-07-29-gps-kalman-track-smoothing-design.md
 import type { TrackPoint } from "../track";
 
-export const SIGMA_ACCEL_MPS2 = 2;
+export const SIGMA_ACCEL_MPS2 = 0.5;
 export const ACC_FLOOR_M = 5;
 export const ACC_DEFAULT_M = 30;
 export const INIT_VEL_VAR_M2S2 = 400;
