@@ -128,6 +128,18 @@ describe("cleanTrack", () => {
     expect(out.map((p) => p.t)).toEqual(pts.map((p) => p.t));
   });
 
+  it("propagates the Kalman smoother's inferred-gap flag through the full pipeline", () => {
+    // Two runs of real, sustained discharging motion (100 m per 15 s — fast enough that
+    // rejectSpikes/collapseIdleExcursions/snapStays all leave every point untouched; see
+    // the analysis in the Task 6 fix-round-1 report), with an 85 s gap between them —
+    // comfortably over the Kalman pass's 30 s COAST_MAX_MS break threshold.
+    const before = [pt(0, 0), pt(15, 100)];
+    const after = [pt(100, 400), pt(115, 500)];
+    const out = cleanTrack([...before, ...after]);
+    expect(out[2].inferred).toBe(true);
+    expect(out[0].inferred).toBeFalsy();
+  });
+
   it("preserves a genuine chair drive's distance within a few percent", () => {
     // Steady 2 m/s: 30 m per 15 s, 40 points → 39 segments × 30 m = 1170 m ≈ 0.727 mi.
     const track = Array.from({ length: 40 }, (_, i) => pt(i * 15, i * 30));
