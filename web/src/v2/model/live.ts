@@ -54,6 +54,49 @@ export function lastTrackPosition(points: TrackPoint[]): LivePos | null {
   return { lat: p.lat, lon: p.lon, tsMs: p.t };
 }
 
+export const PREDICT_MAX_MS = 10_000;
+export const PREDICT_MAX_M = 200;
+
+const M_PER_DEG_LAT = 111_320;
+
+/**
+ * Dead-reckon the chair between fixes so the marker glides instead of teleporting every
+ * ~9-15 s. Velocity comes from the last two points of the CLEANED track (already smoothed,
+ * so this is the filter's velocity without plumbing filter state through cleanTrack).
+ *
+ * Extrapolation is capped at PREDICT_MAX_MS or PREDICT_MAX_M, whichever binds first — at
+ * train speed the distance cap binds, walking the time cap does — so the marker never claims
+ * a position the model cannot support. Past the cap it holds the last position, where the
+ * existing LIVE_STALE_MS greying takes over. Never extrapolates across an `inferred` segment:
+ * that velocity was inferred, not measured.
+ */
+export function predictPosition(points: TrackPoint[], nowMs: number): LivePos | null {
+  if (points.length === 0) return null;
+  const last = points[points.length - 1];
+  const held: LivePos = { lat: last.lat, lon: last.lon, tsMs: last.t };
+  if (points.length < 2 || last.inferred) return held;
+
+  const prev = points[points.length - 2];
+  const dtS = (last.t - prev.t) / 1000;
+  if (dtS <= 0) return held;
+
+  const aheadMs = Math.min(Math.max(0, nowMs - last.t), PREDICT_MAX_MS);
+  if (aheadMs === 0) return held;
+
+  const mPerDegLon = M_PER_DEG_LAT * Math.max(Math.abs(Math.cos((last.lat * Math.PI) / 180)), 1e-6);
+  const vE = ((last.lon - prev.lon) * mPerDegLon) / dtS;
+  const vN = ((last.lat - prev.lat) * M_PER_DEG_LAT) / dtS;
+  const speed = Math.hypot(vE, vN);
+  if (speed === 0) return held;
+
+  const aheadS = Math.min(aheadMs / 1000, PREDICT_MAX_M / speed);
+  return {
+    lat: last.lat + (vN * aheadS) / M_PER_DEG_LAT,
+    lon: last.lon + (vE * aheadS) / mPerDegLon,
+    tsMs: last.t,
+  };
+}
+
 /** Resolve the chair marker from all available fixes: show the NEWEST one, greyed when
  *  that fix is older than [LIVE_STALE_MS]. Only null when no fix exists at all — the
  *  marker must never vanish while any known position is available. Staleness is derived

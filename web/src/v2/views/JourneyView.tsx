@@ -10,7 +10,7 @@ import {
   type SegKind,
 } from "../model/journey";
 import { cleanTrack } from "../model/cleanTrack";
-import { LIVE_REFRESH_MS, isWindowLive, lastKnownPosition, lastTrackPosition, resolveChairMarker, type LivePos } from "../model/live";
+import { LIVE_REFRESH_MS, isWindowLive, lastKnownPosition, predictPosition, resolveChairMarker, type LivePos } from "../model/live";
 import { useNow } from "../../useNow";
 import { Ago } from "../../components/Ago";
 import { JourneyMap } from "../components/JourneyMap";
@@ -178,7 +178,8 @@ export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
   // are unchanged so the map's live-marker effect fires on real movement / stale-flips,
   // not on every `now` tick.
   const marker = isLive
-    ? resolveChairMarker([lastKnownPosition(data.items, addresses), lastTrackPosition(points)], now)
+    ? resolveChairMarker(
+        [lastKnownPosition(data.items, addresses), predictPosition(points, now)], now)
     : { pos: null as LivePos | null, stale: false };
   const liveStale = marker.stale;
   const liveRef = useRef<LivePos | null>(null);

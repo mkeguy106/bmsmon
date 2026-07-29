@@ -3,7 +3,8 @@ import type { FleetItem } from "../../types";
 import type { TrackPoint } from "../track";
 import {
   LIVE_STALE_MS, isWindowLive, lastKnownPosition, livePosition,
-  lastTrackPosition, resolveChairMarker, type LivePos,
+  lastTrackPosition, resolveChairMarker, predictPosition, PREDICT_MAX_MS, PREDICT_MAX_M,
+  type LivePos,
 } from "./live";
 
 const item = (address: string, ts_ms: number, lat: number | null): FleetItem =>
@@ -79,6 +80,50 @@ describe("lastTrackPosition", () => {
   });
   it("null for an empty track", () => {
     expect(lastTrackPosition([])).toBeNull();
+  });
+});
+
+const tpi = (t: number, lat: number, lon: number, inferred?: boolean) =>
+  ({ t, lat, lon, power_w: null, current_a: null, soc: null, acc: 10, ...(inferred ? { inferred } : {}) });
+
+describe("predictPosition", () => {
+  const mLon = 111_320 * Math.cos((43 * Math.PI) / 180);
+  // Heading east at 10 m/s, last fix at t=15000.
+  const pts = [tpi(0, 43, -87.9), tpi(15_000, 43, -87.9 + 150 / mLon)];
+
+  it("extrapolates along the last known velocity", () => {
+    const p = predictPosition(pts, 20_000)!;           // 5 s past the last fix → ~50 m further
+    expect((p.lon - -87.9) * mLon).toBeCloseTo(200, 0);
+  });
+
+  it("caps extrapolation by time", () => {
+    const far = predictPosition(pts, 15_000 + PREDICT_MAX_MS + 60_000)!;
+    const atCap = predictPosition(pts, 15_000 + PREDICT_MAX_MS)!;
+    expect(far.lat).toBeCloseTo(atCap.lat, 10);
+    expect(far.lon).toBeCloseTo(atCap.lon, 10);
+  });
+
+  it("caps extrapolation by distance", () => {
+    // 40 m/s (train): the 200 m cap binds before the 10 s one.
+    const fast = [tpi(0, 43, -87.9), tpi(15_000, 43, -87.9 + 600 / mLon)];
+    const p = predictPosition(fast, 15_000 + PREDICT_MAX_MS)!;
+    expect((p.lon - -87.9) * mLon - 600).toBeLessThanOrEqual(PREDICT_MAX_M + 0.5);
+  });
+
+  it("never predicts backwards in time", () => {
+    const p = predictPosition(pts, 10_000)!;
+    expect(p.lon).toBeCloseTo(-87.9 + 150 / mLon, 10);
+  });
+
+  it("does not extrapolate across an inferred segment", () => {
+    const broken = [tpi(0, 43, -87.9), tpi(200_000, 43, -87.9 + 3000 / mLon, true)];
+    const p = predictPosition(broken, 205_000)!;
+    expect(p.lon).toBeCloseTo(-87.9 + 3000 / mLon, 10);   // holds the last fix
+  });
+
+  it("returns null without at least two points", () => {
+    expect(predictPosition([], 1000)).toBeNull();
+    expect(predictPosition([tpi(0, 43, -87.9)], 1000)).not.toBeNull();  // single fix: hold it
   });
 });
 
