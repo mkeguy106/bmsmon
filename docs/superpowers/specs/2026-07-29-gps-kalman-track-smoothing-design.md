@@ -89,7 +89,17 @@ Without this field the filter degrades to a uniform blur; with it, an 18 m fix o
 
 ### 2. The filter — `web/src/v2/model/kalmanTrack.ts` (new, pure)
 
-A constant-velocity (CV) Kalman filter with a Rauch–Tung–Striebel backward smoother.
+A constant-velocity (CV) Kalman filter with a two-filter (Fraser–Potter) backward smoother.
+
+**Per-axis, not 4-state.** With diagonal measurement and process noise, east and north do not
+interact, so the implementation runs two independent 2-state (position, velocity) filters
+rather than one 4-state filter — mathematically identical, far easier to verify. The outlier
+gate below is still applied *jointly* across both axes, because a fix is one 2-D event.
+
+**Two-filter rather than RTS.** The smoother combines the forward *posterior* at each index
+(which includes measurement `i`) with the backward *prior* (which excludes it). The two are
+therefore independent, so inverse-variance weighting is valid, and no matrix inversion is
+needed. It also makes the live-head property below automatic instead of a special case.
 
 **Units.** Points are projected to a local ENU tangent plane in metres about the track's first
 fix, filtered there, and converted back to lat/lon on output. Filtering in degrees would make
@@ -131,8 +141,8 @@ segment from the previous point to this one is inferred, not measured." A render
 segment `i-1 → i` dashed when `points[i].inferred` is true. The first point of a track is
 never flagged.
 
-**Live head.** The RTS smoother has no future data at the head, so the final point's smoothed
-state equals the forward-filtered state. The live marker therefore consumes the *filtered*
+**Live head.** The smoother has no future data at the head — the backward prior there has
+infinite variance — so the final point's smoothed state equals the forward-filtered state. The live marker therefore consumes the *filtered*
 state, and the trail behind it consumes the smoothed one — the marker must never lag the head
 just because smoothing is symmetric elsewhere.
 
