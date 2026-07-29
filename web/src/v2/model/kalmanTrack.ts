@@ -91,8 +91,13 @@ function forward(z: number[], r: number[], tS: number[]): Estimate[] {
 
 /** Backward pass: PRIOR estimate at every index (measurement i deliberately excluded, so it
  *  stays independent of the forward posterior). The last index has no prior — infinite
- *  variance — which is what makes the smoothed head equal the filtered head. */
-function backwardPrior(z: number[], r: number[], tS: number[]): Estimate[] {
+ *  variance — which is what makes the smoothed head equal the filtered head.
+ *
+ *  Exported for testing: the independence of out[i] from z[i]/r[i] is exactly what makes the
+ *  inverse-variance combination in `combine` valid, and it is easy to break silently (folding
+ *  the posterior in here instead would double-count every measurement without failing any
+ *  distance-threshold test). */
+export function backwardPrior(z: number[], r: number[], tS: number[]): Estimate[] {
   const out: Estimate[] = new Array(z.length);
   let a: Axis | null = null;
   for (let i = z.length - 1; i >= 0; i--) {

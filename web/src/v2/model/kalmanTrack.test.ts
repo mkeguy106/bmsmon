@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { smoothKalman, ACC_DEFAULT_M } from "./kalmanTrack";
+import { smoothKalman, ACC_DEFAULT_M, backwardPrior } from "./kalmanTrack";
 import type { TrackPoint } from "../track";
 
 const mk = (t: number, lat: number, lon: number, acc: number | null = 10): TrackPoint =>
@@ -50,6 +50,18 @@ describe("smoothKalman", () => {
     const withDefault = smoothKalman([mk(0, 43, -87.9, 10), mk(15_000, 43, -87.9, 10),
       mk(30_000, 43.0004, -87.9, ACC_DEFAULT_M), mk(45_000, 43, -87.9, 10)])[2];
     expect(withNull.lat).toBeCloseTo(withDefault.lat, 10);
+  });
+
+  it("backward prior at i ignores the measurement at i (no double-counting)", () => {
+    const tS = [0, 15, 30, 45];
+    const r = [100, 100, 100, 100];
+    const z = [0, 150, 300, 450];
+    const moved = [0, 150, 9999, 450]; // index 2 perturbed wildly
+    const a = backwardPrior(z, r, tS);
+    const b = backwardPrior(moved, r, tS);
+    expect(b[2].x).toBeCloseTo(a[2].x, 9); // prior at 2 must not move
+    expect(b[2].varX).toBeCloseTo(a[2].varX, 9);
+    expect(b[1].x).not.toBeCloseTo(a[1].x, 3); // but index 1 DOES see it (sanity: the test can fail)
   });
 
   it("returns short tracks untouched", () => {
