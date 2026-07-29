@@ -94,6 +94,7 @@ describe("predictPosition", () => {
   it("extrapolates along the last known velocity", () => {
     const p = predictPosition(pts, 20_000)!;           // 5 s past the last fix → ~50 m further
     expect((p.lon - -87.9) * mLon).toBeCloseTo(200, 0);
+    expect(p.tsMs).toBe(15_000);   // the last fix's real time, never nowMs
   });
 
   it("caps extrapolation by time", () => {
@@ -101,6 +102,8 @@ describe("predictPosition", () => {
     const atCap = predictPosition(pts, 15_000 + PREDICT_MAX_MS)!;
     expect(far.lat).toBeCloseTo(atCap.lat, 10);
     expect(far.lon).toBeCloseTo(atCap.lon, 10);
+    expect(far.tsMs).toBe(15_000);   // still the real fix time, not nowMs (which differs between far/atCap)
+    expect(atCap.tsMs).toBe(15_000);
   });
 
   it("caps extrapolation by distance", () => {
@@ -108,6 +111,7 @@ describe("predictPosition", () => {
     const fast = [tpi(0, 43, -87.9), tpi(15_000, 43, -87.9 + 600 / mLon)];
     const p = predictPosition(fast, 15_000 + PREDICT_MAX_MS)!;
     expect((p.lon - -87.9) * mLon - 600).toBeLessThanOrEqual(PREDICT_MAX_M + 0.5);
+    expect(p.tsMs).toBe(15_000);   // the last fix's real time, never nowMs
   });
 
   it("never predicts backwards in time", () => {
