@@ -542,7 +542,12 @@ rollup input into `web/dist/v2/` — no server change; both bundles share `web/d
 planned views: **Command** (fleet rail, stage, range/recharge, aside, bound to
 `/web/fleet` + `/ws`, plus a per-cell-voltage pipeline android `cells[]` → server `samples.cellN_v`
 → fleet snapshot `cells` → web), **Fleet Health** (tiles + 8-pack board + 24h sparkline off
-`GET /web/history`), **Alerts** (capacity ladder + temp zones + cell imbalance, `localStorage`
+`GET /web/history`; **offline packs show their LAST-KNOWN SOC/capacity, muted + "last seen
+<ago>"** — same rule as v1 and the Command rail, because a pack out of BLE range still holds its
+charge and a blank "—" hid it. `FLEET CAPACITY` folds those last-known Ah in and says
+"incl. N offline · last known"; `PACKS READY`/`NEED RECHARGE` stay live-only, being
+actionable-now counts. The hero card's heading follows the base's real status instead of a
+hardcoded "In use now"), **Alerts** (capacity ladder + temp zones + cell imbalance, `localStorage`
 acknowledge), **Settings** (units/map trail/theme segmented toggles), **History** (per-base
 capacity-fade/cell-imbalance/temperature trend charts with A/B breakdown, a charge-session log, and
 editable per-base notes, backed by `GET /web/trends`, `GET /web/charge-sessions`, and the

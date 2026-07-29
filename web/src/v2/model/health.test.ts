@@ -11,14 +11,24 @@ describe("healthSummary", () => {
     mk({ address: "c", soc: 88, soh: 72, remaining_ah: 88, full_charge_ah: 100 }),
     mk({ address: "d", soc: 100, soh: 99, remaining_ah: 100, full_charge_ah: 100 }),
   ];
-  it("counts ready/recharge/degraded and fleet capacity, excluding stale from live counts", () => {
+  it("counts ready/recharge/degraded, excluding stale from the live counts", () => {
     const s = healthSummary(items, new Set(["d"]));
     expect(s.ready).toBe(1);          // a (95); d is stale
     expect(s.needRecharge).toBe(1);   // b (20)
     expect(s.degraded).toBe(1);       // c (soh 72) — degraded counts regardless of stale
-    expect(Math.round(s.capacityPct)).toBe(68); // (95+20+88)/(300) over connected a,b,c
   });
-  it("capacityPct is 0 when no connected pack has capacity", () => {
+  it("folds an offline pack's LAST-KNOWN capacity into capacityPct", () => {
+    const s = healthSummary(items, new Set(["d"]));
+    // (95+20+88+100)/400 — stale d still holds its charge, so it counts.
+    expect(Math.round(s.capacityPct)).toBe(76);
+    expect(s.staleCounted).toBe(1);
+  });
+  it("staleCounted is 0 with every pack live", () => {
+    const s = healthSummary(items, new Set());
+    expect(Math.round(s.capacityPct)).toBe(76);
+    expect(s.staleCounted).toBe(0);
+  });
+  it("capacityPct is 0 when no pack reports capacity", () => {
     expect(healthSummary([mk({ address: "a" })], new Set()).capacityPct).toBe(0);
   });
 });

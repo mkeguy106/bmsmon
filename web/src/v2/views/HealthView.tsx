@@ -6,8 +6,9 @@ import type { HistPoint } from "../history";
 import type { FleetData } from "../useFleetData";
 import { useHistory } from "../useHistory";
 import { healthSummary, healthBoardOrder, packStatus, type PackStatus } from "../model/health";
-import { groupBases, DAILY_DRIVER_BASE, type BasePack } from "../fleet";
+import { groupBases, DAILY_DRIVER_BASE, type BasePack, type BaseStatus } from "../fleet";
 import { Bar, StatTile, Chip } from "../components/Atoms";
+import { Ago } from "../../components/Ago";
 import { Sparkline } from "../components/Sparkline";
 import { socColor, sohColor } from "../colors";
 
@@ -17,6 +18,12 @@ const STATUS_COLOR: Record<PackStatus, string> = {
 };
 const STATUS_TAG: Record<PackStatus, string> = {
   "in-use": "IN USE", charging: "CHARGING", low: "LOW", idle: "IDLE", offline: "OFFLINE",
+};
+// The hero card follows the base's real status — it used to be hardcoded "In use
+// now", which reads as a lie next to an offline base's last-known numbers.
+const HERO_HEADING: Record<BaseStatus, string> = {
+  "in-use": "In use now", charging: "Charging", backup: "Ready · backup",
+  spares: "Standing by", offline: "Last known · offline",
 };
 
 
@@ -39,15 +46,24 @@ function HeroBarRow({ label, frac, text, color }: {
 
 function HeroPackCard({ pack }: { pack: BasePack }) {
   const { item, connected } = pack;
-  const soc = connected ? item.soc : null;
+  // Offline packs keep their LAST-KNOWN telemetry (muted + timestamped) rather
+  // than blanking to "—" — a pack out of BLE range still holds its charge, and
+  // the stale number is the only capacity information there is. Mirrors v1's
+  // "DISCONNECTED · updated <ago>" and Command's "last seen".
+  const soc = item.soc;
   const capFrac = item.remaining_ah != null && item.full_charge_ah
     ? item.remaining_ah / item.full_charge_ah : null;
   const soh = item.soh;
   return (
     <div style={{ flex: "1 1 200px", minWidth: 180, opacity: connected ? 1 : 0.55 }}>
-      <div className="mono" style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>
+      <div className="mono" style={{ fontSize: 13, fontWeight: 600, marginBottom: connected ? 10 : 2 }}>
         {item.alias ?? item.address}
       </div>
+      {!connected && (
+        <div className="mono" style={{ fontSize: 10, color: "var(--text-4)", marginBottom: 8 }}>
+          OFFLINE · last seen <Ago tsMs={item.ts_ms} />
+        </div>
+      )}
       <HeroBarRow label="SOC" frac={soc != null ? soc / 100 : 0}
         text={soc != null ? `${Math.round(soc)}%` : "—"} color={socColor(soc, connected)} />
       <HeroBarRow label="CAPACITY" frac={capFrac ?? 0}
@@ -77,7 +93,9 @@ function BoardRow({ item, connected, points, unit }: {
   item: FleetItem; connected: boolean; points: HistPoint[] | undefined; unit: TempUnit;
 }) {
   const status = packStatus(item, connected);
-  const soc = connected ? item.soc : null;
+  // Last-known SOC survives the disconnect (see HeroPackCard) — socColor mutes
+  // it to var(--text-4) so a stale bar never reads as a live one.
+  const soc = item.soc;
   const soh = item.soh;
   return (
     <div style={{ display: "grid", gridTemplateColumns: BOARD_COLUMNS, gap: 10,
@@ -92,7 +110,7 @@ function BoardRow({ item, connected, points, unit }: {
           <Bar frac={soc != null ? soc / 100 : 0} color={socColor(soc, connected)} />
         </span>
         <span className="mono" style={{ fontSize: 11, width: 34, textAlign: "right",
-          color: "var(--text-2)" }}>
+          color: connected ? "var(--text-2)" : "var(--text-4)" }}>
           {soc != null ? `${Math.round(soc)}%` : "—"}
         </span>
       </div>
@@ -106,8 +124,13 @@ function BoardRow({ item, connected, points, unit }: {
         {item.cycles ?? "—"}
       </span>
       <Sparkline points={points} />
-      <span>
+      <span style={{ display: "flex", flexDirection: "column", gap: 3, alignItems: "flex-start" }}>
         <Chip tone={STATUS_COLOR[status]}>{STATUS_TAG[status]}</Chip>
+        {!connected && (
+          <span className="mono" style={{ fontSize: 10, color: "var(--text-4)" }}>
+            <Ago tsMs={item.ts_ms} />
+          </span>
+        )}
       </span>
     </div>
   );
@@ -148,12 +171,16 @@ export function HealthView({ data, unit, mobile }: {
         <StatTile label="PACKS READY" value={`${summary.ready}/8`} />
         <StatTile label="NEED RECHARGE" value={String(summary.needRecharge)} />
         <StatTile label="DEGRADED" value={String(summary.degraded)} />
-        <StatTile label="FLEET CAPACITY" value={`${Math.round(summary.capacityPct)}%`} />
+        <StatTile label="FLEET CAPACITY" value={`${Math.round(summary.capacityPct)}%`}
+          sub={summary.staleCounted > 0
+            ? `incl. ${summary.staleCounted} offline · last known` : undefined} />
       </div>
 
       {heroBase && (
         <div className="card">
-          <div className="eyebrow" style={{ marginBottom: 12 }}>In use now · Base {heroBase.id}</div>
+          <div className="eyebrow" style={{ marginBottom: 12 }}>
+            {HERO_HEADING[heroBase.status]} · Base {heroBase.id}
+          </div>
           <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
             {heroBase.packs.map((p) => <HeroPackCard key={p.item.address} pack={p} />)}
           </div>
