@@ -6,7 +6,7 @@ import {
 import type { TrackPoint, Track } from "../track";
 
 const p = (o: Partial<TrackPoint>): TrackPoint =>
-  ({ t: 0, lat: 43, lon: -87.9, power_w: 0, current_a: 0, soc: 88, ...o });
+  ({ t: 0, lat: 43, lon: -87.9, power_w: 0, current_a: 0, soc: 88, acc: null, ...o });
 
 describe("haversineMi", () => {
   it("~69 mi per degree of longitude at the equator", () => {
@@ -75,6 +75,23 @@ describe("mergeBaseTracks", () => {
     expect(merged[0].power_w).toBe(-70);
     expect(merged[0].current_a).toBe(-5);
     expect(merged[0].soc).toBe(85);
+  });
+
+  it("averages the accuracy radius across a base's packs", () => {
+    const mk = (address: string, acc: number | null) => ({
+      address,
+      points: [{ t: 1000, lat: 43, lon: -87.9, power_w: -10, current_a: -1, soc: 90, acc }],
+    });
+    const merged = mergeBaseTracks([mk("A", 10), mk("B", 30)]);
+    expect(merged[0].acc).toBe(20);
+  });
+
+  it("yields null accuracy when no pack reported one", () => {
+    const mk = (address: string) => ({
+      address,
+      points: [{ t: 1000, lat: 43, lon: -87.9, power_w: null, current_a: null, soc: null, acc: null }],
+    });
+    expect(mergeBaseTracks([mk("A"), mk("B")])[0].acc).toBeNull();
   });
 });
 

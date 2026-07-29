@@ -111,9 +111,11 @@ export function mergeBaseTracks(tracks: Track[]): TrackPoint[] {
       return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : 0;
     };
     const socs = ps.map((p) => p.soc).filter((v): v is number => v != null);
+    const accs = ps.map((p) => p.acc).filter((v): v is number => v != null && Number.isFinite(v));
     out.push({ t, lat: mean((p) => p.lat), lon: mean((p) => p.lon),
       power_w: sum((p) => p.power_w), current_a: sum((p) => p.current_a),
-      soc: socs.length ? Math.min(...socs) : null });
+      soc: socs.length ? Math.min(...socs) : null,
+      acc: accs.length ? accs.reduce((a, b) => a + b, 0) / accs.length : null });
   }
   return out;
 }

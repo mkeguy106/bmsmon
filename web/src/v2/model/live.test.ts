@@ -70,7 +70,7 @@ describe("lastKnownPosition", () => {
 });
 
 const tp = (t: number, lat: number, lon: number): TrackPoint =>
-  ({ t, lat, lon, power_w: null, current_a: null, soc: null });
+  ({ t, lat, lon, power_w: null, current_a: null, soc: null, acc: null });
 
 describe("lastTrackPosition", () => {
   it("returns the last GPS point of the track (the track head)", () => {

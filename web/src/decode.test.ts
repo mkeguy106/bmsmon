@@ -196,4 +196,12 @@ describe("decodeTrack", () => {
   it("decodeTrack null for malformed root", () => {
     expect(decodeTrack({ address: 5 })).toBeNull();
   });
+  it("decodes the track accuracy radius, defaulting to null", () => {
+    const t = decodeTrack({ address: "a", points: [
+      { t: 1, lat: 43, lon: -87.9, acc: 12.5 },
+      { t: 2, lat: 43.001, lon: -87.9 },
+    ] });
+    expect(t?.points[0].acc).toBe(12.5);
+    expect(t?.points[1].acc).toBeNull();
+  });
 });

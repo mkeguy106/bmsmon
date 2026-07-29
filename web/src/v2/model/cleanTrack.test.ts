@@ -8,7 +8,7 @@ const M = 1 / 111_320;
 
 /** Point [m] meters north of origin at time [tS] seconds, drawing [amps] (negative = discharge). */
 const pt = (tS: number, m: number, amps = -2): TrackPoint => ({
-  t: tS * 1000, lat: 40 + m * M, lon: -75, power_w: Math.abs(amps) * 25, current_a: amps, soc: 80,
+  t: tS * 1000, lat: 40 + m * M, lon: -75, power_w: Math.abs(amps) * 25, current_a: amps, soc: 80, acc: null,
 });
 
 const totalMi = (ps: TrackPoint[]) =>

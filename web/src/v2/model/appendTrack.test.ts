@@ -3,7 +3,7 @@ import type { TrackPoint } from "../track";
 import { appendTrack } from "./appendTrack";
 
 const pt = (t: number, v = 1): TrackPoint =>
-  ({ t, lat: 40 + v / 1000, lon: -75 - v / 1000, power_w: v * 10, current_a: -v, soc: 90 - v });
+  ({ t, lat: 40 + v / 1000, lon: -75 - v / 1000, power_w: v * 10, current_a: -v, soc: 90 - v, acc: null });
 
 describe("appendTrack", () => {
   it("empty prev: returns the incoming points", () => {
@@ -63,7 +63,7 @@ describe("appendTrack", () => {
   });
 
   it("value-only field differences are detected (null vs number)", () => {
-    const a: TrackPoint = { t: 0, lat: 1, lon: 2, power_w: null, current_a: null, soc: null };
+    const a: TrackPoint = { t: 0, lat: 1, lon: 2, power_w: null, current_a: null, soc: null, acc: null };
     const b: TrackPoint = { ...a, power_w: 0 };
     expect(appendTrack([a], [b], 0)).toEqual([b]);
     const prev = [a];

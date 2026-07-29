@@ -61,7 +61,7 @@ export default function App() {
   // above the early returns; feed is null until the first poll lands.
   const cleaned = useMemo<TrackPoint[]>(() => (feed
     ? cleanTrack(feed.points.map((p) => ({
-        t: p.t, lat: p.lat, lon: p.lon, power_w: p.power_w, current_a: p.current_a, soc: null,
+        t: p.t, lat: p.lat, lon: p.lon, power_w: p.power_w, current_a: p.current_a, soc: null, acc: null,
       })))
     : []), [feed]);
   const trail = useMemo(() => trailProps(cleaned, trailMode), [cleaned, trailMode]);

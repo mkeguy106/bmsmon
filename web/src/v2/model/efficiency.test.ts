@@ -6,7 +6,7 @@ import type { TrackPoint } from "../track";
 import type { RangeParams } from "../../range";
 
 const p = (o: Partial<TrackPoint>): TrackPoint =>
-  ({ t: 0, lat: 43, lon: -87.9, power_w: 0, current_a: 0, soc: 88, ...o });
+  ({ t: 0, lat: 43, lon: -87.9, power_w: 0, current_a: 0, soc: 88, acc: null, ...o });
 
 const S = 1000, MIN = 60_000;
 const params = (o: Partial<RangeParams>): RangeParams => ({

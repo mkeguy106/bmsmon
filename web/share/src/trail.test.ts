@@ -5,7 +5,7 @@ import { loadTrailMode, saveTrailMode, trailProps } from "./trail";
 // ~0.005 mi apart (> MOVE_EPS_MI) so movement-based transit classification triggers.
 const pt = (i: number, current: number | null, power: number | null): TrackPoint => ({
   t: i * 15_000, lat: 43.0 + i * 0.0001, lon: -87.9,
-  power_w: power, current_a: current, soc: null,
+  power_w: power, current_a: current, soc: null, acc: null,
 });
 
 const fakeStorage = (init: Record<string, string> = {}) => {

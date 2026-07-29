@@ -195,7 +195,7 @@ export function decodeTrack(x: unknown): Track | null {
     if (!isObj(p) || !Number.isFinite(p.t) || !Number.isFinite(p.lat) || !Number.isFinite(p.lon)) continue;
     points.push({ t: p.t as number, lat: p.lat as number, lon: p.lon as number,
       power_w: numOrNull(p.power_w) ?? null, current_a: numOrNull(p.current_a) ?? null,
-      soc: numOrNull(p.soc) ?? null });
+      soc: numOrNull(p.soc) ?? null, acc: numOrNull(p.acc) ?? null });
   }
   return { address: x.address, points };
 }
