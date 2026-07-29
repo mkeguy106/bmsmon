@@ -560,9 +560,26 @@ energy-over-distance chart, backed by the new read-only `GET /web/track` endpoin
 per-pack GPS + discharge series; both this and the share feed gate out coarse fixes with
 `gps_accuracy_m > 250` server-side (`GPS_ACCURACY_MAX_M`, queries.py) — a post-reboot fused
 network fix (363–636 m accuracy, 433 m off) drew a phantom jump on 2026-07-14; real fixes ran
-≤200 m even in a vehicle pre-GNSS, and raw samples keep every fix). Journey goes **live** when the selected window includes now:
+≤200 m even in a vehicle pre-GNSS, and raw samples keep every fix). `/web/track` also returns
+each bucket's mean accuracy radius as `acc`. **Track cleaning is now four passes, the last one
+a Kalman smoother:** `rejectSpikes → collapseIdleExcursions → snapStays → smoothKalman`
+(`web/src/v2/model/cleanTrack.ts` wires them; the smoother lives in
+`model/kalmanTrack.ts`) — an accuracy-weighted constant-velocity filter (measurement variance
+from `acc`, floored/defaulted) with **innovation gating** (a fix inconsistent with the motion
+model is rejected, prediction stands instead) and **`COAST_MAX_MS`** (30 s) gap breaks: a hole
+longer than that restarts the filter and marks the point after it `inferred`, which the map
+draws **dashed/faded** instead of a confident line. Backtested against real production data
+2026-07-29 (train ride, 70–145 km/h, coarse cell-fallback fixes) and 2026-07-12 (a normal
+continuous-GPS outing) — see `docs/range-backtest-2026-07.md` Addendum 5: miles drop slightly
+after the Kalman pass on both (jitter shrinking, not movement being fabricated), the train day
+correctly produces a handful of inferred segments (bridging one dead zone as long as 47
+minutes) and the outing day produces none during actual driving (its lone inferred segment is
+an overnight stationary gap, zero distance). Journey goes **live** when the selected window includes now:
 the trail re-polls every 15 s (`useTrack` refreshMs), a pulsing ♿ marker tracks the chair off
-the live WS fleet feed (hidden when the freshest fix is >120 s old), the camera follows until
+the live WS fleet feed (hidden when the freshest fix is >120 s old) — between fixes it
+**dead-reckons** along the last known heading/speed, capped at `PREDICT_MAX_MS` (10 s) or
+`PREDICT_MAX_M` (200 m), whichever binds first (`model/live.ts` `predictPosition`) — the
+camera follows until
 the user pans (dragstart breaks follow unconditionally — Leaflet dragstart is user-only; a
 persistent crosshair **re-center** button re-locks — on both platforms, replacing the old
 ⌖ FOLLOW), and map fit is keyed to the selected window so live refreshes never yank pan/zoom
