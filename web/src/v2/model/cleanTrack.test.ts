@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { TrackPoint } from "../track";
 import { haversineMi } from "./journey";
-import { cleanTrack, collapseIdleExcursions, rejectSpikes, smoothTrack, snapStays } from "./cleanTrack";
+import { cleanTrack, collapseIdleExcursions, rejectSpikes, snapStays } from "./cleanTrack";
 
 // ~degrees of latitude per meter (1 deg lat = 111 320 m).
 const M = 1 / 111_320;
@@ -117,17 +117,17 @@ describe("collapseIdleExcursions", () => {
   });
 });
 
-describe("smoothTrack", () => {
-  it("preserves endpoints and point count", () => {
-    const track = [pt(0, 0), pt(15, 30), pt(30, 55), pt(45, 90)];
-    const out = smoothTrack(track);
-    expect(out).toHaveLength(4);
-    expect(out[0].lat).toBe(track[0].lat);
-    expect(out[3].lat).toBe(track[3].lat);
-  });
-});
-
 describe("cleanTrack", () => {
+  it("runs the Kalman smoother last, preserving point count and timestamps", () => {
+    const pts = [0, 1, 2, 3, 4].map((i) => ({
+      t: i * 15_000, lat: 43 + (i * 150) / 111_320, lon: -87.9,
+      power_w: -60, current_a: -5, soc: 90, acc: 12,
+    }));
+    const out = cleanTrack(pts);
+    expect(out).toHaveLength(pts.length);
+    expect(out.map((p) => p.t)).toEqual(pts.map((p) => p.t));
+  });
+
   it("preserves a genuine chair drive's distance within a few percent", () => {
     // Steady 2 m/s: 30 m per 15 s, 40 points → 39 segments × 30 m = 1170 m ≈ 0.727 mi.
     const track = Array.from({ length: 40 }, (_, i) => pt(i * 15, i * 30));

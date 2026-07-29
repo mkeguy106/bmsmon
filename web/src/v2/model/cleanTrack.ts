@@ -6,11 +6,13 @@
 // brief excursion that leaves a spot and returns to it is multipath (elevator shafts produce
 // fixes CLAIMING 9-32 m accuracy that are 100+ m off — no accuracy gate can catch those);
 // (3) stay-point snapping — parked jitter collapses onto one spot WITHOUT removing points
-// (the playback timeline / energy series iterate this array); (4) 3-point smoothing.
+// (the playback timeline / energy series iterate this array); (4) accuracy-weighted Kalman
+// smoothing with outlier gating and gap breaks (see kalmanTrack.ts).
 // Design: docs/superpowers/specs/2026-07-13-gps-track-cleaning-design.md
 // Kotlin sibling (spike rejection only): android .../model/RangeLearn.kt rejectSpikes().
 import type { TrackPoint } from "../track";
 import { DISCHARGE_EPS, haversineMi } from "./journey";
+import { smoothKalman } from "./kalmanTrack";
 
 export const CHAIR_MAX_MPS = 4.5;   // ~9 mph chair top speed + downhill margin
 export const VEHICLE_MAX_MPS = 45;  // ~100 mph — anything under this is a plausible vehicle
@@ -95,19 +97,6 @@ export function snapStays(points: TrackPoint[]): TrackPoint[] {
   return out;
 }
 
-/** 3-point moving average on coordinates; endpoints untouched. */
-export function smoothTrack(points: TrackPoint[]): TrackPoint[] {
-  if (points.length < 3) return points;
-  return points.map((p, i) => {
-    if (i === 0 || i === points.length - 1) return p;
-    return {
-      ...p,
-      lat: (points[i - 1].lat + p.lat + points[i + 1].lat) / 3,
-      lon: (points[i - 1].lon + p.lon + points[i + 1].lon) / 3,
-    };
-  });
-}
-
 export function cleanTrack(points: TrackPoint[]): TrackPoint[] {
-  return smoothTrack(snapStays(collapseIdleExcursions(rejectSpikes(points))));
+  return smoothKalman(snapStays(collapseIdleExcursions(rejectSpikes(points))));
 }
