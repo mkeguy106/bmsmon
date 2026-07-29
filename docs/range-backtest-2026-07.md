@@ -117,36 +117,60 @@ Ran `web/scripts/backtest-clean.mjs` (via `npx vite-node`) against the full prod
 `cleanTrack` pipeline — `rejectSpikes → collapseIdleExcursions → snapStays → smoothKalman`
 (`web/src/v2/model/kalmanTrack.ts`) — on two real days for pack `C8:47:80:15:67:44` (2012-A),
 pulled with the server's own `/web/track` query (15 s buckets, `link_event IS NULL`, lat/lon
-non-null, `gps_accuracy_m IS NULL OR <= 250`):
+non-null, `gps_accuracy_m IS NULL OR <= 250`).
 
-| day | context | points | mean acc (m) | raw mi | after spike+stay | after Kalman | inferred segs |
-|---|---|---|---|---|---|---|---|
-| 2026-07-29 | train ride, 70–145 km/h | 2,740 | 20.2 (p90 28.1, max 222.8) | 77.913 | 70.555 | **69.658** | **10** |
-| 2026-07-12 | normal wheelchair outing | 5,754 | 82.3 (p50 100.0, max 170.3) | 18.155 | 12.413 | **11.54** | **1** |
+**The train day is pinned to a closed window, not "the day."** 2026-07-29 was still in progress
+at measurement time — a re-run about an hour after the first pull returned materially different
+numbers (a new 22.5-minute gap had appeared by 12:49 UTC), so a full-calendar-day figure would
+not have been reproducible. The table below uses `ts >= '2026-07-29 00:00:00' AND ts <
+'2026-07-29 13:00:00'` (UTC), a bound safely in the past by the time this was written, so these
+numbers are fixed. The outing day (2026-07-12) is a full closed calendar day — it ended long
+before this backtest ran.
+
+| day | window (UTC) | context | points | mean acc (m) | raw mi | after spike+stay | after Kalman | inferred segs |
+|---|---|---|---|---|---|---|---|---|
+| 2026-07-29 | 00:00–13:00 | train ride, 70–145 km/h | 2,768 | 21.6 (p50 10.2, p90 30.3, max 222.8) | 95.658 | 88.300 | **86.850** | **15** |
+| 2026-07-12 | full day | normal wheelchair outing | 5,754 | 82.3 (p50 100.0, p90 100.0, max 170.3) | 18.155 | 12.413 | **11.54** | **1** |
 
 **Direction checks out on both days.** Miles drop at the Kalman step on both (train
-70.555→69.658, −1.3%; outing 12.413→11.54, −7.0%) — jitter inflation shrinking, not movement
+88.300→86.850, −1.6%; outing 12.413→11.54, −7.0%) — jitter inflation shrinking, not movement
 being fabricated, matching the expected direction from the design doc.
 
-**Train day:** 10 inferred segments, all inside the actual 11:21–12:25 high-speed window (up
-to 196.5 km/h measured, gated fixes as coarse as 222.8 m). The largest hole was **47 minutes**
-(11:38:30–12:25:30) — far past the ~120 s the design doc measured from a partial-day snapshot
-taken earlier the same day; the ride evidently ran through a much longer dead zone than that
-snapshot caught. This is the strongest possible validation of the feature: previously that
-47-minute blackout would have drawn one straight confident chord across ~40 km of track at
-apparent highway speed. It now renders as a single dashed/inferred bridge instead.
+**Train day:** 15 inferred segments inside the bounded window, all inside the actual
+high-speed running (fixes above 70 km/h from 11:21:45 to 12:58:00 UTC, up to 196.5 km/h
+measured, gated fixes as coarse as 222.8 m). The largest hole is **47 minutes**
+(11:38:30–12:25:30 UTC) — fully inside the 00:00–13:00 window, confirmed directly against the
+bounded pull — far past the ~120 s the design doc measured from a partial-day snapshot taken
+earlier the same day; the ride evidently ran through a much longer dead zone than that snapshot
+caught. This is the strongest possible validation of the feature: previously that 47-minute
+blackout would have drawn one straight confident chord across ~40 km of track at apparent
+highway speed. It now renders as a single dashed/inferred bridge instead. A second, shorter
+22.5-minute gap (12:27:00–12:49:30 UTC) falls inside the window too, contributing one more
+inferred segment; the ride was evidently still producing dead zones near the end of the
+bounded window.
 
 **Outing day: no bug.** The one inferred segment sits at 04:34:15–04:35:45, a 90 s gap with
 `current_a = 0` and *identical* lat/lon before and after (a stationary overnight sample drop,
 not a hole in the actual outing). `COAST_MAX_MS` is not mistriggering on ordinary driving
 buckets — the daytime outing itself has zero gaps over 30 s.
 
-**Discrepancy worth flagging, not chasing further right now:** this day's full-24h raw mileage
-(18.155 mi) is roughly double Addendum 4's 9.78 mi for what is nominally the same 2026-07-12
-track. Point counts match almost exactly (5,754 vs 5,759), so it isn't a different day. The
-likely explanation is that Addendum 4 ran before the server's accuracy gate existed
-(shipped 2026-07-14, one day after Addendum 4) and/or measured a narrower time window than the
-full calendar day pulled here — this day's fixes run coarse (median reported accuracy exactly
-100 m, the era before always-on GNSS capture), so a full 24 h of ~100 m-radius overnight jitter
-adds up fast. Both figures agree that cleaning removes the large majority of it; revisit only
-if a future check-in needs the exact number.
+**Open question, deliberately left open:** this day's full-24h raw mileage (18.155 mi, 5,754
+buckets) runs almost double Addendum 4's 9.78 mi for what is nominally the same 2026-07-12
+2012-A track (5,759 buckets). Two plausible explanations were checked against prod and **both
+are ruled out**:
+
+- *The accuracy gate excluded a lot of coarse fixes Addendum 4 didn't gate.* Checked: only
+  **3 of 48,584** GPS-carrying rows that day exceed the 250 m gate (day-average accuracy
+  82.3 m). The gate removes essentially nothing — it cannot explain a ~2x difference. (Also,
+  as a matter of direction, if Addendum 4's query predated the gate, its raw figure should have
+  come out *higher* than this gated pull, not lower — the opposite of what's observed.)
+- *Addendum 4 measured a narrower time window than a full calendar day.* Checked: the bucket
+  counts are near-identical (5,754 vs 5,759), which is what a full calendar day at 15 s
+  buckets looks like (86,400 / 15 = 5,760) either way — there's no room for a materially
+  narrower window to produce a near-identical count.
+
+The cause of the discrepancy is **unexplained**. It does not affect this backtest's
+conclusions — the before/after comparison above runs on one internally consistent input, so
+whatever produced Addendum 4's lower absolute number doesn't bear on whether this day's own
+raw→cleaned drop is correctly signed and sized. Recording the ruled-out numbers here so a
+future investigation doesn't re-derive them from scratch.

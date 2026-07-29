@@ -568,13 +568,14 @@ a Kalman smoother:** `rejectSpikes → collapseIdleExcursions → snapStays → 
 from `acc`, floored/defaulted) with **innovation gating** (a fix inconsistent with the motion
 model is rejected, prediction stands instead) and **`COAST_MAX_MS`** (30 s) gap breaks: a hole
 longer than that restarts the filter and marks the point after it `inferred`, which the map
-draws **dashed/faded** instead of a confident line. Backtested against real production data
-2026-07-29 (train ride, 70–145 km/h, coarse cell-fallback fixes) and 2026-07-12 (a normal
-continuous-GPS outing) — see `docs/range-backtest-2026-07.md` Addendum 5: miles drop slightly
-after the Kalman pass on both (jitter shrinking, not movement being fabricated), the train day
-correctly produces a handful of inferred segments (bridging one dead zone as long as 47
-minutes) and the outing day produces none during actual driving (its lone inferred segment is
-an overnight stationary gap, zero distance). Journey goes **live** when the selected window includes now:
+draws **dashed/faded** instead of a confident line. Backtested against real production data —
+2026-07-29 (train ride, 70–145 km/h, coarse cell-fallback fixes, pinned to the closed
+00:00–13:00 UTC window since the day was still in progress at measurement time) and 2026-07-12
+(a full, normal continuous-GPS outing day) — see `docs/range-backtest-2026-07.md` Addendum 5:
+miles drop slightly after the Kalman pass on both (jitter shrinking, not movement being
+fabricated), the train day correctly produces over a dozen inferred segments (bridging dead
+zones up to 47 minutes long) and the outing day produces none during actual driving (its lone
+inferred segment is an overnight stationary gap, zero distance). Journey goes **live** when the selected window includes now:
 the trail re-polls every 15 s (`useTrack` refreshMs), a pulsing ♿ marker tracks the chair off
 the live WS fleet feed (hidden when the freshest fix is >120 s old) — between fixes it
 **dead-reckons** along the last known heading/speed, capped at `PREDICT_MAX_MS` (10 s) or
