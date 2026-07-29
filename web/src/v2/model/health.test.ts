@@ -11,11 +11,23 @@ describe("healthSummary", () => {
     mk({ address: "c", soc: 88, soh: 72, remaining_ah: 88, full_charge_ah: 100 }),
     mk({ address: "d", soc: 100, soh: 99, remaining_ah: 100, full_charge_ah: 100 }),
   ];
-  it("counts ready/recharge/degraded, excluding stale from the live counts", () => {
+  it("counts ready/recharge/degraded on last-known readings, stale included", () => {
     const s = healthSummary(items, new Set(["d"]));
-    expect(s.ready).toBe(1);          // a (95); d is stale
+    expect(s.ready).toBe(2);          // a (95) live + d (100) offline on its last reading
+    expect(s.readyStale).toBe(1);     // …of which d is last-known
     expect(s.needRecharge).toBe(1);   // b (20)
-    expect(s.degraded).toBe(1);       // c (soh 72) — degraded counts regardless of stale
+    expect(s.needRechargeStale).toBe(0);
+    expect(s.degraded).toBe(1);       // c (soh 72)
+  });
+  it("reports an offline LOW pack in needRecharge", () => {
+    const s = healthSummary(items, new Set(["b"]));
+    expect(s.needRecharge).toBe(1);
+    expect(s.needRechargeStale).toBe(1);
+  });
+  it("counts no pack whose SOC is unknown", () => {
+    const s = healthSummary([mk({ address: "z" })], new Set(["z"]));
+    expect(s.ready).toBe(0);
+    expect(s.needRecharge).toBe(0);
   });
   it("folds an offline pack's LAST-KNOWN capacity into capacityPct", () => {
     const s = healthSummary(items, new Set(["d"]));

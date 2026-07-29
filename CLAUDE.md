@@ -544,10 +544,12 @@ planned views: **Command** (fleet rail, stage, range/recharge, aside, bound to
 → fleet snapshot `cells` → web), **Fleet Health** (tiles + 8-pack board + 24h sparkline off
 `GET /web/history`; **offline packs show their LAST-KNOWN SOC/capacity, muted + "last seen
 <ago>"** — same rule as v1 and the Command rail, because a pack out of BLE range still holds its
-charge and a blank "—" hid it. `FLEET CAPACITY` folds those last-known Ah in and says
-"incl. N offline · last known"; `PACKS READY`/`NEED RECHARGE` stay live-only, being
-actionable-now counts. The hero card's heading follows the base's real status instead of a
-hardcoded "In use now"), **Alerts** (capacity ladder + temp zones + cell imbalance, `localStorage`
+charge and a blank "—" hid it. **Every summary tile counts offline packs on their last-known
+reading too** — `PACKS READY`, `NEED RECHARGE` and `FLEET CAPACITY` each footnote how much of
+their figure is stale ("incl. N offline · last known", from `readyStale`/`needRechargeStale`/
+`staleCounted`), so being away from the spares no longer reads as 0 ready / 0% capacity. The
+hero card's heading follows the base's real status instead of a hardcoded "In use now"),
+**Alerts** (capacity ladder + temp zones + cell imbalance, `localStorage`
 acknowledge), **Settings** (units/map trail/theme segmented toggles), **History** (per-base
 capacity-fade/cell-imbalance/temperature trend charts with A/B breakdown, a charge-session log, and
 editable per-base notes, backed by `GET /web/trends`, `GET /web/charge-sessions`, and the

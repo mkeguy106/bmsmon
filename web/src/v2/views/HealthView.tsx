@@ -30,6 +30,11 @@ const HERO_HEADING: Record<BaseStatus, string> = {
 // PACK · CAPACITY · HEALTH · TEMP · CYCLES · trend sparkline · STATUS.
 const BOARD_COLUMNS = "minmax(90px,1fr) minmax(120px,1.4fr) 64px 64px 56px 104px 96px";
 
+/** Tile footnote: how much of the figure above is an offline pack's last reading. */
+function lastKnownNote(staleCount: number): string | undefined {
+  return staleCount > 0 ? `incl. ${staleCount} offline · last known` : undefined;
+}
+
 function HeroBarRow({ label, frac, text, color }: {
   label: string; frac: number; text: string; color: string;
 }) {
@@ -168,12 +173,13 @@ export function HealthView({ data, unit, mobile }: {
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div style={{ display: "grid", gridTemplateColumns: mobile ? "1fr 1fr" : "repeat(4, 1fr)",
         gap: 12 }}>
-        <StatTile label="PACKS READY" value={`${summary.ready}/8`} />
-        <StatTile label="NEED RECHARGE" value={String(summary.needRecharge)} />
+        <StatTile label="PACKS READY" value={`${summary.ready}/8`}
+          sub={lastKnownNote(summary.readyStale)} />
+        <StatTile label="NEED RECHARGE" value={String(summary.needRecharge)}
+          sub={lastKnownNote(summary.needRechargeStale)} />
         <StatTile label="DEGRADED" value={String(summary.degraded)} />
         <StatTile label="FLEET CAPACITY" value={`${Math.round(summary.capacityPct)}%`}
-          sub={summary.staleCounted > 0
-            ? `incl. ${summary.staleCounted} offline · last known` : undefined} />
+          sub={lastKnownNote(summary.staleCounted)} />
       </div>
 
       {heroBase && (

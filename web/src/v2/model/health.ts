@@ -8,29 +8,34 @@ export const DEGRADED_SOH = 80;
 export interface HealthSummary {
   ready: number; needRecharge: number; degraded: number;
   capacityPct: number;
-  /** Offline packs whose LAST-KNOWN capacity is folded into capacityPct. */
-  staleCounted: number;
+  /** Offline packs folded into each figure on their LAST-KNOWN reading. */
+  readyStale: number; needRechargeStale: number; staleCounted: number;
 }
 
+/**
+ * Every figure here counts offline packs on their LAST-KNOWN reading, because a
+ * pack out of BLE range still holds the charge we last saw — dropping it made
+ * the fleet read emptier than it is (worst case: away from the spares, the
+ * tiles claimed 0 ready and 0% capacity). The *Stale counts let each tile say
+ * how much of its number is last-known rather than live.
+ */
 export function healthSummary(items: FleetItem[], staleAddrs: Set<string>): HealthSummary {
-  const live = items.filter((i) => !staleAddrs.has(i.address));
-  // READY / NEED RECHARGE are actionable-now counts, so they stay live-only:
-  // an out-of-range pack is not a pack you can go grab and rely on.
-  const ready = live.filter((i) => (i.soc ?? -1) >= READY_SOC).length;
-  const needRecharge = live.filter((i) => (i.soc ?? Infinity) < RECHARGE_SOC).length;
+  const stale = (i: FleetItem) => staleAddrs.has(i.address);
+  const readyPacks = items.filter((i) => (i.soc ?? -1) >= READY_SOC);
+  const lowPacks = items.filter((i) => (i.soc ?? Infinity) < RECHARGE_SOC);
   const degraded = items.filter((i) => i.soh != null && i.soh < DEGRADED_SOH).length;
-  // FLEET CAPACITY is stored energy, not connectivity: a pack out of BLE range
-  // still holds its charge, so offline packs contribute their LAST-KNOWN Ah
-  // (counted in staleCounted so the tile can say so). Excluding them made the
-  // fleet read empty whenever the phone was away from the spares.
   let rem = 0, full = 0, staleCounted = 0;
   for (const i of items) {
     if (i.remaining_ah != null && i.full_charge_ah != null && i.full_charge_ah > 0) {
       rem += i.remaining_ah; full += i.full_charge_ah;
-      if (staleAddrs.has(i.address)) staleCounted++;
+      if (stale(i)) staleCounted++;
     }
   }
-  return { ready, needRecharge, degraded, capacityPct: full > 0 ? (rem / full) * 100 : 0, staleCounted };
+  return {
+    ready: readyPacks.length, readyStale: readyPacks.filter(stale).length,
+    needRecharge: lowPacks.length, needRechargeStale: lowPacks.filter(stale).length,
+    degraded, capacityPct: full > 0 ? (rem / full) * 100 : 0, staleCounted,
+  };
 }
 
 /** Attention-first: disconnected packs first, then ascending SOC (nulls last), stable. */
