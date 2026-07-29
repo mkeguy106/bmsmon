@@ -57,8 +57,9 @@ describe("smoothKalman", () => {
     const r = [100, 100, 100, 100];
     const z = [0, 150, 300, 450];
     const moved = [0, 150, 9999, 450]; // index 2 perturbed wildly
-    const a = backwardPrior(z, r, tS);
-    const b = backwardPrior(moved, r, tS);
+    const ok = z.map(() => true);
+    const a = backwardPrior(z, r, tS, ok);
+    const b = backwardPrior(moved, r, tS, ok);
     expect(b[2].x).toBeCloseTo(a[2].x, 9); // prior at 2 must not move
     expect(b[2].varX).toBeCloseTo(a[2].varX, 9);
     expect(b[1].x).not.toBeCloseTo(a[1].x, 3); // but index 1 DOES see it (sanity: the test can fail)
@@ -68,5 +69,34 @@ describe("smoothKalman", () => {
     expect(smoothKalman([])).toEqual([]);
     const one = [mk(0, 43, -87.9)];
     expect(smoothKalman(one)).toEqual(one);
+  });
+
+  it("rejects a single wild outlier instead of bending the path around it", () => {
+    // Due north at 10 m/s with one fix teleported 500 m east, claiming to be accurate.
+    const mLon = 111_320 * Math.cos((43 * Math.PI) / 180);
+    const pts = Array.from({ length: 9 }, (_, i) =>
+      mk(i * 15_000, 43 + (i * 150) / 111_320, -87.9, 10));
+    pts[4] = mk(4 * 15_000, pts[4].lat, -87.9 + 500 / mLon, 10);
+    const out = smoothKalman(pts);
+    // The outlier's own smoothed position must stay near the true line, not out at 500 m.
+    const offsetM = Math.abs(out[4].lon - -87.9) * mLon;
+    expect(offsetM).toBeLessThan(50);
+    // …and its neighbours must be barely disturbed.
+    expect(Math.abs(out[3].lon - -87.9) * mLon).toBeLessThan(20);
+    expect(Math.abs(out[5].lon - -87.9) * mLon).toBeLessThan(20);
+  });
+
+  it("accepts a real train acceleration instead of gating it as an outlier", () => {
+    // ~40 m/s cruise, then one bucket of genuine 1 m/s² acceleration. This must NOT be
+    // rejected — the gate's job is to catch teleports, not physics.
+    const mLat = 111_320;
+    const pts = [0, 1, 2, 3, 4].map((i) => mk(i * 15_000, 43 + (i * 600) / mLat, -87.9, 10));
+    const extra = 0.5 * 1.0 * 15 * 15;                     // 112.5 m beyond constant velocity
+    pts.push(mk(5 * 15_000, 43 + (5 * 600 + extra) / mLat, -87.9, 10));
+    const out = smoothKalman(pts);
+    // The accelerated fix must still land essentially on its measurement, not be pulled back
+    // to the constant-velocity prediction as a rejected outlier would be.
+    const measuredN = (pts[5].lat - 43) * mLat, smoothedN = (out[5].lat - 43) * mLat;
+    expect(Math.abs(smoothedN - measuredN)).toBeLessThan(40);
   });
 });
