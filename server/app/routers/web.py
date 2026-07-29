@@ -103,7 +103,8 @@ async def track(address: str, from_ms: int = Query(...), to_ms: int = Query(...)
     async with pool.acquire() as conn:
         rows = await q.track_series(conn, address, from_ms, to_ms)
     points = [{"t": int(r["bucket_ms"]), "lat": _f(r["lat"]), "lon": _f(r["lon"]),
-               "power_w": _f(r["power_w"]), "current_a": _f(r["current_a"]), "soc": _f(r["soc"])}
+               "power_w": _f(r["power_w"]), "current_a": _f(r["current_a"]), "soc": _f(r["soc"]),
+               "acc": _f(r["acc"])}
               for r in rows]
     return {"address": address, "points": points}
 

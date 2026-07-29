@@ -497,13 +497,15 @@ async def trend_series(conn, address: str, from_ms: int, to_ms: int, bucket_ms: 
 
 
 async def track_series(conn, address: str, from_ms: int, to_ms: int) -> list[dict]:
-    """15-second buckets of GPS-carrying real telemetry (lat/lon present) with discharge context.
+    """15-second buckets of GPS-carrying real telemetry (lat/lon present) with discharge context
+    and the bucket's mean accuracy radius (`acc`) — the Journey map weights fixes by it.
     Coarse fixes (accuracy radius > GPS_ACCURACY_MAX_M) are gated out; NULL accuracy passes.
     The redundant ts predicates exist purely for partition pruning (see history_series)."""
     rows = await conn.fetch(
         """SELECT (ts_ms / 15000) * 15000 AS bucket_ms,
                   avg(lat)::double precision AS lat, avg(lon)::double precision AS lon,
-                  avg(power_w)::real AS power_w, avg(current_a)::real AS current_a, avg(soc)::real AS soc
+                  avg(power_w)::real AS power_w, avg(current_a)::real AS current_a, avg(soc)::real AS soc,
+                  avg(gps_accuracy_m)::real AS acc
              FROM samples
             WHERE address = $1 AND ts_ms >= $2 AND ts_ms < $3
               AND ts >= to_timestamp($2::double precision / 1000.0)

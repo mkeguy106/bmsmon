@@ -83,3 +83,33 @@ async def test_track_excludes_coarse_fixes(app, client):
     pts = r.json()["points"]
     assert [p["t"] for p in pts] == [base, base + 2 * BUCKET, base + 3 * BUCKET]
     assert all(p["lat"] < 43.001 for p in pts)
+
+
+async def test_track_returns_accuracy_radius(app, client):
+    """The Journey map weights each fix by its accuracy radius, so /web/track must
+    expose it. Buckets average it like the coordinates; a NULL-accuracy fix yields None."""
+    pool = app.state.pool
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO devices (id, install_uuid, public_key_spki) VALUES ($1,$2,$3)",
+            DEV, "uuid-web-track-acc", b"\x00",
+        )
+        base = int(datetime(2026, 7, 3, tzinfo=timezone.utc).timestamp() * 1000)
+        base = (base // BUCKET) * BUCKET
+        rows = [
+            q.sample_row(DEV, A, {"ts_ms": base + 1000, "lat": 43.0, "lon": -87.9,
+                                  "soc": 88, "gps_accuracy_m": 10.0}),
+            q.sample_row(DEV, A, {"ts_ms": base + 2000, "lat": 43.0, "lon": -87.9,
+                                  "soc": 88, "gps_accuracy_m": 30.0}),
+            q.sample_row(DEV, A, {"ts_ms": base + BUCKET + 1000, "lat": 43.001, "lon": -87.9,
+                                  "soc": 88}),  # no accuracy reported
+        ]
+        assert await q.insert_samples(conn, rows) == 3
+
+    r = await client.get("/web/track", headers=USER,
+                         params={"address": A, "from_ms": base, "to_ms": base + 2 * BUCKET})
+    assert r.status_code == 200
+    points = r.json()["points"]
+    assert len(points) == 2
+    assert points[0]["acc"] == 20.0   # mean of 10 and 30
+    assert points[1]["acc"] is None
