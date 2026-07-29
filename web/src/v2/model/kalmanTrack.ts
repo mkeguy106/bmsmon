@@ -26,6 +26,7 @@ export const ACC_FLOOR_M = 5;
 export const ACC_DEFAULT_M = 30;
 export const INIT_VEL_VAR_M2S2 = 400;
 export const GATE_CHI2 = 13.8;          // 2 dof, p=0.999
+export const COAST_MAX_MS = 30_000;
 
 const R_EARTH_M = 6_371_000;
 const M_PER_DEG_LAT = (Math.PI / 180) * R_EARTH_M;
@@ -83,6 +84,12 @@ function update(a: Axis, z: number, r: number): Axis {
   };
 }
 
+/** `true` at index i when the hole before it is too long to coast through — the filter
+ *  restarts there and the bridging segment is drawn as inferred. Index 0 is never a break. */
+export function breakMask(points: TrackPoint[]): boolean[] {
+  return points.map((p, i) => i > 0 && p.t - points[i - 1].t > COAST_MAX_MS);
+}
+
 interface Estimate { x: number; varX: number }
 
 /** Normalized innovation squared for one axis. */
@@ -95,11 +102,15 @@ const nis = (a: Axis, z: number, r: number) => ((z - a.x) ** 2) / (a.p00 + r);
  * it is a train" from "fast because the fix is wrong" without hand-tuning a speed bound per
  * vehicle type. The first measurement is always accepted — it initializes the filter.
  */
-export function acceptMask(e: number[], n: number[], r: number[], tS: number[]): boolean[] {
+export function acceptMask(
+  e: number[], n: number[], r: number[], tS: number[], brk: boolean[],
+): boolean[] {
   const mask = new Array<boolean>(e.length).fill(true);
   let ae: Axis | null = null, an: Axis | null = null;
   for (let i = 0; i < e.length; i++) {
-    if (ae === null || an === null) { ae = init(e[i], r[i]); an = init(n[i], r[i]); continue; }
+    if (ae === null || an === null || brk[i]) {
+      ae = init(e[i], r[i]); an = init(n[i], r[i]); continue;
+    }
     const dt = tS[i] - tS[i - 1];
     const pe = predict(ae, dt), pn = predict(an, dt);
     if (nis(pe, e[i], r[i]) + nis(pn, n[i], r[i]) > GATE_CHI2) {
@@ -113,11 +124,13 @@ export function acceptMask(e: number[], n: number[], r: number[], tS: number[]):
 }
 
 /** Forward pass: posterior estimate at every index. */
-function forward(z: number[], r: number[], tS: number[], ok: boolean[]): Estimate[] {
+function forward(
+  z: number[], r: number[], tS: number[], ok: boolean[], brk: boolean[],
+): Estimate[] {
   const out: Estimate[] = [];
   let a: Axis | null = null;
   for (let i = 0; i < z.length; i++) {
-    if (a === null) a = init(z[i], r[i]);
+    if (a === null || brk[i]) a = init(z[i], r[i]);
     else {
       a = predict(a, tS[i] - tS[i - 1]);
       if (ok[i]) a = update(a, z[i], r[i]);
@@ -135,16 +148,20 @@ function forward(z: number[], r: number[], tS: number[], ok: boolean[]): Estimat
  *  inverse-variance combination in `combine` valid, and it is easy to break silently (folding
  *  the posterior in here instead would double-count every measurement without failing any
  *  distance-threshold test). */
-export function backwardPrior(z: number[], r: number[], tS: number[], ok: boolean[]): Estimate[] {
+export function backwardPrior(
+  z: number[], r: number[], tS: number[], ok: boolean[], brk: boolean[],
+): Estimate[] {
   const out: Estimate[] = new Array(z.length);
   let a: Axis | null = null;
   for (let i = z.length - 1; i >= 0; i--) {
-    if (a === null) out[i] = { x: 0, varX: Infinity };
+    // Running in reverse, the break BEFORE index i+1 ends this segment, so the prior at i
+    // must not come from across it.
+    if (a === null || brk[i + 1]) out[i] = { x: 0, varX: Infinity };
     else {
       a = predict(a, tS[i + 1] - tS[i]);
       out[i] = { x: a.x, varX: a.p00 };
     }
-    if (a === null) a = init(z[i], r[i]);
+    if (a === null || brk[i + 1]) a = init(z[i], r[i]);
     else if (ok[i]) a = update(a, z[i], r[i]);
   }
   return out;
@@ -171,9 +188,13 @@ export function smoothKalman(points: TrackPoint[]): TrackPoint[] {
   const e = points.map((p) => toE(proj, p.lon));
   const n = points.map((p) => toN(proj, p.lat));
 
-  const ok = acceptMask(e, n, r, tS);
-  const eS = combine(forward(e, r, tS, ok), backwardPrior(e, r, tS, ok));
-  const nS = combine(forward(n, r, tS, ok), backwardPrior(n, r, tS, ok));
+  const brk = breakMask(points);
+  const ok = acceptMask(e, n, r, tS, brk);
+  const eS = combine(forward(e, r, tS, ok, brk), backwardPrior(e, r, tS, ok, brk));
+  const nS = combine(forward(n, r, tS, ok, brk), backwardPrior(n, r, tS, ok, brk));
 
-  return points.map((p, i) => ({ ...p, lat: toLat(proj, nS[i]), lon: toLon(proj, eS[i]) }));
+  return points.map((p, i) => ({
+    ...p, lat: toLat(proj, nS[i]), lon: toLon(proj, eS[i]),
+    ...(brk[i] ? { inferred: true } : {}),
+  }));
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { smoothKalman, ACC_DEFAULT_M, backwardPrior } from "./kalmanTrack";
+import { smoothKalman, ACC_DEFAULT_M, backwardPrior, COAST_MAX_MS } from "./kalmanTrack";
 import type { TrackPoint } from "../track";
 
 const mk = (t: number, lat: number, lon: number, acc: number | null = 10): TrackPoint =>
@@ -58,8 +58,9 @@ describe("smoothKalman", () => {
     const z = [0, 150, 300, 450];
     const moved = [0, 150, 9999, 450]; // index 2 perturbed wildly
     const ok = z.map(() => true);
-    const a = backwardPrior(z, r, tS, ok);
-    const b = backwardPrior(moved, r, tS, ok);
+    const brk = z.map(() => false);
+    const a = backwardPrior(z, r, tS, ok, brk);
+    const b = backwardPrior(moved, r, tS, ok, brk);
     expect(b[2].x).toBeCloseTo(a[2].x, 9); // prior at 2 must not move
     expect(b[2].varX).toBeCloseTo(a[2].varX, 9);
     expect(b[1].x).not.toBeCloseTo(a[1].x, 3); // but index 1 DOES see it (sanity: the test can fail)
@@ -98,5 +99,27 @@ describe("smoothKalman", () => {
     // to the constant-velocity prediction as a rejected outlier would be.
     const measuredN = (pts[5].lat - 43) * mLat, smoothedN = (out[5].lat - 43) * mLat;
     expect(Math.abs(smoothedN - measuredN)).toBeLessThan(40);
+  });
+
+  it("breaks the track across a long GPS hole instead of inventing a curve", () => {
+    const mLon = 111_320 * Math.cos((43 * Math.PI) / 180);
+    // Moving east at 10 m/s, then a 120 s hole, then fixes resume 3 km further east.
+    const before = [0, 1, 2].map((i) => mk(i * 15_000, 43, -87.9 + (i * 150) / mLon, 10));
+    const after = [0, 1, 2].map((i) =>
+      mk(150_000 + i * 15_000, 43, -87.9 + (3000 + i * 150) / mLon, 10));
+    const out = smoothKalman([...before, ...after]);
+
+    expect(out[3].inferred).toBe(true);        // first point after the hole
+    expect(out[2].inferred).toBeFalsy();       // last point before it
+    expect(out[0].inferred).toBeFalsy();       // never on the first point
+    // The far side must sit on its own measurements, NOT be dragged toward a coasted
+    // prediction from before the hole.
+    expect(Math.abs((out[3].lon - -87.9) * mLon - 3000)).toBeLessThan(50);
+  });
+
+  it("does not break across an ordinary bucket gap", () => {
+    const pts = [0, 1, 2, 3].map((i) => mk(i * 15_000, 43 + (i * 150) / 111_320, -87.9, 10));
+    expect(smoothKalman(pts).some((p) => p.inferred)).toBe(false);
+    expect(COAST_MAX_MS).toBe(30_000);
   });
 });
