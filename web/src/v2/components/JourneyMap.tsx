@@ -139,14 +139,19 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
     let run: [number, number][] = [];
     let runKind: SegKind | null = null;
     let runColor = "";
+    let runInferred = false;
     const flush = () => {
       if (run.length >= 2 && runKind != null) {
-        const opts: L.PolylineOptions = runKind === "active"
-          ? { color: runColor, weight: 4, opacity: 0.95, interactive: false }
-          : { color: runColor, weight: 3, opacity: 0.8, dashArray: "4 6", interactive: false };
+        // An inferred run bridges a GPS hole — dashed and faded so a guess never reads as
+        // measured track, whatever its segment kind would otherwise draw.
+        const opts: L.PolylineOptions = runInferred
+          ? { color: runColor, weight: 3, opacity: 0.45, dashArray: "2 8", interactive: false }
+          : runKind === "active"
+            ? { color: runColor, weight: 4, opacity: 0.95, interactive: false }
+            : { color: runColor, weight: 3, opacity: 0.8, dashArray: "4 6", interactive: false };
         L.polyline(run, opts).addTo(group);
       }
-      run = []; runKind = null; runColor = "";
+      run = []; runKind = null; runColor = ""; runInferred = false;
     };
     for (let i = 1; i < points.length; i++) {
       const kind = segKinds[i] ?? "idle";
@@ -155,11 +160,12 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
       const color = kind === "active"
         ? resolve(metric === "soc" ? socColor(cur.soc) : dischargeColor(cur.power_w ?? 0))
         : resolve("var(--text-4)");
-      if (kind !== runKind || color !== runColor) {
+      const inferred = cur.inferred === true;
+      if (kind !== runKind || color !== runColor || inferred !== runInferred) {
         flush();
         const prev = points[i - 1];
         run.push([prev.lat, prev.lon]);
-        runKind = kind; runColor = color;
+        runKind = kind; runColor = color; runInferred = inferred;
       }
       run.push([cur.lat, cur.lon]);
     }
