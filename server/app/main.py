@@ -131,6 +131,11 @@ def create_app() -> FastAPI:
     # each test app starts fresh). See routers/share.py for the TTL/interval rationale.
     from app.routers.share import TOUCH_INTERVAL_S, TRACK_CACHE_TTL_S
     app.state.share_track_cache = TtlCache(ttl_s=TRACK_CACHE_TTL_S)
+    app.state.share_discharge_cache = TtlCache(ttl_s=TRACK_CACHE_TTL_S)
+    # Last base the guest dock resolved to — rung 3 of the share ladder ("parked: stay
+    # put"). Memory only: on restart the dock falls back to the discharge hold/freshest
+    # sample, which is exactly the cold-start behaviour the ladder is written for.
+    app.state.share_active_base = None
     app.state.share_touch = TouchThrottle(interval_s=TOUCH_INTERVAL_S)
     # devices.last_seen_at write throttle (see routers/api_device.py).
     app.state.device_touch = TouchThrottle(interval_s=60.0)

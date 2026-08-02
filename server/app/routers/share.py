@@ -52,6 +52,25 @@ def day_window_ms(now: datetime) -> tuple[int, int]:
 
 STATUS_STALE_MS = 120_000  # mirrors the web LIVE_STALE_MS
 
+# The dock must describe the base the guest is following — the chair — and NOT "whichever
+# pack polled most recently". The phone polls the staged base every ~1.5 s and rotates
+# through the background packs, so whenever the spares are in BLE range (i.e. at home) any
+# of the 8 can hold the newest sample: measured against prod, a background pack was the
+# freshest ~30% of the time, which flipped the guest dock to an idle spare — 99% CAP, a
+# dead FLOW bar — every few polls while the chair sat at 72% and drawing. So resolve the
+# active base with the same ladder the Android stage (model/Fleet.kt resolveStage) and the
+# WebUI (web/src/stage.ts selectStageItems) already use:
+#   1. a base discharging right now = the active chair;
+#   2. else the base that discharged most recently within ACTIVE_HOLD_MS — stopped at a
+#      crossing, or with one of its packs briefly out of BLE range;
+#   3. else the base the dock was already showing (parked; process memory, single worker);
+#   4. else the freshest sample — cold start, nothing has moved yet.
+# resolveStage's "a charging base may take over" rung is deliberately NOT ported: the
+# spares live on chargers, so it would hand the dock straight back to them.
+DISCHARGE_EPS = 0.1           # A — same threshold as the app/WebUI (BMS deadband is ~1.04 A)
+ACTIVE_HOLD_MS = 15 * 60_000  # mirrors android DEFAULT_STAGE_HOLD_MIN
+_DISCHARGE_CACHE_KEY = "recent_discharge"  # fleet-wide, so one key (see TRACK_CACHE_TTL_S)
+
 # Guest polls arrive every ~10 s per guest; the fleet GPS track query is the expensive
 # part (~200 ms over today's whole window in prod). Cache it process-wide for one poll
 # period so N guests collapse onto <=1 query per TRACK_TTL_S. The cache key is the day
@@ -81,37 +100,68 @@ def _pack_label(row: dict) -> str:
     return (row.get("address") or "??")[-2:]
 
 
-def pick_guest_status(rows: list[dict], now_ms: int) -> dict | None:
+def _group_key(row: dict):
+    """Base identity. Falls back to the address so two ungrouped packs (group_id NULL,
+    e.g. a battery not yet aliased) never merge into one false "base" with summed flow."""
+    return row.get("group_id") or row.get("address")
+
+
+def resolve_active_group(rows: list[dict], fresh: list[dict],
+                         last_discharge_ms: dict[str, int] | None,
+                         sticky: str | None, now_ms: int):
+    """Which base the guest dock follows — the four-rung ladder documented above.
+    [fresh] is the non-stale subset of [rows]; [last_discharge_ms] is address -> ts of
+    the last discharging sample (queries.recent_discharge_by_address)."""
+    live = {_group_key(r) for r in fresh}
+    # 1. drawing right now. Deepest draw wins: the server has no daily-driver notion to
+    #    break ties with, and the base under real load is the one being ridden.
+    drawing = [r for r in fresh if float(r.get("current_a") or 0.0) < -DISCHARGE_EPS]
+    if drawing:
+        return _group_key(min(drawing, key=lambda r: float(r["current_a"])))
+    # 2. recent-discharge hold. Keyed off the BASE, not the pack, and resolved against
+    #    every row (not just fresh ones) so the pack that was drawing can drop out of BLE
+    #    range while its sibling keeps the dock on the right base.
+    group_of = {r["address"]: _group_key(r) for r in rows}
+    held = [(ts, g) for addr, ts in (last_discharge_ms or {}).items()
+            if (g := group_of.get(addr)) in live and now_ms - ts < ACTIVE_HOLD_MS]
+    if held:
+        return max(held)[1]
+    # 3. parked: stay where we were, as long as that base is still reporting.
+    if sticky in live:
+        return sticky
+    # 4. nothing has moved since the process started.
+    return _group_key(max(fresh, key=lambda r: r["ts_ms"]))
+
+
+def pick_guest_status(rows: list[dict], now_ms: int,
+                      last_discharge_ms: dict[str, int] | None = None,
+                      sticky: str | None = None) -> tuple[dict | None, str | None]:
     """Aggregate the active base's latest telemetry into the guest dock payload.
 
-    Active base = group of the freshest sample (the staged base polls at 1.5 s, so it
-    is effectively always freshest). Rows older than STATUS_STALE_MS are ignored; no
-    fresh rows -> None (the guest dock renders empty). Deliberate, minimal battery
-    surface (2026-07-14 spec amendment): only soc/current/power/regen ever leave the
-    server here — never voltage, temperature, cells, or cycles."""
+    Returns (payload, active base) — the caller feeds the base back in as [sticky] on the
+    next poll (rung 3). Rows older than STATUS_STALE_MS are ignored; no fresh rows ->
+    (None, sticky): the dock renders empty but a momentary fleet blackout must not lose
+    the base we were following. Deliberate, minimal battery surface (2026-07-14 spec
+    amendment): only soc/current/power/regen ever leave the server here — never voltage,
+    temperature, cells, or cycles."""
     fresh = [r for r in rows
              if r.get("ts_ms") and r["ts_ms"] >= now_ms - STATUS_STALE_MS
              and r.get("soc") is not None]
     if not fresh:
-        return None
-    newest = max(fresh, key=lambda r: r["ts_ms"])
-    # Group key falls back to the address so two ungrouped packs (group_id NULL, e.g. a
-    # battery not yet aliased) never merge into one false "base" with summed flow.
-    def _group_key(r: dict):
-        return r.get("group_id") or r.get("address")
-
-    group = [r for r in fresh if _group_key(r) == _group_key(newest)]
+        return None, sticky
+    active = resolve_active_group(rows, fresh, last_discharge_ms, sticky, now_ms)
+    group = [r for r in fresh if _group_key(r) == active]
     packs = sorted(
         ({"label": _pack_label(r), "soc": int(round(float(r["soc"])))} for r in group),
         key=lambda p: p["label"])
     return {
-        "ts": int(newest["ts_ms"]),
+        "ts": max(int(r["ts_ms"]) for r in group),
         "soc": min(p["soc"] for p in packs),
         "packs": packs,
         "current_a": round(sum(float(r.get("current_a") or 0.0) for r in group), 2),
         "power_w": round(sum(float(r.get("power_w") or 0.0) for r in group), 1),
         "regen": any(bool(r.get("regen")) for r in group),
-    }
+    }, active
 
 
 async def _resolve(request: Request, token: str, pool) -> tuple[str, dict | None]:
@@ -147,6 +197,10 @@ async def share_feed(token: str, request: Request, pool=Depends(get_pool)):
     # Per-share state above (expiry/410/revocation) and the guest *status* below stay
     # per-request; only the fleet-wide GPS trail — identical for every guest — is cached.
     points = state.share_track_cache.get(from_ms)
+    # Fleet-wide like the trail, so it is cached on the same period: N guests collapse
+    # onto <=1 discharge lookup per TTL, and a <=10 s-stale answer is nothing against a
+    # 15-minute hold window.
+    last_discharge = state.share_discharge_cache.get(_DISCHARGE_CACHE_KEY)
     async with pool.acquire() as conn:
         if points is None:
             rows = await q.gps_track_all(conn, from_ms, now_ms + 1)
@@ -154,11 +208,18 @@ async def share_feed(token: str, request: Request, pool=Depends(get_pool)):
                        "power_w": _f(r["power_w"]), "current_a": _f(r["current_a"])}
                       for r in rows]
             state.share_track_cache.put(from_ms, points)
+        if last_discharge is None:
+            last_discharge = await q.recent_discharge_by_address(
+                conn, now_ms - ACTIVE_HOLD_MS, DISCHARGE_EPS)
+            state.share_discharge_cache.put(_DISCHARGE_CACHE_KEY, last_discharge)
         snapshot = await q.fleet_snapshot(conn)
         if state.share_touch.should_touch(share["id"]):
             await q.touch_location_share(conn, share["id"], now_ms)
+    status, active = pick_guest_status(snapshot, now_ms, last_discharge,
+                                       state.share_active_base)
+    state.share_active_base = active
     return JSONResponse(
         {"points": points, "last": points[-1] if points else None,
          "expires_at": share["expires_at"], "now": now_ms, "owner": settings.share_owner,
-         "status": pick_guest_status(snapshot, now_ms)},
+         "status": status},
         headers=_SEC_HEADERS)

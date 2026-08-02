@@ -665,8 +665,26 @@ defaults to **light** mode with a persisted top-right sun/moon toggle
 and shows a 2-line **guest dock** (CAP/FLOW, twin of the mobile Journey dock) — a
 deliberate, minimal relaxation of the no-battery-data rule: the feed's `status` object
 carries ONLY the active base's soc/packs/current/power/regen (never voltage, temps,
-cells, cycles), aggregated by the pure `pick_guest_status()` in `share.py` (freshest
-group from `fleet_snapshot`, 120 s staleness → null; ungrouped packs never merge).
+cells, cycles), aggregated by the pure `pick_guest_status()` in `share.py`
+(`fleet_snapshot` rows, 120 s staleness → null; ungrouped packs never merge).
+**2026-08-02 fix — the guest dock follows the chair, not the last pack to poll.** The
+active base was "group of the freshest sample", which is a race: the phone polls the
+staged base every ~1.5 s and rotates through the background packs, so with the spares in
+BLE range (at home) a background pack held the newest row ~18–30% of the time and flipped
+the dock to an idle spare — **99% CAP, dead FLOW bar** — every few polls (replayed against
+75 min of prod: wrong base on 17.6% of polls, 114 flips; after the fix 0 and 0).
+`resolve_active_group()` now mirrors the ladder the Android stage (`resolveStage`) and the
+WebUI (`selectStageItems`) already use: **(1)** a base discharging right now
+(`DISCHARGE_EPS` 0.1 A, deepest draw wins — the server has no daily-driver notion),
+**(2)** else the base that discharged most recently within `ACTIVE_HOLD_MS` (15 min,
+= android `DEFAULT_STAGE_HOLD_MIN`) via `queries.recent_discharge_by_address()` — a
+bounded LATERAL walk, ~6 ms on prod, TTL-cached fleet-wide like the trail — keyed off the
+BASE so a pack can drop out of BLE range without losing the hold, **(3)** else the base
+the dock was already showing (`app.state.share_active_base`, process memory, single
+worker), **(4)** else the freshest sample. resolveStage's "a charging base may take over"
+rung is deliberately NOT ported — the spares live on chargers, so it would hand the dock
+straight back to them. Note the guest feed still polls on `FEED_POLL_MS` (10 s), so FLOW
+is correct but coarser than the owner's own 1.5 s view.
 
 **Local dev/test:** `docker compose -f server/docker-compose.dev.yml up -d` brings up a Postgres on
 `localhost:5432` (user/pw/db all `bmsmon`, matching the default `DATABASE_URL`). Run server tests

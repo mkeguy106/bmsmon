@@ -224,6 +224,32 @@ async def fleet_snapshot(conn) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def recent_discharge_by_address(conn, since_ms: int, eps_a: float) -> dict[str, int]:
+    """address -> ts_ms of its most recent discharging sample since [since_ms] (packs
+    that haven't drawn in the window are absent). Lets the share feed answer "which base
+    is the chair" when nothing is drawing *right now* — see routers/share.py.
+
+    Same LATERAL shape as fleet_snapshot, so each pack is one bounded backward walk of
+    the PK's (address, ts) prefix; the redundant ts predicate prunes partitions. Bounded
+    by the caller's window (~15 min), which is what keeps it cheap for packs that never
+    discharge — measured on prod: ~6 ms, ~600 shared buffers for the 8-pack fleet."""
+    rows = await conn.fetch(
+        """SELECT b.address, s.ts_ms
+             FROM batteries b
+             JOIN LATERAL (
+                SELECT s.ts_ms FROM samples s
+                WHERE s.address = b.address AND s.link_event IS NULL
+                  AND s.ts_ms >= $1
+                  AND s.ts >= to_timestamp($1::double precision / 1000.0)
+                  AND s.current_a < $2
+                ORDER BY s.ts DESC
+                LIMIT 1
+             ) s ON true""",
+        since_ms, -abs(eps_a),
+    )
+    return {r["address"]: int(r["ts_ms"]) for r in rows}
+
+
 async def scrub_expired_gps(conn, retention_days: int) -> int:
     """GPS retention scrub (SEC-12): NULL out the location columns on samples older than
     the retention window. Telemetry rows are NEVER deleted — the battery history is kept
