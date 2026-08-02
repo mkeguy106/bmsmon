@@ -23,10 +23,15 @@ export interface GuestStatus {
 }
 
 export interface Feed {
+  /** The whole day on a full poll; only buckets at/after `since` on an incremental one. */
   points: FeedPoint[];
+  /** Always the FULL trail's newest point, so a no-news poll can't blank the marker. */
   last: FeedPoint | null;
   expires_at: number;
   now: number;
+  /** Start of the server's day window. A change means midnight rolled over mid-session,
+   *  so the accumulated trail must be replaced rather than appended to. */
+  day_start: number;
   owner: string;
   status: GuestStatus | null;
 }
@@ -37,7 +42,14 @@ export type FeedResult =
   | { kind: "expired" }  // 410
   | { kind: "error" };   // network / 5xx
 
-export const FEED_POLL_MS = 10_000;
+// 4 s. The server's data is only as fresh as the phone's upload batching (measured on
+// prod: a batch every ~12 s median), so polling faster than this buys little — but at 4 s
+// the dock and marker pick up a landed batch ~6 s sooner on average than at 10 s. It is
+// affordable only because polls are INCREMENTAL: a full poll is ~56 KB gzipped (the whole
+// day's trail, 19.7 MB per guest-hour at the old 10 s rate), an incremental one ~135 B.
+export const FEED_POLL_MS = 4_000;
+/** Full-window refetch cadence — heals anything an increment can't see (see useTrack). */
+export const FULL_REFRESH_MS = 5 * 60_000;
 export const STALE_MS = 120_000; // mirrors v2 LIVE_STALE_MS
 
 /** /share/<token> (optional trailing slash). Tokens are token_urlsafe(24) = 32 chars;
@@ -60,9 +72,13 @@ export function remainingLabel(expiresAt: number, nowMs: number): string {
   return `${Math.max(1, Math.floor(left / 60_000))}m left`;
 }
 
-export async function fetchFeed(token: string): Promise<FeedResult> {
+/** [since] is the newest bucket the caller already holds — its START, not one past it:
+ *  that bucket is still filling server-side, so it gets re-sent and replaced. Omit it to
+ *  fetch the whole day. */
+export async function fetchFeed(token: string, since?: number): Promise<FeedResult> {
   try {
-    const r = await fetch(`/share/${token}/feed`);
+    const q = since != null ? `?since=${since}` : "";
+    const r = await fetch(`/share/${token}/feed${q}`);
     if (r.status === 404) return { kind: "ended" };
     if (r.status === 410) return { kind: "expired" };
     if (!r.ok) return { kind: "error" };

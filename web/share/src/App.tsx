@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { JourneyMap } from "../../src/v2/components/JourneyMap";
+import { appendTrack } from "../../src/v2/model/appendTrack";
 import { cleanTrack } from "../../src/v2/model/cleanTrack";
 import type { LivePos } from "../../src/v2/model/live";
 import type { TrackPoint } from "../../src/v2/track";
 import { relAgo } from "../../src/util";
 import { visibleInterval } from "../../src/visiblePoll";
 import {
-  FEED_POLL_MS, fetchFeed, isStale, remainingLabel, tokenFromPath, type Feed,
+  FEED_POLL_MS, FULL_REFRESH_MS, fetchFeed, isStale, remainingLabel, tokenFromPath,
+  type Feed, type FeedPoint,
 } from "./feed";
 import { ArrowPanel } from "./Arrow";
 import { Dock } from "./Dock";
@@ -18,6 +20,12 @@ type Status = "loading" | "ok" | "ended" | "expired" | "error";
 export default function App() {
   const token = useMemo(() => tokenFromPath(window.location.pathname), []);
   const [feed, setFeed] = useState<Feed | null>(null);
+  // The trail is ACCUMULATED across polls (the feed only re-sends new buckets), so it
+  // lives outside `feed`. A ref mirrors it so the poll can read the seam bucket without
+  // re-running its effect on every data change — same shape as v2's useTrack.
+  const [track, setTrack] = useState<TrackPoint[]>([]);
+  const trackRef = useRef<TrackPoint[]>(track);
+  useEffect(() => { trackRef.current = track; }, [track]);
   const [status, setStatus] = useState<Status>("loading");
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [guest, setGuest] = useState<LivePos | null>(null);
@@ -35,20 +43,40 @@ export default function App() {
     let alive = true;
     let stopped = false;
     let stopPolling: (() => void) | null = null;
+    let lastFullMs = 0;
+    let dayStart: number | null = null;
     // Once a poll resolves "ended"/"expired" the share is terminally over: stop
     // polling so a later network blip can never flip the sticky terminal status
     // to "error" (or a stray "ok").
-    const load = () => fetchFeed(token).then((r) => {
-      if (!alive || stopped) return;
-      setNowMs(Date.now());
-      if (r.kind === "ok") { setFeed(r.feed); setStatus("ok"); }
-      else if (r.kind === "error") setStatus((s) => (s === "ok" ? "ok" : "error"));
-      else {
-        stopped = true;
-        stopPolling?.();
-        setStatus(r.kind);
-      }
-    });
+    const load = () => {
+      // Incremental from the newest bucket's START (it is still filling server-side, so
+      // it gets replaced). Fall back to a full fetch on the first load, whenever the
+      // trail is empty, and every FULL_REFRESH_MS as a drift safety net.
+      const prev = trackRef.current;
+      const seamT = prev.length > 0 && Date.now() - lastFullMs < FULL_REFRESH_MS
+        ? prev[prev.length - 1].t : null;
+      if (seamT == null) lastFullMs = Date.now();
+      return fetchFeed(token, seamT ?? undefined).then((r) => {
+        if (!alive || stopped) return;
+        setNowMs(Date.now());
+        if (r.kind === "ok") {
+          const incoming = r.feed.points.map(toTrackPoint);
+          // Midnight rolled over mid-session: the server's window moved, so replace
+          // rather than splice tomorrow's buckets onto yesterday's trail.
+          const rolled = dayStart != null && r.feed.day_start !== dayStart;
+          dayStart = r.feed.day_start;
+          if (rolled) { lastFullMs = 0; setTrack(incoming); }
+          else setTrack((cur) => appendTrack(cur, incoming, seamT ?? -Infinity));
+          setFeed(r.feed);
+          setStatus("ok");
+        } else if (r.kind === "error") setStatus((s) => (s === "ok" ? "ok" : "error"));
+        else {
+          stopped = true;
+          stopPolling?.();
+          setStatus(r.kind);
+        }
+      });
+    };
     load();
     // Visibility-gated: a backgrounded guest tab stops polling and catches up on refocus.
     stopPolling = visibleInterval(load, FEED_POLL_MS);
@@ -56,14 +84,11 @@ export default function App() {
   }, [token]);
 
   // cleanTrack + trailProps are O(points) passes; memoize so the guest's geolocation
-  // watcher (which can re-render ~1/s via onGuest) doesn't rebuild the trail — with
-  // stable identities the JourneyMap trail effect no-ops between feed polls. Hooks stay
-  // above the early returns; feed is null until the first poll lands.
-  const cleaned = useMemo<TrackPoint[]>(() => (feed
-    ? cleanTrack(feed.points.map((p) => ({
-        t: p.t, lat: p.lat, lon: p.lon, power_w: p.power_w, current_a: p.current_a, soc: null, acc: null,
-      })))
-    : []), [feed]);
+  // watcher (which can re-render ~1/s via onGuest) doesn't rebuild the trail. Keyed on
+  // `track`, whose identity appendTrack PRESERVES when a poll brings nothing new — which
+  // is what makes the 4 s poll free: ~4 of 5 polls do no work here or in the map effect.
+  // Hooks stay above the early returns; feed is null until the first poll lands.
+  const cleaned = useMemo<TrackPoint[]>(() => cleanTrack(track), [track]);
   const trail = useMemo(() => trailProps(cleaned, trailMode), [cleaned, trailMode]);
 
   if (!token || status === "ended") return <Message text="This share link isn't available." />;
@@ -135,6 +160,13 @@ export default function App() {
     </div>
   );
 }
+
+/** Feed wire point -> the v2 TrackPoint the map/cleanTrack pipeline consumes. The guest
+ *  feed deliberately carries no per-point SOC, and no accuracy radius. */
+const toTrackPoint = (p: FeedPoint): TrackPoint => ({
+  t: p.t, lat: p.lat, lon: p.lon,
+  power_w: p.power_w, current_a: p.current_a, soc: null, acc: null,
+});
 
 const mapChip = {
   display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderRadius: 8,

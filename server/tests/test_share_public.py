@@ -228,7 +228,9 @@ async def test_feed_today_only_no_battery_fields(app, client):
     assert r.headers["cache-control"] == "no-store"
     assert r.headers["referrer-policy"] == "no-referrer"
     body = r.json()
-    assert set(body.keys()) == {"points", "last", "expires_at", "now", "owner", "status"}
+    assert set(body.keys()) == {"points", "last", "expires_at", "now", "day_start",
+                                "owner", "status"}
+    assert body["day_start"] == day_window_ms(datetime.now(timezone.utc))[0]
     assert len(body["points"]) == 1
     # trail-detail relaxation (2026-07-14): per-bucket discharge context rides along —
     # exactly these keys, still never per-point SOC/voltage/temp/cells
@@ -366,10 +368,73 @@ async def test_feed_excludes_coarse_fixes(app, client):
     assert body["last"]["lat"] == 43.0
 
 
+async def test_feed_since_returns_only_newer_buckets_and_never_requeries(app, client):
+    """Incremental poll: `since` slices the CACHED trail, so a 4 s poll costs no DB work.
+    Proof that it is a cache slice and not a fresh query: a fix seeded after the first
+    poll is invisible until the TTL lapses."""
+    now_ms = int(time.time() * 1000)
+    async with app.state.pool.acquire() as conn:
+        await _seed_device(conn)
+        await _mk_share(conn, "tok-inc", now_ms, now_ms + 3_600_000)
+        await _seed_fix(conn, now_ms - 90_000, 43.0, -87.9)
+        await _seed_fix(conn, now_ms - 30_000, 43.1, -87.8)
+    full = (await client.get("/share/tok-inc/feed")).json()
+    assert len(full["points"]) == 2
+    seam = full["points"][-1]["t"]
+    async with app.state.pool.acquire() as conn:
+        await _seed_fix(conn, now_ms - 5_000, 43.2, -87.7)
+    inc = (await client.get(f"/share/tok-inc/feed?since={seam}")).json()
+    assert [p["t"] for p in inc["points"]] == [seam]   # seam bucket re-sent, nothing older
+    app.state.share_track_cache.clear()                # TTL lapse
+    inc2 = (await client.get(f"/share/tok-inc/feed?since={seam}")).json()
+    assert len(inc2["points"]) == 2                    # seam + the newly landed fix
+
+
+async def test_feed_since_keeps_last_as_the_whole_trails_newest(app, client):
+    """A poll with nothing new must not blank the live chair marker."""
+    now_ms = int(time.time() * 1000)
+    async with app.state.pool.acquire() as conn:
+        await _seed_device(conn)
+        await _mk_share(conn, "tok-last", now_ms, now_ms + 3_600_000)
+        await _seed_fix(conn, now_ms - 90_000, 43.0, -87.9)
+    body = (await client.get(f"/share/tok-last/feed?since={now_ms}")).json()
+    assert body["points"] == []                # nothing at/after `since`...
+    assert body["last"]["lat"] == 43.0         # ...but the marker still has a position
+
+
+async def test_feed_garbage_or_stale_since_degrades_to_the_full_trail(app, client):
+    """A share link must never 4xx on a stray query param; the whole day is always a
+    correct answer, and a `since` from before today's window has nothing to trim."""
+    now_ms = int(time.time() * 1000)
+    async with app.state.pool.acquire() as conn:
+        await _seed_device(conn)
+        await _mk_share(conn, "tok-junk", now_ms, now_ms + 3_600_000)
+        await _seed_fix(conn, now_ms - 90_000, 43.0, -87.9)
+    for q_str in ("since=banana", "since=", "since=-5", "since=0", "since=1e9"):
+        r = await client.get(f"/share/tok-junk/feed?{q_str}")
+        assert r.status_code == 200, q_str
+        assert len(r.json()["points"]) == 1, q_str
+
+
+async def test_feed_since_does_not_resurrect_expired_or_gone_shares(app, client):
+    now_ms = int(time.time() * 1000)
+    async with app.state.pool.acquire() as conn:
+        await _seed_device(conn)
+        await _mk_share(conn, "tok-warm2", now_ms, now_ms + 3_600_000)
+        await _mk_share(conn, "tok-dead2", now_ms - 7_200_000, now_ms - 3_600_000)
+        await _seed_fix(conn, now_ms - 60_000, 43.0, -87.9)
+    assert (await client.get("/share/tok-warm2/feed")).status_code == 200
+    assert (await client.get(f"/share/tok-dead2/feed?since={now_ms}")).status_code == 410
+    assert (await client.get(f"/share/tok-nope2/feed?since={now_ms}")).status_code == 404
+
+
 async def test_feed_rate_limited_per_ip(app):
+    limit = app.state.share_limiter.max_attempts
+    assert limit >= 15 * 4  # a 4 s guest poll is 15/min; leave room for several guests
     transport = ASGITransport(app=app, client=("9.9.9.9", 12345))
     async with AsyncClient(transport=transport, base_url="http://t") as c:
-        codes = [(await c.get("/share/tok-nope/feed")).status_code for _ in range(61)]
+        codes = [(await c.get("/share/tok-nope/feed")).status_code
+                 for _ in range(limit + 1)]
     assert codes[0] == 404
     assert codes[-1] == 429
 

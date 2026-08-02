@@ -649,12 +649,12 @@ page; unknown/REVOKED → identical bare 404) and `GET /share/{token}/feed` (tod
 fleet GPS via `q.gps_track_all`, fields t/lat/lon ONLY — never battery data; day window
 clamped server-side in the container TZ; 410 when expired; updates
 last_access/access_count; no-store + no-referrer on every response incl. errors; per-IP
-`share_limiter` 60/min). Admin CRUD on the Authentik zone: `POST/GET /web/shares`,
+`share_limiter` 150/min). Admin CRUD on the Authentik zone: `POST/GET /web/shares`,
 `DELETE /web/shares/{id}` (require_admin — a share grants unauthenticated access, same
 trust class as enroll codes; listing keeps ended shares 7 days). WebUI: Journey toolbar
 ↗ opens `ShareDialog` (name + 1h/1d/1w → native share sheet, else clipboard);
 `Settings › Location shares` (`SharesPanel`) lists name/remaining/last-opened/×count +
-Revoke (kills a live guest within one 10 s poll; the guest page stops polling once
+Revoke (kills a live guest within one 4 s poll; the guest page stops polling once
 terminally ended/expired). Guest page (`web/share/src/`): map + today's neutral-green
 trail + pulsing/stale chair marker + "Following <owner>" (`BMSMON_SHARE_OWNER`, default
 "Joely") + countdown, and a "Point me there" panel — geolocation distance/cardinal +
@@ -683,8 +683,32 @@ BASE so a pack can drop out of BLE range without losing the hold, **(3)** else t
 the dock was already showing (`app.state.share_active_base`, process memory, single
 worker), **(4)** else the freshest sample. resolveStage's "a charging base may take over"
 rung is deliberately NOT ported — the spares live on chargers, so it would hand the dock
-straight back to them. Note the guest feed still polls on `FEED_POLL_MS` (10 s), so FLOW
-is correct but coarser than the owner's own 1.5 s view.
+straight back to them.
+
+**2026-08-02 — the guest feed polls every 4 s and polls INCREMENTALLY.** `FEED_POLL_MS`
+went 10 s → 4 s, which was only affordable after fixing what a poll costs: the feed used
+to re-send the **whole day's trail every time** (measured on prod: 3 868 points, 419 KB
+raw / **56 KB gzipped per poll = 19.7 MB per guest-hour**, and 49 MB/h if the interval had
+just been lowered). `GET /share/{token}/feed?since=<bucket_ms>` now returns only buckets
+at/after `since`, **sliced from the already-cached list in memory** — no extra query, so
+DB cost stays flat as the poll rate rises (a 15 s GPS bucket can't be fresher than the
+10 s trail cache anyway, so re-querying would buy nothing). Measured end-to-end on the
+built bundle: first poll 27 KB, every later poll **469 B**. Three details are load-bearing:
+`since` is the client's newest bucket **START, not one past it** (that bucket is still
+filling and its averages keep moving, so it is re-sent and replaced — the same seam rule
+`useTrack`/`appendTrack` use); **`last` is computed from the FULL trail before slicing**,
+or a no-news poll would blank the live chair marker; and the response carries `day_start`
+so a session open across midnight replaces instead of appending. Garbage/stale `since`
+degrades to a full response (`parse_since`) — a share link must never 4xx on a stray query
+param. The guest page accumulates `TrackPoint[]` and splices with the existing tested
+`appendTrack`, which **preserves array identity when nothing changed** — that is what
+makes 4 s free: ~4 of 5 polls skip `cleanTrack` and the Leaflet trail effect entirely.
+Rate limit 60 → 150/min per IP (a 4 s poll is 15/min; keeps ~10 guests behind one CGNAT
+IP). NOT changed: the phone's upload batching (`FLUSH_AGE_MS` 15 s / `MIN_BATCH` 20)
+delivers a batch every ~12 s median, so that — not the poll — is now the freshness floor;
+lowering it would roughly triple upload requests (battery + mobile data) and walk back the
+deliberate batching win. Net: guest lag ~11 s → ~8 s average, ~35 s → ~17 s worst. Spec:
+`docs/superpowers/specs/2026-08-02-share-feed-incremental-polling-design.md`.
 
 **Local dev/test:** `docker compose -f server/docker-compose.dev.yml up -d` brings up a Postgres on
 `localhost:5432` (user/pw/db all `bmsmon`, matching the default `DATABASE_URL`). Run server tests

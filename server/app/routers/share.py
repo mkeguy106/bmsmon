@@ -90,6 +90,22 @@ def _f(v):
     return float(v) if v is not None else None
 
 
+def parse_since(raw: str | None, from_ms: int) -> int | None:
+    """The guest's newest known bucket start, or None = "send the whole day".
+
+    Garbage, empty, or a value from before today's window all degrade to None rather than
+    erroring: a share link must never 4xx on a stray query param, and the full trail is
+    always a correct answer — just a bigger one. Taken as a string (not an int path param)
+    precisely so FastAPI can't turn `?since=banana` into a 422 for a guest."""
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > from_ms else None
+
+
 def _pack_label(row: dict) -> str:
     """'2012 · A' -> 'A'; fall back to the address tail for unaliased packs."""
     alias = (row.get("alias") or "")
@@ -186,7 +202,8 @@ async def share_page(token: str, request: Request, pool=Depends(get_pool)):
 
 
 @router.get("/{token}/feed")
-async def share_feed(token: str, request: Request, pool=Depends(get_pool)):
+async def share_feed(token: str, request: Request, since: str | None = None,
+                     pool=Depends(get_pool)):
     status, share = await _resolve(request, token, pool)
     if status == "gone":
         raise HTTPException(404, "Not Found", headers=_SEC_HEADERS)
@@ -218,8 +235,17 @@ async def share_feed(token: str, request: Request, pool=Depends(get_pool)):
     status, active = pick_guest_status(snapshot, now_ms, last_discharge,
                                        state.share_active_base)
     state.share_active_base = active
+    # Incremental poll: slice the CACHED list — no extra query, so the DB cost of a poll
+    # is flat no matter how fast guests poll. A 15 s GPS bucket can't be fresher than the
+    # cache TTL anyway, so there is nothing to gain from re-querying. `since` is the
+    # client's newest bucket START, so that partially-filled bucket is re-sent and
+    # REPLACED client-side (appendTrack's seam rule) — its averages are still moving.
+    cut = parse_since(since, from_ms)
+    trail = points if cut is None else [p for p in points if p["t"] >= cut]
     return JSONResponse(
-        {"points": points, "last": points[-1] if points else None,
-         "expires_at": share["expires_at"], "now": now_ms, "owner": settings.share_owner,
-         "status": status},
+        # `last` comes from the FULL trail, never the slice: a poll with no new buckets
+        # must not blank the guest's live chair marker.
+        {"points": trail, "last": points[-1] if points else None,
+         "expires_at": share["expires_at"], "now": now_ms, "day_start": from_ms,
+         "owner": settings.share_owner, "status": status},
         headers=_SEC_HEADERS)

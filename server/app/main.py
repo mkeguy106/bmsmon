@@ -144,9 +144,11 @@ def create_app() -> FastAPI:
     app.include_router(api_device.router)
     app.include_router(web.router)
     app.include_router(ws.router)
-    # Per-IP limiter for the public /share zone: a guest page polls ~6-8/min, so
-    # 60/min is invisible to legitimate use and throttles token scanning.
-    app.state.share_limiter = RateLimiter(max_attempts=60, window_s=60)
+    # Per-IP limiter for the public /share zone. A guest page polls every 4 s = 15/min,
+    # so 150/min keeps ~10 guests behind one IP (CGNAT) working while still bounding
+    # load; a 192-bit token is infeasible to scan at any of these rates, and since the
+    # poll went incremental each request is a cache slice rather than a query.
+    app.state.share_limiter = RateLimiter(max_attempts=150, window_s=60)
     app.include_router(share.router)
     import os
     web_dist = os.environ.get("BMSMON_WEB_DIST", "/app/web/dist")
