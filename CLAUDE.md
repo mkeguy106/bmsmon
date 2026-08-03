@@ -733,6 +733,36 @@ serves API + static) and pushes `ghcr.io/mkeguy106/bmsmon-server:latest` (+ a `:
 push to `main` touching `server/**`, `web/**`, or that workflow. Watch a run with `gh run watch` or
 the Actions tab.
 
+The job sets `DOCKER_BUILD_RECORD_UPLOAD: false`. Without it `docker/build-push-action@v6` uploads a
+~63 KB `<owner>~<repo>~XXXXXX.dockerbuild` build record as an Actions artifact on **every** run;
+nothing ever reads them and 54 (3.2 MB) had accumulated by 2026-08-03.
+
+### Storage hygiene — the GHCR "untagged" footgun
+
+`.github/workflows/prune-storage.yml` (weekly + `workflow_dispatch`, dry-run by default) retires old
+images via `.github/scripts/prune-ghcr.sh`, and sweeps stray Actions artifacts older than 7 days.
+
+**Never prune this package with `delete-only-untagged-versions: true`.** Each build pushes one tag
+but creates *three* package versions, because buildx publishes an OCI **index**:
+
+```
+:latest  ->  OCI index                          <- the "tagged" version
+               |- sha256:9d55f8…  amd64 image        <- listed as UNTAGGED
+               `- sha256:7cb69a…  provenance att.    <- listed as UNTAGGED
+```
+
+The untagged entries *are* the image. Bulk-deleting them strips the layers out from under `:latest`,
+and the NAS `docker compose pull bmsmon-api` then fails with `manifest unknown`. `prune-ghcr.sh` is
+manifest-aware: it resolves each surviving index's children from the registry and only deletes an
+untagged version once nothing references it, aborting rather than guessing if a manifest won't
+resolve. It keeps the newest `KEEP` (default 10) tagged versions plus whatever carries `latest`.
+
+Two operational notes: `gh api --method DELETE` must **not** be passed `--silent` — it masks the exit
+status, so a loop reports success for every failed delete. And bmsmon is a **public** repo whose GHCR
+package is public, so none of this draws against billable Actions/Packages quota; the 2026-08-03
+audit put bmsmon at 1.8 GB-hours YTD (0.003% of the account) against milwaukee-events' 56,491
+(94.6%). Prune here for tidiness, not for quota.
+
 ### Production deploy (QNAP NAS)
 
 Production is `bmsmon.covert.life` on the QNAP NAS **`ddnas02`** (SSH: `ssh joely@ddnas02`), run from

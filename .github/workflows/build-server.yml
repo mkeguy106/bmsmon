@@ -11,6 +11,11 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      # docker/build-push-action v6 uploads a "<owner>~<repo>~XXXXXX.dockerbuild"
+      # build record as an Actions artifact on EVERY run. Nothing ever reads it;
+      # 54 of them (3.2 MB) had silently accumulated by 2026-08-03. Off.
+      DOCKER_BUILD_RECORD_UPLOAD: false
     # Actions SHA-pinned to the resolved tag commits (SEC-10, supply chain).
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

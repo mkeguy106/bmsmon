@@ -1,0 +1,81 @@
+name: prune-storage
+# Keeps bmsmon's GitHub storage from creeping back up.
+#
+# Two jobs, both safe to re-run:
+#   ghcr      - retire old sha-tagged images + their now-orphaned child manifests
+#   artifacts - sweep any Actions artifact older than the retention window
+#
+# The build workflow itself no longer uploads .dockerbuild records
+# (DOCKER_BUILD_RECORD_UPLOAD=false), so the artifact job is a backstop for
+# anything a future workflow starts leaving behind.
+on:
+  schedule:
+    - cron: "17 4 * * 0"   # Sundays, 04:17 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report only, delete nothing"
+        type: boolean
+        default: true
+      keep:
+        description: "How many newest tagged images to retain"
+        type: string
+        default: "10"
+
+concurrency:
+  group: prune-storage
+  cancel-in-progress: false
+
+jobs:
+  ghcr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Prune old image versions (manifest-aware)
+        env:
+          # bmsmon-server is a USER-scoped package. If GITHUB_TOKEN turns out to
+          # lack delete rights here, set a GHCR_PRUNE_TOKEN secret (PAT with
+          # delete:packages) and it will be used instead.
+          GH_TOKEN: ${{ secrets.GHCR_PRUNE_TOKEN || secrets.GITHUB_TOKEN }}
+          DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '1' || '0' }}
+          KEEP: ${{ inputs.keep || '10' }}
+        run: bash .github/scripts/prune-ghcr.sh
+
+      - name: Verify production can still pull :latest
+        run: |
+          # The prune is only correct if this still resolves. Fail loudly if not.
+          docker manifest inspect ghcr.io/${{ github.repository_owner }}/bmsmon-server:latest >/dev/null
+          echo "OK — :latest still resolves after prune"
+
+  artifacts:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Delete Actions artifacts older than 7 days
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          cutoff=$(date -u -d '7 days ago' +%s)
+          n=0
+          while read -r id created; do
+            [ -z "$id" ] && continue
+            [ "$(date -u -d "$created" +%s)" -ge "$cutoff" ] && continue
+            if [ "$DRY_RUN" = "1" ]; then
+              echo "   would delete artifact $id ($created)"
+            elif gh api --method DELETE "/repos/$REPO/actions/artifacts/$id" >/dev/null 2>&1; then
+              # No --silent: it masks the exit status and every failure reads as success.
+              echo "   deleted artifact $id"
+            else
+              echo "   FAILED artifact $id" >&2
+            fi
+            n=$((n+1))
+          done < <(gh api "/repos/$REPO/actions/artifacts" --paginate \
+                     --jq '.artifacts[] | select(.expired==false) | "\(.id) \(.created_at)"')
+          echo "== $n artifact(s) past retention"
