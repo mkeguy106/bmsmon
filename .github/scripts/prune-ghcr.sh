@@ -78,15 +78,26 @@ if [[ "$DRY_RUN" != "0" ]]; then
   exit 0
 fi
 
+ok=0; failed=0
 for id in $(jq -r '.[].id' <<<"$DEL_TAGGED") $(jq -r '.[].id' <<<"$DEL_UNTAGGED"); do
   # NB: do NOT pass --silent here; it masks the exit status and the loop then
   # reports success for every failed delete (hit during the 2026-08-03 cleanup).
-  if gh api --method DELETE "/user/packages/container/$PKG/versions/$id" >/dev/null 2>&1; then
-    echo "   deleted $id"
+  if err="$(gh api --method DELETE "/user/packages/container/$PKG/versions/$id" 2>&1 >/dev/null)"; then
+    echo "   deleted $id"; ok=$((ok+1))
   else
-    echo "   FAILED  $id" >&2
+    echo "   FAILED  $id — ${err//$'\n'/ }" >&2; failed=$((failed+1))
   fi
 done
+
+echo "== deleted $ok, failed $failed"
+if (( failed > 0 )); then
+  # Must be fatal. A token lacking delete:packages rejects every call, and if the
+  # job still went green the prune would look healthy forever while deleting
+  # nothing. For a USER-scoped package GITHUB_TOKEN may not suffice — set a
+  # GHCR_PRUNE_TOKEN secret (PAT with delete:packages) if this trips.
+  echo "!! $failed delete(s) rejected — check token scopes (delete:packages)" >&2
+  exit 1
+fi
 
 echo "== done. Verify production can still pull:"
 echo "   docker manifest inspect ghcr.io/$OWNER/$PKG:latest >/dev/null && echo OK"
