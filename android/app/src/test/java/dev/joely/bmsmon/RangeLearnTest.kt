@@ -20,7 +20,7 @@ class RangeLearnTest {
     private fun dischargeDay(day: Int, startHour: Int, hours: Float, powerW: Float): List<RangeRow> {
         val n = (hours * 3600 / 30).toInt()
         return (0..n).map { i ->
-            RangeRow(ts(day, startHour) + i * 30_000L, "Discharging", powerW,
+            RangeRow(ts(day, startHour) + i * 30_000L, -6f, powerW,
                 lat = null, lon = null, gpsAccuracyM = null, regen = false)
         }
     }
@@ -29,23 +29,23 @@ class RangeLearnTest {
     private fun idleFiller(day: Int, startHour: Int, hours: Int): List<RangeRow> {
         val n = hours * 3600 / 30
         return (0..n).map { i ->
-            RangeRow(ts(day, startHour) + i * 30_000L, "Idle", 0f, null, null, null, regen = false)
+            RangeRow(ts(day, startHour) + i * 30_000L, 0f, 0f, null, null, null, regen = false)
         }
     }
 
     /** [n] qualified drive segments at 3 m/s (30 m / 10 s), 72 W, starting 9:00 on [day].
      *  27 segments = 810 m = 0.503 mi — just over the 0.5 mi outing-day bar. */
     private fun outingDrive(day: Int, n: Int): List<RangeRow> = (0..n).map { i ->
-        RangeRow(ts(day, 9) + i * 10_000L, "Discharging", 72f,
+        RangeRow(ts(day, 9) + i * 10_000L, -6f, 72f,
             lat = 40.0 + i * 30 / 111_320.0, lon = -75.0, gpsAccuracyM = 10f, regen = false)
     }
 
-    /** [n] vehicle-speed windows (300 m / 30 s = 10 m/s, Idle) starting [offsetS] after 9:00,
+    /** [n] vehicle-speed windows (300 m / 30 s = 10 m/s, drawing nothing) after 9:00,
      *  continuing the path from [fromLatSteps] 30-m drive steps. */
     private fun vehicleRun(day: Int, offsetS: Int, fromLatSteps: Int, n: Int = 3): List<RangeRow> {
         val lat0 = 40.0 + fromLatSteps * 30 / 111_320.0
         return (0..n).map { i ->
-            RangeRow(ts(day, 9) + (offsetS + i * 30) * 1000L, "Idle", 0f,
+            RangeRow(ts(day, 9) + (offsetS + i * 30) * 1000L, 0f, 0f,
                 lat = lat0 + i * 300 / 111_320.0, lon = -75.0, gpsAccuracyM = 15f, regen = false)
         }
     }
@@ -95,7 +95,7 @@ class RangeLearnTest {
         // vehicle/passive ride — the discharge gate excludes it even inside the speed band.
         val rows = (1..3).flatMap { d ->
             (0..30).map { i ->
-                RangeRow(ts(d, 9) + i * 30_000L, "Idle", 0f,
+                RangeRow(ts(d, 9) + i * 30_000L, 0f, 0f,
                     lat = 40.0 + i * 60 / 111_320.0, lon = -75.0,   // 2 m/s windowed
                     gpsAccuracyM = 10f, regen = false)
             } + idleFiller(d, 10, 13)
@@ -122,7 +122,7 @@ class RangeLearnTest {
         // measure: windowed displacement recovers the true speed. 81 rows = 2430 m ≥ 0.5 mi.
         val rows = (1..3).flatMap { d ->
             (0..81).map { i ->
-                RangeRow(ts(d, 9) + i * 10_000L, "Discharging", 72f,
+                RangeRow(ts(d, 9) + i * 10_000L, -6f, 72f,
                     lat = 40.0 + (i / 3) * 90 / 111_320.0, lon = -75.0,
                     gpsAccuracyM = 10f, regen = false)
             } + idleFiller(d, 10, 13)
@@ -143,7 +143,7 @@ class RangeLearnTest {
             (0..9).map { k ->
                 val onPathM = k * 90
                 val m = if (k == 5) onPathM + 500 else onPathM
-                RangeRow(ts(d, 9) + k * 30_000L, "Discharging", 72f,
+                RangeRow(ts(d, 9) + k * 30_000L, -6f, 72f,
                     lat = 40.0 + m / 111_320.0, lon = -75.0, gpsAccuracyM = 10f, regen = false)
             } + idleFiller(d, 10, 13)
         }
@@ -157,7 +157,7 @@ class RangeLearnTest {
         // windowed cruise must count as chair driving, not vehicle. 126 m / 30 s steps.
         val rows = (1..3).flatMap { d ->
             (0..8).map { i ->
-                RangeRow(ts(d, 9) + i * 30_000L, "Discharging", 72f,
+                RangeRow(ts(d, 9) + i * 30_000L, -6f, 72f,
                     lat = 40.0 + i * 126 / 111_320.0, lon = -75.0,
                     gpsAccuracyM = 10f, regen = false)
             } + idleFiller(d, 10, 13)
@@ -216,7 +216,7 @@ class RangeLearnTest {
         // steps) at 72 W discharging with 10 m accuracy. Per segment: dWh = 72×10/3600 = 0.2 Wh,
         // d = 20 m. Day total: 20 Wh, 2000 m = 1.2427 mi → 16.09 Wh/mi (same all days → flat band).
         fun drive(day: Int): List<RangeRow> = (0..100).map { i ->
-            RangeRow(ts(day, 9) + i * 10_000L, "Discharging", 72f,
+            RangeRow(ts(day, 9) + i * 10_000L, -6f, 72f,
                 lat = 40.0 + i * 20 / 111_320.0, lon = -75.0, gpsAccuracyM = 10f, regen = false)
         }
         val rows = (1..3).flatMap { d -> drive(d) + idleFiller(d, 10, 13) }  // ascending by tsMs
@@ -229,12 +229,37 @@ class RangeLearnTest {
         val burn = (1..3).flatMap { d -> dischargeDay(d, 8, 2f, 80f) + idleFiller(d, 10, 11) }
         val regenRows = (0..10).map { i ->
             // Hour 22 — after the idle filler ends (21:00), keeping the row list ascending.
-            RangeRow(ts(1, 22) + i * 10_000L, "Discharging", 300f, null, null, null, regen = true)
+            RangeRow(ts(1, 22) + i * 10_000L, -6f, 300f, null, null, null, regen = true)
         }
         val p = learnRangeParams(burn + regenRows, zone, nowMs = ts(4, 0))
         assertEquals(160f, p.whPerDay.mid, 5f)  // regen watts never counted
         // No qualified GPS at all → whPerMile stays seeded.
         assertEquals(SEED_RANGE_PARAMS.whPerMile.lo, p.whPerMile.lo, 0f)
+    }
+
+    @Test fun dischargeIsGatedOnCurrentNotTheBmsStateField() {
+        // The 2026-08-04 production finding: 40,069 rows carried >= 1.05 A of real current while
+        // the BMS state field read "Idle" (85% of them adjacent to a Discharging row — state lags
+        // current at run boundaries). Gating on state dropped 7.16% of real discharge energy and
+        // made the range readout ~6-10% optimistic. RangeRow no longer carries state at all, so
+        // the defect is unrepresentable; this pins the replacement rule.
+        // 3 days x 1 h at 80 W with current flowing => 80 Wh/day, a flat learned band near 80.
+        val drawing = (1..3).flatMap { d ->
+            (0..120).map { i ->
+                RangeRow(ts(d, 8) + i * 30_000L, -6f, 80f, null, null, null, regen = false)
+            } + idleFiller(d, 10, 12)
+        }
+        assertEquals(80f, learnRangeParams(drawing, zone, ts(5, 0)).whPerDay.mid, 5f)
+
+        // Same rows, same power, but current inside the epsilon => not drawing, nothing learned.
+        val notDrawing = (1..3).flatMap { d ->
+            (0..120).map { i ->
+                RangeRow(ts(d, 8) + i * 30_000L, -0.05f, 80f, null, null, null, regen = false)
+            } + idleFiller(d, 10, 12)
+        }
+        val p = learnRangeParams(notDrawing, zone, ts(5, 0))
+        assertEquals(SEED_RANGE_PARAMS.whPerDay.lo, p.whPerDay.lo, 0f)
+        assertEquals(0, p.learnedDays)
     }
 
     @Test fun zeroDischargeQualifyingDaysFallBackToSeedWhPerDay() {
