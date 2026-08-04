@@ -30,7 +30,7 @@
 
 **Interfaces:**
 - Consumes: nothing (pure, first task).
-- Produces: `lockRefreshRate(locked: Boolean, enabled: Boolean): Float`, `lockBrightness(locked: Boolean, enabled: Boolean, level: Float): Float`, `gpsParked(lastDischargeMs: Long?, nowMs: Long, holdMs: Long = PARKED_HOLD_MS): Boolean`, and constants `LOCK_REFRESH_HZ = 60f`, `SYSTEM_REFRESH_RATE = 0f`, `PARKED_HOLD_MS = 300_000L`, `MIN_DIM_LEVEL = 0.05f`, `DEFAULT_DIM_LEVEL = 0.30f`, `BRIGHTNESS_RELEASE = -1f`.
+- Produces: `lockRefreshRate(locked: Boolean, enabled: Boolean): Float`, `lockBrightness(locked: Boolean, enabled: Boolean, level: Float): Float`, `gpsParked(lastDischargeMs: Long?, nowMs: Long, holdMs: Long = PARKED_HOLD_MS): Boolean`, `gpsShouldRun(wanted: Boolean, pauseEnabled: Boolean, lastDischargeMs: Long?, nowMs: Long, holdMs: Long = PARKED_HOLD_MS): Boolean`, and constants `LOCK_REFRESH_HZ = 60f`, `SYSTEM_REFRESH_RATE = 0f`, `PARKED_HOLD_MS = 300_000L`, `MIN_DIM_LEVEL = 0.05f`, `DEFAULT_DIM_LEVEL = 0.30f`, `BRIGHTNESS_RELEASE = -1f`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -122,8 +122,36 @@ class BatterySaverTest {
     @Test fun holdIsFiveMinutes() {
         assertEquals(5 * 60_000L, PARKED_HOLD_MS)
     }
+
+    // ── gpsShouldRun ─────────────────────────────────────────────────────────
+    // The composed rule MonitorEngine.applyGpsGate delegates to.
+
+    @Test fun gpsRunsWhenWantedAndMoving() {
+        val now = 10_000_000L
+        assertTrue(gpsShouldRun(wanted = true, pauseEnabled = true, lastDischargeMs = now - 1000L, nowMs = now))
+    }
+
+    @Test fun gpsStopsWhenParked() {
+        val now = 10_000_000L
+        assertFalse(gpsShouldRun(true, pauseEnabled = true, lastDischargeMs = now - PARKED_HOLD_MS, nowMs = now))
+    }
+
+    // With the toggle off, parking is irrelevant — this is the opt-out path.
+    @Test fun gpsIgnoresParkedWhenPauseDisabled() {
+        val now = 10_000_000L
+        assertTrue(gpsShouldRun(true, pauseEnabled = false, lastDischargeMs = null, nowMs = now))
+    }
+
+    // The parked gate can only ever SUBTRACT from what the cloud settings want.
+    @Test fun gpsNeverRunsWhenNotWanted() {
+        val now = 10_000_000L
+        assertFalse(gpsShouldRun(false, pauseEnabled = false, lastDischargeMs = now, nowMs = now))
+        assertFalse(gpsShouldRun(false, pauseEnabled = true, lastDischargeMs = now, nowMs = now))
+    }
 }
 ```
+
+Add `import dev.joely.bmsmon.model.gpsShouldRun` to the test's import block.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -202,6 +230,21 @@ fun lockBrightness(locked: Boolean, enabled: Boolean, level: Float): Float =
  */
 fun gpsParked(lastDischargeMs: Long?, nowMs: Long, holdMs: Long = PARKED_HOLD_MS): Boolean =
     lastDischargeMs == null || nowMs - lastDischargeMs >= holdMs
+
+/**
+ * Whether GPS capture should actually run: what the cloud settings want, minus the parked gate.
+ *
+ * [wanted] is `monitoring && gpsEnabled && enrolled && cloudEnabled`, decided elsewhere. The
+ * parked gate can only ever SUBTRACT from it — it never turns GPS on. `MonitorEngine.applyGpsGate`
+ * is a thin wrapper around this, so the rule is testable without a device.
+ */
+fun gpsShouldRun(
+    wanted: Boolean,
+    pauseEnabled: Boolean,
+    lastDischargeMs: Long?,
+    nowMs: Long,
+    holdMs: Long = PARKED_HOLD_MS,
+): Boolean = wanted && !(pauseEnabled && gpsParked(lastDischargeMs, nowMs, holdMs))
 ```
 
 - [ ] **Step 4: Run the test to verify it passes**
@@ -210,7 +253,7 @@ fun gpsParked(lastDischargeMs: Long?, nowMs: Long, holdMs: Long = PARKED_HOLD_MS
 cd /home/joely/bmsmon/android && ./gradlew :app:testDebugUnitTest --tests "dev.joely.bmsmon.BatterySaverTest"
 ```
 
-Expected: PASS, 10 tests.
+Expected: PASS, 14 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -466,58 +509,13 @@ death; never writes the system-wide setting."
 
 **Files:**
 - Modify: `app/src/main/java/dev/joely/bmsmon/monitor/MonitorEngine.kt` (`setGpsActive` at line 425-429; the poll-loop state update ending at line 531; add the new gate function)
-- Test: `app/src/test/java/dev/joely/bmsmon/BatterySaverTest.kt` (extend)
+- Modify: `app/src/main/java/dev/joely/bmsmon/BatteryViewModel.kt` (complete `setGpsPauseParked`, push on load)
 
 **Interfaces:**
-- Consumes: `gpsParked`, `PARKED_HOLD_MS` (Task 1); `MonitorState.lastDischargeAt: Map<String, Long>` (existing).
+- Consumes: `gpsShouldRun` (Task 1, already unit-tested there); `MonitorState.lastDischargeAt: Map<String, Long>` (existing).
 - Produces: `MonitorEngine.setGpsPauseParked(on: Boolean)`; `MonitorEngine.setGpsActive(active: Boolean)` keeps its signature but now records *intent* rather than directly starting GPS.
 
-- [ ] **Step 1: Write the failing test for the gate composition**
-
-Append to `BatterySaverTest.kt`:
-
-```kotlin
-    // ── the composed gate the engine applies ─────────────────────────────────
-    // Engine truth: GPS runs only when it is wanted AND the chair is not parked.
-    // Expressed here as the same boolean the engine computes, so the rule is
-    // pinned by a test even though the engine itself needs a device to run.
-
-    private fun gpsShouldRun(wanted: Boolean, pauseEnabled: Boolean, lastDischargeMs: Long?, now: Long) =
-        wanted && !(pauseEnabled && gpsParked(lastDischargeMs, now))
-
-    @Test fun gpsRunsWhenWantedAndMoving() {
-        val now = 10_000_000L
-        assertTrue(gpsShouldRun(wanted = true, pauseEnabled = true, lastDischargeMs = now - 1000L, now = now))
-    }
-
-    @Test fun gpsStopsWhenParked() {
-        val now = 10_000_000L
-        assertFalse(gpsShouldRun(true, pauseEnabled = true, lastDischargeMs = now - PARKED_HOLD_MS, now = now))
-    }
-
-    // With the toggle off, parking is irrelevant — this is the opt-out path.
-    @Test fun gpsIgnoresParkedWhenPauseDisabled() {
-        val now = 10_000_000L
-        assertTrue(gpsShouldRun(true, pauseEnabled = false, lastDischargeMs = null, now = now))
-    }
-
-    // The parked gate can only ever SUBTRACT from what the cloud settings want.
-    @Test fun gpsNeverRunsWhenNotWanted() {
-        val now = 10_000_000L
-        assertFalse(gpsShouldRun(false, pauseEnabled = false, lastDischargeMs = now, now = now))
-        assertFalse(gpsShouldRun(false, pauseEnabled = true, lastDischargeMs = now, now = now))
-    }
-```
-
-- [ ] **Step 2: Run to verify it fails**
-
-```bash
-cd /home/joely/bmsmon/android && ./gradlew :app:testDebugUnitTest --tests "dev.joely.bmsmon.BatterySaverTest"
-```
-
-Expected: FAIL — `gpsShouldRun` references compile, but the tests fail only if the helper is wrong. If they pass immediately, that is acceptable here: the helper encodes the rule, and Step 3 makes the engine match it. Confirm all 14 tests are listed.
-
-- [ ] **Step 3: Split intent from effect in the engine**
+- [ ] **Step 1: Split intent from effect in the engine**
 
 In `MonitorEngine.kt`, replace the existing `setGpsActive`:
 
@@ -560,17 +558,21 @@ with:
      * spikes, so we would rather capture nothing than capture noise.
      */
     private fun applyGpsGate(now: Long) {
-        val parked = gpsPauseParked && gpsParked(_state.value.lastDischargeAt.values.maxOrNull(), now)
-        val active = gpsWanted && !parked
+        val active = gpsShouldRun(
+            wanted = gpsWanted,
+            pauseEnabled = gpsPauseParked,
+            lastDischargeMs = _state.value.lastDischargeAt.values.maxOrNull(),
+            nowMs = now,
+        )
         if (_state.value.gpsActive == active) return
         _state.update { it.copy(gpsActive = active) }
         if (active) locationSource.start() else locationSource.stop()
     }
 ```
 
-Add `import dev.joely.bmsmon.model.gpsParked` at the top.
+Add `import dev.joely.bmsmon.model.gpsShouldRun` at the top. The decision itself is the pure function from Task 1 — this wrapper only reads state and drives `locationSource`.
 
-- [ ] **Step 4: Re-evaluate the gate each poll**
+- [ ] **Step 2: Re-evaluate the gate each poll**
 
 In the poll-loop function, immediately after the `_state.update { ... }` block that ends with `peakCurrentA = peakC,` and its closing `)` / `}` (around line 531) — i.e. after `lastDischargeAt` has been recomputed for this sample and before `val fix = ...` — insert:
 
@@ -581,7 +583,7 @@ In the poll-loop function, immediately after the `_state.update { ... }` block t
 
 This is the only periodic driver the gate needs: `lastDischargeAt` only ever changes here, and the poll loop runs continuously while monitoring.
 
-- [ ] **Step 5: Push the setting from the ViewModel into the engine**
+- [ ] **Step 3: Push the setting from the ViewModel into the engine**
 
 Now that `MonitorEngine.setGpsPauseParked` exists, complete the setter deferred in Task 2. In
 `BatteryViewModel.kt`:
@@ -606,7 +608,7 @@ Without this, a fresh process would run the engine on its `gpsPauseParked = true
 which happens to match the setting's default, so the bug would be invisible until someone turned
 the toggle off and restarted the app.
 
-- [ ] **Step 6: Run the tests**
+- [ ] **Step 4: Run the tests**
 
 ```bash
 cd /home/joely/bmsmon/android && ./gradlew :app:testDebugUnitTest
@@ -614,7 +616,7 @@ cd /home/joely/bmsmon/android && ./gradlew :app:testDebugUnitTest
 
 Expected: PASS, including `MonitorRestoreTest` (which exercises `restorePlan`/`gpsActive`).
 
-- [ ] **Step 7: Build, install, and verify on-device**
+- [ ] **Step 5: Build, install, and verify on-device**
 
 ```bash
 cd /home/joely/bmsmon/android && ./gradlew :app:assembleDebug && \
@@ -635,7 +637,7 @@ Expected: no `WorkSource{10304 dev.joely.bmsmon}` request listed while parked. D
 adb -s adb-1C091FDF6003V0-RQzUxy._adb-tls-connect._tcp logcat -d -t 300 | grep -iE "foregroundservice|securityexception|bmsmon"
 ```
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 cd /home/joely/bmsmon && git add android/app/src/main/java/dev/joely/bmsmon/monitor/MonitorEngine.kt android/app/src/main/java/dev/joely/bmsmon/BatteryViewModel.kt android/app/src/test/java/dev/joely/bmsmon/BatterySaverTest.kt && git commit -m "feat(android): pause GPS capture while the chair is parked
