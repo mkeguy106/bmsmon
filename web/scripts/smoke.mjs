@@ -1,5 +1,5 @@
-// WebUI smoke test: screenshot v1, every v2 view, and the preview harness,
-// failing on any console error or page crash.
+// WebUI smoke test: screenshot v2 (the default UI at "/"), v1 (at /v1/), and the preview
+// harness, failing on any console error or page crash.
 //
 // Prereqs (see CLAUDE.md "WebUI smoke test"):
 //   1. dev Postgres up + seeded:  server/.venv/bin/python server/scripts/seed_dev.py
@@ -25,12 +25,14 @@ async function shot(name, ms = 3500) {
   console.log(`shot: ${name}`);
 }
 
-// v1 dashboard
-await page.goto(`${BASE}/`, { waitUntil: "networkidle" });
+// v1 dashboard (demoted to /v1/ on 2026-08-04; note the server's /v2/ -> / redirect does
+// NOT exist under `vite dev`, so these must be the real build paths, not the old ones)
+await page.goto(`${BASE}/v1/`, { waitUntil: "networkidle" });
 await shot("v1-dashboard");
 
-// v2 — walk every nav view (Command first so the persisted view choice can't skip it)
-await page.goto(`${BASE}/v2/`, { waitUntil: "networkidle" });
+// v2 — the default UI at "/". Walk every nav view (Command first so the persisted view
+// choice can't skip it)
+await page.goto(`${BASE}/`, { waitUntil: "networkidle" });
 for (const label of ["Command", "Fleet Health", "Alerts", "History", "Journey", "Settings"]) {
   const nav = page.getByText(label, { exact: true }).first();
   try {
@@ -46,7 +48,7 @@ await page.goto(`${BASE}/preview.html`, { waitUntil: "networkidle" });
 await shot("v1-preview", 2500);
 
 // sit on Command 12 s to catch tick-driven runtime errors
-await page.goto(`${BASE}/v2/`, { waitUntil: "networkidle" });
+await page.goto(`${BASE}/`, { waitUntil: "networkidle" });
 await page.getByText("Command", { exact: true }).first().click();
 await page.waitForTimeout(12000);
 await page.screenshot({ path: `${OUT}/v2-command-after-12s.png` });

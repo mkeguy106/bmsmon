@@ -1,16 +1,22 @@
 <!doctype html>
 <html lang="en">
   <head><meta charset="utf-8" /><title>bmsmon</title>
+    <!-- Without this, iOS lays out at a virtual 980px and scales to ~40%: microscopic text AND
+         innerWidth=980 defeats the <820px auto-mobile detection. viewport-fit=cover lets the
+         fixed bottom tabs pad around the iPhone home indicator (env(safe-area-inset-bottom)). -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="light dark" />
     <meta name="darkreader-lock" />
     <script>
       try {
-        if (localStorage.getItem("bmsmon-theme") === "light")
-          document.documentElement.dataset.theme = "light";
-      } catch (e) {}
+        var m = JSON.parse(localStorage.getItem("bmsmon-v2-settings") || "{}").themeMode
+             || (localStorage.getItem("bmsmon-theme") === "light" ? "light" : "system");
+        var dark = m === "dark" || (m !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.dataset.theme = dark ? "dark" : "light";
+      } catch (e) { document.documentElement.dataset.theme = "dark"; }
     </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
   </head>
-  <body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body>
+  <body><div id="root"></div><script type="module" src="/src/v2/main.tsx"></script></body>
 </html>
