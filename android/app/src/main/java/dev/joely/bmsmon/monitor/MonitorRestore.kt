@@ -33,6 +33,7 @@ data class RestorePlan(
     val tempThresholdsByProfile: Map<String, TempThresholds>,
     val tempUnit: TempUnit,
     val gpsActive: Boolean,
+    val gpsPauseParked: Boolean,
 )
 
 /**
@@ -75,6 +76,9 @@ fun restorePlan(p: Persisted): RestorePlan? {
         // Effective GPS-active, same gate as the ViewModel: gpsEnabled (default = cloudEnabled)
         // AND enrolled AND cloud sync on. `monitoring` is implied (we only restore when on).
         gpsActive = (p.gpsEnabled ?: p.cloudEnabled) && p.enrolled && p.cloudEnabled,
+        // Battery saver: a headless restart is a fresh process, so without this the engine would
+        // run on its field default (true) and keep pausing GNSS for a user who turned that off.
+        gpsPauseParked = p.gpsPauseParked,
     )
 }
 

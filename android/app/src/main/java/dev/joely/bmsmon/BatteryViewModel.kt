@@ -807,6 +807,8 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         engine.setStage(currentStageAddrs())
         pushAlertConfig()
         pushTempConfig()
+        // Pause-while-parked before the intent, so the gate's first evaluation is already correct.
+        engine.setGpsPauseParked(_state.value.gpsPauseParked)
         engine.setGpsActive(_state.value.gpsEnabled && _state.value.enrolled && _state.value.cloudEnabled)
         engine.importLegacyCsvIfNeeded(
             alreadyImported = _state.value.csvImported,
@@ -1083,6 +1085,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     fun setGpsPauseParked(on: Boolean) {
         _state.update { it.copy(gpsPauseParked = on) }
         viewModelScope.launch { store.setGpsPauseParked(on) }
+        engine.setGpsPauseParked(on)
     }
 
     /** Acknowledge the active alert: silence it until the condition changes/resolves. */

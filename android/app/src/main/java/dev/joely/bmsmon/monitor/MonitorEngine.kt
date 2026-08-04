@@ -51,6 +51,7 @@ import dev.joely.bmsmon.model.applyDisabled
 import dev.joely.bmsmon.model.groupActivity
 import dev.joely.bmsmon.model.groupOf
 import dev.joely.bmsmon.model.groupViews
+import dev.joely.bmsmon.model.gpsShouldRun
 import dev.joely.bmsmon.model.isRegen
 import dev.joely.bmsmon.model.powerDecision
 import dev.joely.bmsmon.model.seedLowPower
@@ -277,6 +278,9 @@ class MonitorEngine(
         setStage(plan.stageAddrs)
         setAlertConfig(plan.alertConfig)
         setTempAlertConfig(plan.tempAlertsEnabled, plan.tempThresholdsByProfile, plan.tempUnit)
+        // Pause setting first, so the gate's first evaluation is already correct and GPS is never
+        // started only to be stopped again (which would also churn the service's FGS type).
+        setGpsPauseParked(plan.gpsPauseParked)
         setGpsActive(plan.gpsActive)
         return true
     }
@@ -302,6 +306,10 @@ class MonitorEngine(
         rangeJob = null
         ble.stop()
         locationSource.stop()
+        // Clear the GPS intent too, not just the effect: otherwise a later setGpsPauseParked(false)
+        // (the setting is reachable with monitoring off) would re-evaluate a stale "wanted = true"
+        // and start GNSS with nothing monitoring. start() has the ViewModel push both again.
+        gpsWanted = false
         alertNotifier.clear()
         stageAddrs = emptySet()
         _state.update { st ->
@@ -422,8 +430,48 @@ class MonitorEngine(
         }
     }
 
-    /** Start/stop GPS capture; cached fixes are attached to each upload while active. */
+    // What the cloud settings WANT (monitoring && gpsEnabled && enrolled && cloudEnabled), before
+    // the parked gate subtracts from it. Kept separate so the gate can flip GPS off and back on
+    // without losing the user's intent.
+    @Volatile private var gpsWanted = false
+    @Volatile private var gpsPauseParked = true
+
+    /** Record whether GPS capture is wanted at all; the parked gate decides if it actually runs. */
     fun setGpsActive(active: Boolean) {
+        gpsWanted = active
+        applyGpsGate(now())
+    }
+
+    /** Settings › Battery saver: pause GNSS while no base has discharged recently. */
+    fun setGpsPauseParked(on: Boolean) {
+        gpsPauseParked = on
+        applyGpsGate(now())
+    }
+
+    /**
+     * Fold intent + parked state into the actual GPS run state. The engine stays the single
+     * writer of [MonitorState.gpsActive].
+     *
+     * The chair cannot move without discharging a pack, so a parked chair's fixes teach the range
+     * learner nothing (its discharge gate discards them) while GNSS costs ~22 mA. Full stop rather
+     * than a drop to balanced accuracy: coarse fixes are what produced the 2026-07-13 phantom map
+     * spikes, so we would rather capture nothing than capture noise.
+     *
+     * Synchronized because there are now two callers on different threads — the ViewModel (main)
+     * and the BLE poll callback (Dispatchers.Default) — and the read-decide-act has to be atomic
+     * or an interleaving could leave `gpsActive = false` with the fused request still registered,
+     * i.e. exactly the silent GNSS drain this gate exists to remove. Lock order is always
+     * engine -> LocationSource, and LocationSource never calls back in, so this cannot deadlock.
+     */
+    @Synchronized
+    private fun applyGpsGate(now: Long) {
+        val active = gpsShouldRun(
+            wanted = gpsWanted,
+            pauseEnabled = gpsPauseParked,
+            lastDischargeMs = _state.value.lastDischargeAt.values.maxOrNull(),
+            nowMs = now,
+        )
+        if (_state.value.gpsActive == active) return
         _state.update { it.copy(gpsActive = active) }
         if (active) locationSource.start() else locationSource.stop()
     }
@@ -530,6 +578,8 @@ class MonitorEngine(
                 peakCurrentA = peakC,
             )
         }
+        // lastDischargeAt just moved; re-derive whether the chair still counts as driving.
+        applyGpsGate(now)
         val fix = if (_state.value.gpsActive) locationSource.current() else null
         // Upload GPS only when the fix is new for this pack (bandwidth — see isNewFixForPack).
         val uploadFix = fix?.takeIf { isNewFixForPack(lastGpsFixUploaded[addr], it.timeMs) }

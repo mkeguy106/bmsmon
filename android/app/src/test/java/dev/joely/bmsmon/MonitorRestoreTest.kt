@@ -39,6 +39,7 @@ class MonitorRestoreTest {
         cloudEnabled: Boolean = false,
         enrolled: Boolean = false,
         gpsEnabled: Boolean? = null,
+        gpsPauseParked: Boolean = true,
     ) = Persisted(
         accentArgb = null, powerArgb = null, manualMode = false, darkMode = false,
         dailyDriverId = dailyDriverId, lastStage = lastStage, dynamicStage = null,
@@ -50,7 +51,7 @@ class MonitorRestoreTest {
         autoLuxThreshold = null, locked = false, csvImported = false,
         lockShowTime = true, lockShowWifi = true, lockShowBattery = true,
         lockLowRefresh = true, lockDimScreen = false, lockDimLevel = DEFAULT_DIM_LEVEL,
-        gpsPauseParked = true,
+        gpsPauseParked = gpsPauseParked,
         disabledAddrs = disabledAddrs, cloudEnabled = cloudEnabled, apiBaseUrl = null,
         deviceId = null, enrolled = enrolled, gpsEnabled = gpsEnabled,
         importWatermark = 0L, importDone = false, tempThresholdsByProfile = emptyMap(),
@@ -173,6 +174,14 @@ class MonitorRestoreTest {
         assertFalse(
             restorePlan(persisted(cloudEnabled = true, enrolled = true, gpsEnabled = false))!!.gpsActive,
         )
+    }
+
+    // A sticky restart is a fresh process: without carrying this the engine would fall back to its
+    // field default (true) and keep pausing GNSS for a user who had turned that setting off.
+    @Test
+    fun `parked gps pause setting is restored`() {
+        assertTrue(restorePlan(persisted(gpsPauseParked = true))!!.gpsPauseParked)
+        assertFalse(restorePlan(persisted(gpsPauseParked = false))!!.gpsPauseParked)
     }
 
     @Test
