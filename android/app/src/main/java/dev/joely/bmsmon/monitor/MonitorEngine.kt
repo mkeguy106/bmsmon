@@ -305,11 +305,7 @@ class MonitorEngine(
         rangeJob?.cancel()
         rangeJob = null
         ble.stop()
-        locationSource.stop()
-        // Clear the GPS intent too, not just the effect: otherwise a later setGpsPauseParked(false)
-        // (the setting is reachable with monitoring off) would re-evaluate a stale "wanted = true"
-        // and start GNSS with nothing monitoring. start() has the ViewModel push both again.
-        gpsWanted = false
+        shutdownGps()
         alertNotifier.clear()
         stageAddrs = emptySet()
         _state.update { st ->
@@ -342,6 +338,10 @@ class MonitorEngine(
             st.copy(fleet = fleet, regenAddrs = regen)
         }
         ble.setDisabled(addresses)
+        // "Disconnect all" cancels every worker, so onPoll — the gate's primary driver — may never
+        // fire again while monitoring stays on. Re-evaluate here rather than wait for the range
+        // loop's 5-minute tick.
+        applyGpsGate(now())
     }
     fun kickAll() = ble.kickAll()
 
@@ -457,11 +457,12 @@ class MonitorEngine(
      * than a drop to balanced accuracy: coarse fixes are what produced the 2026-07-13 phantom map
      * spikes, so we would rather capture nothing than capture noise.
      *
-     * Synchronized because there are now two callers on different threads — the ViewModel (main)
-     * and the BLE poll callback (Dispatchers.Default) — and the read-decide-act has to be atomic
-     * or an interleaving could leave `gpsActive = false` with the fused request still registered,
-     * i.e. exactly the silent GNSS drain this gate exists to remove. Lock order is always
-     * engine -> LocationSource, and LocationSource never calls back in, so this cannot deadlock.
+     * Synchronized because there are several callers on different threads — the ViewModel (main),
+     * the BLE poll callback (Dispatchers.IO) and the range loop — and the read-decide-act has to be
+     * atomic or an interleaving could leave `gpsActive = false` with the fused request still
+     * registered, i.e. exactly the silent GNSS drain this gate exists to remove. [shutdownGps]
+     * takes the same lock for the same reason. Lock order is always engine -> LocationSource, and
+     * LocationSource never calls back in, so this cannot deadlock.
      */
     @Synchronized
     private fun applyGpsGate(now: Long) {
@@ -474,6 +475,29 @@ class MonitorEngine(
         if (_state.value.gpsActive == active) return
         _state.update { it.copy(gpsActive = active) }
         if (active) locationSource.start() else locationSource.stop()
+    }
+
+    /**
+     * Monitoring is ending: drop the GPS intent and the request together, under the gate's lock.
+     *
+     * This has to be one atomic step, not three loose ones in [stop]. `ble.stop()` cancels the
+     * control-loop job, but `onPoll` is a plain call from the loop body and cancellation cannot
+     * preempt it — so a gate call can already be mid-flight, having decided `active = true`. Doing
+     * the teardown unsynchronized lets that call's `locationSource.start()` land *after* [stop],
+     * leaving `gpsActive = false` in the state with the fused request still registered: a silent
+     * high-accuracy GNSS drain with monitoring off. Holding the lock forces the two to order —
+     * either the gate runs first (starts, and is stopped here a moment later) or after (reads
+     * `gpsWanted = false` and no-ops).
+     *
+     * Clearing the intent also matters on its own: a later `setGpsPauseParked(false)` (the setting
+     * is reachable with monitoring off) would otherwise re-evaluate a stale `wanted = true` and
+     * start GNSS with nothing monitoring. [start] has the ViewModel push both again.
+     */
+    @Synchronized
+    private fun shutdownGps() {
+        gpsWanted = false
+        _state.update { it.copy(gpsActive = false) }
+        locationSource.stop()
     }
 
     /**
@@ -659,6 +683,12 @@ class MonitorEngine(
         rangeJob = scope.launch {
             while (isActive) {
                 runCatching { rangePass() }
+                // Second driver for the parked-GPS gate. onPoll is the primary one, but it only
+                // fires when a frame arrives — "Disconnect all", Bluetooth off, or every pack out
+                // of range (the phone leaves the chair) stall it indefinitely with monitoring
+                // still on, freezing lastDischargeAt and pinning GNSS on. This loop's 5-minute
+                // period equals PARKED_HOLD_MS, so it bounds the overshoot at one hold.
+                runCatching { applyGpsGate(now()) }
                 delay(5 * 60_000L)
             }
         }
