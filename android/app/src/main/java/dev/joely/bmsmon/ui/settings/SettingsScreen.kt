@@ -57,6 +57,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -72,6 +73,7 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -81,6 +83,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.joely.bmsmon.ALERT_THRESHOLDS
 import dev.joely.bmsmon.Appearance
+import dev.joely.bmsmon.BmsApp
 import dev.joely.bmsmon.UiState
 import dev.joely.bmsmon.fractionToLux
 import dev.joely.bmsmon.luxToFraction
@@ -1347,6 +1350,36 @@ private fun ColumnScope.BatterySaverContent(
                 "the range estimate ignores anyway.",
             state.gpsPauseParked, onSetGpsPauseParked,
         )
+    }
+
+    // Diagnostic only. Retention already runs (14-day samples, 7-day/20 MB raw frames) and the
+    // SQLite freelist measured 0 pages, so there is nothing to reclaim — this row exists so the
+    // size stays visible if that ever stops being true.
+    SectionLabel("Local database")
+    val context = LocalContext.current
+    var dbBytes by remember { mutableStateOf(0L) }
+    var dbRows by remember { mutableStateOf(0L) }
+    LaunchedEffect(Unit) {
+        dbBytes = context.getDatabasePath("bms.db").length()
+        dbRows = (context.applicationContext as BmsApp).db.samples().count()
+    }
+    GroupedCard {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 15.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Telemetry log", color = c.text, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                Text(
+                    "Kept for 14 days, pruned automatically.",
+                    color = c.text2, fontSize = 12.sp, lineHeight = 16.sp,
+                )
+            }
+            Text(
+                "%.0f MB · %,d rows".format(dbBytes / 1_048_576.0, dbRows),
+                color = c.text2, fontFamily = MonoFont, fontSize = 13.sp,
+            )
+        }
     }
 }
 
