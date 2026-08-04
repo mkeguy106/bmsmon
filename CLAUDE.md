@@ -404,7 +404,7 @@ row can't flash a fresh size against a stale count. `TelemetryRepository.dbSizeB
 file **plus its `-wal`/`-shm` sidecars**, since Room's AUTOMATIC journal mode resolves to WAL
 on-device and `bms.db` alone undercounts by whatever is uncheckpointed — **replaced** an
 `approxSizeBytes()` heuristic (`count() × 80 bytes/row`) that measured logical rows instead of
-physical pages and read **~2.2× low** (183.6 MB estimated vs 403.7 MB actual). Both `Data & logging`
+physical pages and read **~2.2× low** (183.6 MB estimated vs 403.7 MB actual). The 423.5 MB figure above is in decimal units (÷ 1,000,000); 403.7 MB and the app's display are binary (÷ 1,048,576), so the ~19 MB gap is unit convention, not a discrepancy. Both `Data & logging`
 and `Battery saver` now call it, so the two pages can never disagree.
 
 **Dev-workflow gotcha, and here it is a real-world one: `adb install -r` stops the app and nothing
