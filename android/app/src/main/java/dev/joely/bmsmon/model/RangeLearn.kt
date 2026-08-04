@@ -178,18 +178,22 @@ private fun accumulate(rows: List<RangeRow>, zone: ZoneId): Map<LocalDate, DaySt
     return days
 }
 
+/** A band plus whether it was actually learned — false means [bandOf] returned the seed. */
+private data class BandResult(val band: Band, val learned: Boolean)
+
 /** p20/p80 band across per-day values, or [seed] with fewer than [MIN_LEARN_DAYS] days. */
-private fun bandOf(values: List<Float>, seed: Band): Band {
-    if (values.size < MIN_LEARN_DAYS) return seed
+private fun bandOf(values: List<Float>, seed: Band): BandResult {
+    if (values.size < MIN_LEARN_DAYS) return BandResult(seed, false)
     val sorted = values.sorted()
     val hiRaw = percentile(sorted, 0.8f)
     // All-zero(ish) days carry no signal (e.g. a pack staged but parked for days) — an
     // honest band can't be learned from them, and a zero hi would divide to Infinity.
-    if (hiRaw <= 0f) return seed
+    if (hiRaw <= 0f) return BandResult(seed, false)
     val lo = percentile(sorted, 0.2f).coerceAtLeast(0.01f)
     val hi = hiRaw.coerceAtLeast(lo)
     // A degenerate flat band (identical days) still needs width for an honest hi/lo readout.
-    return if (hi - lo < lo * 0.1f) Band(lo * 0.95f, hi * 1.05f) else Band(lo, hi)
+    val band = if (hi - lo < lo * 0.1f) Band(lo * 0.95f, hi * 1.05f) else Band(lo, hi)
+    return BandResult(band, true)
 }
 
 /** Distill [rows] (14-day window, ascending, one pack) into learned parameter bands. */
@@ -206,11 +210,17 @@ fun learnRangeParams(rows: List<RangeRow>, zone: ZoneId, nowMs: Long): RangePara
     // converges on lived "how far does it take me" range, not smooth-cruise physics.
     val whPerMile = qualifying.filter { it.driveM >= OUTING_MIN_DRIVE_M }
         .map { it.disWh / (it.driveM / METERS_PER_MILE) }
+    val whPerDayBand = bandOf(whPerDay, SEED_RANGE_PARAMS.whPerDay)
     return RangeParams(
-        whPerDay = bandOf(whPerDay, SEED_RANGE_PARAMS.whPerDay),
-        activeW = bandOf(activeW, SEED_RANGE_PARAMS.activeW),
-        whPerMile = bandOf(whPerMile, SEED_RANGE_PARAMS.whPerMile),
-        learnedDays = whPerDay.size,
+        whPerDay = whPerDayBand.band,
+        activeW = bandOf(activeW, SEED_RANGE_PARAMS.activeW).band,
+        whPerMile = bandOf(whPerMile, SEED_RANGE_PARAMS.whPerMile).band,
+        // Days that actually TAUGHT a band, not days that merely had coverage. Consumers read
+        // learnedDays == 0 as "this estimate is seed-based" (web efficiency.ts's "vs seed est."
+        // chip), so counting qualifying days here made every background pack claim 12-13 learned
+        // days while carrying pure seeds — a pack that never discharges has 12 h/day of coverage
+        // and zero signal, so bandOf's hiRaw<=0 guard seeds it while the count said otherwise.
+        learnedDays = if (whPerDayBand.learned) whPerDay.size else 0,
         updatedMs = nowMs,
     )
 }

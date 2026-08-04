@@ -197,7 +197,9 @@ class RangeLearnTest {
         val p = learnRangeParams(rows, zone, nowMs = ts(3, 0))
         assertEquals(SEED_RANGE_PARAMS.whPerDay.lo, p.whPerDay.lo, 0f)
         assertEquals(SEED_RANGE_PARAMS.whPerDay.hi, p.whPerDay.hi, 0f)
-        assertEquals(2, p.learnedDays)
+        // Seed bands must report 0 learned days: consumers read learnedDays == 0 as
+        // "this estimate is seed-based".
+        assertEquals(0, p.learnedDays)
     }
 
     @Test fun lowCoverageDayDoesNotQualify() {
@@ -242,7 +244,11 @@ class RangeLearnTest {
         val p = learnRangeParams(rows, zone, nowMs = ts(4, 0))
         assertEquals(SEED_RANGE_PARAMS.whPerDay.lo, p.whPerDay.lo, 0f)
         assertEquals(SEED_RANGE_PARAMS.whPerDay.hi, p.whPerDay.hi, 0f)
-        assertEquals(3, p.learnedDays)
+        // This is exactly the production case found at the 2026-08-04 check-in: all six
+        // background packs reported learned_days 12-13 while carrying pure seed bands, so the
+        // web EfficiencyCard's "vs seed est." chip claimed a real comparison. Coverage-qualifying
+        // days are NOT learned days when the band fell back to seed.
+        assertEquals(0, p.learnedDays)
     }
 
     @Test fun todayUsageSumsSinceLocalMidnight() {
