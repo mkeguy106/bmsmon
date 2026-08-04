@@ -12,6 +12,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import dev.joely.bmsmon.model.Band
 import dev.joely.bmsmon.model.Battery
 import dev.joely.bmsmon.model.BatteryState
+import dev.joely.bmsmon.model.DEFAULT_DIM_LEVEL
 import dev.joely.bmsmon.model.Group
 import dev.joely.bmsmon.model.RangeParams
 import dev.joely.bmsmon.model.Roster
@@ -56,6 +57,10 @@ data class Persisted(
     val lockShowTime: Boolean,
     val lockShowWifi: Boolean,
     val lockShowBattery: Boolean,
+    val lockLowRefresh: Boolean,
+    val lockDimScreen: Boolean,
+    val lockDimLevel: Float,
+    val gpsPauseParked: Boolean,
     val disabledAddrs: Set<String>?,
     val cloudEnabled: Boolean,
     val apiBaseUrl: String?,
@@ -107,6 +112,10 @@ class SettingsStore(private val context: Context) {
         val LOCK_SHOW_TIME = booleanPreferencesKey("lock_show_time")
         val LOCK_SHOW_WIFI = booleanPreferencesKey("lock_show_wifi")
         val LOCK_SHOW_BATTERY = booleanPreferencesKey("lock_show_battery")
+        val LOCK_LOW_REFRESH = booleanPreferencesKey("lock_low_refresh")
+        val LOCK_DIM_SCREEN = booleanPreferencesKey("lock_dim_screen")
+        val LOCK_DIM_LEVEL = floatPreferencesKey("lock_dim_level")
+        val GPS_PAUSE_PARKED = booleanPreferencesKey("gps_pause_parked")
         val DISABLED = stringSetPreferencesKey("disabled_addrs")
         val CLOUD_ENABLED = booleanPreferencesKey("cloud_enabled")
         val API_BASE_URL = stringPreferencesKey("api_base_url")
@@ -166,6 +175,10 @@ class SettingsStore(private val context: Context) {
             lockShowTime = p[K.LOCK_SHOW_TIME] ?: true,
             lockShowWifi = p[K.LOCK_SHOW_WIFI] ?: true,
             lockShowBattery = p[K.LOCK_SHOW_BATTERY] ?: true,
+            lockLowRefresh = p[K.LOCK_LOW_REFRESH] ?: true,
+            lockDimScreen = p[K.LOCK_DIM_SCREEN] ?: false,
+            lockDimLevel = p[K.LOCK_DIM_LEVEL] ?: DEFAULT_DIM_LEVEL,
+            gpsPauseParked = p[K.GPS_PAUSE_PARKED] ?: true,
             disabledAddrs = p[K.DISABLED],
             cloudEnabled = p[K.CLOUD_ENABLED] ?: false,
             apiBaseUrl = p[K.API_BASE_URL],
@@ -218,6 +231,10 @@ class SettingsStore(private val context: Context) {
     suspend fun setLockShowTime(on: Boolean) = context.dataStore.edit { it[K.LOCK_SHOW_TIME] = on }.let {}
     suspend fun setLockShowWifi(on: Boolean) = context.dataStore.edit { it[K.LOCK_SHOW_WIFI] = on }.let {}
     suspend fun setLockShowBattery(on: Boolean) = context.dataStore.edit { it[K.LOCK_SHOW_BATTERY] = on }.let {}
+    suspend fun setLockLowRefresh(on: Boolean) = context.dataStore.edit { it[K.LOCK_LOW_REFRESH] = on }.let {}
+    suspend fun setLockDimScreen(on: Boolean) = context.dataStore.edit { it[K.LOCK_DIM_SCREEN] = on }.let {}
+    suspend fun setLockDimLevel(level: Float) = context.dataStore.edit { it[K.LOCK_DIM_LEVEL] = level }.let {}
+    suspend fun setGpsPauseParked(on: Boolean) = context.dataStore.edit { it[K.GPS_PAUSE_PARKED] = on }.let {}
     suspend fun setDisabled(addrs: Set<String>) = context.dataStore.edit { it[K.DISABLED] = addrs }.let {}
     suspend fun setCloudEnabled(on: Boolean) = context.dataStore.edit { it[K.CLOUD_ENABLED] = on }.let {}
     /** Persist the cloud API base URL, forced to https (see [normalizeApiBaseUrl]). */
