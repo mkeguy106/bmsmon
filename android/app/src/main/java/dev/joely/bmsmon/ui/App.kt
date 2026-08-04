@@ -42,6 +42,10 @@ import dev.joely.bmsmon.BmsDeviceAdminReceiver
 import dev.joely.bmsmon.Screen
 import dev.joely.bmsmon.ble.blePermissions
 import dev.joely.bmsmon.ble.hasBlePermissions
+import dev.joely.bmsmon.model.BRIGHTNESS_RELEASE
+import dev.joely.bmsmon.model.SYSTEM_REFRESH_RATE
+import dev.joely.bmsmon.model.lockBrightness
+import dev.joely.bmsmon.model.lockRefreshRate
 import dev.joely.bmsmon.ui.detail.BatteryDetailScreen
 import dev.joely.bmsmon.ui.history.GroupHealthScreen
 import dev.joely.bmsmon.ui.history.HealthReviewScreen
@@ -88,6 +92,32 @@ fun App(vm: BatteryViewModel) {
         if (keepOn) window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         onDispose { window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+    }
+
+    // Settings › Battery saver: cap the refresh rate and optionally dim, while locked.
+    // Both are window-scoped LayoutParams, so they revert automatically when this window loses
+    // focus or the process dies — unlike the global peak_refresh_rate / system brightness
+    // settings, which would leak our preference into the whole phone.
+    //
+    // Deliberately NOT gated on state.screenHoldAllowed: that latch stops the screen being *held
+    // on*, whereas a lower refresh rate is a saving in every power state.
+    val lockRate = lockRefreshRate(state.locked, state.lockLowRefresh)
+    val lockDim = lockBrightness(state.locked, state.lockDimScreen, state.lockDimLevel)
+    DisposableEffect(window, lockRate, lockDim) {
+        window?.let { w ->
+            w.attributes = w.attributes.apply {
+                preferredRefreshRate = lockRate
+                screenBrightness = lockDim
+            }
+        }
+        onDispose {
+            window?.let { w ->
+                w.attributes = w.attributes.apply {
+                    preferredRefreshRate = SYSTEM_REFRESH_RATE
+                    screenBrightness = BRIGHTNESS_RELEASE
+                }
+            }
+        }
     }
 
     // Match the system-bar icon contrast to the resolved theme. With edge-to-edge the bars are
@@ -261,6 +291,12 @@ fun App(vm: BatteryViewModel) {
         onSetLockShowWifi = vm::setLockShowWifi,
         onSetLockShowBattery = vm::setLockShowBattery,
     )
+    val batterySaverActions = BatterySaverActions(
+        onSetLockLowRefresh = vm::setLockLowRefresh,
+        onSetLockDimScreen = vm::setLockDimScreen,
+        onSetLockDimLevel = vm::setLockDimLevel,
+        onSetGpsPauseParked = vm::setGpsPauseParked,
+    )
     val dataActions = DataActions(
         onSetLogging = vm::setLogging,
         onClearLog = vm::clearLog,
@@ -334,6 +370,7 @@ fun App(vm: BatteryViewModel) {
                         appearance = appearanceActions,
                         display = displayActions,
                         lock = lockActions,
+                        batterySaver = batterySaverActions,
                         data = dataActions,
                         cloud = cloudActions,
                     )

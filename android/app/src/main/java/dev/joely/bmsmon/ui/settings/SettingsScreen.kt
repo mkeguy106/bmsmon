@@ -32,6 +32,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.BatteryFull
+import androidx.compose.material.icons.filled.BatterySaver
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.BrightnessAuto
 import androidx.compose.material.icons.filled.Check
@@ -56,6 +57,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -71,6 +73,7 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -80,11 +83,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.joely.bmsmon.ALERT_THRESHOLDS
 import dev.joely.bmsmon.Appearance
+import dev.joely.bmsmon.BmsApp
 import dev.joely.bmsmon.UiState
+import dev.joely.bmsmon.data.formatDbSizeMb
 import dev.joely.bmsmon.fractionToLux
 import dev.joely.bmsmon.luxToFraction
 import dev.joely.bmsmon.model.BatteryGroup
 import dev.joely.bmsmon.model.GaugeSide
+import dev.joely.bmsmon.model.MIN_DIM_LEVEL
 import dev.joely.bmsmon.model.STAGE_HOLD_OPTIONS_MIN
 import dev.joely.bmsmon.model.TempThresholds
 import dev.joely.bmsmon.model.TempUnit
@@ -94,6 +100,7 @@ import dev.joely.bmsmon.model.formatTemp
 import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.ui.AlertActions
 import dev.joely.bmsmon.ui.AppearanceActions
+import dev.joely.bmsmon.ui.BatterySaverActions
 import dev.joely.bmsmon.ui.CloudActions
 import dev.joely.bmsmon.ui.DataActions
 import dev.joely.bmsmon.ui.DisplayActions
@@ -109,6 +116,8 @@ import dev.joely.bmsmon.ui.theme.RegenGreen
 import dev.joely.bmsmon.ui.theme.TempCool
 import dev.joely.bmsmon.ui.theme.ThemeSwatches
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 private fun shortMac(addr: String): String = addr.removePrefix("C8:47:80:")
 
@@ -116,8 +125,8 @@ private fun shortMac(addr: String): String = addr.removePrefix("C8:47:80:")
 private val CatPurple = Color(0xFF8B6BC9)
 private val CatBlue = Color(0xFF3E86C9)
 
-/** The nine category detail pages the hub drills into. */
-private enum class SettingsPage { Monitoring, Alerts, Temperature, Groups, Appearance, Display, Lock, Data, About, Cloud }
+/** The category detail pages the hub drills into. */
+private enum class SettingsPage { Monitoring, Alerts, Temperature, Groups, Appearance, Display, Lock, BatterySaver, Data, About, Cloud }
 
 @Composable
 fun SettingsScreen(
@@ -129,6 +138,7 @@ fun SettingsScreen(
     appearance: AppearanceActions,
     display: DisplayActions,
     lock: LockActions,
+    batterySaver: BatterySaverActions,
     data: DataActions,
     cloud: CloudActions,
 ) {
@@ -166,6 +176,15 @@ fun SettingsScreen(
         }
         SettingsPage.Lock -> DetailScaffold("Lock Screen", { page = null }) {
             LockScreenContent(state, lock.onSetLockShowTime, lock.onSetLockShowWifi, lock.onSetLockShowBattery)
+        }
+        SettingsPage.BatterySaver -> DetailScaffold("Battery Saver", { page = null }) {
+            BatterySaverContent(
+                state,
+                batterySaver.onSetLockLowRefresh,
+                batterySaver.onSetLockDimScreen,
+                batterySaver.onSetLockDimLevel,
+                batterySaver.onSetGpsPauseParked,
+            )
         }
         SettingsPage.Data -> DetailScaffold("Data & Logging", { page = null }) {
             DataLoggingContent(state, data.onSetLogging, data.onClearLog)
@@ -250,6 +269,10 @@ private fun SettingsHub(
                 CategoryRow(
                     Icons.Filled.Lock, c.text3, "Lock screen", lockValue(state),
                 ) { onOpen(SettingsPage.Lock) }
+                RowHairline()
+                CategoryRow(
+                    Icons.Filled.BatterySaver, CatBlue, "Battery saver", batterySaverValue(state),
+                ) { onOpen(SettingsPage.BatterySaver) }
             }
 
             GroupedCard {
@@ -293,6 +316,12 @@ private fun lockValue(state: UiState): String {
     }
     return if (parts.isEmpty()) "Off" else parts.joinToString(" · ")
 }
+
+private fun batterySaverValue(state: UiState): String = buildList {
+    if (state.lockLowRefresh) add("60 Hz on lock")
+    if (state.lockDimScreen) add("dim on lock")
+    if (state.gpsPauseParked) add("GPS pauses when parked")
+}.ifEmpty { listOf("off") }.joinToString(" · ")
 
 private fun cloudValue(state: UiState): String =
     if (state.enrolled) "Enrolled" else "Not set up"
@@ -1254,7 +1283,119 @@ private fun LockToggleRow(label: String, selected: Boolean, onClick: () -> Unit)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// 7 · Data & Logging
+// 7 · Battery saver
+// ────────────────────────────────────────────────────────────────────────────
+
+/** Size + row count for the "Local database" diagnostics row, resolved together so the row
+ *  commits both at once instead of flashing a fresh size against a stale (zero) row count. */
+private data class DbStats(val bytes: Long = 0L, val rows: Long = 0L)
+
+@Composable
+private fun ColumnScope.BatterySaverContent(
+    state: UiState,
+    onSetLockLowRefresh: (Boolean) -> Unit,
+    onSetLockDimScreen: (Boolean) -> Unit,
+    onSetLockDimLevel: (Float) -> Unit,
+    onSetGpsPauseParked: (Boolean) -> Unit,
+) {
+    val c = Bm.colors
+    Text(
+        "Measured savings on this phone. The screen is by far the biggest drain, then GPS — " +
+            "Bluetooth is under 2% and is deliberately left alone.",
+        color = c.text2, fontSize = 12.sp, lineHeight = 17.sp,
+    )
+
+    SectionLabel("While locked")
+    GroupedCard {
+        ToggleRow(
+            "Lower refresh rate on lock",
+            "Hold the display at 60 Hz instead of 90 while locked. Saves about 18 mA and is " +
+                "invisible on a screen that updates once a second.",
+            state.lockLowRefresh, onSetLockLowRefresh,
+        )
+        RowHairline(inset = 0.dp)
+        ToggleRow(
+            "Dim screen while locked",
+            "Off by default: reading pack state at a glance outdoors matters more than the " +
+                "saving. Turn on only if you can still read it in daylight.",
+            state.lockDimScreen, onSetLockDimScreen,
+        )
+    }
+
+    if (state.lockDimScreen) {
+        SectionLabel("Dim level")
+        GroupedCard {
+            Column(Modifier.padding(horizontal = 15.dp, vertical = 12.dp)) {
+                // Drag position lives here so every frame is a local state write, not a DataStore
+                // disk write; it's keyed on state.lockDimLevel so it re-syncs whenever the backing
+                // value changes from anywhere else (persisted restore, a future remote setter,
+                // etc.) instead of freezing at whatever it was on first composition. The key only
+                // actually changes on release (or an external update) — never mid-drag, since we
+                // don't call onSetLockDimLevel until then — so dragging itself never gets reset by
+                // the ~1.5 s telemetry-driven recompositions this screen otherwise sees.
+                var dragLevel by remember(state.lockDimLevel) { mutableStateOf(state.lockDimLevel) }
+                Text(
+                    "${(dragLevel * 100).roundToInt()}%",
+                    color = c.text, fontSize = 15.sp, fontWeight = FontWeight.Medium,
+                )
+                Slider(
+                    value = dragLevel,
+                    onValueChange = { dragLevel = it },
+                    onValueChangeFinished = { onSetLockDimLevel(dragLevel) },
+                    valueRange = MIN_DIM_LEVEL..1f,
+                )
+            }
+        }
+    }
+
+    SectionLabel("Location")
+    GroupedCard {
+        ToggleRow(
+            "Pause GPS while parked",
+            "The chair can't move without drawing current, so when nothing has discharged for " +
+                "five minutes GPS is switched off. Saves about 22 mA and skips the indoor fixes " +
+                "the range estimate ignores anyway.",
+            state.gpsPauseParked, onSetGpsPauseParked,
+        )
+    }
+
+    // Diagnostic only. Retention already runs (14-day samples, 7-day/20 MB raw frames) and the
+    // SQLite freelist measured 0 pages, so there is nothing to reclaim — this row exists so the
+    // size stays visible if that ever stops being true. Size + row count are resolved together
+    // off-main (TelemetryRepository.dbSizeBytes() covers the WAL/SHM sidecars, not just the main
+    // file — same call the Data & Logging page uses, so the two pages never disagree) and
+    // committed in one state write so the row can't flash a stale "0 rows" against a fresh size.
+    SectionLabel("Local database")
+    val context = LocalContext.current
+    var dbStats by remember { mutableStateOf(DbStats()) }
+    LaunchedEffect(Unit) {
+        val app = context.applicationContext as BmsApp
+        dbStats = withContext(Dispatchers.IO) {
+            DbStats(bytes = app.engine.history.dbSizeBytes(), rows = app.db.samples().count())
+        }
+    }
+    GroupedCard {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 15.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Telemetry log", color = c.text, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                Text(
+                    "Kept for 14 days, pruned automatically.",
+                    color = c.text2, fontSize = 12.sp, lineHeight = 16.sp,
+                )
+            }
+            Text(
+                "${formatDbSizeMb(dbStats.bytes)} · %,d rows".format(dbStats.rows),
+                color = c.text2, fontFamily = MonoFont, fontSize = 13.sp,
+            )
+        }
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// 8 · Data & Logging
 // ────────────────────────────────────────────────────────────────────────────
 
 @Composable
@@ -1306,7 +1447,7 @@ private fun RowScope.StatTile(label: String, value: String, sub: String, valueCo
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// 8 · About
+// 9 · About
 // ────────────────────────────────────────────────────────────────────────────
 
 @Composable

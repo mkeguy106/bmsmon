@@ -51,6 +51,7 @@ import dev.joely.bmsmon.model.applyDisabled
 import dev.joely.bmsmon.model.groupActivity
 import dev.joely.bmsmon.model.groupOf
 import dev.joely.bmsmon.model.groupViews
+import dev.joely.bmsmon.model.gpsShouldRun
 import dev.joely.bmsmon.model.isRegen
 import dev.joely.bmsmon.model.powerDecision
 import dev.joely.bmsmon.model.seedLowPower
@@ -219,6 +220,17 @@ class MonitorEngine(
     /** Begin monitoring every pack in [roster]. [seed] pre-populates the fleet (dimmed until live). */
     fun start(roster: Roster, seed: Map<String, BatteryStatus>, loggingEnabled: Boolean) {
         if (_state.value.monitoring) return
+        // Reset GPS intent/state/request together through shutdownGps() rather than folding a
+        // bare `gpsActive = false` into the state copy below. A bare state reset only touches
+        // MonitorState — if `gpsActive` were ever false while LocationSource was still
+        // `requesting` (unreachable today, but exactly the desync the gate can't recover from),
+        // applyGpsGate's `if (_state.value.gpsActive == active) return` early-out would then
+        // never call locationSource.stop(), i.e. a silent GNSS drain. shutdownGps() is safe to
+        // call before a session begins: gpsWanted is already false pre-start, gpsActive is
+        // already false (a fresh engine's default MonitorState(), or stop()'s explicit reset),
+        // and LocationSource.stop() no-ops when it isn't requesting — so this is a genuine no-op
+        // on the common path and a real fix on the desynced one.
+        shutdownGps()
         this.roster = roster
         logging = loggingEnabled
         _state.update { st ->
@@ -229,7 +241,6 @@ class MonitorEngine(
                 lastDischargeAt = emptyMap(),
                 peakPowerW = 0f,
                 peakCurrentA = 0f,
-                gpsActive = false,
                 tailMinByAddress = emptyMap(),
                 tailRunEndByAddress = emptyMap(),
             )
@@ -277,6 +288,9 @@ class MonitorEngine(
         setStage(plan.stageAddrs)
         setAlertConfig(plan.alertConfig)
         setTempAlertConfig(plan.tempAlertsEnabled, plan.tempThresholdsByProfile, plan.tempUnit)
+        // Pause setting first, so the gate's first evaluation is already correct and GPS is never
+        // started only to be stopped again (which would also churn the service's FGS type).
+        setGpsPauseParked(plan.gpsPauseParked)
         setGpsActive(plan.gpsActive)
         return true
     }
@@ -301,7 +315,7 @@ class MonitorEngine(
         rangeJob?.cancel()
         rangeJob = null
         ble.stop()
-        locationSource.stop()
+        shutdownGps()
         alertNotifier.clear()
         stageAddrs = emptySet()
         _state.update { st ->
@@ -334,6 +348,10 @@ class MonitorEngine(
             st.copy(fleet = fleet, regenAddrs = regen)
         }
         ble.setDisabled(addresses)
+        // "Disconnect all" cancels every worker, so onPoll — the gate's primary driver — may never
+        // fire again while monitoring stays on. Re-evaluate here rather than wait for the range
+        // loop's 5-minute tick.
+        applyGpsGate(now())
     }
     fun kickAll() = ble.kickAll()
 
@@ -422,10 +440,74 @@ class MonitorEngine(
         }
     }
 
-    /** Start/stop GPS capture; cached fixes are attached to each upload while active. */
+    // What the cloud settings WANT (monitoring && gpsEnabled && enrolled && cloudEnabled), before
+    // the parked gate subtracts from it. Kept separate so the gate can flip GPS off and back on
+    // without losing the user's intent.
+    @Volatile private var gpsWanted = false
+    @Volatile private var gpsPauseParked = true
+
+    /** Record whether GPS capture is wanted at all; the parked gate decides if it actually runs. */
     fun setGpsActive(active: Boolean) {
+        gpsWanted = active
+        applyGpsGate(now())
+    }
+
+    /** Settings › Battery saver: pause GNSS while no base has discharged recently. */
+    fun setGpsPauseParked(on: Boolean) {
+        gpsPauseParked = on
+        applyGpsGate(now())
+    }
+
+    /**
+     * Fold intent + parked state into the actual GPS run state. The engine stays the single
+     * writer of [MonitorState.gpsActive].
+     *
+     * The chair cannot move without discharging a pack, so a parked chair's fixes teach the range
+     * learner nothing (its discharge gate discards them) while GNSS costs ~22 mA. Full stop rather
+     * than a drop to balanced accuracy: coarse fixes are what produced the 2026-07-13 phantom map
+     * spikes, so we would rather capture nothing than capture noise.
+     *
+     * Synchronized because there are several callers on different threads — the ViewModel (main),
+     * the BLE poll callback (Dispatchers.IO) and the range loop — and the read-decide-act has to be
+     * atomic or an interleaving could leave `gpsActive = false` with the fused request still
+     * registered, i.e. exactly the silent GNSS drain this gate exists to remove. [shutdownGps]
+     * takes the same lock for the same reason. Lock order is always engine -> LocationSource, and
+     * LocationSource never calls back in, so this cannot deadlock.
+     */
+    @Synchronized
+    private fun applyGpsGate(now: Long) {
+        val active = gpsShouldRun(
+            wanted = gpsWanted,
+            pauseEnabled = gpsPauseParked,
+            lastDischargeMs = _state.value.lastDischargeAt.values.maxOrNull(),
+            nowMs = now,
+        )
+        if (_state.value.gpsActive == active) return
         _state.update { it.copy(gpsActive = active) }
         if (active) locationSource.start() else locationSource.stop()
+    }
+
+    /**
+     * Monitoring is ending: drop the GPS intent and the request together, under the gate's lock.
+     *
+     * This has to be one atomic step, not three loose ones in [stop]. `ble.stop()` cancels the
+     * control-loop job, but `onPoll` is a plain call from the loop body and cancellation cannot
+     * preempt it — so a gate call can already be mid-flight, having decided `active = true`. Doing
+     * the teardown unsynchronized lets that call's `locationSource.start()` land *after* [stop],
+     * leaving `gpsActive = false` in the state with the fused request still registered: a silent
+     * high-accuracy GNSS drain with monitoring off. Holding the lock forces the two to order —
+     * either the gate runs first (starts, and is stopped here a moment later) or after (reads
+     * `gpsWanted = false` and no-ops).
+     *
+     * Clearing the intent also matters on its own: a later `setGpsPauseParked(false)` (the setting
+     * is reachable with monitoring off) would otherwise re-evaluate a stale `wanted = true` and
+     * start GNSS with nothing monitoring. [start] has the ViewModel push both again.
+     */
+    @Synchronized
+    private fun shutdownGps() {
+        gpsWanted = false
+        _state.update { it.copy(gpsActive = false) }
+        locationSource.stop()
     }
 
     /**
@@ -530,6 +612,8 @@ class MonitorEngine(
                 peakCurrentA = peakC,
             )
         }
+        // lastDischargeAt just moved; re-derive whether the chair still counts as driving.
+        applyGpsGate(now)
         val fix = if (_state.value.gpsActive) locationSource.current() else null
         // Upload GPS only when the fix is new for this pack (bandwidth — see isNewFixForPack).
         val uploadFix = fix?.takeIf { isNewFixForPack(lastGpsFixUploaded[addr], it.timeMs) }
@@ -608,6 +692,15 @@ class MonitorEngine(
         rangeJob?.cancel()
         rangeJob = scope.launch {
             while (isActive) {
+                // Second driver for the parked-GPS gate, run FIRST — before rangePass(), not
+                // after. onPoll is the primary driver, but it only fires when a frame arrives —
+                // "Disconnect all", Bluetooth off, or every pack out of range (the phone leaves
+                // the chair) stall it indefinitely with monitoring still on, freezing
+                // lastDischargeAt and pinning GNSS on. rangePass() pulls a 14-day window for
+                // every pack on its 6-hourly learn pass (up to ~800k rows/pack), so gating after
+                // it would tack that pass's duration onto this loop's period on exactly those
+                // passes; gating first keeps this loop's period equal to PARKED_HOLD_MS.
+                runCatching { applyGpsGate(now()) }
                 runCatching { rangePass() }
                 delay(5 * 60_000L)
             }

@@ -276,6 +276,146 @@ consequences worth knowing: a monitoring stop→start inside the 5-14% band re-s
 only ever biases toward screen-off), and if you ever persist the latch, keep the seed as the
 fallback for a missing value.
 
+**In-app battery saver (`Settings › Battery saver`).** Three toggles, each sized from an on-device
+measurement *before* it was designed (Pixel 6, `dumpsys batterystats` over a 6 h 33 m / 2 580 mAh
+session, 2026-08-03): screen **908 mAh ≈ 139 mA**, cpu 275 mAh ≈ 42 mA, mobile_radio 186 mAh
+≈ **28.5 mA** burned while `OUT_OF_SERVICE` (fixed out-of-band with airplane mode, not by the app),
+gnss **143 mAh ≈ 22 mA**, wifi 108 mAh ≈ 16.5 mA, GPU 57.3, bluetooth **19.3 mAh ≈ 3 mA**, TPU 18.4.
+The trigger was finding the phone net-discharging at **−174 mA while sitting on its wireless
+charger** at 11% SOC, ~3 h from dead. Pure logic in `model/BatterySaver.kt` — `lockRefreshRate` /
+`lockBrightness` / `gpsParked` / `gpsShouldRun`, no Android imports, 15 unit tests in
+`BatterySaverTest.kt`, same pure-and-total shape as `PowerPolicy`:
+
+- **Lower refresh rate on lock** — default **ON**. `preferredRefreshRate = LOCK_REFRESH_HZ` (60f)
+  on the activity window while locked. **90 → 60 Hz measured ~18 mA**: the raw net delta was
+  28.7 mA, but 11 mA of that was the charging pad opening up as the phone cooled (237 → 248 mA
+  input), so track pad input separately or the thermal feedback loop gets miscredited to the
+  refresh rate. **60 → 30 Hz measured NO gain — it came out slightly *worse*, within noise**, with
+  pad input and temperature flat: Android's idle frame-rate override was already dropping the
+  render rate on a stage that only redraws every 1.5 s, so nearly every frame is idle and capping
+  the *peak* is where the whole 18 mA lives. 30 Hz *is* reachable on this panel (it shows up as a
+  `renderFrameRate` of 30.0, an override inside mode 1 rather than a mode switch) — it is rejected for lack of benefit, not
+  lack of capability, and rejecting it also spares a `compileSdk` bump to 35 for
+  `View.setRequestedFrameRate`. **Do not go sub-60 without a fresh measurement showing otherwise.**
+  Deliberately **not** gated on `screenHoldAllowed`: that latch exists to stop the screen being
+  *held on*, whereas a lower refresh rate is a saving in every power state, so gating it could only
+  ever cost battery.
+- **Dim screen while locked** — default **OFF by explicit decision**: reading pack state at a
+  glance outdoors outranks the saving, so this is opt-in. A slider (`lockDimLevel`, default
+  `DEFAULT_DIM_LEVEL` 0.30) rather than a fixed level, because the right value depends on the
+  daylight the user actually rides in — floored at `MIN_DIM_LEVEL` **5%** so a slider dragged to
+  zero can never black out a chair-mounted display. The slider persists once on release
+  (`onValueChangeFinished`), keyed on the stored value so the ~1.5 s telemetry recompositions on
+  that screen can't reset a drag.
+- **Pause GPS while parked** — default **ON**. The chair cannot move without discharging a pack —
+  the same fact the range learner's discharge gate already rests on — so a parked chair's fixes
+  cost 22 mA to produce data the learner throws away. Parked indoors the fixes are junk anyway:
+  **53.79% location-failure rate**, 4 satellites, mean C/N₀ 24 dB-Hz, last fix accuracy 39 m.
+  `gpsParked()` reads the newest entry of the engine's **existing** `lastDischargeAt` map (no new
+  discharge threshold is introduced) and calls it parked after `PARKED_HOLD_MS` (5 min), boundary
+  inclusive. `groupActivity()`'s 0.05 A epsilon needs no tuning: the BMS's ~1.04 A reporting
+  deadband means any epsilon in (0, 1.04) is equivalent, the same structural guarantee the regen
+  detector relies on. **Full stop, not a drop to balanced accuracy** — coarse fixes are what caused
+  the 2026-07-13 phantom map spikes, so we would rather capture nothing than capture noise that
+  gets uploaded and drawn before being discarded. Accepted cost: reacquisition, **TTFF 292 s mean
+  indoors** (outdoor TTFF is far better, and the learner's 0.5-mi outing gate is well above the
+  error a lost first minute introduces). Two caveats on the 22 mA: it is GNSS's measured share of
+  that session, and **the saving from pausing it was never measured end-to-end** — the phone sat
+  inside its low-battery latch throughout testing, so GNSS was already in balanced mode. And the
+  gate arms on *any* base's discharge, so a spare discharging on a charger at home holds GNSS on;
+  that is the first knob to turn if the saving ever measures low.
+
+Both display effects are window-scoped `WindowManager.LayoutParams` set in a `DisposableEffect` in
+`ui/App.kt`, so they revert on focus loss or process death — **nothing writes the system-wide
+`peak_refresh_rate` or the system brightness.** (If a device ever seems to ignore the app's
+preference, check for leftover `settings system peak_refresh_rate`/`min_refresh_rate` overrides from
+manual testing; those mask it.)
+
+**Bluetooth was deliberately excluded.** Slowing the BLE poll cadence is the intuitive lever and it
+is worth ~3 mA — **1.7% of drain**. It would degrade the monitoring this app exists for to save
+nothing. Do not pull it.
+
+`MonitorEngine` splits GPS **intent** from **effect**: `gpsWanted` (`monitoring && gpsEnabled &&
+enrolled && cloudEnabled`, pushed by the ViewModel) is held separately from `applyGpsGate()`, which
+folds in the parked state and remains the **single writer** of `gpsActive`. `applyGpsGate` is
+`@Synchronized` because several threads drive it — the ViewModel (main), the BLE poll callback
+(`Dispatchers.IO`), the range loop — and the read-decide-act must be atomic, or an interleaving can
+leave `gpsActive = false` with the fused request still registered: exactly the silent GNSS drain the
+gate exists to remove. **Three gate drivers, all load-bearing:** the BLE poll (primary, but it only
+fires when a frame arrives), `setDisabled()` (**"Disconnect all"** cancels every worker, so `onPoll`
+may never fire again with monitoring still on), and `startRangeLoop()`'s **5-minute tick** (Bluetooth
+off or every pack out of range stalls `onPoll` indefinitely, freezing `lastDischargeAt` and pinning
+GNSS on; the loop's period equals `PARKED_HOLD_MS`, bounding the overshoot at one hold). Teardown
+goes through `shutdownGps()`, which drops intent and request together under the same lock —
+`ble.stop()` cancels the control-loop job but cannot preempt an in-flight `onPoll`, so an
+unsynchronized teardown lets that call's `locationSource.start()` land *after* `stop()`.
+`MonitoringService` re-derives its FGS type from `gpsActive`, adding/removing
+`FOREGROUND_SERVICE_TYPE_LOCATION` at runtime as the gate flips; three real 16 ↔ 24 type changes
+were observed on-device with no `SecurityException` and a stable pid, though the strict "type
+changed while the process was already backgrounded" timing was only confirmed for one of the
+three — the settings pipeline resolves faster than an adb tap-then-HOME can beat.
+
+**The parked gate also switches GPS off during vehicle transit. This is inherent to the heuristic,
+not a bug, and the response is an open decision.** The proxy is "no base has discharged for
+5 minutes", and in the van or on the train **the chair draws nothing** (user-confirmed — it is
+precisely why the range learner's discharge gate excludes vehicle rides). So transport reads as
+*parked* and GNSS stops. Two shipped behaviors degrade: **Journey loses real transit legs** — the
+"dashed transit legs" described under WebUI v2 below came from GPS moving while no pack discharged,
+and with GPS paused the map bridges the hole with a straight `inferred` dashed line (the Kalman
+pass's `COAST_MAX_MS` handling) instead of the traced route; graceful, but the real path is gone.
+And **the live share marker freezes at the departure point for the whole ride** — a guest following
+a share link sees the chair greyed at the origin with its age, and "Point me there" would send them
+where the chair *was*, which is the sharper problem since following the chair live is the share
+feature's entire purpose. Options considered, **none chosen**: (a) accept it — the learner never
+used those miles anyway, and a dashed straight line is arguably what a transit leg should look
+like; (b) lengthen `PARKED_HOLD_MS` to ~20 min — one constant, covers short hops, still breaks on
+long journeys, and gives back most of the saving during frequent stops; (c) gate on phone motion via
+activity recognition or the significant-motion sensor — technically the correct fix and nearly free
+in power (sensors measured 0.03 mAh over 6.5 h), but it needs `ACTIVITY_RECOGNITION` and real new
+scope; (d) suppress the pause while a share is live — **rejected**, the cloud channel is
+deliberately one-way phone→server and this would invert that architecture. **No server or WebUI
+change was required:** every GPS read path already filters `lat IS NOT NULL AND lon IS NOT NULL`
+(`server/app/db/queries.py:539`, `:623`), `lat`/`lon`/`gps_accuracy_m` have always been nullable
+(the phone already uploads null coordinates whenever GPS is off or no fix is cached), the live
+marker already greys at 120 s to "last known + age", and the server suite passes unchanged
+(185 tests). Gaps were already first-class on the web side.
+
+**Android's own Battery Saver is deliberately not relied on.** Read off the device (`dumpsys power`,
+Android 17 / SDK 37) rather than off the generic feature list, almost every lever is already pulled
+or does not apply: it carries **no refresh-rate flag at all** and the display reports
+`lowPowerSupportedModes=[]`; `enable_brightness_adjustment=false`, so it **does not dim** (the
+`adjust_brightness_factor=0.5` is inert); `disable_aod` and `enable_night_mode` are already in our
+desired state; `enable_quick_doze` only fires with the screen off and we hold it on;
+`force_all_apps_standby`/`force_background_check`/`enable_firewall` are real but throttle *other*
+apps, and our foreground service is exempt; and `location_mode=3` (foreground-only) **actively
+breaks** backgrounded GPS capture. Hence an in-app section doing the specific things that measurably
+help this app.
+
+**Local DB size is not a problem and needs no new pruning.** Retention already runs and works:
+`SAMPLE_RETENTION_DAYS = 14`, raw frames 7 days / 20 MB (`RAW_FRAME_RETENTION_DAYS` /
+`RAW_FRAME_MAX_BYTES`), applied by `TelemetryRepository.prune()` from `maybePrune()` every 200
+inserts. Measured 2026-08-03: the SQLite header reads 103 389 pages × 4096 = **423.5 MB with a
+freelist of 0 pages** — nothing is reclaimable, `VACUUM` would free nothing, the file is at a
+steady-state high-water mark reusing pages rather than growing unbounded — against **212 GB free**
+(`/data` 8% used). Shortening retention would actively harm the product: `RangeLearn` reads the
+**14-day** window and needs `MIN_LEARN_DAYS = 3`, and the Wh/mile band is still converging off seed.
+`Settings › Battery saver` shows the size and row count read-only, resolved together off-main so the
+row can't flash a fresh size against a stale count. `TelemetryRepository.dbSizeBytes()` — the main
+file **plus its `-wal`/`-shm` sidecars**, since Room's AUTOMATIC journal mode resolves to WAL
+on-device and `bms.db` alone undercounts by whatever is uncheckpointed — **replaced** an
+`approxSizeBytes()` heuristic (`count() × 80 bytes/row`) that measured logical rows instead of
+physical pages and read **~2.2× low** (183.6 MB estimated vs 403.7 MB actual). The 423.5 MB figure above is in decimal units (÷ 1,000,000); 403.7 MB and the app's display are binary (÷ 1,048,576), so the ~19 MB gap is unit convention, not a discrepancy. Both `Data & logging`
+and `Battery saver` now call it, so the two pages can never disagree.
+
+**Dev-workflow gotcha, and here it is a real-world one: `adb install -r` stops the app and nothing
+relaunches it.** The phone *is* the wheelchair's battery monitor, so an install that leaves the
+process dead is downtime, not a dev inconvenience — during this build the chair's monitoring sat
+dead until it was manually restarted. Always follow an install with
+`adb shell am start -n dev.joely.bmsmon/.MainActivity` and confirm with
+`adb shell 'ps -A | grep bmsmon'`. Note that a `monkey` launcher intent
+(`adb shell monkey -p dev.joely.bmsmon -c android.intent.category.LAUNCHER 1`) reports
+`Events injected: 1` but does **not** start this app on this device.
+
 **Alerts (capacity + temperature):** the stage flashes a `DangerOverlay` that *names* the alert
 type (`BATTERY CAPACITY` / `TEMPERATURE`) and fires headless notifications via `AlertNotifier`
 (critical channel = sound+vibration). Pure logic in `model/Alerts.kt` (SOC bands; a threshold of

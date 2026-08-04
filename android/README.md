@@ -13,8 +13,9 @@ optional cloud upload.
   **low-battery alert** wash (amber/red) until acknowledged.
 - **Settings** — Monitoring & stage, **Alerts** (full 5% threshold ladder 95→5, configurable
   critical level, reset to defaults), Battery groups, Appearance & color, Display & units, Lock
-  screen, Data & logging, **Cloud sync** (enroll via QR, Report to cloud, **Send GPS location**),
-  About. Everything persists via DataStore.
+  screen, **Battery saver** (60 Hz on lock, optional dim with a 5%-floored slider, pause GPS while
+  parked, read-only local DB size), Data & logging, **Cloud sync** (enroll via QR, Report to cloud,
+  **Send GPS location**), About. Everything persists via DataStore.
 
 ## Safety (critical)
 The app is **read-only by construction**. `ble/BmsProtocol.kt` frames ONLY the whitelisted
@@ -44,12 +45,21 @@ Requires JDK 17 and an Android SDK with platform 34 (`ANDROID_HOME`/`ANDROID_SDK
 ./gradlew :app:assembleDebug          # build
 ./gradlew :app:testDebugUnitTest      # parser + safety tests
 adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb shell am start -n dev.joely.bmsmon/.MainActivity   # REQUIRED — install -r leaves it stopped
+adb shell 'ps -A | grep bmsmon'                        # confirm it came back
 ```
 
-Wireless install/test over ADB (phone in TCP mode):
+**`adb install -r` stops the app and nothing relaunches it.** On the test phone this app is a power
+wheelchair's live battery monitor, so an install that leaves the process dead is real downtime, not
+a dev inconvenience — always `am start` afterwards and confirm the process is back before walking
+away. `adb shell monkey -p dev.joely.bmsmon -c android.intent.category.LAUNCHER 1` reports
+`Events injected: 1` but does **not** start this app on this device.
+
+Wireless install/test over ADB (phone in TCP mode — same `am start` rule applies):
 ```bash
 adb connect <phone-ip>:5555
 adb -s <phone-ip>:5555 install -r app/build/outputs/apk/debug/app-debug.apk
+adb -s <phone-ip>:5555 shell am start -n dev.joely.bmsmon/.MainActivity
 ```
 
 - `minSdk 26`, `compileSdk`/`targetSdk 34`, AGP 8.2.2, Kotlin 1.9.22, Compose BOM 2024.02.02.

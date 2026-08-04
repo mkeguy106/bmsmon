@@ -22,6 +22,26 @@ import java.util.concurrent.atomic.AtomicReference
 data class GpsFix(val lat: Double, val lon: Double, val accuracyM: Float?, val timeMs: Long)
 
 /**
+ * A `lastLocation` fix older than this is dropped rather than seeded into the cache. Before the
+ * parked-GPS gate, [LocationSource.start] ran once per monitoring session; now it runs at every
+ * park→drive transition, so `lastLocation` can hand back an arbitrarily old pre-park fix — which
+ * would otherwise get attached to every locally logged Room sample until a real GNSS fix arrives
+ * (up to the measured 292 s indoor TTFF), writing known-wrong coordinates into field telemetry.
+ * 120 s comfortably exceeds normal fix cadence (2-20 s) while staying well under that TTFF, so a
+ * genuinely fresh idle fix is never rejected.
+ */
+private const val MAX_CACHED_FIX_AGE_MS = 120_000L
+
+/**
+ * True when a fix timestamped [fixTimeMs] is too old to trust as "now". Both timestamps are
+ * wall-clock epoch ms: [android.location.Location.getTime] returns UTC epoch ms — NOT
+ * `SystemClock.elapsedRealtime()`, which is boot-relative — so it is compared against
+ * `System.currentTimeMillis()`, the matching wall clock, not a monotonic one.
+ */
+internal fun isFixTooStale(fixTimeMs: Long, nowMs: Long, maxAgeMs: Long = MAX_CACHED_FIX_AGE_MS): Boolean =
+    nowMs - fixTimeMs > maxAgeMs
+
+/**
  * Thin wrapper over the fused location provider. Holds the latest fix in an atomic reference;
  * [current] is read on each telemetry upload. Safe to call [start]/[stop] repeatedly.
  */
@@ -46,7 +66,9 @@ class LocationSource(private val context: Context) {
         if (requesting || !hasLocationPermission(context)) return
         requesting = true
         client.lastLocation.addOnSuccessListener { loc ->
-            loc?.let { cache.set(GpsFix(it.latitude, it.longitude, if (it.hasAccuracy()) it.accuracy else null, it.time)) }
+            loc?.takeIf { !isFixTooStale(it.time, System.currentTimeMillis()) }?.let {
+                cache.set(GpsFix(it.latitude, it.longitude, if (it.hasAccuracy()) it.accuracy else null, it.time))
+            }
         }
         requestUpdates()
     }

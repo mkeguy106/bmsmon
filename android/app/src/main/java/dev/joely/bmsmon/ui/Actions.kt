@@ -98,6 +98,14 @@ data class LockActions(
     val onSetLockShowBattery: (Boolean) -> Unit,
 )
 
+/** Settings › Battery saver. */
+data class BatterySaverActions(
+    val onSetLockLowRefresh: (Boolean) -> Unit,
+    val onSetLockDimScreen: (Boolean) -> Unit,
+    val onSetLockDimLevel: (Float) -> Unit,
+    val onSetGpsPauseParked: (Boolean) -> Unit,
+)
+
 /** Settings › Data & logging. */
 data class DataActions(
     val onSetLogging: (Boolean) -> Unit,

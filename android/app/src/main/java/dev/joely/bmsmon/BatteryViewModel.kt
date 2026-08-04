@@ -11,6 +11,7 @@ import dev.joely.bmsmon.sensor.AmbientLightSensor
 import dev.joely.bmsmon.data.PackHealth
 import dev.joely.bmsmon.data.SettingsStore
 import dev.joely.bmsmon.data.buildPackHealth
+import dev.joely.bmsmon.data.formatDbSizeMb
 import dev.joely.bmsmon.data.peakPool
 import dev.joely.bmsmon.ble.profile.BatteryProfile
 import dev.joely.bmsmon.ble.profile.ProfileRegistry
@@ -29,6 +30,7 @@ import dev.joely.bmsmon.model.pickStageAlert
 import dev.joely.bmsmon.model.RangeParams
 import dev.joely.bmsmon.model.CAP_SEVERITY_CRITICAL
 import dev.joely.bmsmon.model.CAP_SEVERITY_WARNING
+import dev.joely.bmsmon.model.DEFAULT_DIM_LEVEL
 import dev.joely.bmsmon.model.SEVERITY_NONE
 import dev.joely.bmsmon.model.nextChargeHold
 import dev.joely.bmsmon.model.tempSeverity
@@ -177,6 +179,12 @@ data class UiState(
     val lockShowTime: Boolean = true,
     val lockShowWifi: Boolean = true,
     val lockShowBattery: Boolean = true,
+    // Settings › Battery saver. Defaults are a user decision: refresh-rate cap and GPS-pause on,
+    // dimming OFF — the app's whole purpose is showing pack state clearly at a glance outdoors.
+    val lockLowRefresh: Boolean = true,
+    val lockDimScreen: Boolean = false,
+    val lockDimLevel: Float = DEFAULT_DIM_LEVEL,
+    val gpsPauseParked: Boolean = true,
     val cloudEnabled: Boolean = false,
     val apiBaseUrl: String? = null,
     val enrolled: Boolean = false,
@@ -442,6 +450,10 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     lockShowTime = p.lockShowTime,
                     lockShowWifi = p.lockShowWifi,
                     lockShowBattery = p.lockShowBattery,
+                    lockLowRefresh = p.lockLowRefresh,
+                    lockDimScreen = p.lockDimScreen,
+                    lockDimLevel = p.lockDimLevel,
+                    gpsPauseParked = p.gpsPauseParked,
                     // Per-battery disconnects persist across restarts.
                     disabled = p.disabledAddrs ?: emptySet(),
                     cloudEnabled = p.cloudEnabled,
@@ -533,9 +545,8 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         refreshDbSize()
     }
     fun refreshDbSize() = viewModelScope.launch {
-        val bytes = engine.history.approxSizeBytes()
-        val mb = bytes / (1024f * 1024f)
-        _state.update { it.copy(dbSize = "%.1f MB".format(mb)) }
+        val bytes = engine.history.dbSizeBytes()   // off-main internally; true file+WAL size
+        _state.update { it.copy(dbSize = formatDbSizeMb(bytes)) }
     }
     fun goHome() = _state.update { it.copy(screen = Screen.Home) }
     fun goHistory() = _state.update { it.copy(screen = Screen.History) }
@@ -796,6 +807,8 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         engine.setStage(currentStageAddrs())
         pushAlertConfig()
         pushTempConfig()
+        // Pause-while-parked before the intent, so the gate's first evaluation is already correct.
+        engine.setGpsPauseParked(_state.value.gpsPauseParked)
         engine.setGpsActive(_state.value.gpsEnabled && _state.value.enrolled && _state.value.cloudEnabled)
         engine.importLegacyCsvIfNeeded(
             alreadyImported = _state.value.csvImported,
@@ -1052,6 +1065,27 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     fun setLockShowBattery(on: Boolean) {
         _state.update { it.copy(lockShowBattery = on) }
         viewModelScope.launch { store.setLockShowBattery(on) }
+    }
+
+    fun setLockLowRefresh(on: Boolean) {
+        _state.update { it.copy(lockLowRefresh = on) }
+        viewModelScope.launch { store.setLockLowRefresh(on) }
+    }
+
+    fun setLockDimScreen(on: Boolean) {
+        _state.update { it.copy(lockDimScreen = on) }
+        viewModelScope.launch { store.setLockDimScreen(on) }
+    }
+
+    fun setLockDimLevel(level: Float) {
+        _state.update { it.copy(lockDimLevel = level) }
+        viewModelScope.launch { store.setLockDimLevel(level) }
+    }
+
+    fun setGpsPauseParked(on: Boolean) {
+        _state.update { it.copy(gpsPauseParked = on) }
+        viewModelScope.launch { store.setGpsPauseParked(on) }
+        engine.setGpsPauseParked(on)
     }
 
     /** Acknowledge the active alert: silence it until the condition changes/resolves. */

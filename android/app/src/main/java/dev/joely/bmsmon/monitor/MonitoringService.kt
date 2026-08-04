@@ -11,6 +11,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import dev.joely.bmsmon.BmsApp
@@ -88,7 +89,21 @@ class MonitoringService : Service() {
                         if (!ns.monitoring) {
                             stopCleanly()
                         } else if (Build.VERSION.SDK_INT >= 30 && ns.fgsType != appliedType) {
-                            startForegroundCompat(buildNotification(ns.text))
+                            // The parked-GPS gate flips gpsActive on its own now, so the location
+                            // bit of the FGS type changes *while the service runs* and often while
+                            // the app is in the background. Android 14+ re-checks the FGS start
+                            // restriction on every startForeground() call and can answer with
+                            // SecurityException / ForegroundServiceStartNotAllowedException — and
+                            // an uncaught throw in this collector kills the process, taking the
+                            // wheelchair's battery monitor with it. Degrade instead: keep the
+                            // previously applied type (GPS itself is already stopped/started by
+                            // the engine either way) and still refresh the notification.
+                            runCatching { startForegroundCompat(buildNotification(ns.text)) }
+                                .onFailure { e ->
+                                    Log.w(TAG, "FGS type update to ${ns.fgsType} refused", e)
+                                    NotificationManagerCompat.from(this@MonitoringService)
+                                        .notify(NOTIF_ID, buildNotification(ns.text))
+                                }
                         } else {
                             NotificationManagerCompat.from(this@MonitoringService)
                                 .notify(NOTIF_ID, buildNotification(ns.text))
@@ -194,6 +209,7 @@ class MonitoringService : Service() {
     }
 
     companion object {
+        private const val TAG = "MonitoringService"
         private const val CHANNEL_ID = "monitoring"
         private const val NOTIF_ID = 1
         private const val WAKE_TAG = "bmsmon:monitoring"
