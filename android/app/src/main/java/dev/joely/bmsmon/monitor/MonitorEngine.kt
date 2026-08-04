@@ -220,6 +220,17 @@ class MonitorEngine(
     /** Begin monitoring every pack in [roster]. [seed] pre-populates the fleet (dimmed until live). */
     fun start(roster: Roster, seed: Map<String, BatteryStatus>, loggingEnabled: Boolean) {
         if (_state.value.monitoring) return
+        // Reset GPS intent/state/request together through shutdownGps() rather than folding a
+        // bare `gpsActive = false` into the state copy below. A bare state reset only touches
+        // MonitorState — if `gpsActive` were ever false while LocationSource was still
+        // `requesting` (unreachable today, but exactly the desync the gate can't recover from),
+        // applyGpsGate's `if (_state.value.gpsActive == active) return` early-out would then
+        // never call locationSource.stop(), i.e. a silent GNSS drain. shutdownGps() is safe to
+        // call before a session begins: gpsWanted is already false pre-start, gpsActive is
+        // already false (a fresh engine's default MonitorState(), or stop()'s explicit reset),
+        // and LocationSource.stop() no-ops when it isn't requesting — so this is a genuine no-op
+        // on the common path and a real fix on the desynced one.
+        shutdownGps()
         this.roster = roster
         logging = loggingEnabled
         _state.update { st ->
@@ -230,7 +241,6 @@ class MonitorEngine(
                 lastDischargeAt = emptyMap(),
                 peakPowerW = 0f,
                 peakCurrentA = 0f,
-                gpsActive = false,
                 tailMinByAddress = emptyMap(),
                 tailRunEndByAddress = emptyMap(),
             )
@@ -682,13 +692,16 @@ class MonitorEngine(
         rangeJob?.cancel()
         rangeJob = scope.launch {
             while (isActive) {
-                runCatching { rangePass() }
-                // Second driver for the parked-GPS gate. onPoll is the primary one, but it only
-                // fires when a frame arrives — "Disconnect all", Bluetooth off, or every pack out
-                // of range (the phone leaves the chair) stall it indefinitely with monitoring
-                // still on, freezing lastDischargeAt and pinning GNSS on. This loop's 5-minute
-                // period equals PARKED_HOLD_MS, so it bounds the overshoot at one hold.
+                // Second driver for the parked-GPS gate, run FIRST — before rangePass(), not
+                // after. onPoll is the primary driver, but it only fires when a frame arrives —
+                // "Disconnect all", Bluetooth off, or every pack out of range (the phone leaves
+                // the chair) stall it indefinitely with monitoring still on, freezing
+                // lastDischargeAt and pinning GNSS on. rangePass() pulls a 14-day window for
+                // every pack on its 6-hourly learn pass (up to ~800k rows/pack), so gating after
+                // it would tack that pass's duration onto this loop's period on exactly those
+                // passes; gating first keeps this loop's period equal to PARKED_HOLD_MS.
                 runCatching { applyGpsGate(now()) }
+                runCatching { rangePass() }
                 delay(5 * 60_000L)
             }
         }

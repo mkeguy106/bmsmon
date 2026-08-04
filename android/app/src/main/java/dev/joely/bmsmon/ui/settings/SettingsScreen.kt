@@ -85,6 +85,7 @@ import dev.joely.bmsmon.ALERT_THRESHOLDS
 import dev.joely.bmsmon.Appearance
 import dev.joely.bmsmon.BmsApp
 import dev.joely.bmsmon.UiState
+import dev.joely.bmsmon.data.formatDbSizeMb
 import dev.joely.bmsmon.fractionToLux
 import dev.joely.bmsmon.luxToFraction
 import dev.joely.bmsmon.model.BatteryGroup
@@ -1386,7 +1387,7 @@ private fun ColumnScope.BatterySaverContent(
                 )
             }
             Text(
-                "%.0f MB · %,d rows".format(dbStats.bytes / 1_048_576.0, dbStats.rows),
+                "${formatDbSizeMb(dbStats.bytes)} · %,d rows".format(dbStats.rows),
                 color = c.text2, fontFamily = MonoFont, fontSize = 13.sp,
             )
         }

@@ -274,3 +274,12 @@ class TelemetryRepository(private val db: BmsDatabase) {
             .sumOf { f -> if (f.exists()) f.length() else 0L }
     }
 }
+
+/**
+ * The single "database size" readout formatter, shared by the Data & Logging summary/tile and
+ * the Battery Saver "Local database" row — both used to format [dbSizeBytes] independently
+ * (`%.1f` vs `%.0f`), so the same byte count could read "403.7 MB" on one settings page and
+ * "404 MB" one tap away. Binary units (÷ 1,048,576, i.e. MiB) labelled "MB" is a deliberate,
+ * documented convention (CLAUDE.md) — not changed here, only unified.
+ */
+fun formatDbSizeMb(bytes: Long): String = "%.1f MB".format(bytes / 1_048_576.0)

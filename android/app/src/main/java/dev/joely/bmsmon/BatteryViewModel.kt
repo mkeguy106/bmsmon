@@ -11,6 +11,7 @@ import dev.joely.bmsmon.sensor.AmbientLightSensor
 import dev.joely.bmsmon.data.PackHealth
 import dev.joely.bmsmon.data.SettingsStore
 import dev.joely.bmsmon.data.buildPackHealth
+import dev.joely.bmsmon.data.formatDbSizeMb
 import dev.joely.bmsmon.data.peakPool
 import dev.joely.bmsmon.ble.profile.BatteryProfile
 import dev.joely.bmsmon.ble.profile.ProfileRegistry
@@ -545,8 +546,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun refreshDbSize() = viewModelScope.launch {
         val bytes = engine.history.dbSizeBytes()   // off-main internally; true file+WAL size
-        val mb = bytes / (1024f * 1024f)
-        _state.update { it.copy(dbSize = "%.1f MB".format(mb)) }
+        _state.update { it.copy(dbSize = formatDbSizeMb(bytes)) }
     }
     fun goHome() = _state.update { it.copy(screen = Screen.Home) }
     fun goHistory() = _state.update { it.copy(screen = Screen.History) }
