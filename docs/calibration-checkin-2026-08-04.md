@@ -29,9 +29,10 @@ against the last *kept* one, which a SQL window cannot express).
 | `WIN_MAX_ACCURACY_M` | 50 m | **KEEP** — 97–98% of current fixes pass |
 | live-marker staleness | 120 s | **KEEP** — 33 of 337k gaps exceed it |
 | `PARKED_HOLD_MS` | 5 min | **KEEP** (decision recorded below) |
-| seed range bands | 78–182 / 52.5–97.5 / 51–85 | **KEEP** — learned lands 16–27 mi vs seed 15–25 |
+| seed range bands | 78–182 / 52.5–97.5 / 51–85 | **KEEP** — learned lands ~15–26 mi vs seed 15–25 |
 | `SEED_TAIL_MIN` | 58 → **70** | **CHANGED** — measured mean 70.6 min |
 | `learnedDays` | — | **BUG FIXED** — seed bands reported 12–13 |
+| learner discharge gate | `state` → **current sign** | **BUG FIXED (§7)** — was 7.16% low, readout ~6–10% optimistic |
 
 ---
 
@@ -84,6 +85,12 @@ confirmed, so the lower readout of ~16–17 mi is real.
 **At full charge (1280 Wh) the readout is now ~16–27 mi, against the seed's 15–25.** The
 seeds are therefore well calibrated and are left alone — they are conservative in the safe
 direction and are replaced after 3 qualifying days anyway.
+
+> **Superseded by §7 (same day).** The figures in this section are computed on the shipped
+> `state`-based discharge gate, which §7 then found to understate discharge by 7.16%. After that
+> fix the bands are 49.9–84.0 (2012-B) and 50.5–82.1 (2012-A) Wh/mi and the readout is
+> **~15–26 mi**. The conclusions above still hold — the 31-mi upper readout is not real (it is now
+> ~26), and the seeds remain well calibrated (indeed more so).
 
 Over the full 38 days (32–33 outing days, ~102 chair miles per pack) the band tightens to
 47.2–75.3 (2012-B) and 46.9–75.1 (2012-A) Wh/mi. Outing-day cost ranges 35–105 Wh/mi; the
@@ -304,22 +311,32 @@ Two consequences:
 2. **The EfficiencyCard compares a correctly-measured cost against an understated band**, so normal
    outings read as "above band" / worse-than-usual when they are not.
 
-**Fix belongs on the android side, not the server**: gate `accumulate` on current sign like the web
-does. `RangeRow` does not currently carry current, so it needs a field plus the Room mapping — a
-slightly wider change than a constant, which is why it is recorded here rather than applied in the
-same pass. `bucketedFixes`'s `discharging` flag has the same issue and should move with it (it
-undercounts miles too, which is why the ratio shifts less than the 7.16% energy figure alone).
+### FIXED + DEPLOYED 2026-08-04
+
+The fix belonged on the android side, not the server. `RangeRow` and the Room projection
+(`RangeRowColumns`) now carry **`currentA` and no longer carry `state` at all**, so the defect is
+unrepresentable rather than merely corrected — there is no state field left to gate on by mistake.
+A single `RangeRow.isDischarging` extension (`(currentA ?: 0f) < -DISCHARGE_EPS`) is the one
+definition, used by both `accumulate`'s energy gate and `bucketedFixes`'s `discharging` flag — the
+flag undercounted miles too, which is why the band shifts less than the 7.16% energy figure alone.
+
+Observed on-device after the install (learn pass at 14:28 pushed to `device_range_config`):
+
+| pack | before (state gate) | after (current gate) | predicted |
+|---|---|---|---|
+| 2012-B | 47.5 – 79.2 | **49.9 – 84.0** | 50.0 – 85.4 |
+| 2012-A | 47.6 – 77.3 | **50.5 – 82.1** | 51.0 – 84.7 |
+
+Matching prediction within the difference between the phone's rolling 14-day window and this
+analysis's midnight-aligned one. The user-facing range readout at full charge moves from
+**~16–27 mi to ~15–26 mi** — about 1.3 mi shorter at each end, in the safe direction.
 
 ## Follow-ups left open
 
-1. **Gate the range learner on current sign, not the state field** (§7) — the highest-value
-   item, because it is the only one that moves a safety-relevant readout in the unsafe
-   direction (~6–10% optimistic). Needs `currentA` on `RangeRow` + the Room mapping, and
-   `bucketedFixes`'s `discharging` flag moved with it.
-2. **Depth-aware charge tail** (§4) — the one change that would materially improve ETA
+1. **Depth-aware charge tail** (§4) — the one change that would materially improve ETA
    accuracy. r = +0.67 signal exists; needs a design.
-3. Next check-in: ~2026-09. Re-verify whPerMile's low end once more outing days accumulate
+2. Next check-in: ~2026-09. Re-verify whPerMile's low end once more outing days accumulate
    (it moved 41 → 47 between passes, which moved the headline mileage by 4 mi) — and re-run it
    on whichever discharge gate is in force by then, since §7 shifts the basis.
-4. Minor, unexplained: 2,994 `Discharging` rows report exactly 0 W (the mirror of the §7 skew).
+3. Minor, unexplained: 2,994 `Discharging` rows report exactly 0 W (the mirror of the §7 skew).
    Harmless — they contribute no energy either way.

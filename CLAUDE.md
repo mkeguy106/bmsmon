@@ -584,16 +584,19 @@ open items from 2026-07-15 are closed; every constant held except one reseed and
   and 48.4–80.0 → **51.0–84.7** (2012-A), i.e. **the shipped range readout is ~6–10% optimistic**
   (~16–27 mi where the corrected basis gives ~15–26) — the unsafe direction for a wheelchair — and
   the EfficiencyCard compares a correct cost against an understated band, so normal outings read
-  "above band". Note the corrected band lands almost exactly on the **original seed 51–85**. Fix is
-  android-side: gate `accumulate` (and `bucketedFixes`'s `discharging` flag) on current sign, which
-  needs `currentA` added to `RangeRow` + the Room mapping. **NOT yet applied.**
+  "above band". Note the corrected band lands almost exactly on the **original seed 51–85**.
+  **FIXED + DEPLOYED same day:** `RangeRow` and the Room projection now carry `currentA` and **no
+  longer carry `state` at all**, so the defect is unrepresentable rather than merely corrected —
+  one `RangeRow.isDischarging` (`(currentA ?: 0f) < -DISCHARGE_EPS`) is the single definition, used
+  by both `accumulate` and `bucketedFixes` (the fixes flag undercounted *miles* too, which is why
+  the band moves less than the 7.16% energy figure alone). On-device after install the learn pass
+  pushed **49.9–84.0** (2012-B) and **50.5–82.1** (2012-A) Wh/mi, matching prediction — the range
+  readout at full charge went **~16–27 mi → ~15–26 mi**, in the safe direction.
 
-**Next check (~2026-09).** Open: (1) **gate the learner on current sign** — highest value, it is the
-only open item that moves a safety-relevant readout the wrong way. (2) **depth-aware charge tail** —
+**Next check (~2026-09).** Open: (1) **depth-aware charge tail** —
 the one change that would materially improve ETA, since tail length correlates r = **+0.67** with
 session length (−0.48 with start SOC) and a scalar EMA captures none of it; needs a design.
-(3) Re-verify whPerMile's low end as outing days accumulate — it moved 41 → 47 between passes,
-worth 4 mi of headline range — on whichever discharge gate is in force by then.
+(2) Re-verify whPerMile as outing days accumulate, now on the corrected current-sign basis.
 
 Garbage-frame guard: `parseTelemetry` realigns to the `01 93 55 AA` status header (BLE
 notification fragments can prepend stale bytes, which previously decoded as soc=0/37.6 V and
