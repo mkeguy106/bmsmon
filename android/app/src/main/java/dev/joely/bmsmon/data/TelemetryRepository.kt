@@ -15,6 +15,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /** Samples per transaction during the legacy CSV backfill (DATA-8). */
@@ -253,6 +254,23 @@ class TelemetryRepository(private val db: BmsDatabase) {
         }
     }
 
-    suspend fun approxSizeBytes(): Long =
-        db.samples().count() * 80L + db.rawFrames().totalHexBytes()
+    /**
+     * True on-disk footprint of `bms.db`: the main file plus its WAL/SHM sidecars. Room's
+     * default journal mode is AUTOMATIC (never overridden in `BmsDatabase.create()`), which
+     * resolves to write-ahead logging on-device, so live data can sit in `bms.db-wal` until
+     * SQLite checkpoints it back into the main file — `File.length()` on `bms.db` alone
+     * undercounts the real footprint by whatever hasn't been checkpointed yet.
+     *
+     * This is the single source of truth for every "database size" readout in the app (the
+     * Battery Saver diagnostics row and the Data & Logging stat tile both call this) — it
+     * replaces an earlier `count() * 80 bytes/row` estimate that measured logical row count,
+     * not physical file size, and read ~2.2x low against the real file on device (183.6 MB
+     * estimated vs 403.7 MB actual) because it never accounted for SQLite index/page overhead
+     * or the WAL sidecar. Runs file I/O, so always off the main thread.
+     */
+    suspend fun dbSizeBytes(): Long = withContext(Dispatchers.IO) {
+        val path = db.openHelper.writableDatabase.path ?: return@withContext 0L
+        listOf(File(path), File("$path-wal"), File("$path-shm"))
+            .sumOf { f -> if (f.exists()) f.length() else 0L }
+    }
 }

@@ -544,7 +544,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         refreshDbSize()
     }
     fun refreshDbSize() = viewModelScope.launch {
-        val bytes = engine.history.approxSizeBytes()
+        val bytes = engine.history.dbSizeBytes()   // off-main internally; true file+WAL size
         val mb = bytes / (1024f * 1024f)
         _state.update { it.copy(dbSize = "%.1f MB".format(mb)) }
     }

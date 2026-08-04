@@ -115,6 +115,8 @@ import dev.joely.bmsmon.ui.theme.RegenGreen
 import dev.joely.bmsmon.ui.theme.TempCool
 import dev.joely.bmsmon.ui.theme.ThemeSwatches
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 private fun shortMac(addr: String): String = addr.removePrefix("C8:47:80:")
 
@@ -1283,6 +1285,10 @@ private fun LockToggleRow(label: String, selected: Boolean, onClick: () -> Unit)
 // 7 · Battery saver
 // ────────────────────────────────────────────────────────────────────────────
 
+/** Size + row count for the "Local database" diagnostics row, resolved together so the row
+ *  commits both at once instead of flashing a fresh size against a stale (zero) row count. */
+private data class DbStats(val bytes: Long = 0L, val rows: Long = 0L)
+
 @Composable
 private fun ColumnScope.BatterySaverContent(
     state: UiState,
@@ -1354,14 +1360,18 @@ private fun ColumnScope.BatterySaverContent(
 
     // Diagnostic only. Retention already runs (14-day samples, 7-day/20 MB raw frames) and the
     // SQLite freelist measured 0 pages, so there is nothing to reclaim — this row exists so the
-    // size stays visible if that ever stops being true.
+    // size stays visible if that ever stops being true. Size + row count are resolved together
+    // off-main (TelemetryRepository.dbSizeBytes() covers the WAL/SHM sidecars, not just the main
+    // file — same call the Data & Logging page uses, so the two pages never disagree) and
+    // committed in one state write so the row can't flash a stale "0 rows" against a fresh size.
     SectionLabel("Local database")
     val context = LocalContext.current
-    var dbBytes by remember { mutableStateOf(0L) }
-    var dbRows by remember { mutableStateOf(0L) }
+    var dbStats by remember { mutableStateOf(DbStats()) }
     LaunchedEffect(Unit) {
-        dbBytes = context.getDatabasePath("bms.db").length()
-        dbRows = (context.applicationContext as BmsApp).db.samples().count()
+        val app = context.applicationContext as BmsApp
+        dbStats = withContext(Dispatchers.IO) {
+            DbStats(bytes = app.engine.history.dbSizeBytes(), rows = app.db.samples().count())
+        }
     }
     GroupedCard {
         Row(
@@ -1376,7 +1386,7 @@ private fun ColumnScope.BatterySaverContent(
                 )
             }
             Text(
-                "%.0f MB · %,d rows".format(dbBytes / 1_048_576.0, dbRows),
+                "%.0f MB · %,d rows".format(dbStats.bytes / 1_048_576.0, dbStats.rows),
                 color = c.text2, fontFamily = MonoFont, fontSize = 13.sp,
             )
         }
