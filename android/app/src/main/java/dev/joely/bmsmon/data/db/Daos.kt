@@ -6,10 +6,13 @@ import androidx.room.Query
 import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
-/** Lean projection for the range learner — avoids materializing full 22-column rows. */
+/** Lean projection for the range learner — avoids materializing full 22-column rows.
+ *
+ *  Carries [currentA], NOT the BMS `state` field: on this hardware state lags current at the
+ *  boundaries of a discharge run, so gating on it loses real energy (see RangeLearn.accumulate). */
 data class RangeRowColumns(
     val tsMs: Long,
-    val state: String?,
+    val currentA: Float?,
     val powerW: Float?,
     val lat: Double?,
     val lon: Double?,
@@ -32,7 +35,7 @@ interface SampleDao {
     suspend fun since(address: String, sinceMs: Long): List<SampleEntity>
 
     @Query(
-        "SELECT tsMs, state, powerW, lat, lon, gpsAccuracyM, regen FROM samples " +
+        "SELECT tsMs, currentA, powerW, lat, lon, gpsAccuracyM, regen FROM samples " +
             "WHERE address = :address AND tsMs >= :sinceMs AND linkEvent IS NULL ORDER BY tsMs ASC"
     )
     suspend fun rangeRowsSince(address: String, sinceMs: Long): List<RangeRowColumns>

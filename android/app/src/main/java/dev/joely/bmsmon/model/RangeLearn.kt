@@ -12,16 +12,41 @@ import kotlin.math.sqrt
  * Design: docs/superpowers/specs/2026-07-11-discharge-estimate-design.md
  */
 
-/** One telemetry row, pre-filtered to linkEvent == null (recentSamples does that). */
+/** One telemetry row, pre-filtered to linkEvent == null (recentSamples does that).
+ *
+ *  Deliberately carries [currentA] and NOT the BMS `state` field — see [DISCHARGE_EPS]. */
 data class RangeRow(
     val tsMs: Long,
-    val state: String?,
+    val currentA: Float?,
     val powerW: Float?,
     val lat: Double?,
     val lon: Double?,
     val gpsAccuracyM: Float?,
     val regen: Boolean,
 )
+
+/**
+ * Discharge threshold, on CURRENT (negative = drawing) rather than the BMS `state` field.
+ *
+ * Measured 2026-08-04 across 4.81M production samples: **40,069 rows carry >= 1.05 A of real
+ * current while `state` reads `Idle`**, and 85% of them sit directly adjacent to a `Discharging`
+ * row — the state field lags the current field at the boundaries of a discharge run. Gating on
+ * state therefore dropped **7.16% of real discharge energy** (342 Wh of 4,438 in a live 14-day
+ * window), which understated whPerMile by 6-10% and made the range readout that much OPTIMISTIC —
+ * the unsafe direction on a wheelchair. Correcting it moved 2012-B's band 47.3-77.9 -> 50.0-85.4,
+ * essentially back onto the original 51-85 seed.
+ *
+ * The value mirrors `DISCHARGE_EPS` in web/src/v2/model/journey.ts, which `efficiency.ts`'s
+ * `outingWh` already used — this change makes the learner agree with the WebUI rather than
+ * quietly measuring a different quantity. Any epsilon in (0, 1.044) is equivalent anyway: the BMS
+ * has a ~1.044 A reporting deadband (idle reads exactly 0.000 A), the same structural guarantee
+ * REGEN_EPS rests on. See docs/calibration-checkin-2026-08-04.md §7.
+ */
+const val DISCHARGE_EPS = 0.1f
+
+/** True when the pack is actually drawing — the single definition of "discharging" in here. */
+val RangeRow.isDischarging: Boolean
+    get() = (currentA ?: 0f) < -DISCHARGE_EPS
 
 /** A day must have this much sample coverage to teach daily-burn stats. */
 private const val MIN_DAY_COVERAGE_S = 12f * 3600f
@@ -102,7 +127,7 @@ private fun bucketedFixes(rows: List<RangeRow>): List<Fix> {
         val bucket = r.tsMs / WIN_BUCKET_MS
         if (bucket == lastBucket) continue
         lastBucket = bucket
-        out.add(Fix(r.tsMs, r.lat, r.lon, r.state == "Discharging"))
+        out.add(Fix(r.tsMs, r.lat, r.lon, r.isDischarging))
     }
     return out
 }
@@ -161,7 +186,7 @@ private fun accumulate(rows: List<RangeRow>, zone: ZoneId): Map<LocalDate, DaySt
         val s = days.getOrPut(day) { DayStats() }
         s.coverageS += dt
         val p = cur.powerW
-        if (cur.state == "Discharging" && !cur.regen && p != null && p.isFinite() && p > 0f) {
+        if (cur.isDischarging && !cur.regen && p != null && p.isFinite() && p > 0f) {
             s.disWh += p * dt / 3600f
             s.disS += dt
         }

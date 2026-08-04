@@ -720,7 +720,7 @@ class MonitorEngine(
         for (b in roster.batteries) {
             val addr = b.address
             val rows = repository.rangeRows(addr, since).map {
-                RangeRow(it.tsMs, it.state, it.powerW, it.lat, it.lon, it.gpsAccuracyM, it.regen)
+                RangeRow(it.tsMs, it.currentA, it.powerW, it.lat, it.lon, it.gpsAccuracyM, it.regen)
             }
             if (rows.isEmpty()) continue
             if (learn) {
