@@ -233,6 +233,37 @@ Following `PowerPolicyTest.kt`, which covers the analogous latch logic. The wind
 themselves are not unit-testable and are verified on-device by reading back
 `dumpsys display | grep renderFrameRate` and `dumpsys location`.
 
+## Follow-ups left open after implementation (2026-08-04)
+
+Shipped and merged; the final whole-branch review found no Critical or Important defects. Four
+Minor findings were fixed in the final wave (`9bbbd62`). These four were deliberately parked as
+genuine follow-ups rather than merge gates:
+
+- **The DB-size row bypasses the ViewModel.** `SettingsScreen` reaches `BmsApp.engine.history`
+  directly — the only settings page that goes around its `*Actions` object — and re-runs a
+  `SELECT COUNT(*)` over 1.88M rows that `BatteryViewModel.refreshDbSize()` already did on
+  `goSettings()`. Fix: put `dbRows` on `UiState` and render from state.
+- **The dim slider has no live preview.** `lockBrightness` only applies while locked, and the
+  settings entry point is hidden while locked — so the level is chosen blind, then discovered on
+  lock. That loop runs against the exact hazard `MIN_DIM_LEVEL` exists to prevent. Contained by the
+  OFF default and the 5% floor. Fix: apply `dragLevel` to the window while the card is composed,
+  release on dispose.
+- **Refresh rate and brightness share one `DisposableEffect`.** Changing either key disposes and
+  re-applies both, so toggling the refresh setting while locked with dim on releases brightness to
+  system for a frame. Split into two effects if it proves visible.
+- **`_state.update` runs inside the gate's monitor.** `MonitoringService` collects on
+  `Dispatchers.Main.immediate`, so a main-thread gate call (`setDisabled`, `setGpsPauseParked`)
+  resumes collectors *inline* — `startForeground()`'s binder call executes inside the lock while a
+  concurrent `onPoll` blocks on it. Not a deadlock (Java monitors are reentrant) and not a
+  correctness bug, but an unbounded lock hold on a user-action path. Fix: decide under the lock,
+  publish the state write and the `LocationSource` call after.
+
+Known behavior, not a defect: if every pack drops out of BLE range for over 5 minutes **while the
+chair is actually driving** (phone leaves the chair, Bluetooth off, adapter flake), the gate reads
+parked and stops GNSS mid-drive. Inherent to the proxy, and the lesser evil versus pinning GNSS on
+whenever polling stalls — the Wh side is missing over the same window, so the learned Wh/mile ratio
+stays roughly self-consistent.
+
 ## Out of scope
 
 - **Sub-60 Hz refresh rates** — measured as no benefit (above). Revisit only with a measurement
