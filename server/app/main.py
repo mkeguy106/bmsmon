@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
@@ -70,11 +71,13 @@ async def _rollup_loop(pool) -> None:
 
 
 # Vite emits content-hashed filenames into these dirs (one shared assets/ chunk pool for
-# the v1 + v2 bundles — dist/v2 holds only its index.html — plus the share zone's own
-# dist/share/assets, which reaches this mount because /share/{token} routes never match
-# two-segment paths). Hashed content is safe to cache forever; the HTML shells must
-# always revalidate so a deploy's new hashes land (no-cache still allows 304s via ETag).
-_HASHED_ASSET_PREFIXES = ("assets/", "v2/assets/", "share/assets/")
+# the v2 + v1 bundles — v2 is the default at dist/index.html and dist/v1 holds only its
+# index.html — plus the share zone's own dist/share/assets, which reaches this mount
+# because /share/{token} routes never match two-segment paths). Hashed content is safe to
+# cache forever; the HTML shells must always revalidate so a deploy's new hashes land
+# (no-cache still allows 304s via ETag) — that is also what lets a UI swap at "/" land
+# without a cache-bust step.
+_HASHED_ASSET_PREFIXES = ("assets/", "v1/assets/", "share/assets/")
 
 
 class CachedStaticFiles(StaticFiles):
@@ -150,6 +153,17 @@ def create_app() -> FastAPI:
     # poll went incremental each request is a cache slice rather than a query.
     app.state.share_limiter = RateLimiter(max_attempts=150, window_s=60)
     app.include_router(share.router)
+    # v2 moved from /v2/ to / on 2026-08-04 (v1 now lives at /v1/). Keep old bookmarks and
+    # any phone home-screen shortcut working. 307 rather than 308 because browsers cache
+    # permanent redirects hard and this stays reversible. Registered before the "/" mount so
+    # it wins over the static tree. Deliberately NOT /v2/{p:path}: v2 has no client-side
+    # routing so there are no deep links to catch, and a catch-all would swallow
+    # /v2/assets/* — nothing is emitted there today, but it would be a trap if that changed.
+    @app.get("/v2", include_in_schema=False)
+    @app.get("/v2/", include_in_schema=False)
+    async def v2_moved_to_root() -> RedirectResponse:
+        return RedirectResponse("/", status_code=307)
+
     import os
     web_dist = os.environ.get("BMSMON_WEB_DIST", "/app/web/dist")
     if os.path.isdir(web_dist):

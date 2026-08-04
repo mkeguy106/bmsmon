@@ -663,7 +663,7 @@ header; default dark; persisted in `localStorage["bmsmon-theme"]`; light mode is
 `:root[data-theme="light"]` CSS-variable override in `web/src/theme.css`). The page declares
 `<meta name="darkreader-lock">` so the Dark Reader extension never alters it in either mode.
 
-**WebUI layout (`web/src/App.tsx`):** the dashboard is the **main stage** + **All Batteries**; a
+**WebUI v1 layout (`web/src/App.tsx`, served at `/v1/` since 2026-08-04):** the dashboard is the **main stage** + **All Batteries**; a
 header **⚙ toggle** opens a **Settings** view (battery-profile panel + device admin — kept off the
 main page). Header also has a **°C/°F** unit toggle (`localStorage["bmsmon-temp-unit"]`, default the
 phone's synced unit). **Pin to stage:** a pin icon on every card/stage pack; pinned packs (by
@@ -672,14 +672,24 @@ address, `localStorage["bmsmon-pins"]`) become the main stage, else it auto-sele
 telemetry, muted** (dimmed ring/gauge + muted stats + `DISCONNECTED · updated <ago>`), and stop
 driving live temperature alerts — like the Android All-Batteries view. A dev-only preview harness
 (`web/preview.html` → `src/preview.tsx`) renders the components with mock data for Playwright
-screenshots; it is **not** in the production bundle (`vite build` emits only `index.html`).
+screenshots; it is **not** in the production bundle (it is not a rollup input, so `vite build`
+emits only the two shells).
 
-### WebUI v2 (all six views live)
+### WebUI v2 — the default UI (all six views live)
 
-A v2 dashboard runs alongside v1, served at `/v2/` (React, `web/src/v2/`) via a second Vite
-rollup input into `web/dist/v2/` — no server change; both bundles share `web/dist/assets`. Phases
-1–4 are all **merged to `main` and deployed to prod** (`bmsmon.covert.life/v2/`), landing all six
-planned views: **Command** (fleet rail, stage, range/recharge, aside, bound to
+**v2 is what `/` serves (since 2026-08-04); v1 is kept, demoted to `/v1/`.** Both are React
+bundles from one Vite build with two rollup inputs — `web/index.html` (v2, entry `src/v2/`) →
+`dist/index.html`, and `web/v1/index.html` (entry `src/`) → `dist/v1/index.html` — sharing a
+single `web/dist/assets` chunk pool. Each input key names its entry chunk (`assets/v2-*.js`,
+`assets/v1-*.js`). **Neither bundle has client-side routing and both build with base `/`**, so a
+shell does not care which directory it sits in; that is what made the swap a pure build change.
+The server still just mounts `dist` at `/` with `html=True`. Two things carry the flip:
+`server/app/main.py` keeps narrow `/v2` + `/v2/` → `/` **307** redirects (temporary, so it stays
+reversible; deliberately not a `/v2/{path}` catch-all, which would swallow `/v2/assets/*`), and
+`/`'s existing `Cache-Control: no-cache` is what let the UI at `/` change without a cache-bust
+step. All v2 `localStorage`/`sessionStorage` keys are origin-scoped, so pins, theme, TRAIL and
+unit prefs survived the move with no migration. Phases 1–4 are all **merged to `main` and
+deployed to prod** (`bmsmon.covert.life`), landing all six planned views: **Command** (fleet rail, stage, range/recharge, aside, bound to
 `/web/fleet` + `/ws`, plus a per-cell-voltage pipeline android `cells[]` → server `samples.cellN_v`
 → fleet snapshot `cells` → web), **Fleet Health** (tiles + 8-pack board + 24h sparkline off
 `GET /web/history`; **offline packs show their LAST-KNOWN SOC/capacity, muted + "last seen
@@ -754,10 +764,13 @@ comparison) until a pack has `learnedDays > 0`. Point inspection survives as **h
 energy chart (`onHover` → nearest point → map cursor marker + SOC/DRAW/DIST/STATE readouts); no
 slider, no auto-play. Mobile Journey (dock-based) is unchanged. Spec:
 `docs/superpowers/specs/2026-07-16-journey-efficiency-card-design.md`.
-**CRITICAL mobile lesson (2026-07-13): `web/v2/index.html` carries the
+**CRITICAL mobile lesson (2026-07-13): the v2 shell — `web/index.html` since the 2026-08-04
+flip, `web/v2/index.html` before it — carries the
 viewport meta tag** — without it, phones rendered a virtual 980 px scaled to ~40% (microscopic
-text) AND `innerWidth` defeated the <820 px auto-mobile detection; v1's index.html deliberately
-has NO viewport meta (it has no mobile layout, so scaled-desktop is the better fallback).
+text) AND `innerWidth` defeated the <820 px auto-mobile detection; `web/v1/index.html` deliberately
+has NO viewport meta (it has no mobile layout, so scaled-desktop is the better fallback). Each tag
+belongs to its own shell file, so the flip moved them correctly by construction — but this is the
+one line to re-check after any future shell shuffle.
 Bottom tabs are 68 px + home-indicator safe-area (`BAR_H` exported; App pads by it); Command
 stacks pack cards vertically on mobile. The roadmap's deferred Phase-4 Command bits are wired:
 **DRIVEN TODAY** (cleaned today-track driven miles, 60 s refresh) and a tile-free SVG
@@ -860,8 +873,10 @@ prod), run the API with the built-in local identity (`BMSMON_DEV_TRUST_HEADERS=1
 server/.venv/bin/uvicorn app.main:app --port 8000` — dev-trust refuses non-local DATABASE_URLs, and
 without it /web/* 401s and the /ws close-after-accept loop starves the REST fallback), start
 `npx vite dev --port 5173` in `web/`, then `node scripts/smoke.mjs` (from `web/`). It screenshots
-v1 + all six v2 views + preview.html into `web/smoke-shots/` (gitignored) and exits non-zero on any
-console error or page crash. `playwright` is a web devDependency; browsers via
+all six v2 views (at `/`) + v1 (at `/v1/`) + preview.html into `web/smoke-shots/` (gitignored) and
+exits non-zero on any console error or page crash. Note the smoke test drives `vite dev`, which
+serves the shells straight off disk and has **no** `/v2/` → `/` redirect (that lives in FastAPI),
+so it must use the real build paths. `playwright` is a web devDependency; browsers via
 `npx playwright install chromium`. The server Dockerfile sets `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`
 so CI image builds never pull browsers. Re-run the seeder to reset pack staleness (data >90 s old
 renders as DISCONNECTED — useful for testing that state deliberately).
