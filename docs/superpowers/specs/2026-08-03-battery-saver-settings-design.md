@@ -128,22 +128,27 @@ the range learner nothing — this is the same discharge-gate reasoning already 
 `RangeLearn`/`cleanTrack`. So while no pack is discharging, GNSS is pure cost.
 
 ```kotlin
-/** True when no pack has discharged recently — the chair is parked and GPS teaches nothing. */
+/** True when no base has discharged recently — the chair is parked and GPS teaches nothing. */
 fun gpsParked(lastDischargeMs: Long?, nowMs: Long, holdMs: Long = PARKED_HOLD_MS): Boolean =
     lastDischargeMs == null || nowMs - lastDischargeMs >= holdMs
 
 const val PARKED_HOLD_MS = 5 * 60_000L
-
-/** A pack is discharging when it draws more than the BMS's reporting deadband allows to be noise. */
-const val DISCHARGE_EPS_A = 0.1
 ```
 
 - `MonitorEngine`'s effective GPS-active gains `&& !parked`; the engine stays the single writer.
-- `lastDischargeMs` updates from the poll loop whenever any pack's current is a discharge — i.e.
-  `current <= -DISCHARGE_EPS_A` (0,1 A), the same epsilon the regen detector and the server's
-  `resolve_active_group()` already use. The BMS's ~1,04 A reporting deadband (idle reads exactly
-  0,000 A) makes this unambiguous: any epsilon in (0, 1,04) is equivalent, so 0,1 A yields neither
-  false positives nor misses.
+- **No new discharge threshold is introduced.** `MonitorState.lastDischargeAt` — a
+  `Map<baseId, Long>` already maintained by `recomputeLastDischarge()` on every poll, stamping any
+  base whose `groupActivity()` reads `Discharging` — is exactly this signal. The parked input is
+  simply its newest entry:
+
+  ```kotlin
+  val lastDischargeMs = state.lastDischargeAt.values.maxOrNull()
+  ```
+
+  `groupActivity()` already treats a base as discharging on either the BMS `Discharging` state flag
+  or `current < -CURRENT_EPS` (0,05 A). The BMS's ~1,04 A reporting deadband (idle reads exactly
+  0,000 A) means any epsilon in (0, 1,04) is equivalent, so this yields neither false positives nor
+  misses — the same structural guarantee the regen detector relies on.
 - Resume is immediate on the first discharging sample.
 
 **Full stop, not a drop to balanced accuracy.** The alternative — dropping to
