@@ -32,6 +32,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.BatteryFull
+import androidx.compose.material.icons.filled.BatterySaver
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.BrightnessAuto
 import androidx.compose.material.icons.filled.Check
@@ -85,6 +86,7 @@ import dev.joely.bmsmon.fractionToLux
 import dev.joely.bmsmon.luxToFraction
 import dev.joely.bmsmon.model.BatteryGroup
 import dev.joely.bmsmon.model.GaugeSide
+import dev.joely.bmsmon.model.MIN_DIM_LEVEL
 import dev.joely.bmsmon.model.STAGE_HOLD_OPTIONS_MIN
 import dev.joely.bmsmon.model.TempThresholds
 import dev.joely.bmsmon.model.TempUnit
@@ -94,6 +96,7 @@ import dev.joely.bmsmon.model.formatTemp
 import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.ui.AlertActions
 import dev.joely.bmsmon.ui.AppearanceActions
+import dev.joely.bmsmon.ui.BatterySaverActions
 import dev.joely.bmsmon.ui.CloudActions
 import dev.joely.bmsmon.ui.DataActions
 import dev.joely.bmsmon.ui.DisplayActions
@@ -116,8 +119,8 @@ private fun shortMac(addr: String): String = addr.removePrefix("C8:47:80:")
 private val CatPurple = Color(0xFF8B6BC9)
 private val CatBlue = Color(0xFF3E86C9)
 
-/** The nine category detail pages the hub drills into. */
-private enum class SettingsPage { Monitoring, Alerts, Temperature, Groups, Appearance, Display, Lock, Data, About, Cloud }
+/** The category detail pages the hub drills into. */
+private enum class SettingsPage { Monitoring, Alerts, Temperature, Groups, Appearance, Display, Lock, BatterySaver, Data, About, Cloud }
 
 @Composable
 fun SettingsScreen(
@@ -129,6 +132,7 @@ fun SettingsScreen(
     appearance: AppearanceActions,
     display: DisplayActions,
     lock: LockActions,
+    batterySaver: BatterySaverActions,
     data: DataActions,
     cloud: CloudActions,
 ) {
@@ -166,6 +170,15 @@ fun SettingsScreen(
         }
         SettingsPage.Lock -> DetailScaffold("Lock Screen", { page = null }) {
             LockScreenContent(state, lock.onSetLockShowTime, lock.onSetLockShowWifi, lock.onSetLockShowBattery)
+        }
+        SettingsPage.BatterySaver -> DetailScaffold("Battery Saver", { page = null }) {
+            BatterySaverContent(
+                state,
+                batterySaver.onSetLockLowRefresh,
+                batterySaver.onSetLockDimScreen,
+                batterySaver.onSetLockDimLevel,
+                batterySaver.onSetGpsPauseParked,
+            )
         }
         SettingsPage.Data -> DetailScaffold("Data & Logging", { page = null }) {
             DataLoggingContent(state, data.onSetLogging, data.onClearLog)
@@ -250,6 +263,10 @@ private fun SettingsHub(
                 CategoryRow(
                     Icons.Filled.Lock, c.text3, "Lock screen", lockValue(state),
                 ) { onOpen(SettingsPage.Lock) }
+                RowHairline()
+                CategoryRow(
+                    Icons.Filled.BatterySaver, CatBlue, "Battery saver", batterySaverValue(state),
+                ) { onOpen(SettingsPage.BatterySaver) }
             }
 
             GroupedCard {
@@ -293,6 +310,12 @@ private fun lockValue(state: UiState): String {
     }
     return if (parts.isEmpty()) "Off" else parts.joinToString(" · ")
 }
+
+private fun batterySaverValue(state: UiState): String = buildList {
+    if (state.lockLowRefresh) add("60 Hz on lock")
+    if (state.lockDimScreen) add("dim on lock")
+    if (state.gpsPauseParked) add("GPS pauses when parked")
+}.ifEmpty { listOf("off") }.joinToString(" · ")
 
 private fun cloudValue(state: UiState): String =
     if (state.enrolled) "Enrolled" else "Not set up"
@@ -1254,7 +1277,72 @@ private fun LockToggleRow(label: String, selected: Boolean, onClick: () -> Unit)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// 7 · Data & Logging
+// 7 · Battery saver
+// ────────────────────────────────────────────────────────────────────────────
+
+@Composable
+private fun ColumnScope.BatterySaverContent(
+    state: UiState,
+    onSetLockLowRefresh: (Boolean) -> Unit,
+    onSetLockDimScreen: (Boolean) -> Unit,
+    onSetLockDimLevel: (Float) -> Unit,
+    onSetGpsPauseParked: (Boolean) -> Unit,
+) {
+    val c = Bm.colors
+    Text(
+        "Measured savings on this phone. The screen is by far the biggest drain, then GPS — " +
+            "Bluetooth is under 2% and is deliberately left alone.",
+        color = c.text2, fontSize = 12.sp, lineHeight = 17.sp,
+    )
+
+    SectionLabel("While locked")
+    GroupedCard {
+        ToggleRow(
+            "Lower refresh rate on lock",
+            "Hold the display at 60 Hz instead of 90 while locked. Saves about 18 mA and is " +
+                "invisible on a screen that updates once a second.",
+            state.lockLowRefresh, onSetLockLowRefresh,
+        )
+        RowHairline(inset = 0.dp)
+        ToggleRow(
+            "Dim screen while locked",
+            "Off by default: reading pack state at a glance outdoors matters more than the " +
+                "saving. Turn on only if you can still read it in daylight.",
+            state.lockDimScreen, onSetLockDimScreen,
+        )
+    }
+
+    if (state.lockDimScreen) {
+        SectionLabel("Dim level")
+        GroupedCard {
+            Column(Modifier.padding(horizontal = 15.dp, vertical = 12.dp)) {
+                Text(
+                    "${(state.lockDimLevel * 100).toInt()}%",
+                    color = c.text, fontSize = 15.sp, fontWeight = FontWeight.Medium,
+                )
+                Slider(
+                    value = state.lockDimLevel,
+                    onValueChange = onSetLockDimLevel,
+                    valueRange = MIN_DIM_LEVEL..1f,
+                )
+            }
+        }
+    }
+
+    SectionLabel("Location")
+    GroupedCard {
+        ToggleRow(
+            "Pause GPS while parked",
+            "The chair can't move without drawing current, so when nothing has discharged for " +
+                "five minutes GPS is switched off. Saves about 22 mA and skips the indoor fixes " +
+                "the range estimate ignores anyway.",
+            state.gpsPauseParked, onSetGpsPauseParked,
+        )
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// 8 · Data & Logging
 // ────────────────────────────────────────────────────────────────────────────
 
 @Composable
@@ -1306,7 +1394,7 @@ private fun RowScope.StatTile(label: String, value: String, sub: String, valueCo
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// 8 · About
+// 9 · About
 // ────────────────────────────────────────────────────────────────────────────
 
 @Composable

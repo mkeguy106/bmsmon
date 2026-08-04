@@ -291,6 +291,12 @@ fun App(vm: BatteryViewModel) {
         onSetLockShowWifi = vm::setLockShowWifi,
         onSetLockShowBattery = vm::setLockShowBattery,
     )
+    val batterySaverActions = BatterySaverActions(
+        onSetLockLowRefresh = vm::setLockLowRefresh,
+        onSetLockDimScreen = vm::setLockDimScreen,
+        onSetLockDimLevel = vm::setLockDimLevel,
+        onSetGpsPauseParked = vm::setGpsPauseParked,
+    )
     val dataActions = DataActions(
         onSetLogging = vm::setLogging,
         onClearLog = vm::clearLog,
@@ -364,6 +370,7 @@ fun App(vm: BatteryViewModel) {
                         appearance = appearanceActions,
                         display = displayActions,
                         lock = lockActions,
+                        batterySaver = batterySaverActions,
                         data = dataActions,
                         cloud = cloudActions,
                     )
