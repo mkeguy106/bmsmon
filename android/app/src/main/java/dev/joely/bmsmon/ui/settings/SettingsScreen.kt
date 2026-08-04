@@ -1316,13 +1316,22 @@ private fun ColumnScope.BatterySaverContent(
         SectionLabel("Dim level")
         GroupedCard {
             Column(Modifier.padding(horizontal = 15.dp, vertical = 12.dp)) {
+                // Drag position lives here so every frame is a local state write, not a DataStore
+                // disk write; it's keyed on state.lockDimLevel so it re-syncs whenever the backing
+                // value changes from anywhere else (persisted restore, a future remote setter,
+                // etc.) instead of freezing at whatever it was on first composition. The key only
+                // actually changes on release (or an external update) — never mid-drag, since we
+                // don't call onSetLockDimLevel until then — so dragging itself never gets reset by
+                // the ~1.5 s telemetry-driven recompositions this screen otherwise sees.
+                var dragLevel by remember(state.lockDimLevel) { mutableStateOf(state.lockDimLevel) }
                 Text(
-                    "${(state.lockDimLevel * 100).toInt()}%",
+                    "${(dragLevel * 100).roundToInt()}%",
                     color = c.text, fontSize = 15.sp, fontWeight = FontWeight.Medium,
                 )
                 Slider(
-                    value = state.lockDimLevel,
-                    onValueChange = onSetLockDimLevel,
+                    value = dragLevel,
+                    onValueChange = { dragLevel = it },
+                    onValueChangeFinished = { onSetLockDimLevel(dragLevel) },
                     valueRange = MIN_DIM_LEVEL..1f,
                 )
             }
