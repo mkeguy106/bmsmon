@@ -31,6 +31,7 @@ against the last *kept* one, which a SQL window cannot express).
 | `PARKED_HOLD_MS` | 5 min | **KEEP** (decision recorded below) |
 | seed range bands | 78–182 / 52.5–97.5 / 51–85 | **KEEP** — learned lands ~15–26 mi vs seed 15–25 |
 | `SEED_TAIL_MIN` | 58 → **70** | **CHANGED** — measured mean 70.6 min |
+| depth-aware charge tail | — | **DECIDED AGAINST (§4)** — every charge is overnight |
 | `learnedDays` | — | **BUG FIXED** — seed bands reported 12–13 |
 | learner discharge gate | `state` → **current sign** | **BUG FIXED (§7)** — was 7.16% low, readout ~6–10% optimistic |
 
@@ -149,11 +150,53 @@ for both.
 `SEED_TAIL_MIN` reseeded **58 → 70** to match the measured mean. This only affects a fresh
 install's first few charges (the EMA converged fine from 58), but 58 sat a fifth below reality.
 
-**Design lead, not applied.** The tail correlates with session depth — **r = +0.67** against
-total charge time, **r = −0.48** against start SOC. So a depth-aware tail (predicted from
-charge delivered or start SOC) would explain roughly 45% of the variance a scalar EMA
-explains none of, and would roughly halve ETA error. That is a design change and is left
-open deliberately.
+### A depth-aware tail was considered and DECIDED AGAINST (2026-08-04)
+
+The obvious improvement: the tail correlates with session depth — **r = +0.67** against total
+charge time, **r = −0.48** against start SOC — so predicting it from charge delivered would
+explain ~45% of the variance a scalar EMA explains none of, and roughly halve ETA error.
+
+**Not worth building, because the error lands where nobody reads it.** Every charge in the
+dataset is an overnight charge — all 14 sessions start between **19:54 and 00:43**, and
+**24 of 28 finish between 00:00 and 07:59**:
+
+| started | finished | min | from SOC |
+|---|---|---|---|
+| 22:19 | 03:24 | 305 | 68 |
+| 22:06 | 04:43 | 397 | 54 |
+| 22:17 | 02:20 | 244 | 72 |
+| 19:54 | 01:18 | 324 | 65 |
+| 00:43 | 05:19 | 275 | 69 |
+| 21:15 | 03:02 | 348 | 60 |
+| 21:58 | 03:14 | 316 | 66 |
+| 21:42 | 03:48 | 366 | 63 |
+| 21:12 | 01:56 | 284 | 75 |
+| **20:58** | **22:57** | **119** | **88** |
+| 22:37 | 04:31 | 354 | 66 |
+| **21:13** | **23:22** | **129** | **87** |
+| 20:53 | 03:16 | 384 | 59 |
+| 21:50 | 06:24 | 513 | 49 |
+
+The only sessions finishing while the user is awake are the two shallow top-ups (bold), and
+those are exactly the ones the ETA **over**-predicts by +33…+39 min — it promises longer than
+reality, so the chair is ready sooner than told. The dangerous direction (under-predicting by
+−28…−52 min, promising sooner than reality) occurs only on the deep sessions, every one of
+which finishes between 01:18 and 06:24.
+
+Against that, the cost is not a constant tweak: a scalar EMA becomes a two-parameter per-pack
+regression needing more observations to converge (~3 charges/week available), new persistence,
+and a fresh interaction with the run-identity dedup that took a bug to get right in July — real
+new surface on the charge path. And the ceiling is modest: R² ≈ 0.45 leaves ~15 min of residual
+against today's 22.
+
+The cheap 80% is already banked — reseeding 58 → 70 removed the systematic low bias, which was
+the only part that affected anything.
+
+**Revisit trigger: daytime charging.** A pre-outing top-up ("can I reach full before I leave?")
+is the one scenario where 30–50 min matters, and a *deep* daytime charge is where the error runs
+in the unsafe direction. Nothing like it exists in 38 days. This is a usage change rather than a
+code change, so re-run the finish-hour histogram (`scratchpad 20-when.sql` pattern) at each
+check-in; if sessions start finishing in the 08:00–23:59 window from a low start SOC, reopen this.
 
 **Checked and clean:** the `remaining_ah` overshoot above is confined to the Charging state —
 at SOC 100 while Idle it reads exactly 105.00 = `full_charge_ah`. Since
@@ -333,10 +376,8 @@ analysis's midnight-aligned one. The user-facing range readout at full charge mo
 
 ## Follow-ups left open
 
-1. **Depth-aware charge tail** (§4) — the one change that would materially improve ETA
-   accuracy. r = +0.67 signal exists; needs a design.
-2. Next check-in: ~2026-09. Re-verify whPerMile's low end once more outing days accumulate
+1. Next check-in: ~2026-09. Re-verify whPerMile's low end once more outing days accumulate
    (it moved 41 → 47 between passes, which moved the headline mileage by 4 mi) — and re-run it
    on whichever discharge gate is in force by then, since §7 shifts the basis.
-3. Minor, unexplained: 2,994 `Discharging` rows report exactly 0 W (the mirror of the §7 skew).
+2. Minor, unexplained: 2,994 `Discharging` rows report exactly 0 W (the mirror of the §7 skew).
    Harmless — they contribute no energy either way.

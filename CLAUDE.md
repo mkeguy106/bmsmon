@@ -593,10 +593,25 @@ open items from 2026-07-15 are closed; every constant held except one reseed and
   pushed **49.9–84.0** (2012-B) and **50.5–82.1** (2012-A) Wh/mi, matching prediction — the range
   readout at full charge went **~16–27 mi → ~15–26 mi**, in the safe direction.
 
-**Next check (~2026-09).** Open: (1) **depth-aware charge tail** —
-the one change that would materially improve ETA, since tail length correlates r = **+0.67** with
-session length (−0.48 with start SOC) and a scalar EMA captures none of it; needs a design.
-(2) Re-verify whPerMile as outing days accumulate, now on the corrected current-sign basis.
+- **A depth-aware charge tail was considered and DECIDED AGAINST.** It is the one change that
+  would materially improve ETA (tail length correlates r = **+0.67** with session length, −0.48
+  with start SOC; a scalar EMA captures none of it, so a 2-parameter fit would roughly halve the
+  ~22 min error). Rejected because **the error lands where nobody reads it**: every charge in the
+  dataset is overnight — all 14 sessions start **19:54–00:43** and **24 of 28 finish 00:00–07:59**.
+  The only sessions finishing while the user is awake (22:57, 23:22) are the two shallow top-ups,
+  and those are exactly the ones the ETA **over**-predicts (+33…+39 min, i.e. ready sooner than
+  promised — the harmless direction); the under-predicting deep sessions all finish 01:18–06:24.
+  Against that: a scalar EMA would become a per-pack regression needing more observations to
+  converge, new persistence, and a fresh interaction with the run-identity dedup that took a bug
+  to get right — real new surface on the charge path, for ~15 min residual (R² ≈ 0.45) instead of
+  22. The cheap 80% is already banked in the 58 → 70 reseed. **Revisit trigger: daytime charging**
+  — a pre-outing top-up is the one case where 30–50 min matters, and a *deep* daytime charge is
+  where the error runs unsafe. That is a usage change, not a code change, so just re-run the
+  finish-hour histogram at each check-in and reopen if sessions start finishing 08:00–23:59 from a
+  low start SOC.
+
+**Next check (~2026-09).** Open: re-verify whPerMile as outing days accumulate, now on the
+corrected current-sign basis.
 
 Garbage-frame guard: `parseTelemetry` realigns to the `01 93 55 AA` status header (BLE
 notification fragments can prepend stale bytes, which previously decoded as soc=0/37.6 V and
