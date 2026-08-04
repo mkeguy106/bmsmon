@@ -238,13 +238,88 @@ data one.
 
 ---
 
+## 7. Server / WebUI audit — no code change needed
+
+Every calibration-bearing constant on the API and dashboard side was checked against the same
+dataset. **Nothing on the server or in the web bundles needs changing.**
+
+| Constant | Where | Evidence | Verdict |
+|---|---|---|---|
+| `GPS_ACCURACY_MAX_M = 250` | `queries.py:16` | gates 0.13% post-GNSS-switch | KEEP |
+| `DISCHARGE_EPS = 0.1` | `share.py:70`, `web/share/src/dock.ts` | inside the 1.044 A deadband | KEEP |
+| `STATUS_STALE_MS` / `LIVE_STALE_MS = 120 s` | `share.py:53`, `live.ts:11` | 33 of 337k fix gaps exceed it | KEEP |
+| `PREDICT_MAX_MS = 10 s` | `live.ts:57` | p99 fix gap is 9.5 s — cap sits just above it | KEEP |
+| `PAIR_FLOW_FULL_W = 600` | `dock.ts` (both) | base-total p98 = 569.9 W, pegs 1.68% | KEEP |
+| `CHAIR/VEHICLE/ABSURD_MPS` | `cleanTrack.ts:17-19` | twin of the android bounds, validated in §5 | KEEP |
+| `COAST_MAX_MS = 30 s` | `kalmanTrack.ts:29` | fires on 0.04% of gaps | KEEP |
+
+`PAIR_FLOW_FULL_W = 600` is worth noting as independently correct rather than just 2 × 300: the
+**base-total** (2012 A+B summed per tick) p98 is 569.9 W and 600 pegs 1.68% of base ticks — the
+same design point the per-pack ring hits at 300 / 1.84%.
+
+`DEGRADED_SOH = 80` (`health.ts:6`) is untestable on this fleet — every pack reports SOH 100 or
+105, nowhere near the threshold. Note two packs report **105**, i.e. above 100, matching their
+`full_charge_ah` of 105 on a nominally 100 Ah pack; a "105% health" readout is odd but harmless.
+
+### The one real finding: the learner and the WebUI disagree about what "discharging" means
+
+**The WebUI is on the correct side of this.** `web/src/v2/model/efficiency.ts` gates energy on the
+**current sign**:
+
+```ts
+if ((points[i].current_a ?? 0) < -DISCHARGE_EPS) { … }   // outingWh
+```
+
+whereas `RangeLearn.accumulate` (android) gates on the BMS **state field**:
+
+```kotlin
+if (cur.state == "Discharging" && !cur.regen && p != null && p > 0f) { … }
+```
+
+Those are not the same thing on this hardware. **40,069 rows carry ≥1.05 A of real current while
+the state field reads `Idle`** — and **34,277 of them (85%) sit directly adjacent to a
+`Discharging` row**, i.e. the state field lags the current field at the boundaries of discharge
+runs. (`current_a` *is* signed in the cloud — negative discharge, positive charge — so the
+server's `share.py` rung-1 test `current_a < -DISCHARGE_EPS` is correct too.)
+
+Measured over the live 14-day learner window on the two daily drivers: **342.1 Wh missed against
+4,438.3 Wh counted — the learner understates discharge by 7.16%.**
+
+Recomputing the bands under the web's definition, same window, only the gate changed:
+
+| pack | metric | `state`-based (shipped) | `current`-based (web) |
+|---|---|---|---|
+| 2012-B | whPerDay | 101.5–187.5 | 107.7–197.9 |
+| 2012-B | activeW | 57.1–77.0 | 56.5–74.4 |
+| 2012-B | **whPerMile** | **47.3–77.9** | **50.0–85.4** |
+| 2012-A | **whPerMile** | **48.4–80.0** | **51.0–84.7** |
+
+Two consequences:
+
+1. **The shipped range readout is ~6–10% optimistic** — the unsafe direction for a wheelchair.
+   At full charge it reads ~16–27 mi where the corrected basis gives **~15–26 mi**. Note the
+   corrected band lands almost exactly on the original **seed of 51–85**, which suggests the seed
+   was derived on a current-like basis and the state gate has been pulling the learned band below
+   it ever since.
+2. **The EfficiencyCard compares a correctly-measured cost against an understated band**, so normal
+   outings read as "above band" / worse-than-usual when they are not.
+
+**Fix belongs on the android side, not the server**: gate `accumulate` on current sign like the web
+does. `RangeRow` does not currently carry current, so it needs a field plus the Room mapping — a
+slightly wider change than a constant, which is why it is recorded here rather than applied in the
+same pass. `bucketedFixes`'s `discharging` flag has the same issue and should move with it (it
+undercounts miles too, which is why the ratio shifts less than the 7.16% energy figure alone).
+
 ## Follow-ups left open
 
-1. **Depth-aware charge tail** (§4) — the one change that would materially improve ETA
+1. **Gate the range learner on current sign, not the state field** (§7) — the highest-value
+   item, because it is the only one that moves a safety-relevant readout in the unsafe
+   direction (~6–10% optimistic). Needs `currentA` on `RangeRow` + the Room mapping, and
+   `bucketedFixes`'s `discharging` flag moved with it.
+2. **Depth-aware charge tail** (§4) — the one change that would materially improve ETA
    accuracy. r = +0.67 signal exists; needs a design.
-2. **`Idle` rows carrying nonzero power** — 40,102 rows report state `Idle` with power > 0
-   (max 987 W), and 2,994 `Discharging` rows report exactly 0 W. Not investigated here; likely
-   state/current transition skew within a frame. Worth a look if any consumer trusts `state`
-   and `power_w` to agree.
 3. Next check-in: ~2026-09. Re-verify whPerMile's low end once more outing days accumulate
-   (it moved 41 → 47 between passes, which moved the headline mileage by 4 mi).
+   (it moved 41 → 47 between passes, which moved the headline mileage by 4 mi) — and re-run it
+   on whichever discharge gate is in force by then, since §7 shifts the basis.
+4. Minor, unexplained: 2,994 `Discharging` rows report exactly 0 W (the mirror of the §7 skew).
+   Harmless — they contribute no energy either way.

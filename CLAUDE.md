@@ -564,13 +564,36 @@ open items from 2026-07-15 are closed; every constant held except one reseed and
   (~3× the p99 gap); the 120 s marker staleness is exceeded by 33 of 337k gaps;
   `CHAIR_MAX_SPEED_MPS=4.5` sits well above the p99 of 3.04 m/s (0.09% exceed).
 
-**Next check (~2026-09).** Open: (1) **depth-aware charge tail** — the one change that would
-materially improve ETA, since tail length correlates r = **+0.67** with session length (−0.48 with
-start SOC) and a scalar EMA captures none of it; needs a design. (2) Re-verify whPerMile's low end
-as outing days accumulate — it moved 41 → 47 between passes, worth 4 mi of headline range.
-(3) Unexplained: 40,102 rows report state `Idle` with power > 0 (max 987 W) and 2,994
-`Discharging` rows report exactly 0 W — likely intra-frame state/current skew, but unexamined;
-matters only if a consumer trusts `state` and `power_w` to agree.
+- **Server/WebUI audit: NO code change needed**, every calibration constant on that side verified —
+  `GPS_ACCURACY_MAX_M=250`, `DISCHARGE_EPS=0.1` (share.py + share dock), `STATUS_STALE_MS`/
+  `LIVE_STALE_MS=120s`, `PREDICT_MAX_MS=10s` (p99 fix gap 9.5 s sits just under it),
+  `COAST_MAX_MS=30s`, the `cleanTrack` speed bounds, and **`PAIR_FLOW_FULL_W=600`**, which is
+  independently right rather than just 2×300: base-total p98 = 569.9 W, pegging 1.68% of base
+  ticks — the same design point the per-pack ring hits. `DEGRADED_SOH=80` is untestable here (every
+  pack reports SOH 100 or **105** — two read above 100, matching `full_charge_ah` 105 on a
+  nominally 100 Ah pack; a "105% health" readout is odd but harmless).
+- **⚠ The learner and the WebUI disagree about what "discharging" means — the WebUI is right.**
+  `efficiency.ts` `outingWh` gates on the **current sign** (`current_a < -DISCHARGE_EPS`);
+  `RangeLearn.accumulate` gates on the BMS **`state` field**. On this hardware those differ:
+  **40,069 rows carry ≥1.05 A of real current while `state` reads `Idle`**, and **85% of them sit
+  directly adjacent to a `Discharging` row** — the state field lags the current field at the
+  boundaries of discharge runs. (`current_a` is signed in the cloud, negative = discharge, so
+  `share.py`'s rung-1 `current_a < -DISCHARGE_EPS` is correct as well.) Over the live 14-day
+  window the learner therefore **misses 342.1 Wh against 4,438.3 counted — understating discharge
+  by 7.16%**. Recomputed under the web's gate, whPerMile goes 47.3–77.9 → **50.0–85.4** (2012-B)
+  and 48.4–80.0 → **51.0–84.7** (2012-A), i.e. **the shipped range readout is ~6–10% optimistic**
+  (~16–27 mi where the corrected basis gives ~15–26) — the unsafe direction for a wheelchair — and
+  the EfficiencyCard compares a correct cost against an understated band, so normal outings read
+  "above band". Note the corrected band lands almost exactly on the **original seed 51–85**. Fix is
+  android-side: gate `accumulate` (and `bucketedFixes`'s `discharging` flag) on current sign, which
+  needs `currentA` added to `RangeRow` + the Room mapping. **NOT yet applied.**
+
+**Next check (~2026-09).** Open: (1) **gate the learner on current sign** — highest value, it is the
+only open item that moves a safety-relevant readout the wrong way. (2) **depth-aware charge tail** —
+the one change that would materially improve ETA, since tail length correlates r = **+0.67** with
+session length (−0.48 with start SOC) and a scalar EMA captures none of it; needs a design.
+(3) Re-verify whPerMile's low end as outing days accumulate — it moved 41 → 47 between passes,
+worth 4 mi of headline range — on whichever discharge gate is in force by then.
 
 Garbage-frame guard: `parseTelemetry` realigns to the `01 93 55 AA` status header (BLE
 notification fragments can prepend stale bytes, which previously decoded as soc=0/37.6 V and
