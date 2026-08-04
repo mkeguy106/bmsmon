@@ -319,11 +319,15 @@ charger** at 11% SOC, ~3 h from dead. Pure logic in `model/BatterySaver.kt` — 
   the 2026-07-13 phantom map spikes, so we would rather capture nothing than capture noise that
   gets uploaded and drawn before being discarded. Accepted cost: reacquisition, **TTFF 292 s mean
   indoors** (outdoor TTFF is far better, and the learner's 0.5-mi outing gate is well above the
-  error a lost first minute introduces). Two caveats on the 22 mA: it is GNSS's measured share of
-  that session, and **the saving from pausing it was never measured end-to-end** — the phone sat
-  inside its low-battery latch throughout testing, so GNSS was already in balanced mode. And the
-  gate arms on *any* base's discharge, so a spare discharging on a charger at home holds GNSS on;
-  that is the first knob to turn if the saving ever measures low.
+  error a lost first minute introduces). **Saving quantified 2026-08-04: the gate holds GNSS off
+  68.4% of wall-clock time, so expected saving ≈ 0.684 × 22 mA ≈ 15 mA (~360 mAh/day, ~3.8% of the
+  2 580 mAh/6.5 h baseline).** That closes the "never measured end-to-end" caveat — the 22 mA was
+  always measured, the duty cycle was the missing half (it is a duty-cycle-derived estimate, not a
+  power measurement). **The "a spare discharging on a charger at home holds GNSS on" caveat is
+  RETIRED as unfounded**: across 38 days there are **0 minutes** where only a non-daily-driver
+  discharged (lifetime discharge rows: 2016-B 8, 2016-A 2, the other four 0, and both spare events
+  fell inside minutes a daily driver was also discharging). The gate is driven entirely by the
+  chair. Transit cost is also now measured — see the `PARKED_HOLD_MS` note below.
 
 Both display effects are window-scoped `WindowManager.LayoutParams` set in a `DisposableEffect` in
 `ui/App.kt`, so they revert on focus loss or process death — **nothing writes the system-wide
@@ -366,10 +370,18 @@ pass's `COAST_MAX_MS` handling) instead of the traced route; graceful, but the r
 And **the live share marker freezes at the departure point for the whole ride** — a guest following
 a share link sees the chair greyed at the origin with its age, and "Point me there" would send them
 where the chair *was*, which is the sharper problem since following the chair live is the share
-feature's entire purpose. Options considered, **none chosen**: (a) accept it — the learner never
+feature's entire purpose. **Quantified + DECIDED 2026-08-04 — option (a), keep 5 min.** Of 357.5
+moving miles (≥0.4 m/s) since 2026-07-13 the gate drops **256.5 (71.7%)**, including **205.5 of
+227.7 vehicle-speed miles (90%)**. Measured trade-off (GNSS-off duty / moving miles lost):
+5 min **68.4% / 256.5** · 10 min 60.6% / 212.9 · 15 min 55.5% / 180.2 · 20 min 51.7% / 150.5 ·
+30 min 46.7% / 113.2. Kept at 5 because the saving is real and the lost miles are ones the range
+learner discards anyway (no discharge ⇒ no learning). Note the option (b) claim below was
+**wrong**: 20 min gives back 41% of the lost movement for about a **quarter** of the saving, not
+"most of it" — reach for it if the frozen live-share marker becomes annoying in practice, which is
+a UX judgement rather than a data one. Options as considered: (a) accept it — the learner never
 used those miles anyway, and a dashed straight line is arguably what a transit leg should look
 like; (b) lengthen `PARKED_HOLD_MS` to ~20 min — one constant, covers short hops, still breaks on
-long journeys, and gives back most of the saving during frequent stops; (c) gate on phone motion via
+long journeys (see the corrected saving figures above); (c) gate on phone motion via
 activity recognition or the significant-motion sensor — technically the correct fix and nearly free
 in power (sensors measured 0.03 mAh over 6.5 h), but it needs `ACTIVITY_RECOGNITION` and real new
 scope; (d) suppress the pause while a share is live — **rejected**, the cloud channel is
@@ -516,10 +528,49 @@ All constants verified against the accumulated cloud dataset (2.0M samples; the 
   conservative vs learned 17–31 mi — safe direction. All gates validated on real data (0.5-mi
   outing gate rejected a 178 Wh/mi poison day; discharge gate excluded vehicle legs).
 
-Next check (~2026-08-01): (1) fix the tail re-fold, then confirm multi-observation EMA
-convergence over several charges; (2) verify whPerMile left seed and re-check its hi end once
-~7+ GNSS outing days exist (if it still tops near 74 Wh/mi, the 31-mi upper readout is real);
-(3) cosmetic: `learned_days` counts whPerDay-qualifying days even when bands are seeds.
+**Accuracy check-in — DONE 2026-08-04. Full write-up: `docs/calibration-checkin-2026-08-04.md`.**
+Basis 4.81M samples / **300,644 discharge rows** over 38 days (2.5× the July basis). All three
+open items from 2026-07-15 are closed; every constant held except one reseed and one bug:
+- **Battery flow KEEP.** p98 = 292.5 W so `POWER_RING_FULL_W=300` still pegs by design (1.84% of
+  discharge samples); new spike record 1115.7 W. The **1.044 A deadband is reconfirmed** and is
+  sharper than recorded — current is quantized in ~63.4 mA steps above it and *nothing* falls in
+  (0, 1.0), so any `REGEN_EPS` in (0, 1.044) is identical. 1664 regen runs now (was 838), longest
+  still 23.2 s, **zero** ≥ 30 s.
+- **whPerMile LEFT SEED — and the 31-mi upper readout is NOT real, it is ~27 mi.** Both daily
+  drivers learned ~47–79 Wh/mi (13 outing days each; recompute reproduces `device_range_config`).
+  `milesHi` divides by the band's **low** end, which came in at **47**, not the predicted 41 —
+  so full charge now reads **~16–27 mi** vs the seed's 15–25. The high end (75–80) is confirmed,
+  so ~16–17 mi at the bottom is real. **Seeds are well calibrated; left alone.**
+- **`learned_days` was NOT cosmetic — FIXED.** All six background packs reported 12–13 learned
+  days with pure seed bands (`learnedDays = whPerDay.size` counted *coverage*-qualifying days,
+  ignoring `bandOf`'s seed fallback). Consumer: `efficiency.ts:88` reads `learnedDays === 0` to
+  label the chip **"vs seed est."**, so seed bands were presented as real comparisons. Now derived
+  from whether the band actually learned; two tests that had locked in the old values updated.
+- **Charge ETA: EMA converged (open item closed), but its target is high-variance.** Run-identity
+  dedup held; predicted-at-SOC-70 grew 267 → 296 min, i.e. the learned tail moved 58 → ~79.
+  Bulk is excellent (SOC 70→98 = **217.1 min, SD 7.8**) and 98→99 is a rock-steady **7.7–8.1 min**.
+  The tail is **real charging, not idle time**: flat ~7.95 A right past the BMS's rated
+  `full_charge_ah` (absorbing 7–9 Ah, `remaining_ah` reaching 111–113) then a genuine ~6-min
+  taper to cutoff — but it runs **40.6–129.6 min** (mean 70.6, SD 25.8). Hence ETA MAE ~22 min,
+  biased directionally (+33…+39 min on shallow top-ups, −28…−52 on deep overnight charges).
+  **`SEED_TAIL_MIN` reseeded 58 → 70** (fresh installs only). Safe: the `remaining_ah` overshoot
+  is Charging-only, clamps to exactly 105.00 at Idle, and `estimatePackRange` returns null while
+  charging, so it never reaches the readout.
+- **GPS KEEP across the board.** The learner's 50 m gate appears to reject half of all fixes, but
+  that is **history, not a problem**: 46.5% of all fixes ever read *exactly* 100.0 m (the fused
+  **network** accuracy) from before the 2026-07-13 high-accuracy GNSS switch; since then **97–98%
+  pass**, which is *why* whPerMile finally learned. `GPS_ACCURACY_MAX_M=250` gates 0.13%
+  post-switch (p99 = 124.8 m, worst accepted 247 m); `COAST_MAX_MS=30 s` fires on 0.04% of gaps
+  (~3× the p99 gap); the 120 s marker staleness is exceeded by 33 of 337k gaps;
+  `CHAIR_MAX_SPEED_MPS=4.5` sits well above the p99 of 3.04 m/s (0.09% exceed).
+
+**Next check (~2026-09).** Open: (1) **depth-aware charge tail** — the one change that would
+materially improve ETA, since tail length correlates r = **+0.67** with session length (−0.48 with
+start SOC) and a scalar EMA captures none of it; needs a design. (2) Re-verify whPerMile's low end
+as outing days accumulate — it moved 41 → 47 between passes, worth 4 mi of headline range.
+(3) Unexplained: 40,102 rows report state `Idle` with power > 0 (max 987 W) and 2,994
+`Discharging` rows report exactly 0 W — likely intra-frame state/current skew, but unexamined;
+matters only if a consumer trusts `state` and `power_w` to agree.
 
 Garbage-frame guard: `parseTelemetry` realigns to the `01 93 55 AA` status header (BLE
 notification fragments can prepend stale bytes, which previously decoded as soc=0/37.6 V and
@@ -580,7 +631,9 @@ divided by its chair miles, counted only on days with ≥0.5 mi of driving, so i
 overhead lands in the per-mile cost and the estimate converges on lived range, not
 smooth-cruise physics. Chair miles are **windowed**: one fix per 30-s bucket, displacement
 between buckets at 0.4–4.5 m/s — NEVER consecutive-sample distances, because the fused
-provider refreshes fixes every ~10–30 s while telemetry samples at 1.5 s, so raw pairs read
+provider refreshes fixes every ~5–10 s (measured 2026-08-04: p50 5.5 s, p99 9.5 s; it was
+~10–30 s in the pre-2026-07-13 balanced-power era, when this was written) while telemetry
+samples at 1.5 s — still the faster of the two, so raw pairs read
 freeze-then-teleport (a real 4.8 mi outing measured 0.02 mi pairwise). **Vehicle rides are
 excluded by the discharge gate**: in the van/train the chair draws nothing (user-confirmed),
 so GPS movement without discharge teaches no miles — no speed-context heuristics. The chair
@@ -612,6 +665,10 @@ continuous-cruise physics). Wh/day and active-W were validated against the real 
 in docs/range-backtest-2026-07.md (daily drivers learn real bands ~81–213 Wh/day; background
 packs stay seeded until they get stage time, by design). Wh/mile is learnable only from
 outdoor GPS outing days — indoor driving is invisible to GPS at wheelchair speeds.
+**Wh/mile left seed on 2026-08-04** (see the check-in above): both daily drivers learned
+~47–79 Wh/mi off 13 outing days, so full charge reads **~16–27 mi** against the seed's 15–25 —
+the seeds proved well calibrated and were left alone. Note `milesHi` divides by the band's **low**
+end, so it is the low end that sets the headline upper mileage.
 
 ## Development
 
