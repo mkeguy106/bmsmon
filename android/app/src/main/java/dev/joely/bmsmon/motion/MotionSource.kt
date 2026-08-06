@@ -1,12 +1,14 @@
 package dev.joely.bmsmon.motion
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.util.Log
 import androidx.core.content.ContextCompat
 import com.google.android.gms.location.ActivityRecognition
 import com.google.android.gms.location.ActivityRecognitionResult
@@ -46,27 +48,68 @@ class MotionSource(private val context: Context) {
         }
     }
 
+    /**
+     * `setPackage` makes the intent explicit — required on Android 14+ (targetSdk 34), which
+     * throws `IllegalArgumentException` for a `FLAG_MUTABLE` PendingIntent wrapping an implicit
+     * intent (bare action, no component/package). Mutable is still required: Play Services fills
+     * the [ActivityRecognitionResult] extra into this intent before broadcasting it, which an
+     * immutable PendingIntent cannot accept. Restricting to our own package is also strictly
+     * safer, and does not affect matching: the dynamically-registered [receiver] still resolves
+     * on [ACTION] via its [IntentFilter], same-app delivery is all [RECEIVER_NOT_EXPORTED] ever
+     * allowed anyway.
+     */
     private fun pendingIntent(): PendingIntent = PendingIntent.getBroadcast(
-        context, 0, Intent(ACTION),
+        context, 0, Intent(ACTION).setPackage(context.packageName),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
     )
 
     /**
      * No-op when already requesting or the permission is missing. Registration and the update
-     * request happen together: if the request fails after the receiver is registered, the
-     * receiver is torn back down in the same call so a failed start never leaves a registered
-     * receiver with [requesting] still false — the two must agree, or a later [stop] would either
-     * skip a live receiver or crash unregistering one that was never added.
+     * request happen together: [registerReceiver] failing (defensive only — the [requesting]
+     * guard above should prevent a duplicate registration from ever reaching it) skips the
+     * request entirely, and a request that fails — synchronously or, in the realistic cases, via
+     * the returned Task's own async failure listener (see [onSubscribeFailed]) — tears the
+     * receiver back down. Either way [requesting] and "receiver is registered" never disagree —
+     * if they could, a later [stop] would either skip a live receiver or crash unregistering one
+     * that was never added.
      */
     @Synchronized
+    @SuppressLint("MissingPermission") // guarded by hasPermission
     fun start() {
         if (requesting || !hasPermission(context)) return
-        ContextCompat.registerReceiver(
-            context, receiver, IntentFilter(ACTION), ContextCompat.RECEIVER_NOT_EXPORTED,
-        )
-        runCatching { client.requestActivityUpdates(INTERVAL_MS, pendingIntent()) }
-            .onFailure { runCatching { context.unregisterReceiver(receiver) }; return }
+        val registered = runCatching {
+            ContextCompat.registerReceiver(
+                context, receiver, IntentFilter(ACTION), ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+        }.isSuccess
+        if (!registered) return
         requesting = true
+        runCatching { client.requestActivityUpdates(INTERVAL_MS, pendingIntent()) }
+            .onSuccess { task -> task.addOnFailureListener { e -> onSubscribeFailed(e) } }
+            .onFailure { e -> onSubscribeFailed(e) }
+    }
+
+    /**
+     * `requestActivityUpdates()` almost never throws synchronously — the realistic failure modes
+     * (Play Services outdated or missing, activity recognition unsupported on this device, API
+     * connection failure) surface later through the returned Task's own failure listener, well
+     * after [start] has already returned with [requesting] set true. Without this rollback,
+     * [requesting] would stay stuck true forever with no update ever going to arrive, and
+     * [current] would silently starve with no way to tell "subscribed" from "silently never
+     * subscribed" — this also covers the rare synchronous-throw path, so [start] only has one
+     * failure handler to reason about.
+     *
+     * [Synchronized] against [start]/[stop]: Play Services normally delivers this on the main
+     * thread, same as callers of [start]/[stop], so in practice this never contends — but nothing
+     * here assumes that, and the [requesting] guard makes a late/duplicate callback (e.g. after an
+     * explicit [stop] already tore things down) a safe no-op rather than a double-unregister.
+     */
+    @Synchronized
+    private fun onSubscribeFailed(e: Throwable) {
+        Log.w(TAG, "requestActivityUpdates failed: ${e.message}")
+        if (!requesting) return
+        requesting = false
+        runCatching { context.unregisterReceiver(receiver) }
     }
 
     /** Latest reading, or null when none has arrived — null fails open to "not still". */
@@ -88,6 +131,7 @@ class MotionSource(private val context: Context) {
     }
 
     companion object {
+        private const val TAG = "MotionSource"
         private const val ACTION = "dev.joely.bmsmon.MOTION_UPDATE"
 
         /** ~30 s. Fast enough to notice a van pulling away, slow enough to stay cheap. */
