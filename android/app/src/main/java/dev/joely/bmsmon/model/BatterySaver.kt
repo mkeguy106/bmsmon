@@ -77,3 +77,35 @@ fun gpsShouldRun(
     nowMs: Long,
     holdMs: Long = PARKED_HOLD_MS,
 ): Boolean = wanted && !(pauseEnabled && gpsParked(lastDischargeMs, nowMs, holdMs))
+
+/**
+ * A single phone-motion sample, as produced by `motion/MotionSource`.
+ *
+ * [still] is true when the most probable detected activity is STILL; [confidence] is that entry's
+ * 0–100 confidence; [atMs] is wall-clock (`System.currentTimeMillis()`), the same clock
+ * [confidentlyStill] compares against.
+ */
+data class MotionReading(val still: Boolean, val confidence: Int, val atMs: Long)
+
+/** Minimum confidence before a STILL reading is trusted enough to pause GNSS. */
+const val STILL_CONFIDENCE_MIN = 75
+
+/** A motion reading older than this is treated as no reading at all — 5 missed 30 s polls. */
+const val MOTION_STALE_MS = 150_000L
+
+/**
+ * Whether the phone is confidently stationary — the second condition for pausing GNSS.
+ *
+ * **Every "no usable signal" path returns false, and false means GPS STAYS ON**: permission denied,
+ * activity recognition unavailable on the device, subscription lapsed, process restarted with no
+ * reading yet, or updates gone stale. That is a deliberate user decision (2026-08-06): losing an
+ * outing is worse than losing the battery saving, because a paused GNSS makes a real trip
+ * indistinguishable from a nap at home.
+ *
+ * Kept as one expression on purpose, so the fail-open property cannot drift as callers are added.
+ */
+fun confidentlyStill(reading: MotionReading?, nowMs: Long): Boolean =
+    reading != null &&
+        reading.still &&
+        reading.confidence >= STILL_CONFIDENCE_MIN &&
+        nowMs - reading.atMs <= MOTION_STALE_MS

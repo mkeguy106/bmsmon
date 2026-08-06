@@ -4,7 +4,11 @@ import dev.joely.bmsmon.model.BRIGHTNESS_RELEASE
 import dev.joely.bmsmon.model.DEFAULT_DIM_LEVEL
 import dev.joely.bmsmon.model.LOCK_REFRESH_HZ
 import dev.joely.bmsmon.model.MIN_DIM_LEVEL
+import dev.joely.bmsmon.model.MOTION_STALE_MS
 import dev.joely.bmsmon.model.PARKED_HOLD_MS
+import dev.joely.bmsmon.model.MotionReading
+import dev.joely.bmsmon.model.STILL_CONFIDENCE_MIN
+import dev.joely.bmsmon.model.confidentlyStill
 import dev.joely.bmsmon.model.gpsParked
 import dev.joely.bmsmon.model.gpsShouldRun
 import dev.joely.bmsmon.model.lockBrightness
@@ -109,5 +113,48 @@ class BatterySaverTest {
         val now = 10_000_000L
         assertFalse(gpsShouldRun(false, pauseEnabled = false, lastDischargeMs = now, nowMs = now))
         assertFalse(gpsShouldRun(false, pauseEnabled = true, lastDischargeMs = now, nowMs = now))
+    }
+
+    // ── confidentlyStill ─────────────────────────────────────────────────────
+    // Every "no usable signal" path must return false, because false means GPS
+    // STAYS ON. That is the explicit fail-open decision: losing an outing is
+    // worse than losing the battery saving.
+
+    private fun reading(still: Boolean, conf: Int, age: Long, now: Long = 10_000_000L) =
+        MotionReading(still = still, confidence = conf, atMs = now - age)
+
+    @Test fun noReadingIsNotConfidentlyStill() {
+        assertFalse(confidentlyStill(null, 10_000_000L))
+    }
+
+    @Test fun movingIsNotConfidentlyStill() {
+        assertFalse(confidentlyStill(reading(still = false, conf = 99, age = 0), 10_000_000L))
+    }
+
+    @Test fun lowConfidenceStillIsNotConfidentlyStill() {
+        assertFalse(confidentlyStill(reading(still = true, conf = 74, age = 0), 10_000_000L))
+    }
+
+    // Threshold fires AT its value, matching the alert-ladder convention.
+    @Test fun exactlyAtConfidenceThresholdIsStill() {
+        assertTrue(confidentlyStill(reading(still = true, conf = STILL_CONFIDENCE_MIN, age = 0), 10_000_000L))
+    }
+
+    @Test fun staleReadingIsNotConfidentlyStill() {
+        assertFalse(confidentlyStill(reading(still = true, conf = 99, age = MOTION_STALE_MS + 1), 10_000_000L))
+    }
+
+    // Boundary is inclusive: exactly at the staleness bound still counts.
+    @Test fun exactlyAtStalenessBoundIsStill() {
+        assertTrue(confidentlyStill(reading(still = true, conf = 99, age = MOTION_STALE_MS), 10_000_000L))
+    }
+
+    @Test fun freshConfidentStillIsStill() {
+        assertTrue(confidentlyStill(reading(still = true, conf = 99, age = 1_000), 10_000_000L))
+    }
+
+    @Test fun motionThresholdsAreSeventyFiveAndTwoAndAHalfMinutes() {
+        assertEquals(75, STILL_CONFIDENCE_MIN)
+        assertEquals(150_000L, MOTION_STALE_MS)
     }
 }
