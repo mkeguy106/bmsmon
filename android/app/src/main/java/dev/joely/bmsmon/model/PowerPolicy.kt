@@ -52,3 +52,28 @@ fun powerDecision(onExternal: Boolean, levelPct: Int, wasLowPower: Boolean): Pow
  * off until the charger has banked real capacity. Clears normally at [LOW_EXIT_PCT].
  */
 fun seedLowPower(levelPct: Int): Boolean = levelPct.coerceIn(0, 100) < LOW_EXIT_PCT
+
+// Mirrors android.os.BatteryManager's EXTRA_STATUS values, kept local so this file stays free of
+// Android types and testable on the plain JVM.
+const val BATTERY_STATUS_CHARGING = 2
+const val BATTERY_STATUS_FULL = 5
+
+/**
+ * Whether the battery is actually gaining charge — for the lock strip's battery icon.
+ *
+ * **Deliberately ignores `EXTRA_PLUGGED`.** "A power source is connected" and "the battery is
+ * gaining charge" are different questions, and conflating them is a real bug we shipped: a
+ * wireless pad that had drifted out of alignment reported plugged=wireless while delivering
+ * ~6 mA with status=NOT_CHARGING, so the icon read "charging" for hours while the phone lost
+ * ground at ~220 mA (2026-08-06). The indicator whose whole job is catching that failure was
+ * blind to it.
+ *
+ * [powerDecision]'s `onExternal` is the *other* question and correctly DOES use `EXTRA_PLUGGED` —
+ * holding the screen depends on a source being present, not on net current. Same idiom, opposite
+ * correctness, because they ask different things.
+ *
+ * [BATTERY_STATUS_FULL] counts as charging: at 100% on a charger Android reports FULL rather than
+ * CHARGING, and the icon should stay lit there.
+ */
+fun batteryCharging(status: Int): Boolean =
+    status == BATTERY_STATUS_CHARGING || status == BATTERY_STATUS_FULL

@@ -41,6 +41,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.joely.bmsmon.model.batteryCharging
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
 import kotlinx.coroutines.delay
@@ -182,11 +183,9 @@ private fun rememberBattery(context: Context): BatteryInfo? {
             if (level < 0 || scale <= 0) return null
             val pct = (level * 100 / scale).coerceIn(0, 100)
             val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
-            val plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
-            val charging = plugged != 0 ||
-                status == BatteryManager.BATTERY_STATUS_CHARGING ||
-                status == BatteryManager.BATTERY_STATUS_FULL
-            return BatteryInfo(pct, charging)
+            // Status only — NOT EXTRA_PLUGGED. See batteryCharging(): a connected-but-dead
+            // wireless pad is exactly the case this icon exists to catch.
+            return BatteryInfo(pct, batteryCharging(status))
         }
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context, intent: Intent) {
