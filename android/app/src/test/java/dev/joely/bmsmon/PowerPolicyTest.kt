@@ -1,7 +1,10 @@
 package dev.joely.bmsmon
 
+import dev.joely.bmsmon.model.BATTERY_STATUS_CHARGING
+import dev.joely.bmsmon.model.BATTERY_STATUS_FULL
 import dev.joely.bmsmon.model.LOW_ENTER_PCT
 import dev.joely.bmsmon.model.LOW_EXIT_PCT
+import dev.joely.bmsmon.model.batteryCharging
 import dev.joely.bmsmon.model.powerDecision
 import dev.joely.bmsmon.model.seedLowPower
 import org.junit.Assert.assertEquals
@@ -113,5 +116,34 @@ class PowerPolicyTest {
     @Test fun seedLowPowerClampsOutOfRange() {
         assertTrue(seedLowPower(-3))
         assertFalse(seedLowPower(200))
+    }
+
+    // ── batteryCharging ──────────────────────────────────────────────────────
+    // The lock strip's icon answers "is the battery gaining charge?", which is
+    // NOT the same question as powerDecision's onExternal ("is a source
+    // connected?"). Conflating them shipped a real bug — see below.
+
+    @Test fun chargingWhenStatusSaysCharging() {
+        assertTrue(batteryCharging(BATTERY_STATUS_CHARGING))
+    }
+
+    // At 100% on a charger Android reports FULL, not CHARGING; the icon stays lit.
+    @Test fun chargingWhenStatusSaysFull() {
+        assertTrue(batteryCharging(BATTERY_STATUS_FULL))
+    }
+
+    @Test fun notChargingForEveryOtherStatus() {
+        // 1=UNKNOWN, 3=DISCHARGING, 4=NOT_CHARGING, plus the -1 "extra missing" case.
+        for (status in intArrayOf(-1, 0, 1, 3, 4)) {
+            assertFalse("expected not-charging for status $status", batteryCharging(status))
+        }
+    }
+
+    // REGRESSION (2026-08-06): a wireless pad drifted out of alignment and delivered ~6 mA with
+    // EXTRA_PLUGGED=wireless but EXTRA_STATUS=NOT_CHARGING(4). The old logic OR'd in
+    // `plugged != 0`, so the icon read "charging" for hours while the phone lost ~220 mA — the
+    // indicator whose whole job is catching a dead charger was blind to it. Status alone decides.
+    @Test fun pluggedIntoADeadChargerIsNotCharging() {
+        assertFalse(batteryCharging(4))
     }
 }

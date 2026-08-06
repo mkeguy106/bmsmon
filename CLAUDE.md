@@ -246,6 +246,28 @@ whole expression in `ui/App.kt` — **lock mode is gated too**, so unplugging al
 display sleep. `power/PowerMonitor.kt` (sticky `ACTION_BATTERY_CHANGED`) feeds it;
 `MonitorEngine` is the single writer of `holdScreen`/`gpsBalanced`/`lowPower` on `MonitorState`.
 
+**"Plugged in" and "charging" are different questions, and the codebase answers both — do not
+unify them.** `PowerMonitor`'s `onExternal` uses `EXTRA_PLUGGED` and is correct: deciding whether
+to hold the screen depends on a source being *present*. The lock strip's battery icon
+(`ui/LockStatusBar.kt`) asks whether the battery is *gaining charge*, and for that `EXTRA_PLUGGED`
+is the wrong signal — it now calls the pure `batteryCharging(status)` in `model/PowerPolicy.kt`,
+which keys on `EXTRA_STATUS` alone (`CHARGING` or `FULL`; FULL counts, because at 100% on a
+charger Android reports FULL rather than CHARGING). The two functions sit together with the
+distinction documented, so nobody "helpfully" makes them consistent.
+
+This was a real shipped bug (2026-08-06): the icon OR'd in `plugged != 0`, so a wireless pad that
+had drifted **out of alignment** — `dc_online=1`, delivering **6.4 mA**, `EXTRA_STATUS=NOT_CHARGING`
+— displayed a charging icon while the phone lost **~225 mA**. The indicator whose entire purpose is
+catching a dead charger was blind to exactly that case. Re-seating the phone took `dc_in` from
+6.4 mA to **692 mA** (~108x), confirming alignment rather than the thermal throttle seen at 43 °C on
+2026-08-03. Regression test: `PowerPolicyTest.pluggedIntoADeadChargerIsNotCharging`.
+
+**The screen-hold gate still has this blind spot** and is deliberately left alone for now: it holds
+the display (~139 mA measured) whenever `EXTRA_PLUGGED` is nonzero, including on a connected-but-dead
+charger — the worst case for holding it. Fixing that means gating on current actually flowing, which
+needs hysteresis so it cannot flap between charging and not, so it is a more careful change than the
+icon was.
+
 Because the BLE poll loop is a coroutine `delay()` — which does NOT fire while the CPU is
 suspended — keep-screen-on had been load-bearing for poll cadence *by accident*.
 `MonitoringService` now holds a `PARTIAL_WAKE_LOCK` (`bmsmon:monitoring`) for the monitoring
