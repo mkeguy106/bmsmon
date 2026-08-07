@@ -214,3 +214,40 @@ vehicle might deliver at once. **Only a real vehicle outing tests this.**
 Branch `feat/motion-gated-gps` at `4c2c29b`, 371 tests green, lint 0 errors. Tasks 1-3 complete and
 reviewed; **Tasks 4-6 deliberately not started.** `main` is untouched. The phone is running the
 branch build — functional and fail-open (GPS stays on), so no safety issue, just no saving.
+
+## UPDATE 2026-08-07 13:20 — periodic AR is definitively dead; transitions were never fairly tested
+
+**Today's telemetry (last 18 h, prod DB):** 216 of 217 five-minute buckets carry GPS (the broken
+gate never closes, so GNSS runs continuously). **Peak speed 2.06 m/s = 5 mph** — wheelchair pace.
+No vehicle-speed fix at all. The two real movements were chair trips under their own power:
+
+```
+09:35 -> 09:40   617 m   2.06 m/s   discharge 33->40%
+10:20 -> 10:25   590 m   1.97 m/s   discharge 45->50%
+```
+
+**Motion broadcasts delivered today: exactly three — 12:11:43, 12:14:45, 12:34:54.** None during
+either movement window. So on this device the periodic API delivers a handful of updates per day at
+moments unrelated to actual motion.
+
+**Option (ii) — "keep periodic, drop the staleness check" — is now DEAD.** Removing staleness does
+not help when the readings themselves arrive ~3x/day and do not track movement. The problem is not
+the freshness rule; it is that the signal has no relationship to the thing being sensed.
+
+**Correction to the 2026-08-06 write-up: option (i) (Activity TRANSITIONS) has never been fairly
+tested, and must not be written off with periodic.** Timeline of why:
+  - 08-05 13:39 → 08-06 15:20: arprobe subscribed to transitions but sat in standby bucket 50
+    (NEVER) — throttled silent, so that whole window is void.
+  - 08-06 15:20 → 19:22: bucket fixed to 10 and transitions re-armed, but the user was stationary
+    at a desk the whole time. No transitions were *expected*; STILL→STILL has no edge.
+  - 08-06 19:22 → 08-07 13:18: switched to SAMPLED for the confidence-value experiment, so
+    transitions were not even subscribed during this morning's trip.
+  Net: transitions have had **zero** hours of fair exposure to a real vehicle trip.
+
+**Action taken 2026-08-07 13:18:** arprobe returned to TRANSITIONS mode, bucket confirmed 10,
+`SUBSCRIBE SUCCEEDED`. The next genuine vehicle trip is now a fair test of option (i).
+
+**Open question put to the user:** whether this morning's "drive for coffee" was the chair or a
+vehicle. The data reads unambiguously as a chair trip (5 mph, packs discharging), which would mean
+it does not test the transit case at all — the chair discharging keeps GPS on via the existing
+signal regardless.
