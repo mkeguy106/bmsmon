@@ -164,11 +164,24 @@ fun App(vm: BatteryViewModel) {
         }
     }
 
+    val motionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* result ignored: a denial just means GNSS is never paused */ }
+    fun askMotionPermission() {
+        if (Build.VERSION.SDK_INT >= 29 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACTIVITY_RECOGNITION) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            motionLauncher.launch(Manifest.permission.ACTIVITY_RECOGNITION)
+        }
+    }
+
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { result ->
         if (result.values.all { it }) {
             askNotificationPermission()
+            askMotionPermission()
             vm.startMonitoring()
         }
     }
