@@ -38,9 +38,15 @@ class MotionSource(private val context: Context) {
             val top = result.mostProbableActivity
             // UNKNOWN, IN_VEHICLE, WALKING, ON_FOOT, ON_BICYCLE and TILTING all yield still=false,
             // which keeps GPS on. Not knowing is not the same as knowing it is stationary.
+            val still = top.type == DetectedActivity.STILL
+            // Permanent instrumentation, not throwaway debug: this is the only window into why the
+            // parked-GPS gate is or isn't pausing, since confidentlyStill() (BatterySaver.kt) only
+            // ever sees the cached MotionReading below, never the raw classification that produced
+            // it. Cheap — this fires at most once per INTERVAL_MS (~twice a minute).
+            Log.d(TAG, "reading activity=${activityName(top.type)} confidence=${top.confidence} still=$still")
             cache.set(
                 MotionReading(
-                    still = top.type == DetectedActivity.STILL,
+                    still = still,
                     confidence = top.confidence,
                     atMs = System.currentTimeMillis(),
                 ),
@@ -141,4 +147,17 @@ class MotionSource(private val context: Context) {
             ContextCompat.checkSelfPermission(context, Manifest.permission.ACTIVITY_RECOGNITION) ==
                 PackageManager.PERMISSION_GRANTED
     }
+}
+
+/** Human-readable name for a [DetectedActivity] `type` constant, for the diagnostic log above. */
+private fun activityName(type: Int): String = when (type) {
+    DetectedActivity.IN_VEHICLE -> "IN_VEHICLE"
+    DetectedActivity.ON_BICYCLE -> "ON_BICYCLE"
+    DetectedActivity.ON_FOOT -> "ON_FOOT"
+    DetectedActivity.STILL -> "STILL"
+    DetectedActivity.TILTING -> "TILTING"
+    DetectedActivity.WALKING -> "WALKING"
+    DetectedActivity.RUNNING -> "RUNNING"
+    DetectedActivity.UNKNOWN -> "UNKNOWN"
+    else -> "UNRECOGNIZED($type)"
 }

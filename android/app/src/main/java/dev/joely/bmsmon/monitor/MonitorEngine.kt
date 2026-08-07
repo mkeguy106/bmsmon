@@ -452,7 +452,6 @@ class MonitorEngine(
     /** Record whether GPS capture is wanted at all; the parked gate decides if it actually runs. */
     fun setGpsActive(active: Boolean) {
         gpsWanted = active
-        if (active) motionSource.start() else motionSource.stop()
         applyGpsGate(now())
     }
 
@@ -463,23 +462,41 @@ class MonitorEngine(
     }
 
     /**
-     * Fold intent + parked state into the actual GPS run state. The engine stays the single
-     * writer of [MonitorState.gpsActive].
+     * Fold intent + parked state into the actual GPS run state, and start/stop [MotionSource]
+     * alongside it. The engine stays the single writer of [MonitorState.gpsActive].
      *
      * The chair cannot move without discharging a pack, so a parked chair's fixes teach the range
      * learner nothing (its discharge gate discards them) while GNSS costs ~22 mA. Full stop rather
      * than a drop to balanced accuracy: coarse fixes are what produced the 2026-07-13 phantom map
      * spikes, so we would rather capture nothing than capture noise.
      *
+     * [motionSource] is started/stopped **here**, driven straight off [gpsWanted], rather than by
+     * its callers. It is an *input* to the pause decision below (via [confidentlyStill]), not
+     * something the decision's own output can gate, and it must run for the whole window the
+     * parked gate could apply within — i.e. whenever GPS is wanted at all, not only once the gate
+     * has already decided to pause. Doing this under the same lock as [locationSource] is what
+     * lets [setGpsActive] stay a bare, unsynchronized volatile write to [gpsWanted]: even if it
+     * races [shutdownGps] between that write and reaching this method, whichever write is still
+     * current when this method acquires the lock is the one both [motionSource] and
+     * [locationSource] end up obeying, because both are driven from the live field here, never
+     * from a value a caller captured earlier. (Previously `setGpsActive` called
+     * `motionSource.start()/stop()` directly, outside any lock — a thread could set
+     * `gpsWanted = true` and be about to call `start()` when [shutdownGps] ran on another thread,
+     * set `gpsWanted = false`, and called `motionSource.stop()`; the first thread's `start()`
+     * would then land *after* that stop, leaving [motionSource] subscribed with nothing consuming
+     * it — a live subscription burning battery for no reason, the same class of leak this
+     * synchronization already prevented for [locationSource].)
+     *
      * Synchronized because there are several callers on different threads — the ViewModel (main),
      * the BLE poll callback (Dispatchers.IO) and the range loop — and the read-decide-act has to be
      * atomic or an interleaving could leave `gpsActive = false` with the fused request still
      * registered, i.e. exactly the silent GNSS drain this gate exists to remove. [shutdownGps]
-     * takes the same lock for the same reason. Lock order is always engine -> LocationSource, and
-     * LocationSource never calls back in, so this cannot deadlock.
+     * takes the same lock for the same reason. Lock order is always engine -> LocationSource /
+     * MotionSource, and neither ever calls back in, so this cannot deadlock.
      */
     @Synchronized
     private fun applyGpsGate(now: Long) {
+        if (gpsWanted) motionSource.start() else motionSource.stop()
         val active = gpsShouldRun(
             wanted = gpsWanted,
             pauseEnabled = gpsPauseParked,
@@ -507,6 +524,10 @@ class MonitorEngine(
      * Clearing the intent also matters on its own: a later `setGpsPauseParked(false)` (the setting
      * is reachable with monitoring off) would otherwise re-evaluate a stale `wanted = true` and
      * start GNSS with nothing monitoring. [start] has the ViewModel push both again.
+     *
+     * [motionSource] is stopped here for the same reason as [locationSource]: it is the other
+     * resource [applyGpsGate] owns under this lock, and leaving it subscribed with monitoring
+     * torn down would be a live Activity Recognition subscription nothing ever reads again.
      */
     @Synchronized
     private fun shutdownGps() {
