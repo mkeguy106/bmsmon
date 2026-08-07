@@ -191,6 +191,7 @@ fun App(vm: BatteryViewModel) {
             vm.stopMonitoring()
         } else if (hasBlePermissions(context)) {
             askNotificationPermission()
+            askMotionPermission()
             vm.startMonitoring()
         } else {
             permLauncher.launch(blePermissions())
