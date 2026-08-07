@@ -711,3 +711,61 @@ what changed: the cost is the map record, not the learner."
 - [ ] App left running, unlocked, unpinned, monitoring active
 - [ ] `adb uninstall` was never run against `dev.joely.bmsmon`
 - [ ] **Deferred to a real vehicle outing:** GPS stays active in transit, and journey data shows fixes above 5 m/s — the metric that has read zero since 2026-08-03
+
+---
+
+### Task 3b: Hysteresis for the motion gate
+
+Added 2026-08-07 after Tasks 1–3 shipped and the gate never fired. See the **AMENDMENT** section of
+the spec for the measured evidence. Must land before Tasks 4–6.
+
+**Files:**
+- Modify: `app/src/main/java/dev/joely/bmsmon/model/BatterySaver.kt`
+- Modify: `app/src/main/java/dev/joely/bmsmon/monitor/MonitorEngine.kt`
+- Test: `app/src/test/java/dev/joely/bmsmon/BatterySaverTest.kt`
+
+**Interfaces:**
+- Consumes: `MotionReading`, `STILL_CONFIDENCE_MIN` (75), `MOTION_STALE_MS` (150_000L) — all unchanged.
+- Produces: `const val STILL_DEBOUNCE_N = 3`; `data class MotionGate(val stillRun: Int = 0, val still: Boolean = false)`; `fun foldMotion(prev: MotionGate, reading: MotionReading?, nowMs: Long): MotionGate`.
+
+**Why:** the shipped `confidentlyStill()` lets one instantaneous sample decide and maps `UNKNOWN` to
+"moving". Measured on-device: while stationary the phone reports `STILL` at confidence 96–100
+interleaved with `UNKNOWN` at 41–50, and **never** reports confident motion. So the shipped rule
+passes 70% of samples but **toggles the gate 5 times in 5 minutes**, restarting GNSS repeatedly.
+`UNKNOWN@41` is *absence of evidence, not evidence of motion*.
+
+**The rule (asymmetric on purpose — it preserves fail-open):**
+
+| reading | action |
+|---|---|
+| null, or older than `MOTION_STALE_MS` | **fail open** → `MotionGate(0, false)` |
+| confident STILL (`still && confidence >= STILL_CONFIDENCE_MIN`) | `stillRun + 1`; `still = stillRun+1 >= STILL_DEBOUNCE_N` |
+| confident non-STILL (`!still && confidence >= STILL_CONFIDENCE_MIN`) | **reopen immediately** → `MotionGate(0, false)` |
+| anything else (uncertain, incl. `UNKNOWN@41`, `STILL@38`) | **hold** → return `prev` unchanged |
+
+Closing needs sustained evidence (3 in a row); reopening needs one confident non-STILL; uncertainty
+changes nothing. Simulated against the captured trace: gate closed **96%** of samples at N=3.
+
+`confidentlyStill()` is **replaced** by `foldMotion` — delete it and its tests, since a single-sample
+predicate is exactly the defect. `STILL_CONFIDENCE_MIN` and `MOTION_STALE_MS` keep their current
+values; do not retune them.
+
+`MonitorEngine` holds one `MotionGate` field, folds each poll inside the already-`@Synchronized`
+`applyGpsGate`, and passes `gate.still` to `gpsShouldRun`'s `confidentlyStill` parameter. It must
+remain the single writer of `MonitorState.gpsActive`, and the gate must still only ever subtract
+from `gpsWanted`. `shutdownGps` must reset the field to `MotionGate()` so a stale run cannot survive
+a stop.
+
+- [ ] **Step 1: Write the failing tests** covering, at minimum: null → fail open; stale → fail open;
+      one confident STILL → not yet still; N consecutive → still; uncertain sample mid-run holds the
+      run rather than resetting it; confident non-STILL reopens immediately from a closed gate;
+      uncertain sample while closed keeps it closed; and that `stillRun` cannot make the gate open
+      when `wanted` is false (via `gpsShouldRun`).
+- [ ] **Step 2: Run to verify they fail.**
+- [ ] **Step 3: Implement `foldMotion`, delete `confidentlyStill` and its tests.**
+- [ ] **Step 4: Wire `MonitorEngine`** (field + fold in `applyGpsGate` + reset in `shutdownGps`).
+- [ ] **Step 5: Run the full suite and `lintDebug`.**
+- [ ] **Step 6: Install, relaunch with `am start`, confirm the process, and verify on-device that
+      with the chair parked the FGS type reaches `types=0x00000010` and *stays* there rather than
+      toggling.** Capture at least 5 minutes of `MotionSource` log alongside it.
+- [ ] **Step 7: Commit.**
