@@ -8,6 +8,7 @@ import android.content.IntentFilter
 import dev.joely.bmsmon.ble.BmsRepository
 import dev.joely.bmsmon.ble.hasBlePermissions
 import dev.joely.bmsmon.location.LocationSource
+import dev.joely.bmsmon.motion.MotionSource
 import dev.joely.bmsmon.ble.profile.ProfileRegistry
 import dev.joely.bmsmon.ble.profile.RedodoBekenProfile
 import dev.joely.bmsmon.cloud.TelemetryReporter
@@ -51,6 +52,7 @@ import dev.joely.bmsmon.model.applyDisabled
 import dev.joely.bmsmon.model.groupActivity
 import dev.joely.bmsmon.model.groupOf
 import dev.joely.bmsmon.model.groupViews
+import dev.joely.bmsmon.model.confidentlyStill
 import dev.joely.bmsmon.model.gpsShouldRun
 import dev.joely.bmsmon.model.isRegen
 import dev.joely.bmsmon.model.powerDecision
@@ -138,6 +140,7 @@ class MonitorEngine(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val ble = BmsRepository(appContext)
     private val locationSource = LocationSource(appContext)
+    private val motionSource = MotionSource(appContext)
     private val powerMonitor = PowerMonitor(appContext)
     private var powerJob: Job? = null
     private val repository = TelemetryRepository(db)
@@ -449,6 +452,7 @@ class MonitorEngine(
     /** Record whether GPS capture is wanted at all; the parked gate decides if it actually runs. */
     fun setGpsActive(active: Boolean) {
         gpsWanted = active
+        if (active) motionSource.start() else motionSource.stop()
         applyGpsGate(now())
     }
 
@@ -481,6 +485,7 @@ class MonitorEngine(
             pauseEnabled = gpsPauseParked,
             lastDischargeMs = _state.value.lastDischargeAt.values.maxOrNull(),
             nowMs = now,
+            confidentlyStill = confidentlyStill(motionSource.current(), now),
         )
         if (_state.value.gpsActive == active) return
         _state.update { it.copy(gpsActive = active) }
@@ -508,6 +513,7 @@ class MonitorEngine(
         gpsWanted = false
         _state.update { it.copy(gpsActive = false) }
         locationSource.stop()
+        motionSource.stop()
     }
 
     /**

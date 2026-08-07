@@ -66,17 +66,22 @@ fun gpsParked(lastDischargeMs: Long?, nowMs: Long, holdMs: Long = PARKED_HOLD_MS
 /**
  * Whether GPS capture should actually run: what the cloud settings want, minus the parked gate.
  *
- * [wanted] is `monitoring && gpsEnabled && enrolled && cloudEnabled`, decided elsewhere. The
- * parked gate can only ever SUBTRACT from it — it never turns GPS on. `MonitorEngine.applyGpsGate`
- * is a thin wrapper around this, so the rule is testable without a device.
+ * [wanted] is `monitoring && gpsEnabled && enrolled && cloudEnabled`, decided elsewhere. The gate
+ * can only ever SUBTRACT from it — it never turns GPS on.
+ *
+ * Pausing needs **both** conditions: the chair has not discharged recently **and** the phone is
+ * confidently still. The chair draws nothing in a van or on a train, so discharge alone reads
+ * transit as "parked" and switches GNSS off for the whole journey — measured 2026-08-06 as three
+ * outings that were entirely invisible on the map, destinations included.
  */
 fun gpsShouldRun(
     wanted: Boolean,
     pauseEnabled: Boolean,
     lastDischargeMs: Long?,
     nowMs: Long,
+    confidentlyStill: Boolean,
     holdMs: Long = PARKED_HOLD_MS,
-): Boolean = wanted && !(pauseEnabled && gpsParked(lastDischargeMs, nowMs, holdMs))
+): Boolean = wanted && !(pauseEnabled && gpsParked(lastDischargeMs, nowMs, holdMs) && confidentlyStill)
 
 /**
  * A single phone-motion sample, as produced by `motion/MotionSource`.

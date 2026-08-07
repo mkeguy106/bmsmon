@@ -94,25 +94,112 @@ class BatterySaverTest {
 
     @Test fun gpsRunsWhenWantedAndMoving() {
         val now = 10_000_000L
-        assertTrue(gpsShouldRun(wanted = true, pauseEnabled = true, lastDischargeMs = now - 1000L, nowMs = now))
+        assertTrue(
+            gpsShouldRun(
+                wanted = true, pauseEnabled = true,
+                lastDischargeMs = now - 1000L, nowMs = now, confidentlyStill = true,
+            ),
+        )
     }
 
     @Test fun gpsStopsWhenParked() {
         val now = 10_000_000L
-        assertFalse(gpsShouldRun(true, pauseEnabled = true, lastDischargeMs = now - PARKED_HOLD_MS, nowMs = now))
+        assertFalse(
+            gpsShouldRun(
+                true, pauseEnabled = true,
+                lastDischargeMs = now - PARKED_HOLD_MS, nowMs = now, confidentlyStill = true,
+            ),
+        )
     }
 
     // With the toggle off, parking is irrelevant — this is the opt-out path.
     @Test fun gpsIgnoresParkedWhenPauseDisabled() {
         val now = 10_000_000L
-        assertTrue(gpsShouldRun(true, pauseEnabled = false, lastDischargeMs = null, nowMs = now))
+        assertTrue(
+            gpsShouldRun(
+                true, pauseEnabled = false,
+                lastDischargeMs = null, nowMs = now, confidentlyStill = true,
+            ),
+        )
     }
 
     // The parked gate can only ever SUBTRACT from what the cloud settings want.
     @Test fun gpsNeverRunsWhenNotWanted() {
         val now = 10_000_000L
-        assertFalse(gpsShouldRun(false, pauseEnabled = false, lastDischargeMs = now, nowMs = now))
-        assertFalse(gpsShouldRun(false, pauseEnabled = true, lastDischargeMs = now, nowMs = now))
+        assertFalse(
+            gpsShouldRun(
+                false, pauseEnabled = false,
+                lastDischargeMs = now, nowMs = now, confidentlyStill = true,
+            ),
+        )
+        assertFalse(
+            gpsShouldRun(
+                false, pauseEnabled = true,
+                lastDischargeMs = now, nowMs = now, confidentlyStill = true,
+            ),
+        )
+    }
+
+    // ── gpsShouldRun with the motion gate ────────────────────────────────────
+    // Pausing now needs BOTH conditions: chair not discharging AND phone still.
+
+    @Test fun pausesOnlyWhenParkedAndStill() {
+        val now = 10_000_000L
+        assertFalse(
+            gpsShouldRun(
+                wanted = true, pauseEnabled = true,
+                lastDischargeMs = now - PARKED_HOLD_MS, nowMs = now, confidentlyStill = true,
+            ),
+        )
+    }
+
+    // THE TRANSIT CASE: chair drew nothing for an hour (it is in a van), but the phone is
+    // moving, so GPS must stay on. This is the entire point of the feature.
+    @Test fun parkedButMovingKeepsGpsOn() {
+        val now = 10_000_000L
+        assertTrue(
+            gpsShouldRun(
+                wanted = true, pauseEnabled = true,
+                lastDischargeMs = now - 3_600_000L, nowMs = now, confidentlyStill = false,
+            ),
+        )
+    }
+
+    @Test fun recentDischargeKeepsGpsOnRegardlessOfStillness() {
+        val now = 10_000_000L
+        for (still in booleanArrayOf(true, false)) {
+            assertTrue(
+                gpsShouldRun(
+                    wanted = true, pauseEnabled = true,
+                    lastDischargeMs = now - 1_000L, nowMs = now, confidentlyStill = still,
+                ),
+            )
+        }
+    }
+
+    @Test fun pauseDisabledIgnoresBothConditions() {
+        val now = 10_000_000L
+        assertTrue(
+            gpsShouldRun(
+                wanted = true, pauseEnabled = false,
+                lastDischargeMs = null, nowMs = now, confidentlyStill = true,
+            ),
+        )
+    }
+
+    // The gate can still only ever SUBTRACT from what the cloud settings want.
+    @Test fun neverRunsWhenNotWantedWhateverTheMotionState() {
+        val now = 10_000_000L
+        for (still in booleanArrayOf(true, false)) {
+            for (pause in booleanArrayOf(true, false)) {
+                assertFalse(
+                    gpsShouldRun(
+                        wanted = false, pauseEnabled = pause,
+                        lastDischargeMs = now, nowMs = now, confidentlyStill = still,
+                    ),
+                )
+            }
+        }
     }
 
     // ── confidentlyStill ─────────────────────────────────────────────────────
