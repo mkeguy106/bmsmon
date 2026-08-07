@@ -6,9 +6,11 @@ import dev.joely.bmsmon.model.LOCK_REFRESH_HZ
 import dev.joely.bmsmon.model.MIN_DIM_LEVEL
 import dev.joely.bmsmon.model.MOTION_STALE_MS
 import dev.joely.bmsmon.model.PARKED_HOLD_MS
+import dev.joely.bmsmon.model.MotionGate
 import dev.joely.bmsmon.model.MotionReading
 import dev.joely.bmsmon.model.STILL_CONFIDENCE_MIN
-import dev.joely.bmsmon.model.confidentlyStill
+import dev.joely.bmsmon.model.STILL_DEBOUNCE_N
+import dev.joely.bmsmon.model.foldMotion
 import dev.joely.bmsmon.model.gpsParked
 import dev.joely.bmsmon.model.gpsShouldRun
 import dev.joely.bmsmon.model.lockBrightness
@@ -202,46 +204,113 @@ class BatterySaverTest {
         }
     }
 
-    // ── confidentlyStill ─────────────────────────────────────────────────────
-    // Every "no usable signal" path must return false, because false means GPS
-    // STAYS ON. That is the explicit fail-open decision: losing an outing is
-    // worse than losing the battery saving.
+    // ── foldMotion ───────────────────────────────────────────────────────────
+    // Asymmetric hysteresis (2026-08-07 amendment): closing the gate (pausing GNSS) needs
+    // STILL_DEBOUNCE_N consecutive confident-STILL readings; reopening needs only one confident
+    // non-STILL reading; uncertainty (confidence < STILL_CONFIDENCE_MIN, including UNKNOWN at any
+    // confidence) HOLDS the previous state rather than resetting it — measured on-device as
+    // STILL@96-100 interleaved with UNKNOWN@41-50, never confident motion, so treating UNKNOWN as
+    // "moving" was the whole bug. null/stale readings still fail open immediately, same as the
+    // deleted confidentlyStill()'s contract, because false/MotionGate() means GPS STAYS ON.
 
     private fun reading(still: Boolean, conf: Int, age: Long, now: Long = 10_000_000L) =
         MotionReading(still = still, confidence = conf, atMs = now - age)
 
-    @Test fun noReadingIsNotConfidentlyStill() {
-        assertFalse(confidentlyStill(null, 10_000_000L))
+    @Test fun noReadingFailsOpen() {
+        val prev = MotionGate(stillRun = 2, still = false)
+        assertEquals(MotionGate(), foldMotion(prev, null, 10_000_000L))
     }
 
-    @Test fun movingIsNotConfidentlyStill() {
-        assertFalse(confidentlyStill(reading(still = false, conf = 99, age = 0), 10_000_000L))
+    @Test fun staleReadingFailsOpen() {
+        val now = 10_000_000L
+        val prev = MotionGate(stillRun = 2, still = false)
+        val stale = reading(still = true, conf = 99, age = MOTION_STALE_MS + 1, now = now)
+        assertEquals(MotionGate(), foldMotion(prev, stale, now))
     }
 
-    @Test fun lowConfidenceStillIsNotConfidentlyStill() {
-        assertFalse(confidentlyStill(reading(still = true, conf = 74, age = 0), 10_000_000L))
+    // Boundary is inclusive, matching the alert-ladder convention: exactly at the staleness
+    // bound is still fresh, so it counts toward the run rather than resetting it.
+    @Test fun exactlyAtStalenessBoundIsFreshAndCounts() {
+        val now = 10_000_000L
+        val fresh = reading(still = true, conf = 99, age = MOTION_STALE_MS, now = now)
+        assertEquals(MotionGate(stillRun = 1, still = false), foldMotion(MotionGate(), fresh, now))
     }
 
-    // Threshold fires AT its value, matching the alert-ladder convention.
-    @Test fun exactlyAtConfidenceThresholdIsStill() {
-        assertTrue(confidentlyStill(reading(still = true, conf = STILL_CONFIDENCE_MIN, age = 0), 10_000_000L))
+    @Test fun oneConfidentStillIsNotYetStill() {
+        val now = 10_000_000L
+        val gate = foldMotion(MotionGate(), reading(still = true, conf = 99, age = 0, now = now), now)
+        assertEquals(1, gate.stillRun)
+        assertFalse(gate.still)
     }
 
-    @Test fun staleReadingIsNotConfidentlyStill() {
-        assertFalse(confidentlyStill(reading(still = true, conf = 99, age = MOTION_STALE_MS + 1), 10_000_000L))
+    @Test fun debounceConsecutiveConfidentStillClosesTheGate() {
+        val now = 10_000_000L
+        var gate = MotionGate()
+        repeat(STILL_DEBOUNCE_N - 1) {
+            gate = foldMotion(gate, reading(still = true, conf = 99, age = 0, now = now), now)
+            assertFalse(gate.still)
+        }
+        gate = foldMotion(gate, reading(still = true, conf = 99, age = 0, now = now), now)
+        assertTrue(gate.still)
+        assertEquals(STILL_DEBOUNCE_N, gate.stillRun)
     }
 
-    // Boundary is inclusive: exactly at the staleness bound still counts.
-    @Test fun exactlyAtStalenessBoundIsStill() {
-        assertTrue(confidentlyStill(reading(still = true, conf = 99, age = MOTION_STALE_MS), 10_000_000L))
+    // UNKNOWN@41 mid-run: absence of evidence, not evidence of motion. The run must hold, not
+    // reset — this is the exact defect confidentlyStill() had.
+    @Test fun uncertainSampleMidRunHoldsRatherThanResets() {
+        val now = 10_000_000L
+        var gate = foldMotion(MotionGate(), reading(still = true, conf = 99, age = 0, now = now), now)
+        assertEquals(1, gate.stillRun)
+        val held = foldMotion(gate, reading(still = false, conf = 41, age = 0, now = now), now)
+        assertEquals(gate, held)
+        // The hold contributed nothing: the run still only needs STILL_DEBOUNCE_N - 1 more
+        // confident-STILL readings to close, not a fresh count from zero.
+        repeat(STILL_DEBOUNCE_N - 1) {
+            gate = foldMotion(gate, reading(still = true, conf = 99, age = 0, now = now), now)
+        }
+        assertTrue(gate.still)
     }
 
-    @Test fun freshConfidentStillIsStill() {
-        assertTrue(confidentlyStill(reading(still = true, conf = 99, age = 1_000), 10_000_000L))
+    @Test fun confidentNonStillReopensImmediatelyFromClosedGate() {
+        val now = 10_000_000L
+        val closed = MotionGate(stillRun = STILL_DEBOUNCE_N, still = true)
+        val moving = reading(still = false, conf = 99, age = 0, now = now)
+        assertEquals(MotionGate(), foldMotion(closed, moving, now))
     }
 
-    @Test fun motionThresholdsAreSeventyFiveAndTwoAndAHalfMinutes() {
+    @Test fun uncertainSampleWhileClosedKeepsItClosed() {
+        val now = 10_000_000L
+        val closed = MotionGate(stillRun = STILL_DEBOUNCE_N, still = true)
+        val unknown = reading(still = false, conf = 50, age = 0, now = now)
+        assertEquals(closed, foldMotion(closed, unknown, now))
+    }
+
+    // STILL@38 from the measured trace: still=true but below STILL_CONFIDENCE_MIN, so it is
+    // uncertain too and must hold rather than count toward the run.
+    @Test fun lowConfidenceStillHoldsRatherThanCounting() {
+        val now = 10_000_000L
+        val gate = MotionGate(stillRun = 1, still = false)
+        val weak = reading(still = true, conf = 38, age = 0, now = now)
+        assertEquals(gate, foldMotion(gate, weak, now))
+    }
+
+    @Test fun motionThresholdsAreSeventyFiveAndTwoAndAHalfMinutesAndThreeInARow() {
         assertEquals(75, STILL_CONFIDENCE_MIN)
         assertEquals(150_000L, MOTION_STALE_MS)
+        assertEquals(3, STILL_DEBOUNCE_N)
+    }
+
+    // The gate can only ever SUBTRACT from `wanted`: a fully closed motion gate (still=true)
+    // must not make GPS run when the cloud settings don't want it at all.
+    @Test fun closedGateCannotMakeGpsRunWhenNotWanted() {
+        val now = 10_000_000L
+        val closed = MotionGate(stillRun = STILL_DEBOUNCE_N, still = true)
+        assertFalse(
+            gpsShouldRun(
+                wanted = false, pauseEnabled = true,
+                lastDischargeMs = now - PARKED_HOLD_MS, nowMs = now,
+                confidentlyStill = closed.still,
+            ),
+        )
     }
 }

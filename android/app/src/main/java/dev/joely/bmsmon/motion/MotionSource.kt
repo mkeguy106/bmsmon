@@ -40,9 +40,9 @@ class MotionSource(private val context: Context) {
             // which keeps GPS on. Not knowing is not the same as knowing it is stationary.
             val still = top.type == DetectedActivity.STILL
             // Permanent instrumentation, not throwaway debug: this is the only window into why the
-            // parked-GPS gate is or isn't pausing, since confidentlyStill() (BatterySaver.kt) only
-            // ever sees the cached MotionReading below, never the raw classification that produced
-            // it. Cheap — this fires at most once per INTERVAL_MS (~twice a minute).
+            // parked-GPS gate is or isn't pausing, since foldMotion() (BatterySaver.kt) only ever
+            // sees the cached MotionReading below, never the raw classification that produced it.
+            // Cheap — this fires at most once per INTERVAL_MS (~twice a minute).
             Log.d(TAG, "reading activity=${activityName(top.type)} confidence=${top.confidence} still=$still")
             cache.set(
                 MotionReading(
@@ -123,9 +123,9 @@ class MotionSource(private val context: Context) {
 
     /**
      * Clears the cache along with the subscription. Without this, a reading cached before [stop]
-     * would still satisfy `confidentlyStill` after a later [start] — read as fresh evidence the
-     * phone is stationary — even though it describes a session that already ended and GNSS may
-     * have moved since.
+     * would still feed the motion gate (`foldMotion`, BatterySaver.kt) after a later [start] —
+     * read as fresh evidence the phone is stationary — even though it describes a session that
+     * already ended and GNSS may have moved since.
      */
     @Synchronized
     fun stop() {

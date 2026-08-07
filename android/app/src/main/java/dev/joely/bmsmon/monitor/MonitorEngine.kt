@@ -52,7 +52,8 @@ import dev.joely.bmsmon.model.applyDisabled
 import dev.joely.bmsmon.model.groupActivity
 import dev.joely.bmsmon.model.groupOf
 import dev.joely.bmsmon.model.groupViews
-import dev.joely.bmsmon.model.confidentlyStill
+import dev.joely.bmsmon.model.MotionGate
+import dev.joely.bmsmon.model.foldMotion
 import dev.joely.bmsmon.model.gpsShouldRun
 import dev.joely.bmsmon.model.isRegen
 import dev.joely.bmsmon.model.powerDecision
@@ -449,6 +450,11 @@ class MonitorEngine(
     @Volatile private var gpsWanted = false
     @Volatile private var gpsPauseParked = true
 
+    // Debounced motion-gate state (see foldMotion). Only ever read/written inside applyGpsGate
+    // and shutdownGps, both @Synchronized on this engine, so this does not need @Volatile the
+    // way gpsWanted/gpsPauseParked do (those are written from outside the lock too).
+    private var motionGate = MotionGate()
+
     /** Record whether GPS capture is wanted at all; the parked gate decides if it actually runs. */
     fun setGpsActive(active: Boolean) {
         gpsWanted = active
@@ -471,11 +477,12 @@ class MonitorEngine(
      * spikes, so we would rather capture nothing than capture noise.
      *
      * [motionSource] is started/stopped **here**, driven straight off [gpsWanted], rather than by
-     * its callers. It is an *input* to the pause decision below (via [confidentlyStill]), not
-     * something the decision's own output can gate, and it must run for the whole window the
-     * parked gate could apply within — i.e. whenever GPS is wanted at all, not only once the gate
-     * has already decided to pause. Doing this under the same lock as [locationSource] is what
-     * lets [setGpsActive] stay a bare, unsynchronized volatile write to [gpsWanted]: even if it
+     * its callers. It is an *input* to the pause decision below (via [motionGate], folded fresh
+     * each call by [foldMotion]), not something the decision's own output can gate, and it must
+     * run for the whole window the parked gate could apply within — i.e. whenever GPS is wanted
+     * at all, not only once the gate has already decided to pause. Doing this under the same
+     * lock as [locationSource] is what lets [setGpsActive] stay a bare, unsynchronized volatile
+     * write to [gpsWanted]: even if it
      * races [shutdownGps] between that write and reaching this method, whichever write is still
      * current when this method acquires the lock is the one both [motionSource] and
      * [locationSource] end up obeying, because both are driven from the live field here, never
@@ -497,12 +504,13 @@ class MonitorEngine(
     @Synchronized
     private fun applyGpsGate(now: Long) {
         if (gpsWanted) motionSource.start() else motionSource.stop()
+        motionGate = foldMotion(motionGate, motionSource.current(), now)
         val active = gpsShouldRun(
             wanted = gpsWanted,
             pauseEnabled = gpsPauseParked,
             lastDischargeMs = _state.value.lastDischargeAt.values.maxOrNull(),
             nowMs = now,
-            confidentlyStill = confidentlyStill(motionSource.current(), now),
+            confidentlyStill = motionGate.still,
         )
         if (_state.value.gpsActive == active) return
         _state.update { it.copy(gpsActive = active) }
@@ -528,6 +536,9 @@ class MonitorEngine(
      * [motionSource] is stopped here for the same reason as [locationSource]: it is the other
      * resource [applyGpsGate] owns under this lock, and leaving it subscribed with monitoring
      * torn down would be a live Activity Recognition subscription nothing ever reads again.
+     * [motionGate] is reset alongside it so a stale debounce run cannot survive a stop and carry
+     * over into the next monitoring session — a fresh session should need [STILL_DEBOUNCE_N]
+     * fresh confident-STILL readings, not inherit a run counted before the phone last moved.
      */
     @Synchronized
     private fun shutdownGps() {
@@ -535,6 +546,7 @@ class MonitorEngine(
         _state.update { it.copy(gpsActive = false) }
         locationSource.stop()
         motionSource.stop()
+        motionGate = MotionGate()
     }
 
     /**
