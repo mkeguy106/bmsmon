@@ -163,3 +163,54 @@ holds GPS off 68% of the time). Zero work, fully reversible. Offer this if (c) s
 The screen-hold gate shares the charging-icon bug's blind spot: it holds the display (~139 mA)
 whenever `EXTRA_PLUGGED` is nonzero, including on a connected-but-dead charger — the worst case for
 holding it. Needs hysteresis so it cannot flap. See `CLAUDE.md`.
+
+---
+
+## UPDATE 2026-08-06 20:31 — the measurement came back, and it stops the build
+
+**The design as specified cannot fire.** Tasks 1-3 are implemented correctly and reviewed clean;
+the defect is in the spec, not the code.
+
+**Measured** on the Pixel 6, periodic Activity Recognition, requested interval **30 s**:
+
+```
+19:11:28 · 19:23:00 · 19:32:33 · then NOTHING for 59 minutes
+```
+
+The logging build was installed at 19:32:28, so the 19:32:33 delivery is just the subscribe-time
+callback. An independent second subscription (`arprobe`, sampled mode, 19:22) delivered **zero**.
+
+**Root cause:** periodic Activity Recognition is **not a heartbeat**. Play Services suppresses
+redundant updates while the detected activity is unchanged. The spec's `MOTION_STALE_MS = 150 s`
+assumed a heartbeat, so in practice the cached reading is *always* stale → `confidentlyStill()` is
+always false → GPS never pauses → the ~15 mA saving never materialises. Meanwhile GPS runs
+continuously, so the current build is strictly worse than before on battery.
+
+**Controller error, corrected for the record:** an earlier claim of mine — "23 broadcasts including
+recent ones" — was wrong. 23 was a grep count over a history buffer that lists each broadcast about
+three times, and `#504/#533/#534` are list indices, not recency indicators. Freshness was inferred
+from list position. The implementer's "one delivery then silence" was correct and mine was not.
+
+**Still unknown, and it is the hopeful reading:** whether AR responds *promptly to a genuine
+activity change*. Suppression while stationary may be precisely why it is quiet, and entering a
+vehicle might deliver at once. **Only a real vehicle outing tests this.**
+
+### Options (user decision required — (i) reverses a documented spec decision)
+
+- **(i) Switch to the Activity Transition API.** Edge-triggered, so "no event" legitimately means
+  "no change" and the staleness concept disappears entirely. The spec explicitly *rejected*
+  transitions on the grounds that one missed edge loses the outing — but periodic has turned out
+  to be less reliable, not more, so that reasoning no longer holds.
+- **(ii) Keep periodic, drop or greatly lengthen staleness.** Simplest change, but a dead
+  subscription then becomes indistinguishable from "still stationary", which fails **closed** —
+  GPS pauses during transit. That is the exact behaviour the user rejected when choosing fail-open.
+- **(iii) Both** — transitions for edges, periodic as a slow sanity check that the subscription is
+  alive. Most robust, most work.
+- **(iv) Abandon (c).** The existing *Settings › Battery saver › Pause GPS while parked* toggle
+  already lets the user trade the saving for journey capture, with zero further work.
+
+### State
+
+Branch `feat/motion-gated-gps` at `4c2c29b`, 371 tests green, lint 0 errors. Tasks 1-3 complete and
+reviewed; **Tasks 4-6 deliberately not started.** `main` is untouched. The phone is running the
+branch build — functional and fail-open (GPS stays on), so no safety issue, just no saving.
