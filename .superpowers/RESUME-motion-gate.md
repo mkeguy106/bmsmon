@@ -301,3 +301,19 @@ Left running the **pre-merge branch build**, and at its **OS PIN lock screen** (
 `input swipe` was read as a notification-shade drag, toggled airplane mode, and the screen timed
 out; monitoring itself never dropped and airplane mode was restored). It needs `main`'s build
 installed — `adb install -r` then `am start`, **never** `adb uninstall`.
+
+## Device topology (documented in CLAUDE.md 2026-08-08, read it before touching radios)
+
+The Pixel is a **dedicated telemetry device**, not the user's phone — their daily phone is an
+iPhone. It is Wi-Fi only: home Wi-Fi at home, **iPhone hotspot** on the road, which is how OTA
+telemetry uploads away from home. Cellular is deliberately off because the SIM reads
+`OUT_OF_SERVICE` and the modem burns ~28 mA hunting (299 mAh over one 12.5 h night).
+**Airplane mode ON, Wi-Fi re-enabled on top, is the correct steady state.**
+
+**⚠ Airplane mode also switches Bluetooth off, which kills BLE monitoring.** Restore both and
+verify: Wi-Fi associated, BLE reconnected to all 8 packs, telemetry uploading. Never toggle radios
+just before the user leaves the house.
+
+Currently **airplane mode is OFF and needs re-enabling** — an incident restored the platform default
+instead of the user's chosen setting. Deferred until after the 2026-08-08 vehicle outing rather than
+risk the Bluetooth link during the one journey the motion gate needs to be tested against.

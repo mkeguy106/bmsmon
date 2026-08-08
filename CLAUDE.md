@@ -206,6 +206,46 @@ Tested with 8x Redodo 12V 100Ah LiFePO4 batteries (grouped into bases; see `BATT
 
 OUI `C8:47:80` = Beken Corporation. All batteries share the same firmware (BK-BLE-1.0, FW 6.1.2, SW 6.3.0).
 
+### The Pixel is a dedicated telemetry device, not the user's phone
+
+This changes how to reason about almost every power and connectivity decision, so read it before
+touching either.
+
+- The Pixel 6 is **mounted on the chair and does nothing but run this app.** The user's daily phone
+  is an **iPhone**. Nobody reads the Pixel's screen for messages, takes calls on it, or is left
+  uncontactable if it loses connectivity.
+- **Networking is Wi-Fi only, by design.** Home Wi-Fi at home; away from home it associates with the
+  **iPhone's hotspot**, which is how OTA telemetry keeps uploading on the road. There is no scenario
+  in which this device needs cellular.
+- **Cellular is deliberately off.** The SIM reads `OUT_OF_SERVICE` on both voice and data (Verizon,
+  `registrationState=DENIED`, emergency-only), so the modem hunts for a network it can never join
+  and burns **~28 mA** doing it — measured 299 mAh across one 12.5 h night. **Airplane mode ON is
+  the correct steady state for this device**, with Wi-Fi re-enabled on top of it.
+
+**⚠ Enabling airplane mode also switches Bluetooth off, which kills BLE monitoring of the chair.**
+Always restore both, in order, and verify rather than assume:
+
+```bash
+adb shell cmd connectivity airplane-mode enable
+# then re-enable Wi-Fi and Bluetooth, and confirm:
+#   Wi-Fi associated (home SSID or the iPhone hotspot)
+#   BLE reconnected to all 8 packs
+#   telemetry uploading again
+```
+
+Never toggle radios immediately before the user leaves the house — a Bluetooth link that does not
+come back cleanly costs a whole outing's monitoring.
+
+**Consequence worth internalising:** the screen and the modem serve no human on this device. They
+are pure overhead, which is why the battery-saver work matters more here than it would on a personal
+phone — and why "the user might need the phone" is never a reason to keep something powered.
+
+**Regression that cost a night (2026-08-07 → 08):** during an unrelated on-device mishap an agent
+accidentally toggled airplane mode ON, then "restored" it to OFF, and the controller confirmed that
+as correct remediation. OFF was not the user's setting — they had deliberately enabled it on
+2026-08-03 for the reason above. The modem then hunted all night. When restoring device state after
+an incident, restore what the **user chose**, not the platform default.
+
 ## Architecture
 
 Single-file script (`bmsmon.py`) with no packaging. Only external dependency is `bleak`.
@@ -301,7 +341,9 @@ fallback for a missing value.
 **In-app battery saver (`Settings › Battery saver`).** Three toggles, each sized from an on-device
 measurement *before* it was designed (Pixel 6, `dumpsys batterystats` over a 6 h 33 m / 2 580 mAh
 session, 2026-08-03): screen **908 mAh ≈ 139 mA**, cpu 275 mAh ≈ 42 mA, mobile_radio 186 mAh
-≈ **28.5 mA** burned while `OUT_OF_SERVICE` (fixed out-of-band with airplane mode, not by the app),
+≈ **28.5 mA** burned while `OUT_OF_SERVICE` (fixed out-of-band with airplane mode, not by the app —
+see "The Pixel is a dedicated telemetry device" for why cellular is off and the Bluetooth gotcha when
+re-enabling airplane mode),
 gnss **143 mAh ≈ 22 mA**, wifi 108 mAh ≈ 16.5 mA, GPU 57.3, bluetooth **19.3 mAh ≈ 3 mA**, TPU 18.4.
 The trigger was finding the phone net-discharging at **−174 mA while sitting on its wireless
 charger** at 11% SOC, ~3 h from dead. Pure logic in `model/BatterySaver.kt` — `lockRefreshRate` /
