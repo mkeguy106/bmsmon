@@ -211,9 +211,10 @@ OUI `C8:47:80` = Beken Corporation. All batteries share the same firmware (BK-BL
 This changes how to reason about almost every power and connectivity decision, so read it before
 touching either.
 
-- The Pixel 6 is **mounted on the chair and does nothing but run this app.** The user's daily phone
-  is an **iPhone**. Nobody reads the Pixel's screen for messages, takes calls on it, or is left
-  uncontactable if it loses connectivity.
+- The Pixel 6 is **MagSafe-mounted to the wheelchair frame** and does nothing but run this app. The
+  user's daily phone is an **iPhone**, so nobody reads the Pixel's screen for messages, takes calls
+  on it, or is left uncontactable if it loses connectivity. **But they do read it constantly for
+  battery state** — see below; the screen is the product.
 - **Networking is Wi-Fi only, by design.** Home Wi-Fi at home; away from home it associates with the
   **iPhone's hotspot**, which is how OTA telemetry keeps uploading on the road. There is no scenario
   in which this device needs cellular.
@@ -236,9 +237,25 @@ adb shell cmd connectivity airplane-mode enable
 Never toggle radios immediately before the user leaves the house — a Bluetooth link that does not
 come back cleanly costs a whole outing's monitoring.
 
-**Consequence worth internalising:** the screen and the modem serve no human on this device. They
-are pure overhead, which is why the battery-saver work matters more here than it would on a personal
-phone — and why "the user might need the phone" is never a reason to keep something powered.
+**The screen is the opposite of overhead — it is the reason this project exists.** The modem is
+dead weight and can go; the display must not be traded away for battery.
+
+The chair's **R-net controller gauge is not calibrated for the LiFePO4 voltage profile** — LiFePO4
+holds a nearly flat voltage across most of its usable range, so a gauge built for lead-acid reads
+"full" almost to the point of cutout. It lies. The Pixel is **MagSafe-mounted to the wheelchair
+frame** at glance height, and this app is the user's **only accurate reading of real remaining
+charge while out in the world** — the thing standing between them and being stranded.
+
+Consequences that bind any future power work:
+
+- **Readability is a safety property, not a preference.** Never trade it for battery life. This is
+  why *Dim screen while locked* defaults **OFF** by explicit user decision, and why the dim slider
+  is floored at 5% — a display that cannot be read at a glance has failed at its only job.
+- Savings must come from things nobody looks at: the modem, GNSS while genuinely parked, the
+  refresh rate (60 Hz is invisible on a stage that redraws every 1.5 s). Not from the display's
+  legibility.
+- "Nobody needs to see this screen" is **never** a valid argument on this device. An earlier
+  revision of this section asserted exactly that and was wrong.
 
 **Regression that cost a night (2026-08-07 → 08):** during an unrelated on-device mishap an agent
 accidentally toggled airplane mode ON, then "restored" it to OFF, and the controller confirmed that
