@@ -314,6 +314,8 @@ telemetry uploads away from home. Cellular is deliberately off because the SIM r
 verify: Wi-Fi associated, BLE reconnected to all 8 packs, telemetry uploading. Never toggle radios
 just before the user leaves the house.
 
-Currently **airplane mode is OFF and needs re-enabling** — an incident restored the platform default
-instead of the user's chosen setting. Deferred until after the 2026-08-08 vehicle outing rather than
-risk the Bluetooth link during the one journey the motion gate needs to be tested against.
+**RESTORED 2026-08-08 16:07**, after the vehicle outing rather than before it. Verified end to end:
+airplane_mode 1, modem `POWER_OFF`, Wi-Fi reassociated (IP 192.168.0.16, RSSI -54), Bluetooth
+`State: ON`, and — the check that actually matters — **8 packs reporting to the server**, up from a
+baseline of 7. Monitoring never dropped. Verify BLE by packs reaching the server, not by the adapter
+flag; the flag can read ON while nothing has reconnected.
