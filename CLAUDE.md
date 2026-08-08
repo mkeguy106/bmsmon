@@ -371,7 +371,12 @@ gate exists to remove. **Three gate drivers, all load-bearing:** the BLE poll (p
 fires when a frame arrives), `setDisabled()` (**"Disconnect all"** cancels every worker, so `onPoll`
 may never fire again with monitoring still on), and `startRangeLoop()`'s **5-minute tick** (Bluetooth
 off or every pack out of range stalls `onPoll` indefinitely, freezing `lastDischargeAt` and pinning
-GNSS on; the loop's period equals `PARKED_HOLD_MS`, bounding the overshoot at one hold). Teardown
+GNSS on; the loop's period equals `PARKED_HOLD_MS`, so the *discharge* half of the gate overshoots by
+at most one hold. It is **not** a fast path for the motion half: `foldMotion` folds one reading per
+call, so this driver alone needs `STILL_DEBOUNCE_N` ticks — ~15 min of sampled confident-STILL — to
+close the gate, and a staleness gap in between restarts the run. That is acceptable because it is a
+backstop whose failure direction is GPS staying on; `onPoll` is the driver that actually closes the
+gate). Teardown
 goes through `shutdownGps()`, which drops intent and request together under the same lock —
 `ble.stop()` cancels the control-loop job but cannot preempt an in-flight `onPoll`, so an
 unsynchronized teardown lets that call's `locationSource.start()` land *after* `stop()`.
@@ -429,38 +434,70 @@ evidence). The conceptual error is the thing to remember: **`UNKNOWN@41` is abse
 evidence of motion.** Treating uncertainty as movement was the entire defect.
 
 `foldMotion(prev, reading, nowMs)` (`model/BatterySaver.kt` — pure, no clock, JVM-tested) folds one
-reading at a time into a `MotionGate`, **asymmetrically**:
+reading at a time into a `MotionGate`, **asymmetrically**, in this branch order:
 
-- **null or stale** — older than `MOTION_STALE_MS = 150_000` — → **fails open**, gate reset.
-- **confidence < `STILL_CONFIDENCE_MIN` (75)** → **holds `prev` unchanged**. Uncertainty neither
-  pauses nor resumes; the last confident verdict stands.
-- **confident `STILL`** → run++, gate closes once the run reaches `STILL_DEBOUNCE_N = 3`.
+- **null, or the reading itself older than `MOTION_STALE_MS` (150_000)** → **fails open**, gate reset.
+- **already folded** — `reading.atMs == gate.lastConfidentAtMs` → returns `prev` untouched (see the
+  dedup note below).
+- **confidence < `STILL_CONFIDENCE_MIN` (75)** → **holds `prev` unchanged**, *but only while
+  confident evidence is still fresh*: past `MOTION_STALE_MS` since the last confident reading it
+  fails open anyway. Uncertainty neither pauses nor resumes, and it cannot postpone fail-open either.
+- **confident `STILL`** → run++, gate closes once the run reaches `STILL_DEBOUNCE_N = 3`, and the
+  reading's timestamp becomes the new `lastConfidentAtMs`.
 - **confident non-`STILL`** → reopens on a **single** reading, so getting into a vehicle resumes GNSS
   at the first solid sample rather than after N of them.
 
-**Branch order is load-bearing: staleness is checked *before* uncertainty**, so a dead signal can
-never hold the gate shut. Every unusable-signal path — permission denied, AR unavailable on the
-device, subscription lapsed, process restarted with no reading yet, updates gone stale — fails open
-to GPS-on. That is the user's explicit choice: never lose an outing, even at the cost of the saving.
-The single-sample `confidentlyStill()` predicate is **deleted**; the name survives only as
-`gpsShouldRun`'s parameter, which the gate's `still` verdict now feeds.
+**Folds are deduped by reading identity, and that is what makes N mean anything.** The engine
+evaluates the gate on every BLE frame (~80–115×/min across the fleet) while AR broadcasts arrive
+~10×/min, and `MotionSource.current()` returns the same cached reading in between — so folding on
+every *evaluation* counted one reading ~11 times and collapsed `STILL_DEBOUNCE_N` to an **effective
+1**. Invisible while stationary (nothing ever reopens the gate, which is why the on-device 5m18s hold
+looked right), but in transit a single spurious `STILL@96` at a stop light closed the gate ~1.5 s
+later and the next confident `IN_VEHICLE` reopened it — a GNSS restart and a hole in the track per
+misread, i.e. exactly the flapping the debounce exists to remove. Fixed by carrying the last folded
+confident reading's timestamp **on `MotionGate` itself** (`lastConfidentAtMs`), so the dedup lives in
+the pure function rather than as engine state — and so `shutdownGps()`'s existing gate reset clears
+it too. **One field, two jobs, deliberately**: it is both the dedup key and the fail-open deadline,
+which works because only confident readings ever change the gate (re-folding an uncertain one is
+already idempotent). Staleness is still re-evaluated on **every** call, so the deadline runs off the
+wall clock, not off reading arrivals. Corollary worth stating plainly: **this reduces the measured
+saving** — the gate now takes three genuine readings (~18 s at the observed cadence), not ~1.5 s, to
+close. That is the correct direction.
+
+**Branch order is load-bearing: staleness is checked *before* both the dedup and the uncertainty
+hold**, so a dead signal can never hold the gate shut. Every unusable-signal path — permission
+denied, AR unavailable on the device, subscription lapsed, process restarted with no reading yet,
+updates gone stale, only low-confidence readings arriving — fails open to GPS-on. That is the user's
+explicit choice: never lose an outing, even at the cost of the saving. The single-sample
+`confidentlyStill()` predicate is **deleted**; the name survives only as `gpsShouldRun`'s parameter,
+which the gate's `still` verdict now feeds.
 
 Plumbing: `motion/MotionSource.kt` wraps Play Services **periodic** Activity Recognition (~30 s
 requested), mirroring `location/LocationSource.kt`, and logs every reading (activity name +
 confidence) — permanent instrumentation, not throwaway debug, because `foldMotion` only ever sees the
 cached `MotionReading`, never the classification behind it, and that blindness is what made the
 original non-firing take three rounds to diagnose. `MonitorEngine` owns the `MotionGate`, starts/stops
-`MotionSource` straight off `gpsWanted`, and folds each reading **inside the same `@Synchronized
-applyGpsGate`** that writes `gpsActive` (same lock discipline as `locationSource`, so a `start()`
-can't land after a concurrent teardown's `stop()`); `shutdownGps()` stops the source and **resets the
-gate**, so a stale debounce run cannot survive a stop. Two build pitfalls, both **silent** failures
-rather than crashes: the AR `PendingIntent` must be `FLAG_MUTABLE` (Play Services fills the
-`ActivityRecognitionResult` extra into it) **and** explicit (`Intent(ACTION).setPackage(packageName)`)
-— Android 14+ throws `IllegalArgumentException` for mutable + implicit, so motion sensing would
-simply never have subscribed; and `ACTIVITY_RECOGNITION` must be requested at **both** `ui/App.kt`
-call sites, mirroring `askNotificationPermission()`, because on any install where BLE is already
-granted — the real device and every existing user — the monitor toggle takes the `hasBlePermissions`
-branch and the `permLauncher` site never fires. `Settings › Battery saver` carries a **read-only**
+`MotionSource` off `gpsWanted` **&& the pause toggle** (with *Pause GPS while parked* off,
+`gpsShouldRun` ignores the motion verdict entirely, so the subscription would be pure waste in
+exactly the configuration a user picks to keep their track), and folds each reading **inside the same
+`@Synchronized applyGpsGate`** that writes `gpsActive` (same lock discipline as `locationSource`, so
+a `start()` can't land after a concurrent teardown's `stop()`); `shutdownGps()` stops the source and
+**resets the gate**, so a stale debounce run cannot survive a stop. Three build pitfalls, all
+**silent** failures rather than crashes: the AR `PendingIntent` must be `FLAG_MUTABLE` (Play Services
+fills the `ActivityRecognitionResult` extra into it) **and** explicit
+(`Intent(ACTION).setPackage(packageName)`) — Android 14+ throws `IllegalArgumentException` for
+mutable + implicit, so motion sensing would simply never have subscribed; `ACTIVITY_RECOGNITION` must
+be requested at **both** `ui/App.kt` call sites, because on any install where BLE is already granted —
+the real device and every existing user — the monitor toggle takes the `hasBlePermissions` branch and
+the `permLauncher` site never fires; and it must be requested **in the same
+`RequestMultiplePermissions` call as `POST_NOTIFICATIONS`, never as a second launch in the same
+frame**. `ActivityCompat.requestPermissions` does not queue — a request issued while one is in flight
+is refused and immediately dispatched back as an *empty cancelled result*, so the notification dialog
+appeared and the motion dialog was silently dropped, on the first toggle of a fresh install and on
+every toggle by a user who denied notifications. Since monitoring restores across restarts, a user
+who starts it once and never toggles again would never have been asked at all. Both results are still
+ignored and `vm.startMonitoring()` stays unconditional: neither permission may ever gate BLE
+monitoring. `Settings › Battery saver` carries a **read-only**
 line, "Motion sensing active" / "Motion sensing unavailable — GPS won't pause", so a denied
 permission cannot silently disable the saving while the toggle still reads on. *(Its two states have
 not yet been confirmed on-device — an owed verification, not a completed one.)*
@@ -475,13 +512,15 @@ nothing supports preferring transitions, and the periodic stream is demonstrably
 
 **The saving is PARTIAL, not full, and the tuning fix for it is OPEN.** Play Services' periodic
 delivery is genuinely **bursty** — multi-minute silent gaps — and every gap longer than
-`MOTION_STALE_MS` (150 s) trips staleness and reopens the gate. Measured on-device 2026-08-07: the
-debounce math itself is exact to sub-second precision (every close tied to a 3-reading confident-STILL
-burst, every reopen to staleness firing at 150.067 s / 150.170 s after the last reading, and **zero**
-instances of the old reopen-on-`UNKNOWN` bug), and the gate held closed for one unbroken **5m18s**
-stretch — then cycled open→closed→open→closed→open over ~16 min and sat open the final 7+ min with no
-readings at all (no crash, no subscription error, device awake, not in Doze). Delivery sparsity is a
-**different problem** from the flapping the hysteresis fixed, and it bounds the achievable saving.
+`MOTION_STALE_MS` (150 s) trips staleness and reopens the gate. Measured on-device 2026-08-07: every
+reopen tied to staleness firing at 150.067 s / 150.170 s after the last reading, **zero** instances of
+the old reopen-on-`UNKNOWN` bug, and the gate held closed for one unbroken **5m18s** stretch — then
+cycled open→closed→open→closed→open over ~16 min and sat open the final 7+ min with no readings at all
+(no crash, no subscription error, device awake, not in Doze). **Read the *closing* half of that trace
+with care: it was captured while folds still happened per gate evaluation, so the gate was closing
+after one reading, not three** — the reopen timings and the sparsity finding stand, the close timings
+describe superseded behaviour, and the duty cycle it implies is an over-estimate. Delivery sparsity is
+a **different problem** from the flapping the hysteresis fixed, and it bounds the achievable saving.
 **Lengthening `MOTION_STALE_MS` (~10–15 min) to ride out the gaps is UNDECIDED** — it is only safe if
 AR reliably emits a confident non-`STILL` when motion starts, since reopening would then no longer be
 backstopped by staleness, and **that is untested**. Do not record it as settled either way. Also
@@ -492,7 +531,9 @@ charger for all but 2 minutes of the window. If periodic AR costs more than the 
 saves, the feature is a **net loss and should be reverted**; the check is total phone drain across
 comparable days from `batterystats`, not per-uid attribution. **Also still owed: a real vehicle
 outing**, confirming GNSS stays active in transit and that fixes above 5 m/s reappear — the metric
-that has read zero since 2026-08-03.
+that has read zero since 2026-08-03 — and, with it, a fresh duty-cycle trace now that closing takes
+three genuine readings. Both owed on-device checks (that one, and the settings line's two permission
+states above) are **unperformed**, not pending-and-fine.
 
 **No server or WebUI change was required** for either half of this: every GPS read path already
 filters `lat IS NOT NULL AND lon IS NOT NULL` (`server/app/db/queries.py:539`, `:623`),

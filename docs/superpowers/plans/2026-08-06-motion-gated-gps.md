@@ -726,7 +726,7 @@ the spec for the measured evidence. Must land before Tasks 4–6.
 
 **Interfaces:**
 - Consumes: `MotionReading`, `STILL_CONFIDENCE_MIN` (75), `MOTION_STALE_MS` (150_000L) — all unchanged.
-- Produces: `const val STILL_DEBOUNCE_N = 3`; `data class MotionGate(val stillRun: Int = 0, val still: Boolean = false)`; `fun foldMotion(prev: MotionGate, reading: MotionReading?, nowMs: Long): MotionGate`.
+- Produces: `const val STILL_DEBOUNCE_N = 3`; `data class MotionGate(val stillRun: Int = 0, val still: Boolean = false, val lastConfidentAtMs: Long = 0L)`; `fun foldMotion(prev: MotionGate, reading: MotionReading?, nowMs: Long): MotionGate`.
 
 **Why:** the shipped `confidentlyStill()` lets one instantaneous sample decide and maps `UNKNOWN` to
 "moving". Measured on-device: while stationary the phone reports `STILL` at confidence 96–100
@@ -736,31 +736,51 @@ passes 70% of samples but **toggles the gate 5 times in 5 minutes**, restarting 
 
 **The rule (asymmetric on purpose — it preserves fail-open):**
 
+Branches in order (order matters — staleness first, so a dead signal can never be held shut):
+
 | reading | action |
 |---|---|
-| null, or older than `MOTION_STALE_MS` | **fail open** → `MotionGate(0, false)` |
-| confident STILL (`still && confidence >= STILL_CONFIDENCE_MIN`) | `stillRun + 1`; `still = stillRun+1 >= STILL_DEBOUNCE_N` |
-| confident non-STILL (`!still && confidence >= STILL_CONFIDENCE_MIN`) | **reopen immediately** → `MotionGate(0, false)` |
-| anything else (uncertain, incl. `UNKNOWN@41`, `STILL@38`) | **hold** → return `prev` unchanged |
+| null, or older than `MOTION_STALE_MS` | **fail open** → `MotionGate()` |
+| `atMs == prev.lastConfidentAtMs` (already folded) | **no-op** → return `prev` unchanged |
+| uncertain (`confidence < STILL_CONFIDENCE_MIN`, incl. `UNKNOWN@41`, `STILL@38`) | **hold** → `prev`, unless nothing confident has arrived for `MOTION_STALE_MS`, then **fail open** |
+| confident STILL (`still && confidence >= STILL_CONFIDENCE_MIN`) | `stillRun + 1`; `still = stillRun+1 >= STILL_DEBOUNCE_N`; `lastConfidentAtMs = atMs` |
+| confident non-STILL (`!still && confidence >= STILL_CONFIDENCE_MIN`) | **reopen immediately** → `MotionGate(lastConfidentAtMs = atMs)` |
 
-Closing needs sustained evidence (3 in a row); reopening needs one confident non-STILL; uncertainty
-changes nothing. Simulated against the captured trace: gate closed **96%** of samples at N=3.
+Closing needs sustained evidence (3 distinct **readings** in a row); reopening needs one confident
+non-STILL; uncertainty changes nothing and cannot postpone fail-open. Simulated against the captured
+trace: gate closed **96%** of samples at N=3.
+
+**Amended 2026-08-07 after the whole-branch review**, hence `lastConfidentAtMs` and the two extra
+rows above. The first implementation folded on every *gate evaluation* — ~80–115/min across the
+fleet against ~10 readings/min, with `MotionSource.current()` returning the same cached reading in
+between — so one reading was folded ~11 times and N collapsed to an effective 1. And staleness was
+measured against the last reading of any kind, so a run of `UNKNOWN@41` could hold a closed gate
+indefinitely while resetting the deadline that was supposed to bound it. One field on the gate fixes
+both: it is the dedup key *and* the fail-open deadline, which is sound because only confident
+readings ever change the gate. Expect the measured saving to **drop** — closing now takes ~18 s of
+real readings, not ~1.5 s of re-folds. See the spec's AMENDMENT section.
 
 `confidentlyStill()` is **replaced** by `foldMotion` — delete it and its tests, since a single-sample
 predicate is exactly the defect. `STILL_CONFIDENCE_MIN` and `MOTION_STALE_MS` keep their current
 values; do not retune them.
 
-`MonitorEngine` holds one `MotionGate` field, folds each poll inside the already-`@Synchronized`
-`applyGpsGate`, and passes `gate.still` to `gpsShouldRun`'s `confidentlyStill` parameter. It must
-remain the single writer of `MonitorState.gpsActive`, and the gate must still only ever subtract
-from `gpsWanted`. `shutdownGps` must reset the field to `MotionGate()` so a stale run cannot survive
-a stop.
+`MonitorEngine` holds one `MotionGate` field, folds inside the already-`@Synchronized` `applyGpsGate`
+on every call (the fold itself dedupes, so calling often is free and keeps the staleness deadline
+running off the wall clock), and passes `gate.still` to `gpsShouldRun`'s `confidentlyStill`
+parameter. It must remain the single writer of `MonitorState.gpsActive`, and the gate must still only
+ever subtract from `gpsWanted`. `shutdownGps` must reset the field to `MotionGate()` so a stale run
+cannot survive a stop. `MotionSource` is started on `gpsWanted && gpsPauseParked` — with the pause
+toggle off the verdict is unused, so the subscription would be waste.
 
 - [ ] **Step 1: Write the failing tests** covering, at minimum: null → fail open; stale → fail open;
-      one confident STILL → not yet still; N consecutive → still; uncertain sample mid-run holds the
-      run rather than resetting it; confident non-STILL reopens immediately from a closed gate;
-      uncertain sample while closed keeps it closed; and that `stillRun` cannot make the gate open
-      when `wanted` is false (via `gpsShouldRun`).
+      stale *and* uncertain from a closed gate → fail open (branch order); one confident STILL → not
+      yet still; N distinct readings → still; **folding one reading N times leaves `stillRun = 1`**;
+      many evaluations per reading still close on the third reading; uncertain sample mid-run holds
+      the run rather than resetting it; confident non-STILL reopens immediately from a closed gate;
+      uncertain sample while closed keeps it closed; a stream of uncertain readings fails open
+      `MOTION_STALE_MS` after the last **confident** one; a confident reading refreshes that
+      deadline; and that `stillRun` cannot make the gate open when `wanted` is false (via
+      `gpsShouldRun`).
 - [ ] **Step 2: Run to verify they fail.**
 - [ ] **Step 3: Implement `foldMotion`, delete `confidentlyStill` and its tests.**
 - [ ] **Step 4: Wire `MonitorEngine`** (field + fold in `applyGpsGate` + reset in `shutdownGps`).

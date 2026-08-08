@@ -212,20 +212,40 @@ class BatterySaverTest {
     // STILL@96-100 interleaved with UNKNOWN@41-50, never confident motion, so treating UNKNOWN as
     // "moving" was the whole bug. null/stale readings still fail open immediately, same as the
     // deleted confidentlyStill()'s contract, because false/MotionGate() means GPS STAYS ON.
+    //
+    // Two properties added after the whole-branch review, both about MotionGate.lastConfidentAtMs:
+    // folds are deduped by reading identity (the engine evaluates the gate ~10x more often than
+    // readings arrive, which had collapsed N to an effective 1), and the fail-open deadline is
+    // measured from the last CONFIDENT reading, so uncertainty can hold the verdict but cannot
+    // postpone failing open.
 
     private fun reading(still: Boolean, conf: Int, age: Long, now: Long = 10_000_000L) =
         MotionReading(still = still, confidence = conf, atMs = now - age)
 
+    /** A closed gate as production reaches it: the last confident reading is [atMs]. */
+    private fun closedGate(atMs: Long) =
+        MotionGate(stillRun = STILL_DEBOUNCE_N, still = true, lastConfidentAtMs = atMs)
+
     @Test fun noReadingFailsOpen() {
-        val prev = MotionGate(stillRun = 2, still = false)
+        val prev = MotionGate(stillRun = 2, still = false, lastConfidentAtMs = 9_999_000L)
         assertEquals(MotionGate(), foldMotion(prev, null, 10_000_000L))
     }
 
     @Test fun staleReadingFailsOpen() {
         val now = 10_000_000L
-        val prev = MotionGate(stillRun = 2, still = false)
+        val prev = MotionGate(stillRun = 2, still = false, lastConfidentAtMs = 9_999_000L)
         val stale = reading(still = true, conf = 99, age = MOTION_STALE_MS + 1, now = now)
         assertEquals(MotionGate(), foldMotion(prev, stale, now))
+    }
+
+    // The review's missing case: stale AND uncertain, from a closed gate. Branch order decides it
+    // — staleness is evaluated before the uncertainty hold, so a dead signal cannot be held shut
+    // by the very ambiguity that made it look alive.
+    @Test fun staleAndUncertainReadingFailsOpenRatherThanHolding() {
+        val now = 10_000_000L
+        val closed = closedGate(now - MOTION_STALE_MS - 1)
+        val staleUnknown = reading(still = false, conf = 41, age = MOTION_STALE_MS + 1, now = now)
+        assertEquals(MotionGate(), foldMotion(closed, staleUnknown, now))
     }
 
     // Boundary is inclusive, matching the alert-ladder convention: exactly at the staleness
@@ -233,7 +253,10 @@ class BatterySaverTest {
     @Test fun exactlyAtStalenessBoundIsFreshAndCounts() {
         val now = 10_000_000L
         val fresh = reading(still = true, conf = 99, age = MOTION_STALE_MS, now = now)
-        assertEquals(MotionGate(stillRun = 1, still = false), foldMotion(MotionGate(), fresh, now))
+        val gate = foldMotion(MotionGate(), fresh, now)
+        assertEquals(1, gate.stillRun)
+        assertFalse(gate.still)
+        assertEquals(fresh.atMs, gate.lastConfidentAtMs)
     }
 
     @Test fun oneConfidentStillIsNotYetStill() {
@@ -243,14 +266,35 @@ class BatterySaverTest {
         assertFalse(gate.still)
     }
 
-    @Test fun debounceConsecutiveConfidentStillClosesTheGate() {
-        val now = 10_000_000L
+    // THE regression test for the review's finding 1. The engine folds on every gate evaluation
+    // (~80-115x/min across the fleet) while MotionSource.current() keeps returning the SAME cached
+    // reading until a new broadcast lands (~10/min). Folding one reading must advance the run
+    // exactly once, or STILL_DEBOUNCE_N is an effective 1 and a single spurious STILL at a stop
+    // light closes the gate ~1.5 s later.
+    @Test fun refoldingOneReadingCountsItOnce() {
+        val t0 = 10_000_000L
+        val once = reading(still = true, conf = 99, age = 0, now = t0)
         var gate = MotionGate()
-        repeat(STILL_DEBOUNCE_N - 1) {
-            gate = foldMotion(gate, reading(still = true, conf = 99, age = 0, now = now), now)
+        // 12 evaluations spread over the ~11 the engine really makes between two readings.
+        repeat(12) { i ->
+            gate = foldMotion(gate, once, t0 + i * 100L)
+            assertEquals(1, gate.stillRun)
             assertFalse(gate.still)
         }
-        gate = foldMotion(gate, reading(still = true, conf = 99, age = 0, now = now), now)
+    }
+
+    // The same thing from the engine's side: many evaluations per reading, three distinct
+    // readings. The gate must close on the third READING, not the third evaluation.
+    @Test fun debounceCountsDistinctReadingsNotEvaluations() {
+        val t0 = 10_000_000L
+        var gate = MotionGate()
+        repeat(STILL_DEBOUNCE_N) { n ->
+            val r = MotionReading(still = true, confidence = 99, atMs = t0 + n * 6_000L)
+            repeat(11) { i ->      // ~11 gate evaluations per reading
+                gate = foldMotion(gate, r, r.atMs + i * 500L)
+                assertEquals(n + 1, gate.stillRun)
+            }
+        }
         assertTrue(gate.still)
         assertEquals(STILL_DEBOUNCE_N, gate.stillRun)
     }
@@ -258,38 +302,75 @@ class BatterySaverTest {
     // UNKNOWN@41 mid-run: absence of evidence, not evidence of motion. The run must hold, not
     // reset — this is the exact defect confidentlyStill() had.
     @Test fun uncertainSampleMidRunHoldsRatherThanResets() {
-        val now = 10_000_000L
-        var gate = foldMotion(MotionGate(), reading(still = true, conf = 99, age = 0, now = now), now)
+        val t0 = 10_000_000L
+        var gate = foldMotion(MotionGate(), reading(still = true, conf = 99, age = 0, now = t0), t0)
         assertEquals(1, gate.stillRun)
-        val held = foldMotion(gate, reading(still = false, conf = 41, age = 0, now = now), now)
+        val t1 = t0 + 1_000L
+        val held = foldMotion(gate, MotionReading(still = false, confidence = 41, atMs = t1), t1)
         assertEquals(gate, held)
         // The hold contributed nothing: the run still only needs STILL_DEBOUNCE_N - 1 more
         // confident-STILL readings to close, not a fresh count from zero.
-        repeat(STILL_DEBOUNCE_N - 1) {
-            gate = foldMotion(gate, reading(still = true, conf = 99, age = 0, now = now), now)
+        repeat(STILL_DEBOUNCE_N - 1) { n ->
+            val at = t0 + 6_000L * (n + 1)
+            gate = foldMotion(gate, MotionReading(still = true, confidence = 99, atMs = at), at)
         }
         assertTrue(gate.still)
     }
 
     @Test fun confidentNonStillReopensImmediatelyFromClosedGate() {
         val now = 10_000_000L
-        val closed = MotionGate(stillRun = STILL_DEBOUNCE_N, still = true)
+        val closed = closedGate(now - 6_000L)
         val moving = reading(still = false, conf = 99, age = 0, now = now)
-        assertEquals(MotionGate(), foldMotion(closed, moving, now))
+        val gate = foldMotion(closed, moving, now)
+        assertEquals(0, gate.stillRun)
+        assertFalse(gate.still)
     }
 
     @Test fun uncertainSampleWhileClosedKeepsItClosed() {
         val now = 10_000_000L
-        val closed = MotionGate(stillRun = STILL_DEBOUNCE_N, still = true)
+        val closed = closedGate(now - 6_000L)
         val unknown = reading(still = false, conf = 50, age = 0, now = now)
         assertEquals(closed, foldMotion(closed, unknown, now))
+    }
+
+    // Review finding 3: uncertainty may hold the verdict, but it must not postpone fail-open. AR
+    // is least certain in the first 30-60 s of a trip (28% of the measured trace is sub-75), so a
+    // gate closed at the kerb could otherwise stay closed for the whole ride, bounded by nothing.
+    @Test fun uncertainReadingsCannotPostponeFailOpen() {
+        val closedAt = 10_000_000L
+        var gate = closedGate(closedAt)
+        // Uncertain readings keep landing, each one fresh in its own right.
+        var t = closedAt + 10_000L
+        while (t <= closedAt + MOTION_STALE_MS) {
+            gate = foldMotion(gate, MotionReading(still = false, confidence = 41, atMs = t), t)
+            assertTrue("gate must hold while confident evidence is still fresh at t=$t", gate.still)
+            t += 10_000L
+        }
+        // One tick past MOTION_STALE_MS since the last CONFIDENT reading — even though the newest
+        // reading of any kind is only 10 s old — the gate fails open and GNSS resumes.
+        val past = closedAt + MOTION_STALE_MS + 1
+        gate = foldMotion(gate, MotionReading(still = false, confidence = 41, atMs = past), past)
+        assertEquals(MotionGate(), gate)
+    }
+
+    // A confident reading refreshes the deadline; only confident ones do.
+    @Test fun confidentStillRefreshesTheFailOpenDeadline() {
+        val t0 = 10_000_000L
+        var gate = closedGate(t0)
+        val at = t0 + MOTION_STALE_MS - 1_000L
+        gate = foldMotion(gate, MotionReading(still = true, confidence = 99, atMs = at), at)
+        assertTrue(gate.still)
+        // Past the ORIGINAL deadline but inside the refreshed one: still closed.
+        val later = t0 + MOTION_STALE_MS + 1_000L
+        gate = foldMotion(gate, MotionReading(still = false, confidence = 41, atMs = later), later)
+        assertTrue(gate.still)
     }
 
     // STILL@38 from the measured trace: still=true but below STILL_CONFIDENCE_MIN, so it is
     // uncertain too and must hold rather than count toward the run.
     @Test fun lowConfidenceStillHoldsRatherThanCounting() {
         val now = 10_000_000L
-        val gate = MotionGate(stillRun = 1, still = false)
+        val gate = MotionGate(stillRun = 1, still = false, lastConfidentAtMs = now - 6_000L)
         val weak = reading(still = true, conf = 38, age = 0, now = now)
         assertEquals(gate, foldMotion(gate, weak, now))
     }
@@ -304,7 +385,7 @@ class BatterySaverTest {
     // must not make GPS run when the cloud settings don't want it at all.
     @Test fun closedGateCannotMakeGpsRunWhenNotWanted() {
         val now = 10_000_000L
-        val closed = MotionGate(stillRun = STILL_DEBOUNCE_N, still = true)
+        val closed = closedGate(now)
         assertFalse(
             gpsShouldRun(
                 wanted = false, pauseEnabled = true,

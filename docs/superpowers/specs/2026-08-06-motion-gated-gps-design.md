@@ -243,10 +243,10 @@ uncertainty as movement is what breaks it.
 ### The fix — asymmetric hysteresis
 
 ```kotlin
-/** Consecutive confident-STILL readings required before GNSS may be paused. */
+/** Distinct confident-STILL readings required before GNSS may be paused. */
 const val STILL_DEBOUNCE_N = 3
 
-// State transitions, evaluated per reading:
+// State transitions, evaluated PER READING (see "Per reading, not per evaluation" below):
 //   confident STILL      (still && confidence >= STILL_CONFIDENCE_MIN) -> count++, close gate at N
 //   confident non-STILL  (!still && confidence >= STILL_CONFIDENCE_MIN) -> reopen immediately, reset
 //   uncertain (anything else, incl. UNKNOWN@41 and STILL@38)            -> HOLD state, do not reset
@@ -264,11 +264,47 @@ for the shipped rule. N=2 gives 98% and N=1 gives 100%; **3 is chosen** as the s
 still requires genuinely sustained evidence rather than a single reading, at a negligible cost in
 duty cycle.
 
+### Per reading, not per evaluation (added 2026-08-07 after whole-branch review)
+
+"Consecutive readings" has to mean **distinct AR broadcasts**, and the first implementation did not.
+`applyGpsGate` is driven from `onPoll`, i.e. once per BLE frame per pack — ~80–115 evaluations a
+minute across 8 packs — while readings arrive ~10 a minute, and `MotionSource.current()` returns the
+same cached reading until a new broadcast lands. Folding on every evaluation therefore counted one
+reading ~11 times and made **`STILL_DEBOUNCE_N` an effective 1**: the exact single-sample rule this
+amendment exists to delete, wearing a debounce's clothes.
+
+It is invisible while stationary — nothing ever reopens the gate, so the 5m18s on-device hold looked
+correct — and bites **in transit**, the one case never tested on hardware: one spurious `STILL@96` at
+a stop light closes the gate ~1.5 s later, GNSS stops, and the next confident `IN_VEHICLE` reopens it
+seconds on. A GNSS restart and a hole in the track per misread.
+
+Fix: **dedupe folds by reading identity**, carrying the last folded confident reading's timestamp on
+`MotionGate` itself (`lastConfidentAtMs`) so the dedup lives inside the pure function rather than as
+engine state — and so the engine's existing `motionGate = MotionGate()` reset in `shutdownGps` clears
+it for free. Staleness is still evaluated on **every** call, so the fail-open deadline keeps running
+off the wall clock rather than off reading arrivals.
+
+Expect this to **reduce** the measured saving: closing now takes three genuine readings (~18 s at the
+observed cadence) instead of ~1.5 s. That is the correct direction — the 96%-closed simulation was
+always a simulation of per-reading folding, which is what the code now does.
+
 ### Consequence for staleness
 
 Because uncertainty now holds state rather than resetting it, `MOTION_STALE_MS` regains its intended
-meaning: it catches a genuinely **dead** signal (no readings at all), not a merely ambiguous one. A
-stale reading still fails open.
+meaning: it catches a genuinely **dead** signal, not a merely ambiguous one. A stale reading still
+fails open.
+
+**But uncertainty must not postpone that fail-open** (also from the 2026-08-07 review). Measuring
+staleness against the last reading *of any kind* lets the low-confidence readings the next branch
+treats as no evidence reset the deadline: confident STILL closes the gate, the phone starts moving,
+AR emits only sub-75 readings (28% of the trace, and the first 30–60 s of a trip is when AR is least
+certain) — and the gate stays closed with staleness never firing, GNSS off, bounded by nothing. So
+the deadline is measured from the last **confident** reading (`MotionGate.lastConfidentAtMs`, the
+same field the dedup uses — one field, two jobs, valid because only confident readings change the
+gate at all). Uncertainty may hold the verdict; it may not extend it.
+
+Branch order remains load-bearing: the reading's own staleness is checked **before** both the dedup
+and the uncertainty hold, so a stale *and* uncertain reading fails open rather than being held.
 
 ### Rejected: switching to the Activity Transition API
 

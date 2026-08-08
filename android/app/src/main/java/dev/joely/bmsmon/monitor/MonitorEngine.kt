@@ -476,13 +476,17 @@ class MonitorEngine(
      * than a drop to balanced accuracy: coarse fixes are what produced the 2026-07-13 phantom map
      * spikes, so we would rather capture nothing than capture noise.
      *
-     * [motionSource] is started/stopped **here**, driven straight off [gpsWanted], rather than by
-     * its callers. It is an *input* to the pause decision below (via [motionGate], folded fresh
-     * each call by [foldMotion]), not something the decision's own output can gate, and it must
-     * run for the whole window the parked gate could apply within — i.e. whenever GPS is wanted
-     * at all, not only once the gate has already decided to pause. Doing this under the same
-     * lock as [locationSource] is what lets [setGpsActive] stay a bare, unsynchronized volatile
-     * write to [gpsWanted]: even if it
+     * [motionSource] is started/stopped **here**, driven off [gpsWanted] **and** [gpsPauseParked],
+     * rather than by its callers. It is an *input* to the pause decision below (via [motionGate],
+     * folded by [foldMotion] — once per reading, not once per call; see below), not something the
+     * decision's own output can gate, and it must run for the whole window the parked gate could
+     * apply within: whenever GPS is wanted at all *and* the pause is enabled. With the pause
+     * toggle off, [gpsShouldRun] ignores the motion verdict entirely, so an Activity Recognition
+     * subscription would be pure waste in exactly the configuration a user picks to keep their
+     * track — the toggle is off precisely because they want GNSS to stay on.
+     *
+     * Doing this under the same lock as [locationSource] is what lets [setGpsActive] stay a bare,
+     * unsynchronized volatile write to [gpsWanted]: even if it
      * races [shutdownGps] between that write and reaching this method, whichever write is still
      * current when this method acquires the lock is the one both [motionSource] and
      * [locationSource] end up obeying, because both are driven from the live field here, never
@@ -500,10 +504,20 @@ class MonitorEngine(
      * registered, i.e. exactly the silent GNSS drain this gate exists to remove. [shutdownGps]
      * takes the same lock for the same reason. Lock order is always engine -> LocationSource /
      * MotionSource, and neither ever calls back in, so this cannot deadlock.
+     *
+     * **This method is called far more often than motion readings arrive** — once per BLE frame
+     * per pack (~80–115×/min across the fleet at [STAGE_POLL_MS]/[SLOW_POLL_MS]) against ~10
+     * Activity Recognition broadcasts a minute, and [MotionSource.current] returns the same cached
+     * reading until a new broadcast lands. [foldMotion] therefore dedupes by reading identity
+     * (`MotionGate.lastConfidentAtMs`), so one reading advances the debounce run once rather than
+     * ~11 times; it still re-evaluates staleness on every call, so the fail-open deadline keeps
+     * running off the wall clock. Without that dedup [STILL_DEBOUNCE_N] collapsed to an effective
+     * 1 and a single spurious STILL at a stop light closed the gate ~1.5 s later — a GNSS restart
+     * and a hole in the track per misread, which is the flapping the debounce exists to remove.
      */
     @Synchronized
     private fun applyGpsGate(now: Long) {
-        if (gpsWanted) motionSource.start() else motionSource.stop()
+        if (gpsWanted && gpsPauseParked) motionSource.start() else motionSource.stop()
         motionGate = foldMotion(motionGate, motionSource.current(), now)
         val active = gpsShouldRun(
             wanted = gpsWanted,
@@ -739,6 +753,11 @@ class MonitorEngine(
                 // every pack on its 6-hourly learn pass (up to ~800k rows/pack), so gating after
                 // it would tack that pass's duration onto this loop's period on exactly those
                 // passes; gating first keeps this loop's period equal to PARKED_HOLD_MS.
+                // Note this driver alone cannot close the motion gate quickly: foldMotion folds
+                // one reading per call, so three ticks (~15 min) of confident-STILL samples are
+                // needed, and any staleness gap in between resets the run. That is fine — it is a
+                // backstop against a stalled onPoll pinning GNSS on, and its failure direction is
+                // GPS staying on. onPoll remains the driver that actually closes the gate.
                 runCatching { applyGpsGate(now()) }
                 runCatching { rangePass() }
                 delay(5 * 60_000L)
