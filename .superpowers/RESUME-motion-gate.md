@@ -163,3 +163,91 @@ holds GPS off 68% of the time). Zero work, fully reversible. Offer this if (c) s
 The screen-hold gate shares the charging-icon bug's blind spot: it holds the display (~139 mA)
 whenever `EXTRA_PLUGGED` is nonzero, including on a connected-but-dead charger — the worst case for
 holding it. Needs hysteresis so it cannot flap. See `CLAUDE.md`.
+
+---
+
+## UPDATE 2026-08-06 20:31 — the measurement came back, and it stops the build
+
+**The design as specified cannot fire.** Tasks 1-3 are implemented correctly and reviewed clean;
+the defect is in the spec, not the code.
+
+**Measured** on the Pixel 6, periodic Activity Recognition, requested interval **30 s**:
+
+```
+19:11:28 · 19:23:00 · 19:32:33 · then NOTHING for 59 minutes
+```
+
+The logging build was installed at 19:32:28, so the 19:32:33 delivery is just the subscribe-time
+callback. An independent second subscription (`arprobe`, sampled mode, 19:22) delivered **zero**.
+
+**Root cause:** periodic Activity Recognition is **not a heartbeat**. Play Services suppresses
+redundant updates while the detected activity is unchanged. The spec's `MOTION_STALE_MS = 150 s`
+assumed a heartbeat, so in practice the cached reading is *always* stale → `confidentlyStill()` is
+always false → GPS never pauses → the ~15 mA saving never materialises. Meanwhile GPS runs
+continuously, so the current build is strictly worse than before on battery.
+
+**Controller error, corrected for the record:** an earlier claim of mine — "23 broadcasts including
+recent ones" — was wrong. 23 was a grep count over a history buffer that lists each broadcast about
+three times, and `#504/#533/#534` are list indices, not recency indicators. Freshness was inferred
+from list position. The implementer's "one delivery then silence" was correct and mine was not.
+
+**Still unknown, and it is the hopeful reading:** whether AR responds *promptly to a genuine
+activity change*. Suppression while stationary may be precisely why it is quiet, and entering a
+vehicle might deliver at once. **Only a real vehicle outing tests this.**
+
+### Options (user decision required — (i) reverses a documented spec decision)
+
+- **(i) Switch to the Activity Transition API.** Edge-triggered, so "no event" legitimately means
+  "no change" and the staleness concept disappears entirely. The spec explicitly *rejected*
+  transitions on the grounds that one missed edge loses the outing — but periodic has turned out
+  to be less reliable, not more, so that reasoning no longer holds.
+- **(ii) Keep periodic, drop or greatly lengthen staleness.** Simplest change, but a dead
+  subscription then becomes indistinguishable from "still stationary", which fails **closed** —
+  GPS pauses during transit. That is the exact behaviour the user rejected when choosing fail-open.
+- **(iii) Both** — transitions for edges, periodic as a slow sanity check that the subscription is
+  alive. Most robust, most work.
+- **(iv) Abandon (c).** The existing *Settings › Battery saver › Pause GPS while parked* toggle
+  already lets the user trade the saving for journey capture, with zero further work.
+
+### State
+
+Branch `feat/motion-gated-gps` at `4c2c29b`, 371 tests green, lint 0 errors. Tasks 1-3 complete and
+reviewed; **Tasks 4-6 deliberately not started.** `main` is untouched. The phone is running the
+branch build — functional and fail-open (GPS stays on), so no safety issue, just no saving.
+
+## UPDATE 2026-08-07 13:20 — periodic AR is definitively dead; transitions were never fairly tested
+
+**Today's telemetry (last 18 h, prod DB):** 216 of 217 five-minute buckets carry GPS (the broken
+gate never closes, so GNSS runs continuously). **Peak speed 2.06 m/s = 5 mph** — wheelchair pace.
+No vehicle-speed fix at all. The two real movements were chair trips under their own power:
+
+```
+09:35 -> 09:40   617 m   2.06 m/s   discharge 33->40%
+10:20 -> 10:25   590 m   1.97 m/s   discharge 45->50%
+```
+
+**Motion broadcasts delivered today: exactly three — 12:11:43, 12:14:45, 12:34:54.** None during
+either movement window. So on this device the periodic API delivers a handful of updates per day at
+moments unrelated to actual motion.
+
+**Option (ii) — "keep periodic, drop the staleness check" — is now DEAD.** Removing staleness does
+not help when the readings themselves arrive ~3x/day and do not track movement. The problem is not
+the freshness rule; it is that the signal has no relationship to the thing being sensed.
+
+**Correction to the 2026-08-06 write-up: option (i) (Activity TRANSITIONS) has never been fairly
+tested, and must not be written off with periodic.** Timeline of why:
+  - 08-05 13:39 → 08-06 15:20: arprobe subscribed to transitions but sat in standby bucket 50
+    (NEVER) — throttled silent, so that whole window is void.
+  - 08-06 15:20 → 19:22: bucket fixed to 10 and transitions re-armed, but the user was stationary
+    at a desk the whole time. No transitions were *expected*; STILL→STILL has no edge.
+  - 08-06 19:22 → 08-07 13:18: switched to SAMPLED for the confidence-value experiment, so
+    transitions were not even subscribed during this morning's trip.
+  Net: transitions have had **zero** hours of fair exposure to a real vehicle trip.
+
+**Action taken 2026-08-07 13:18:** arprobe returned to TRANSITIONS mode, bucket confirmed 10,
+`SUBSCRIBE SUCCEEDED`. The next genuine vehicle trip is now a fair test of option (i).
+
+**Open question put to the user:** whether this morning's "drive for coffee" was the chair or a
+vehicle. The data reads unambiguously as a chair trip (5 mph, packs discharging), which would mean
+it does not test the transit case at all — the chair discharging keeps GPS on via the existing
+signal regardless.

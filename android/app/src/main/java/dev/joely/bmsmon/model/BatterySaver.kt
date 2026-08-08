@@ -66,14 +66,132 @@ fun gpsParked(lastDischargeMs: Long?, nowMs: Long, holdMs: Long = PARKED_HOLD_MS
 /**
  * Whether GPS capture should actually run: what the cloud settings want, minus the parked gate.
  *
- * [wanted] is `monitoring && gpsEnabled && enrolled && cloudEnabled`, decided elsewhere. The
- * parked gate can only ever SUBTRACT from it — it never turns GPS on. `MonitorEngine.applyGpsGate`
- * is a thin wrapper around this, so the rule is testable without a device.
+ * [wanted] is `monitoring && gpsEnabled && enrolled && cloudEnabled`, decided elsewhere. The gate
+ * can only ever SUBTRACT from it — it never turns GPS on.
+ *
+ * Pausing needs **both** conditions: the chair has not discharged recently **and** the phone is
+ * confidently still. The chair draws nothing in a van or on a train, so discharge alone reads
+ * transit as "parked" and switches GNSS off for the whole journey — measured 2026-08-06 as three
+ * outings that were entirely invisible on the map, destinations included.
  */
 fun gpsShouldRun(
     wanted: Boolean,
     pauseEnabled: Boolean,
     lastDischargeMs: Long?,
     nowMs: Long,
+    confidentlyStill: Boolean,
     holdMs: Long = PARKED_HOLD_MS,
-): Boolean = wanted && !(pauseEnabled && gpsParked(lastDischargeMs, nowMs, holdMs))
+): Boolean = wanted && !(pauseEnabled && gpsParked(lastDischargeMs, nowMs, holdMs) && confidentlyStill)
+
+/**
+ * A single phone-motion sample, as produced by `motion/MotionSource`.
+ *
+ * [still] is true when the most probable detected activity is STILL; [confidence] is that entry's
+ * 0–100 confidence; [atMs] is wall-clock (`System.currentTimeMillis()`), the same clock
+ * [foldMotion] compares against.
+ */
+data class MotionReading(val still: Boolean, val confidence: Int, val atMs: Long)
+
+/** Minimum confidence before a STILL reading is trusted enough to pause GNSS. */
+const val STILL_CONFIDENCE_MIN = 75
+
+/**
+ * A motion signal that has produced no confident reading for this long is treated as no signal at
+ * all — 5 missed 30 s polls. Measured from the last *confident* reading, not the last reading of
+ * any kind: see [foldMotion]'s uncertainty branch.
+ */
+const val MOTION_STALE_MS = 150_000L
+
+/**
+ * Distinct confident-STILL **readings** required before [foldMotion] closes the gate (pauses
+ * GNSS). Measured on-device 2026-08-07: while stationary the phone reports STILL at confidence
+ * 96–100 interleaved with UNKNOWN at 41–50, and never confident motion — a single-sample rule
+ * (the deleted `confidentlyStill()`) passed 70% of readings but toggled the gate 5 times in 5
+ * minutes, restarting GNSS repeatedly. Simulated against that trace: N=3 keeps the gate closed
+ * 96% of the time with no flapping; chosen as the smallest value that still requires genuinely
+ * sustained evidence rather than a single reading. Do not retune without a fresh trace.
+ *
+ * "Readings", emphatically, not gate evaluations — the engine evaluates the gate on every BLE
+ * frame (~80–115×/min across the fleet) while Activity Recognition broadcasts arrive ~10×/min, so
+ * without [MotionGate.lastConfidentAtMs]'s identity dedup a single reading would be folded ~11
+ * times and N would collapse to an effective 1.
+ */
+const val STILL_DEBOUNCE_N = 3
+
+/**
+ * Debounced motion-gate state, folded one reading at a time by [foldMotion].
+ *
+ * [stillRun] counts consecutive confident-STILL readings since the gate last opened (reset by
+ * any fail-open, reopen, or hold-from-empty — only a run of confident-STILL readings grows it).
+ * [still] is the gate's actual verdict: true only once [stillRun] reaches [STILL_DEBOUNCE_N].
+ * The all-default `MotionGate()` — `stillRun = 0, still = false, lastConfidentAtMs = 0` — is the
+ * fail-open / reopened state.
+ *
+ * [lastConfidentAtMs] is the [MotionReading.atMs] of the last reading that actually moved the
+ * gate, i.e. the last *confident* one, and does double duty **on purpose — one field, two jobs**:
+ * - **Identity dedup.** A reading whose `atMs` already equals it has been folded already, so
+ *   folding it again is a no-op. One field covers this because only confident readings ever
+ *   change the gate: re-folding an uncertain reading is already idempotent (it returns [prev]
+ *   unchanged, or fails open on the deadline below, and both are stable under repetition), so
+ *   uncertain readings need no dedup key of their own.
+ * - **Fail-open deadline.** Staleness is measured from here rather than from the newest reading
+ *   of any kind, so a stream of uncertain readings may hold the verdict but cannot postpone
+ *   failing open.
+ *
+ * `0L` means "no confident reading folded yet", which reads as infinitely stale — fail open, the
+ * correct default. Being part of the gate is also what makes `shutdownGps()`'s existing
+ * `motionGate = MotionGate()` reset the dedup key and the deadline along with the verdict.
+ */
+data class MotionGate(
+    val stillRun: Int = 0,
+    val still: Boolean = false,
+    val lastConfidentAtMs: Long = 0L,
+)
+
+/**
+ * Fold one motion [reading] into [prev] to produce the next [MotionGate] — the second condition
+ * for pausing GNSS, replacing the single-sample `confidentlyStill()` this shipped with originally
+ * (see [STILL_DEBOUNCE_N] for why: it toggled 5 times in 5 minutes against the measured trace).
+ *
+ * Asymmetric hysteresis, on purpose — this is what preserves the fail-open property:
+ * - **Closing** (pausing GNSS) needs [STILL_DEBOUNCE_N] consecutive confident-STILL readings.
+ * - **Reopening** needs only one confident non-STILL reading, so getting into a vehicle resumes
+ *   GNSS at the first solid reading, not after N of them.
+ * - **Uncertainty changes nothing.** A `null` or stale reading (older than [MOTION_STALE_MS])
+ *   fails open immediately — same contract the old `confidentlyStill()` had. A present-but-low-
+ *   confidence reading (confidence `< STILL_CONFIDENCE_MIN`, which is how `UNKNOWN` always
+ *   arrives, and occasionally `STILL` too) **holds [prev] unchanged** rather than resetting it,
+ *   because it is absence of evidence, not evidence of motion — treating it as movement was the
+ *   entire defect.
+ * - **…but uncertainty cannot postpone fail-open.** The hold above only lasts while *confident*
+ *   evidence is still fresh: once nothing confident has arrived for [MOTION_STALE_MS] the gate
+ *   fails open even though uncertain readings keep landing. Without that, a closed gate plus a
+ *   run of `UNKNOWN@41` (28% of the measured trace, and AR is least certain in the first minute
+ *   of a trip) would keep GNSS off bounded by nothing.
+ * - **Folding is idempotent per reading.** Callers re-evaluate the gate far more often than
+ *   readings arrive (see [STILL_DEBOUNCE_N]), so a reading already folded — identified by its
+ *   [MotionReading.atMs] matching [MotionGate.lastConfidentAtMs] — returns [prev] untouched.
+ *   Two broadcasts landing in the same millisecond would collapse into one fold; readings arrive
+ *   seconds apart, and the source only ever caches the newest anyway.
+ *
+ * **Branch order is load-bearing:** staleness of the reading itself is checked *first*, before
+ * both the dedup and the uncertainty hold, so neither can wedge the gate shut on a dead signal.
+ *
+ * [nowMs] is threaded through explicitly (this file stays pure — no clock access) and compared
+ * against [MotionReading.atMs] using the same clock as the caller.
+ */
+fun foldMotion(prev: MotionGate, reading: MotionReading?, nowMs: Long): MotionGate = when {
+    // No signal at all, or the freshest reading is itself older than the staleness bound.
+    reading == null || nowMs - reading.atMs > MOTION_STALE_MS -> MotionGate()
+    // Already folded this exact reading — the gate must not advance on a re-evaluation.
+    reading.atMs == prev.lastConfidentAtMs -> prev
+    // Uncertain: hold the last confident verdict, but only until the fail-open deadline.
+    reading.confidence < STILL_CONFIDENCE_MIN ->
+        if (nowMs - prev.lastConfidentAtMs > MOTION_STALE_MS) MotionGate() else prev
+    // Confident STILL: grow the run, close the gate once it reaches N.
+    reading.still -> (prev.stillRun + 1).let { run ->
+        MotionGate(run, run >= STILL_DEBOUNCE_N, reading.atMs)
+    }
+    // Confident motion: reopen immediately, keeping the reading's identity as the new deadline.
+    else -> MotionGate(lastConfidentAtMs = reading.atMs)
+}

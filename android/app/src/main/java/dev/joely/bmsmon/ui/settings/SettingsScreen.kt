@@ -98,6 +98,7 @@ import dev.joely.bmsmon.model.cToF
 import dev.joely.bmsmon.model.formatDelta
 import dev.joely.bmsmon.model.formatTemp
 import dev.joely.bmsmon.model.groupViews
+import dev.joely.bmsmon.motion.MotionSource
 import dev.joely.bmsmon.ui.AlertActions
 import dev.joely.bmsmon.ui.AppearanceActions
 import dev.joely.bmsmon.ui.BatterySaverActions
@@ -1357,6 +1358,19 @@ private fun ColumnScope.BatterySaverContent(
                 "the range estimate ignores anyway.",
             state.gpsPauseParked, onSetGpsPauseParked,
         )
+        RowHairline(inset = 0.dp)
+        val motionOk = MotionSource.hasPermission(LocalContext.current)
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                if (motionOk) "Motion sensing active"
+                else "Motion sensing unavailable — GPS won't pause",
+                color = if (motionOk) c.text2 else Bm.accent,
+                fontSize = 12.sp, lineHeight = 16.sp,
+            )
+        }
     }
 
     // Diagnostic only. Retention already runs (14-day samples, 7-day/20 MB raw frames) and the

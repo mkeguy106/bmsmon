@@ -205,3 +205,114 @@ accept-and-verify, not an assumption.
 - **The screen-hold gate's matching blind spot** (holds the display on a connected-but-dead
   charger). Real, documented in `CLAUDE.md`, and unrelated to this change — it needs hysteresis of
   its own.
+
+---
+
+## AMENDMENT 2026-08-07 — `confidentlyStill()` needs hysteresis, not a new threshold
+
+The design above shipped as Tasks 1–3 and **did not fire**: GNSS never paused, so the saving never
+materialised. Instrumenting `MotionSource` to log every reading found the cause, and it is neither
+the threshold nor a dead API.
+
+### What the device actually reports
+
+53 readings over 5 minutes with the phone stationary (~5.7 s apart — *faster* than the 30 s
+requested):
+
+| activity | n | share | confidences observed |
+|---|---|---|---|
+| `STILL` | 38 | 72% | 96, 100 (one outlier at 38) |
+| `UNKNOWN` | 15 | 28% | 41, 50 — **never above 50** |
+
+**Zero confident non-`STILL` samples.** While stationary the device never confidently reports
+motion; it reports `STILL` at high confidence, interleaved with low-confidence `UNKNOWN`.
+
+`STILL_CONFIDENCE_MIN = 75` is therefore **correct and stays** — it separates 96/100 from 41/50
+cleanly. `MOTION_STALE_MS = 150_000` also stays; deliveries are frequent, not sparse.
+
+### The actual defect
+
+The original `confidentlyStill()` lets **one instantaneous sample** decide, and maps `UNKNOWN` to
+`still = false`. So every low-confidence blip reopens the gate. Against the real trace the shipped
+rule passes 70% of samples but **toggles the gate 5 times in 5 minutes** — GNSS restarting
+repeatedly, which is worse than either steady state.
+
+The error is conceptual: **`UNKNOWN@41` is absence of evidence, not evidence of motion.** Treating
+uncertainty as movement is what breaks it.
+
+### The fix — asymmetric hysteresis
+
+```kotlin
+/** Distinct confident-STILL readings required before GNSS may be paused. */
+const val STILL_DEBOUNCE_N = 3
+
+// State transitions, evaluated PER READING (see "Per reading, not per evaluation" below):
+//   confident STILL      (still && confidence >= STILL_CONFIDENCE_MIN) -> count++, close gate at N
+//   confident non-STILL  (!still && confidence >= STILL_CONFIDENCE_MIN) -> reopen immediately, reset
+//   uncertain (anything else, incl. UNKNOWN@41 and STILL@38)            -> HOLD state, do not reset
+```
+
+Asymmetric on purpose, and it preserves the fail-open property that motivated the whole design:
+
+- **Closing** the gate (pausing GNSS) requires sustained confident evidence — 3 in a row.
+- **Reopening** it needs only a single confident non-`STILL`, so getting into a vehicle resumes
+  GNSS at the first solid reading.
+- **Uncertainty changes nothing.** It neither pauses nor resumes; the last confident verdict stands.
+
+Simulated against the captured trace: gate closed **96%** of the time at N=3, versus 70%-with-flapping
+for the shipped rule. N=2 gives 98% and N=1 gives 100%; **3 is chosen** as the smallest value that
+still requires genuinely sustained evidence rather than a single reading, at a negligible cost in
+duty cycle.
+
+### Per reading, not per evaluation (added 2026-08-07 after whole-branch review)
+
+"Consecutive readings" has to mean **distinct AR broadcasts**, and the first implementation did not.
+`applyGpsGate` is driven from `onPoll`, i.e. once per BLE frame per pack — ~80–115 evaluations a
+minute across 8 packs — while readings arrive ~10 a minute, and `MotionSource.current()` returns the
+same cached reading until a new broadcast lands. Folding on every evaluation therefore counted one
+reading ~11 times and made **`STILL_DEBOUNCE_N` an effective 1**: the exact single-sample rule this
+amendment exists to delete, wearing a debounce's clothes.
+
+It is invisible while stationary — nothing ever reopens the gate, so the 5m18s on-device hold looked
+correct — and bites **in transit**, the one case never tested on hardware: one spurious `STILL@96` at
+a stop light closes the gate ~1.5 s later, GNSS stops, and the next confident `IN_VEHICLE` reopens it
+seconds on. A GNSS restart and a hole in the track per misread.
+
+Fix: **dedupe folds by reading identity**, carrying the last folded confident reading's timestamp on
+`MotionGate` itself (`lastConfidentAtMs`) so the dedup lives inside the pure function rather than as
+engine state — and so the engine's existing `motionGate = MotionGate()` reset in `shutdownGps` clears
+it for free. Staleness is still evaluated on **every** call, so the fail-open deadline keeps running
+off the wall clock rather than off reading arrivals.
+
+Expect this to **reduce** the measured saving: closing now takes three genuine readings (~18 s at the
+observed cadence) instead of ~1.5 s. That is the correct direction — the 96%-closed simulation was
+always a simulation of per-reading folding, which is what the code now does.
+
+### Consequence for staleness
+
+Because uncertainty now holds state rather than resetting it, `MOTION_STALE_MS` regains its intended
+meaning: it catches a genuinely **dead** signal, not a merely ambiguous one. A stale reading still
+fails open.
+
+**But uncertainty must not postpone that fail-open** (also from the 2026-08-07 review). Measuring
+staleness against the last reading *of any kind* lets the low-confidence readings the next branch
+treats as no evidence reset the deadline: confident STILL closes the gate, the phone starts moving,
+AR emits only sub-75 readings (28% of the trace, and the first 30–60 s of a trip is when AR is least
+certain) — and the gate stays closed with staleness never firing, GNSS off, bounded by nothing. So
+the deadline is measured from the last **confident** reading (`MotionGate.lastConfidentAtMs`, the
+same field the dedup uses — one field, two jobs, valid because only confident readings change the
+gate at all). Uncertainty may hold the verdict; it may not extend it.
+
+Branch order remains load-bearing: the reading's own staleness is checked **before** both the dedup
+and the uncertainty hold, so a stale *and* uncertain reading fails open rather than being held.
+
+### Rejected: switching to the Activity Transition API
+
+The original spec listed transitions as the alternative, and an earlier revision of this amendment
+recommended them. **Measured and rejected.** The probe was armed with transitions at 13:18 on
+2026-08-07 (standby bucket 10, `SUBSCRIBE SUCCEEDED`) and covered two genuine vehicle trips that
+afternoon at up to 24 mph — barber 15:46–15:53, car wash 16:30–16:38. It logged **zero
+transitions**. Periodic updates, by contrast, arrive every few seconds. Caveat worth recording: the
+probe has no foreground service and is not resident, whereas the app is, so the probe may simply be
+an invalid proxy for in-app delivery — but nothing supports preferring transitions, and the periodic
+stream is demonstrably rich enough.

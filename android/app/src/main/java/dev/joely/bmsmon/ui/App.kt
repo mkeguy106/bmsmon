@@ -150,25 +150,36 @@ fun App(vm: BatteryViewModel) {
         }
     }
 
-    // Notification permission (Android 13+) is requested opportunistically for the foreground-
-    // service notification — it never gates monitoring; BLE only needs the BLE permissions.
-    val notifLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { /* result ignored: monitoring runs regardless */ }
-    fun askNotificationPermission() {
-        if (Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+    // The two permissions monitoring would LIKE but never needs: POST_NOTIFICATIONS (13+) for the
+    // foreground-service notification, and ACTIVITY_RECOGNITION (10+) for the parked-GPS motion
+    // gate. Neither gates monitoring — BLE only needs the BLE permissions — so both results are
+    // ignored; a notification denial just loses the ongoing notification, a motion denial just
+    // means GNSS is never paused (Settings › Battery saver says so on its own line).
+    //
+    // ONE launcher, not two, and that is the whole point: ActivityCompat.requestPermissions does
+    // not queue. A second request issued while one is still in flight is refused by the platform
+    // and immediately dispatched back as an empty cancelled result — so asking for these in
+    // sequence in the same frame showed the notification dialog and silently dropped the motion
+    // one, with no way for the user to reach it again short of the system settings app (monitoring
+    // restores across restarts, so a user who starts it once may never toggle again).
+    val extraPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { /* results ignored: monitoring runs regardless of either denial */ }
+    fun askExtraPermissions() {
+        val wanted = buildList {
+            if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
+            if (Build.VERSION.SDK_INT >= 29) add(Manifest.permission.ACTIVITY_RECOGNITION)
+        }.filter {
+            ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
         }
+        if (wanted.isNotEmpty()) extraPermLauncher.launch(wanted.toTypedArray())
     }
 
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { result ->
         if (result.values.all { it }) {
-            askNotificationPermission()
+            askExtraPermissions()
             vm.startMonitoring()
         }
     }
@@ -177,7 +188,9 @@ fun App(vm: BatteryViewModel) {
         if (state.monitoring) {
             vm.stopMonitoring()
         } else if (hasBlePermissions(context)) {
-            askNotificationPermission()
+            // Both call sites ask: on any install where BLE is already granted — the real device
+            // and every existing user — the toggle takes this branch and permLauncher never fires.
+            askExtraPermissions()
             vm.startMonitoring()
         } else {
             permLauncher.launch(blePermissions())

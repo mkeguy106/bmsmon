@@ -55,6 +55,19 @@ a dev inconvenience — always `am start` afterwards and confirm the process is 
 away. `adb shell monkey -p dev.joely.bmsmon -c android.intent.category.LAUNCHER 1` reports
 `Events injected: 1` but does **not** start this app on this device.
 
+**`adb shell input swipe X Y X Y <duration>` is NOT a safe long-press on this device.** Even with
+identical start and end coordinates it is delivered as a *drag*, and near the top of the screen the
+OS reads that drag as a notification-shade pull: simulating a 1.5 s long-press this way toggled
+**airplane mode** on, and the screen then timed out to the phone's **PIN lock** — which only the
+user can clear, so on-device work stops dead until they do. Use held `input motionevent` pairs
+instead, which stay put:
+
+```bash
+adb shell input motionevent DOWN <x> <y>
+# wait out the press duration between the two calls
+adb shell input motionevent UP <x> <y>
+```
+
 Wireless install/test over ADB (phone in TCP mode — same `am start` rule applies):
 ```bash
 adb connect <phone-ip>:5555
