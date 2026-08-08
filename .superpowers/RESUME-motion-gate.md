@@ -251,3 +251,53 @@ tested, and must not be written off with periodic.** Timeline of why:
 vehicle. The data reads unambiguously as a chair trip (5 mph, packs discharging), which would mean
 it does not test the transit case at all — the chair discharging keeps GPS on via the existing
 signal regardless.
+
+---
+
+## MERGED 2026-08-07 — `a881664` on `main`, pushed
+
+Shipped after a final whole-branch review found three Important defects the per-task reviews could
+not see. 378 unit tests / 0 failures, lint 0 errors, server suite 188 passed — all re-run on the
+merged result.
+
+**What the final review caught (all fixed in `ed05a04`):**
+1. **The N=3 debounce behaved as N=1.** `applyGpsGate` folds per BLE poll (~115/min across 8 packs),
+   not per reading (~10/min), so one cached reading was folded ~11 times. Fixed by deduping on
+   `MotionGate.lastConfidentAtMs`.
+2. **The motion permission dialog was silently dropped.** Two `launch()` calls in one frame — the
+   platform refuses concurrent permission requests, so the motion one was cancelled with no dialog.
+   On any install with notifications still pending, the feature was dead. Fixed with a single
+   `RequestMultiplePermissions`.
+3. **Uncertain readings postponed fail-open indefinitely** — `UNKNOWN@41` both held the verdict and
+   reset the deadline. Fixed by keying the deadline off the last *confident* reading.
+
+## STILL OWED — do these before trusting the feature
+
+1. **A real vehicle outing** (user planned for the morning of 2026-08-08). This is the actual proof
+   that GNSS stays on in transit. Check for GPS fixes above 5 m/s in the journey data — that metric
+   read **zero** from 2026-08-04 to 08-06 and is the whole point. Query prod read-only via
+   `ssh joely@ddnas02` → `docker exec bmsmon-db psql -U bmsmon -d bmsmon`; `/web/*` is behind
+   Authentik (302) and unreachable from the dev machine.
+   **Use 1-minute buckets, not 5.** Five-minute bucket centroids averaged a real 24 mph trip down to
+   walking pace and produced a badly wrong conclusion on 2026-08-07.
+2. **The settings line's two permission states** — confirm it reads "Motion sensing active" with the
+   permission granted and the unavailable variant after `pm revoke`, then **re-grant**. Never
+   verified; the phone was at its OS PIN lock.
+3. **AR's power cost**, with a live revert condition: if it exceeds the ~15 mA the pause saves, this
+   feature is a net loss and should be reverted. Per-uid attribution will not settle it (AR runs
+   inside Play Services) — compare total phone drain across comparable days.
+
+## Known limitation, recorded not hidden
+
+The saving is **partial, not full**. Play Services delivers in bursts with multi-minute gaps, so
+`MOTION_STALE_MS` (150 s) trips and the gate cycles — measured one unbroken 5m18s hold, then
+cycling. Lengthening the staleness window is an **open, undecided** tuning question; it is only safe
+if AR reliably emits a confident non-STILL when motion starts, which is untested. Do not tune it
+before the vehicle outing, and note that the fix wave changed the duty cycle any tuning would rest on.
+
+## The phone
+
+Left running the **pre-merge branch build**, and at its **OS PIN lock screen** (an agent's
+`input swipe` was read as a notification-shade drag, toggled airplane mode, and the screen timed
+out; monitoring itself never dropped and airplane mode was restored). It needs `main`'s build
+installed — `adb install -r` then `am start`, **never** `adb uninstall`.
