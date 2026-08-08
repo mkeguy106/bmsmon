@@ -26,7 +26,7 @@ With these fields, both would have been a single SQL query on day one.
 
 ## What is recorded
 
-Three nullable fields per sample:
+Three nullable fields per sample (on the wire class `SampleJson`):
 
 | field | type | meaning |
 |---|---|---|
@@ -57,7 +57,7 @@ already lives.
 
 ## Android
 
-Three fields on `SampleIn` (`cloud/CloudJson.kt`), following the established `gps_accuracy_m` /
+Three fields on `SampleJson` (`cloud/CloudJson.kt:10`), following the established `gps_accuracy_m` /
 `eta_full_min` pattern exactly:
 
 ```kotlin
@@ -78,6 +78,10 @@ for the reading and `motionGate.still` for the verdict. This threads three more 
 and a `Boolean`, so the existing `finiteOrNull()` treatment for floats does not apply.
 
 ## Server
+
+**Two similarly-named classes exist — do not conflate them.** `SampleJson` (Kotlin,
+`android/.../cloud/CloudJson.kt:10`) is the wire row the phone encodes. `SampleIn` (Pydantic,
+`server/app/models.py:15`) is the same row as the server parses it. Both need the three fields.
 
 Three nullable columns, added the way every other late column in this schema was
 (`server/app/db/schema.sql`, alongside the existing `ALTER TABLE samples ADD COLUMN IF NOT EXISTS`
