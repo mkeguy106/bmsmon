@@ -1266,3 +1266,29 @@ for cross-project reference, not a substitute for this CLAUDE.md's detail.
 - [LiTime_BMS_bluetooth](https://github.com/calledit/LiTime_BMS_bluetooth) — Web Bluetooth implementation
 - [litime-bluetooth-battery](https://github.com/chadj/litime-bluetooth-battery) — Another JS implementation
 - [Litime_BMS_ESP32](https://github.com/mirosieber/Litime_BMS_ESP32) — ESP32 Arduino library
+
+**VERIFIED IN THE FIELD 2026-08-08 — the motion gate works.** The outstanding vehicle-outing proof
+was performed: a real round trip, both legs fully traced.
+
+| | before the gate (08-04…08-06) | this outing |
+|---|---|---|
+| GPS fixes above 5 m/s | **0** | **26** |
+| peak speed captured | — | **22.53 m/s = 50 mph** |
+| GPS bucket coverage | — | 96% (263/275) |
+| furthest from start | — | 5.64 mi |
+
+Discharge read **0→0 across both legs** — the exact condition that used to blank the map, since the
+chair draws nothing in a vehicle. Motion readings over the outing: **859 `IN_VEHICLE`**, 687 `STILL`,
+451 `UNKNOWN`. The foreground-service type shows the gate never closed mid-drive (last change before
+the outbound leg `12:28:31 → 24`, next at `12:53:49 → 16` *after* arrival; same shape on the return),
+and all three clauses fired in the right order: chair discharging while loading → GPS on; chair idle
+but `IN_VEHICLE` → GPS **stays** on; parked and still on arrival → gate closes.
+
+**This settles periodic-vs-transitions empirically.** The Activity Transition API logged **zero**
+transitions across two real vehicle trips on 2026-08-07; the periodic API logged 859 `IN_VEHICLE`
+readings across one. Do not revisit transitions without new evidence.
+
+Still open, unchanged: the saving remains **partial** (Play Services delivers in bursts, so the gate
+cycles while parked), the `MOTION_STALE_MS` tuning is still **undecided**, and AR's own power cost is
+still **unmeasured** with its revert condition intact — net loss if it exceeds the ~15 mA the pause
+saves. Also still unverified: the settings line's two permission states.
