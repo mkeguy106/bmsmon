@@ -286,6 +286,14 @@ learner discards anyway (no discharge ⇒ no learning). Note for later: 20 min w
 frozen live-share marker becomes annoying in practice, which is a UX judgement rather than a
 data one.
 
+> **Superseded 2026-08-06** (the figures above stand; the *decision* does not). The trade-off
+> was weighed here as a range-learner cost, but the practical cost is the **map record**: three
+> user-confirmed outings turned out to be entirely invisible, destinations included — 0%
+> discharge for 65–75 minutes, returning within 2–10 m of the start. `PARKED_HOLD_MS` stays at
+> 5 min (no hold covers a 70-minute outing); instead the pause now also requires a debounced
+> confident-still verdict from phone motion. See `CLAUDE.md` → the parked-gate/transit section
+> and `docs/superpowers/specs/2026-08-06-motion-gated-gps-design.md`.
+
 ---
 
 ## 7. Server / WebUI audit — no code change needed
