@@ -354,3 +354,42 @@ async def test_ingest_stores_gps(app, client):
     assert row["lat"] == 41.8781
     assert row["lon"] == -87.6298
     assert abs(row["gps_accuracy_m"] - 7.5) < 1e-4
+
+
+async def test_ingest_accepts_motion_fields(app, client):
+    # A sample carrying motion state round-trips into the new columns.
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    payload = {"batch_seq": 16, "samples": [
+        {"ts_ms": 1719686400000, "address": A, "soc": 87.0,
+         "motion_activity": "IN_VEHICLE", "motion_confidence": 90, "motion_still": False}]}
+    body = json.dumps(payload).encode()
+    r = await client.post("/api/v1/ingest", content=body,
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
+    assert r.status_code == 200
+    assert r.json() == {"accepted": 1, "last_seq": 16}
+    async with app.state.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT motion_activity, motion_confidence, motion_still FROM samples")
+    assert row["motion_activity"] == "IN_VEHICLE"
+    assert row["motion_confidence"] == 90
+    assert row["motion_still"] is False
+
+
+async def test_ingest_without_motion_fields_still_works(app, client):
+    # Older clients send no motion keys at all; ingest must not break and the
+    # columns are NULL. This is the important case: it guarantees this change
+    # cannot break the phone currently uploading in production.
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    body = json.dumps(_payload()).encode()
+    r = await client.post("/api/v1/ingest", content=body,
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
+    assert r.status_code == 200
+    assert r.json() == {"accepted": 1, "last_seq": 7}
+    async with app.state.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT motion_activity, motion_confidence, motion_still FROM samples")
+    assert row["motion_activity"] is None
+    assert row["motion_confidence"] is None
+    assert row["motion_still"] is None

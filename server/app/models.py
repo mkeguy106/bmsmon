@@ -38,6 +38,9 @@ class SampleIn(BaseModel):
     lon: float | None = None
     gps_accuracy_m: float | None = None
     eta_full_min: float | None = None
+    motion_activity: str | None = None
+    motion_confidence: int | None = None
+    motion_still: bool | None = None
 
     @field_validator("cells")
     @classmethod
