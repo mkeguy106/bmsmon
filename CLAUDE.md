@@ -1350,3 +1350,19 @@ Still open, unchanged: the saving remains **partial** (Play Services delivers in
 cycles while parked), the `MOTION_STALE_MS` tuning is still **undecided**, and AR's own power cost is
 still **unmeasured** with its revert condition intact — net loss if it exceeds the ~15 mA the pause
 saves. Also still unverified: the settings line's two permission states.
+
+**Motion telemetry deployed and confirmed 2026-08-08 19:55.** Server deployed first, then the APK —
+that order is load-bearing: a new phone against the old server has its keys silently ignored
+(`SampleIn` has no `extra="forbid"`, so Pydantic defaults to `extra="ignore"`) and would read as an
+Android failure. The three columns landed automatically on container start from the idempotent
+`schema.sql`, with no migration step. Clean cutover in prod at 19:55: zero rows carried motion before
+it, essentially every row after.
+
+**Known gap found immediately by using it:** the first production rows read
+`motion_activity=STILL, motion_confidence=100, motion_still=false` with zero discharge — a confident
+still reading with the gate still open, minutes after restart and well past the 3-reading debounce.
+That is consistent with the documented bursty-delivery limitation (a reading older than
+`MOTION_STALE_MS` fails open), **but the stored fields cannot distinguish it from "debounce not yet
+met"**, because the reading's age is not uploaded. Adding the reading timestamp — or a derived
+staleness flag — would close that. Worth doing before the next diagnostic cycle rather than during
+one, which is the same lesson that produced this feature.
