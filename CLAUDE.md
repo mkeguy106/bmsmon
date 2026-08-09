@@ -976,7 +976,7 @@ the phone's Activity Recognition reading, e.g. `STILL`/`IN_VEHICLE`/`UNKNOWN`),
 the motion **gate's own verdict**, `MotionGate.still`), all nullable.
 
 A fourth column, `motion_at_ms` (bigint — `MotionReading.atMs`, the reading's own wall-clock
-timestamp, same device clock as `ts_ms`), was added 2026-08-08 (spec:
+timestamp, same device clock as `ts_ms`), was added 2026-08-08 and deployed 2026-08-09 (spec:
 `docs/superpowers/specs/2026-08-08-motion-staleness-telemetry-design.md`): `ts_ms - motion_at_ms`
 is the reading's age, which separates "gate failed open on staleness" from "debounce not yet met",
 and distinct `motion_at_ms` values identify individual readings, making the Play Services
