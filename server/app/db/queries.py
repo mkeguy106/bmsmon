@@ -8,7 +8,7 @@ from app.db.rollup import ROLLUP_BUCKET_MS, get_high_water_ms
 _COLS = ["state", "soc", "current_a", "power_w", "voltage_v", "temp_c", "mosfet_temp_c",
          "soh", "full_charge_ah", "remaining_ah", "cycles", "cell_min_v", "cell_max_v",
          "link_event", "lat", "lon", "gps_accuracy_m", "eta_full_min",
-         "motion_activity", "motion_confidence", "motion_still"]
+         "motion_activity", "motion_confidence", "motion_still", "motion_at_ms"]
 
 # Fixes with a larger claimed accuracy radius than this are coarse network/cell fallbacks
 # (fused provider without GNSS lock, e.g. right after a phone reboot — observed 363-636 m
@@ -39,7 +39,7 @@ WITH ins AS (
     (device_id,address,ts_ms,ts,state,soc,current_a,power_w,voltage_v,temp_c,
      mosfet_temp_c,soh,full_charge_ah,remaining_ah,cycles,cell_min_v,cell_max_v,regen,link_event,
      lat,lon,gps_accuracy_m,eta_full_min,cell1_v,cell2_v,cell3_v,cell4_v,
-     motion_activity,motion_confidence,motion_still)
+     motion_activity,motion_confidence,motion_still,motion_at_ms)
   SELECT * FROM unnest(
     $1::uuid[], $2::text[], $3::bigint[], $4::timestamptz[], $5::text[],
     $6::real[], $7::real[], $8::real[], $9::real[], $10::real[],
@@ -47,7 +47,7 @@ WITH ins AS (
     $16::real[], $17::real[], $18::boolean[], $19::text[],
     $20::float8[], $21::float8[], $22::real[], $23::real[],
     $24::real[], $25::real[], $26::real[], $27::real[],
-    $28::text[], $29::smallint[], $30::boolean[])
+    $28::text[], $29::smallint[], $30::boolean[], $31::bigint[])
   ON CONFLICT DO NOTHING
   RETURNING 1
 )
@@ -59,7 +59,7 @@ _INSERT_FIELDS = ["device_id", "address", "ts_ms", "ts", "state", "soc", "curren
                   "full_charge_ah", "remaining_ah", "cycles", "cell_min_v", "cell_max_v",
                   "regen", "link_event", "lat", "lon", "gps_accuracy_m",
                   "eta_full_min", "cell1_v", "cell2_v", "cell3_v", "cell4_v",
-                  "motion_activity", "motion_confidence", "motion_still"]
+                  "motion_activity", "motion_confidence", "motion_still", "motion_at_ms"]
 
 
 async def insert_samples(conn: asyncpg.Connection, rows: list[dict]) -> int:

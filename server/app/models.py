@@ -41,6 +41,7 @@ class SampleIn(BaseModel):
     motion_activity: str | None = None
     motion_confidence: int | None = None
     motion_still: bool | None = None
+    motion_at_ms: int | None = None
 
     @field_validator("cells")
     @classmethod
@@ -59,6 +60,14 @@ class SampleIn(BaseModel):
         # batch, so an unbounded int here would otherwise reach `$N::smallint[]` and 500 the
         # entire batch instead of just this field.
         return v if v is not None and 0 <= v <= 100 else None
+
+    @field_validator("motion_at_ms")
+    @classmethod
+    def _clip_motion_at(cls, v: int | None) -> int | None:
+        # Clamp rather than reject, same rationale as _clip_conf: an unbounded int reaching
+        # `$N::bigint[]` would 500 the whole batch, which the phone drops as Poison. Bound is
+        # "plausible epoch ms": positive and before 2100-01-01 UTC.
+        return v if v is not None and 0 < v < 4_102_444_800_000 else None
 
 
 class IngestBody(BaseModel):

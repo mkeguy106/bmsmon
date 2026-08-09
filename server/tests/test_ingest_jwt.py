@@ -411,7 +411,48 @@ async def test_ingest_without_motion_fields_still_works(app, client):
     assert r.json() == {"accepted": 1, "last_seq": 7}
     async with app.state.pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT motion_activity, motion_confidence, motion_still FROM samples")
+            "SELECT motion_activity, motion_confidence, motion_still, motion_at_ms FROM samples")
     assert row["motion_activity"] is None
     assert row["motion_confidence"] is None
     assert row["motion_still"] is None
+    assert row["motion_at_ms"] is None
+
+
+async def test_ingest_persists_motion_at_ms(app, client):
+    # The reading's own timestamp rides beside the motion fields; age (ts_ms - motion_at_ms)
+    # is what distinguishes a stale fail-open from a debounce still counting.
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    payload = {"batch_seq": 18, "samples": [
+        {"ts_ms": 1719686400000, "address": A, "soc": 87.0,
+         "motion_activity": "STILL", "motion_confidence": 100, "motion_still": False,
+         "motion_at_ms": 1719686245000}]}
+    body = json.dumps(payload).encode()
+    r = await client.post("/api/v1/ingest", content=body,
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
+    assert r.status_code == 200
+    assert r.json() == {"accepted": 1, "last_seq": 18}
+    async with app.state.pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT motion_at_ms FROM samples")
+    assert row["motion_at_ms"] == 1719686245000
+
+
+async def test_ingest_clamps_out_of_range_motion_at_ms(app, client):
+    # Python ints are unbounded; a huge value reaching $N::bigint[] would 500 the WHOLE
+    # set-based batch insert, which the phone treats as Poison and drops — losing real
+    # telemetry to one bogus field. Same rationale as the motion_confidence clamp.
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    payload = {"batch_seq": 19, "samples": [
+        {"ts_ms": 1719686400000, "address": A, "soc": 87.0,
+         "motion_activity": "STILL", "motion_confidence": 100, "motion_still": True,
+         "motion_at_ms": 10**19}]}
+    body = json.dumps(payload).encode()
+    r = await client.post("/api/v1/ingest", content=body,
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
+    assert r.status_code == 200
+    assert r.json() == {"accepted": 1, "last_seq": 19}
+    async with app.state.pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT motion_activity, motion_at_ms FROM samples")
+    assert row["motion_activity"] == "STILL"
+    assert row["motion_at_ms"] is None

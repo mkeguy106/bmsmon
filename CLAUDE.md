@@ -970,14 +970,23 @@ header; default dark; persisted in `localStorage["bmsmon-theme"]`; light mode is
 `:root[data-theme="light"]` CSS-variable override in `web/src/theme.css`). The page declares
 `<meta name="darkreader-lock">` so the Dark Reader extension never alters it in either mode.
 
-`samples` also carries **motion state** (`feat/motion-telemetry`, 2026-08-08 — **not yet
-deployed**: the columns and ingest mapping exist only on that branch until it merges and the
-server image is rebuilt/redeployed): `motion_activity` (text — the phone's Activity Recognition
-reading, e.g. `STILL`/`IN_VEHICLE`/`UNKNOWN`), `motion_confidence` (smallint, 0-100, that
-reading's confidence), and `motion_still` (boolean — the motion **gate's own verdict**,
-`MotionGate.still`), all nullable. **The verdict is stored as its own column rather than derived
-from the reading** because the gate's debounce (`STILL_DEBOUNCE_N = 3` consecutive confident-STILL
-readings to close the gate; one confident non-STILL reading to reopen it) carries state across
+`samples` also carries **motion state** (deployed 2026-08-08 19:55): `motion_activity` (text —
+the phone's Activity Recognition reading, e.g. `STILL`/`IN_VEHICLE`/`UNKNOWN`),
+`motion_confidence` (smallint, 0-100, that reading's confidence), and `motion_still` (boolean —
+the motion **gate's own verdict**, `MotionGate.still`), all nullable.
+
+A fourth column, `motion_at_ms` (bigint — `MotionReading.atMs`, the reading's own wall-clock
+timestamp, same device clock as `ts_ms`), was added 2026-08-08 (spec:
+`docs/superpowers/specs/2026-08-08-motion-staleness-telemetry-design.md`): `ts_ms - motion_at_ms`
+is the reading's age, which separates "gate failed open on staleness" from "debounce not yet met",
+and distinct `motion_at_ms` values identify individual readings, making the Play Services
+delivery-gap distribution measurable from prod SQL. It is null exactly when
+`motion_activity`/`motion_confidence` are; garbage values clamp to null server-side
+(`_clip_motion_at`, mirroring `_clip_conf`).
+
+**The verdict is stored as its own column rather than derived from the reading** because the
+gate's debounce (`STILL_DEBOUNCE_N = 3` consecutive confident-STILL readings to close the gate;
+one confident non-STILL reading to reopen it) carries state across
 readings, and an uncertain reading (confidence `< STILL_CONFIDENCE_MIN`) **holds the previous
 verdict** instead of resetting it — so a single row's activity+confidence can't reconstruct what
 the gate was doing without replaying its whole fold history. Recording only the reading would show
@@ -1366,3 +1375,5 @@ That is consistent with the documented bursty-delivery limitation (a reading old
 met"**, because the reading's age is not uploaded. Adding the reading timestamp — or a derived
 staleness flag — would close that. Worth doing before the next diagnostic cycle rather than during
 one, which is the same lesson that produced this feature.
+
+**CLOSED 2026-08-08: `motion_at_ms` ships exactly this** — see the motion-state paragraph above.

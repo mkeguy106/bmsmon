@@ -35,6 +35,7 @@ data class SampleJson(
     val motion_activity: String? = null,
     val motion_confidence: Int? = null,
     val motion_still: Boolean? = null,
+    val motion_at_ms: Long? = null,
     val cells: List<Float>? = null,
 )
 
@@ -64,7 +65,7 @@ object CloudJson {
         cellMinV: Float?, cellMaxV: Float?, regen: Boolean, linkEvent: String?,
         lat: Double? = null, lon: Double? = null, gpsAccuracyM: Float? = null,
         etaFullMin: Float? = null,
-        motionActivity: String? = null, motionConfidence: Int? = null, motionStill: Boolean? = null,
+        motionActivity: String? = null, motionConfidence: Int? = null, motionStill: Boolean? = null, motionAtMs: Long? = null,
         cells: List<Float>? = null,
     ): String = json.encodeToString(
         SampleJson.serializer(),
@@ -76,7 +77,7 @@ object CloudJson {
             lat.finiteOrNull()?.let { roundCoord(it) }, lon.finiteOrNull()?.let { roundCoord(it) },
             gpsAccuracyM.finiteOrNull()?.let { roundAccuracy(it) },
             etaFullMin.finiteOrNull(),
-            motionActivity, motionConfidence, motionStill,
+            motionActivity, motionConfidence, motionStill, motionAtMs,
             cells?.filter { it.isFinite() }?.takeIf { it.isNotEmpty() }),
     )
 
