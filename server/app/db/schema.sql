@@ -112,6 +112,7 @@ ALTER TABLE samples ADD COLUMN IF NOT EXISTS eta_full_min real;
 ALTER TABLE samples ADD COLUMN IF NOT EXISTS motion_activity   text;
 ALTER TABLE samples ADD COLUMN IF NOT EXISTS motion_confidence smallint;
 ALTER TABLE samples ADD COLUMN IF NOT EXISTS motion_still      boolean;
+ALTER TABLE samples ADD COLUMN IF NOT EXISTS motion_at_ms      bigint;
 ALTER TABLE samples ADD COLUMN IF NOT EXISTS cell1_v real;
 ALTER TABLE samples ADD COLUMN IF NOT EXISTS cell2_v real;
 ALTER TABLE samples ADD COLUMN IF NOT EXISTS cell3_v real;
