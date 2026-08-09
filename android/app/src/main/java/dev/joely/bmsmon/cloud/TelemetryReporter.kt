@@ -135,9 +135,9 @@ class TelemetryReporter(
         lon: Double? = null,
         gpsAccuracyM: Float? = null,
         etaFullMin: Float? = null,
-        motionActivity: String? = null,
-        motionConfidence: Int? = null,
-        motionStill: Boolean? = null,
+        motionActivity: String?,
+        motionConfidence: Int?,
+        motionStill: Boolean?,
     ) {
         if (!reportingEnabled) return
         val payload = CloudJson.sampleJson(

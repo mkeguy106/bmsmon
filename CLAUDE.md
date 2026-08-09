@@ -989,8 +989,14 @@ log line and discarded — via `MotionSource.activityName()` (widened from priva
 the upload path reuses the same mapping instead of duplicating it). The wire class is `SampleJson`
 (`android/.../cloud/CloudJson.kt`); `SampleIn` (`server/app/models.py`) is the server-side Pydantic
 twin — both exist, both carry the three fields, and neither should be conflated with the other.
-All three are nullable end to end, so a payload omitting them (older client, AR unavailable,
-permission denied) still ingests. The per-sample row dict is assembled generically in
+All three columns are nullable end to end for backward compatibility — an older client omits all
+three and still ingests. On this branch's client, though, `motion_still` is always populated: it
+comes from `motionGate.still`, a non-null `Boolean`, so a fail-open verdict uploads as `false`
+rather than being omitted. Only `motion_activity`/`motion_confidence` go null together, and only
+when there is no motion reading at all (AR unavailable, permission denied, or motion sensing not
+currently running). So `motion_activity IS NULL AND motion_still = false` reads as "gate failed
+open with no signal" — not as "no motion data was sent". The per-sample row dict is assembled
+generically in
 `server/app/db/queries.py`'s `sample_row()` off a `_COLS` list — the same mechanism
 `gps_accuracy_m`/`eta_full_min` use — **not** in `routers/api_device.py`.
 

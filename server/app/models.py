@@ -50,6 +50,16 @@ class SampleIn(BaseModel):
         # with fleet_snapshot instead of diverging on non-4-element uploads.
         return v[:4] if v else v
 
+    @field_validator("motion_confidence")
+    @classmethod
+    def _clip_conf(cls, v: int | None) -> int | None:
+        # Clamp rather than reject (Field(ge=0, le=100) would 422 the WHOLE batch on one bad
+        # value, and the phone treats a 422 as Poison and DROPS it — losing real telemetry to
+        # save one bogus confidence reading). insert_samples is one set-based statement per
+        # batch, so an unbounded int here would otherwise reach `$N::smallint[]` and 500 the
+        # entire batch instead of just this field.
+        return v if v is not None and 0 <= v <= 100 else None
+
 
 class IngestBody(BaseModel):
     # batch_seq semantics: a per-process counter on the phone (no ordering guarantee

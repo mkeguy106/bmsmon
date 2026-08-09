@@ -53,6 +53,7 @@ import dev.joely.bmsmon.model.groupActivity
 import dev.joely.bmsmon.model.groupOf
 import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.model.MotionGate
+import dev.joely.bmsmon.model.MotionReading
 import dev.joely.bmsmon.model.foldMotion
 import dev.joely.bmsmon.model.gpsShouldRun
 import dev.joely.bmsmon.model.isRegen
@@ -452,7 +453,10 @@ class MonitorEngine(
 
     // Debounced motion-gate state (see foldMotion). Only ever read/written inside applyGpsGate
     // and shutdownGps, both @Synchronized on this engine, so this does not need @Volatile the
-    // way gpsWanted/gpsPauseParked do (those are written from outside the lock too).
+    // way gpsWanted/gpsPauseParked do (those are written from outside the lock too). Callers
+    // that need the folded verdict (e.g. the upload path in onPoll) must use applyGpsGate's
+    // return value rather than reading this field directly — a direct read is unsynchronized
+    // and was exactly the bug a prior review caught here.
     private var motionGate = MotionGate()
 
     /** Record whether GPS capture is wanted at all; the parked gate decides if it actually runs. */
@@ -516,9 +520,10 @@ class MonitorEngine(
      * and a hole in the track per misread, which is the flapping the debounce exists to remove.
      */
     @Synchronized
-    private fun applyGpsGate(now: Long) {
+    private fun applyGpsGate(now: Long): Pair<MotionReading?, MotionGate> {
         if (gpsWanted && gpsPauseParked) motionSource.start() else motionSource.stop()
-        motionGate = foldMotion(motionGate, motionSource.current(), now)
+        val reading = motionSource.current()
+        motionGate = foldMotion(motionGate, reading, now)
         val active = gpsShouldRun(
             wanted = gpsWanted,
             pauseEnabled = gpsPauseParked,
@@ -526,9 +531,11 @@ class MonitorEngine(
             nowMs = now,
             confidentlyStill = motionGate.still,
         )
-        if (_state.value.gpsActive == active) return
-        _state.update { it.copy(gpsActive = active) }
-        if (active) locationSource.start() else locationSource.stop()
+        if (_state.value.gpsActive != active) {
+            _state.update { it.copy(gpsActive = active) }
+            if (active) locationSource.start() else locationSource.stop()
+        }
+        return reading to motionGate
     }
 
     /**
@@ -665,17 +672,19 @@ class MonitorEngine(
                 peakCurrentA = peakC,
             )
         }
-        // lastDischargeAt just moved; re-derive whether the chair still counts as driving.
-        applyGpsGate(now)
+        // lastDischargeAt just moved; re-derive whether the chair still counts as driving. The
+        // reading and the gate verdict come from this ONE call, both computed under the same
+        // lock — never two independent motionSource.current() calls, which could pair a fresh
+        // reading with a stale verdict (or vice versa) if a broadcast landed in between.
+        val (motion, gate) = applyGpsGate(now)
         val fix = if (_state.value.gpsActive) locationSource.current() else null
         // Upload GPS only when the fix is new for this pack (bandwidth — see isNewFixForPack).
         val uploadFix = fix?.takeIf { isNewFixForPack(lastGpsFixUploaded[addr], it.timeMs) }
         if (uploadFix != null) lastGpsFixUploaded[addr] = uploadFix.timeMs
-        val motion = motionSource.current()
         reporter?.report(
             addr, roster.batteryAt(addr)?.advertisedName, roster.batteryAt(addr)?.alias,
             group?.id, t, now, regen, uploadFix?.lat, uploadFix?.lon, uploadFix?.accuracyM, etaFullMin,
-            motion?.activity, motion?.confidence, motionGate.still,
+            motion?.activity, motion?.confidence, gate.still,
         )
         if (logging) {
             val header = (ProfileRegistry.profileFor(roster.batteryAt(addr)?.advertisedName)

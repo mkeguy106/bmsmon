@@ -376,6 +376,28 @@ async def test_ingest_accepts_motion_fields(app, client):
     assert row["motion_still"] is False
 
 
+async def test_ingest_clamps_out_of_range_motion_confidence(app, client):
+    # A corrupted/buggy client value outside 0-100 must not 500 the whole batch: SampleIn's
+    # clamping validator (mirrors _clip_cells) degrades it to NULL rather than rejecting, so the
+    # rest of the sample -- and the rest of the batch -- still ingests.
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    payload = {"batch_seq": 17, "samples": [
+        {"ts_ms": 1719686400000, "address": A, "soc": 87.0, "motion_activity": "STILL",
+         "motion_confidence": 99999, "motion_still": True}]}
+    body = json.dumps(payload).encode()
+    r = await client.post("/api/v1/ingest", content=body,
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
+    assert r.status_code == 200
+    assert r.json() == {"accepted": 1, "last_seq": 17}
+    async with app.state.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT motion_activity, motion_confidence, motion_still FROM samples")
+    assert row["motion_activity"] == "STILL"
+    assert row["motion_confidence"] is None
+    assert row["motion_still"] is True
+
+
 async def test_ingest_without_motion_fields_still_works(app, client):
     # Older clients send no motion keys at all; ingest must not break and the
     # columns are NULL. This is the important case: it guarantees this change

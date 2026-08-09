@@ -219,8 +219,13 @@ class BatterySaverTest {
     // measured from the last CONFIDENT reading, so uncertainty can hold the verdict but cannot
     // postpone failing open.
 
-    private fun reading(still: Boolean, conf: Int, age: Long, now: Long = 10_000_000L, activity: String = "STILL") =
-        MotionReading(still = still, confidence = conf, atMs = now - age, activity = activity)
+    private fun reading(
+        still: Boolean,
+        conf: Int,
+        age: Long,
+        now: Long = 10_000_000L,
+        activity: String = if (still) "STILL" else "UNKNOWN",
+    ) = MotionReading(still = still, confidence = conf, atMs = now - age, activity = activity)
 
     /** A closed gate as production reaches it: the last confident reading is [atMs]. */
     private fun closedGate(atMs: Long) =
@@ -404,13 +409,20 @@ class BatterySaverTest {
         assertFalse(r.still)
     }
 
-    // Adding the field must not disturb the gate: foldMotion ignores it entirely.
+    // Adding the field must not disturb the gate: foldMotion ignores it entirely. Discriminating
+    // test — fold the SAME reading sequence twice, varying only the activity string, and assert
+    // the resulting gates are equal. (A version that never varies the field, like an earlier
+    // draft of this test, cannot tell "ignored" from "always happens to match".)
     @Test fun activityNameDoesNotAffectTheGateVerdict() {
         val now = 10_000_000L
-        var g = MotionGate()
+        var gStill = MotionGate()
+        var gVehicle = MotionGate()
         repeat(STILL_DEBOUNCE_N) { i ->
-            g = foldMotion(g, MotionReading(true, 99, now - (STILL_DEBOUNCE_N - i) * 1_000L, "STILL"), now)
+            val atMs = now - (STILL_DEBOUNCE_N - i) * 1_000L
+            gStill = foldMotion(gStill, MotionReading(true, 99, atMs, "STILL"), now)
+            gVehicle = foldMotion(gVehicle, MotionReading(true, 99, atMs, "IN_VEHICLE"), now)
         }
-        assertTrue(g.still)
+        assertTrue(gStill.still)
+        assertEquals(gStill, gVehicle)
     }
 }
