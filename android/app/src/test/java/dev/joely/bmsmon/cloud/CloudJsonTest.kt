@@ -192,11 +192,12 @@ class CloudJsonTest {
             groupId = null, state = "Idle", soc = 50f, currentA = 0f, powerW = 0f, voltageV = 13.2f,
             tempC = 25f, mosfetTempC = null, soh = null, fullChargeAh = null, remainingAh = null,
             cycles = null, cellMinV = null, cellMaxV = null, regen = false, linkEvent = null,
-            motionActivity = "IN_VEHICLE", motionConfidence = 90, motionStill = false,
+            motionActivity = "IN_VEHICLE", motionConfidence = 90, motionStill = false, motionAtMs = 1_700_000_000_123L,
         )
         assertTrue(s.contains("\"motion_activity\":\"IN_VEHICLE\""))
         assertTrue(s.contains("\"motion_confidence\":90"))
         assertTrue(s.contains("\"motion_still\":false"))
+        assertTrue(s.contains("\"motion_at_ms\":1700000000123"))
     }
 
     // The omission is what makes this free when motion sensing is unavailable — assert it, do not
@@ -211,5 +212,6 @@ class CloudJsonTest {
         assertFalse(s.contains("motion_activity"))
         assertFalse(s.contains("motion_confidence"))
         assertFalse(s.contains("motion_still"))
+        assertFalse(s.contains("motion_at_ms"))
     }
 }
