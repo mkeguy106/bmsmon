@@ -970,6 +970,64 @@ header; default dark; persisted in `localStorage["bmsmon-theme"]`; light mode is
 `:root[data-theme="light"]` CSS-variable override in `web/src/theme.css`). The page declares
 `<meta name="darkreader-lock">` so the Dark Reader extension never alters it in either mode.
 
+`samples` also carries **motion state** (`feat/motion-telemetry`, 2026-08-08 — **not yet
+deployed**: the columns and ingest mapping exist only on that branch until it merges and the
+server image is rebuilt/redeployed): `motion_activity` (text — the phone's Activity Recognition
+reading, e.g. `STILL`/`IN_VEHICLE`/`UNKNOWN`), `motion_confidence` (smallint, 0-100, that
+reading's confidence), and `motion_still` (boolean — the motion **gate's own verdict**,
+`MotionGate.still`), all nullable. **The verdict is stored as its own column rather than derived
+from the reading** because the gate's debounce (`STILL_DEBOUNCE_N = 3` consecutive confident-STILL
+readings to close the gate; one confident non-STILL reading to reopen it) carries state across
+readings, and an uncertain reading (confidence `< STILL_CONFIDENCE_MIN`) **holds the previous
+verdict** instead of resetting it — so a single row's activity+confidence can't reconstruct what
+the gate was doing without replaying its whole fold history. Recording only the reading would show
+`STILL@100` without revealing the gate was still mid-debounce; recording only the verdict would
+show the gate never closing without revealing a run of `UNKNOWN@41` readings was why. This is the
+whole justification for three columns instead of two. `MotionReading` (`model/BatterySaver.kt`)
+now carries the activity name alongside `still`/`confidence`/`atMs` — previously mapped only for a
+log line and discarded — via `MotionSource.activityName()` (widened from private to `internal` so
+the upload path reuses the same mapping instead of duplicating it). The wire class is `SampleJson`
+(`android/.../cloud/CloudJson.kt`); `SampleIn` (`server/app/models.py`) is the server-side Pydantic
+twin — both exist, both carry the three fields, and neither should be conflated with the other.
+All three columns are nullable end to end for backward compatibility — an older client omits all
+three and still ingests. On this branch's client, though, `motion_still` is always populated: it
+comes from `motionGate.still`, a non-null `Boolean`, so a fail-open verdict uploads as `false`
+rather than being omitted. Only `motion_activity`/`motion_confidence` go null together, and only
+when there is no motion reading at all (AR unavailable, permission denied, or motion sensing not
+currently running). So `motion_activity IS NULL AND motion_still = false` reads as "gate failed
+open with no signal" — not as "no motion data was sent". The per-sample row dict is assembled
+generically in
+`server/app/db/queries.py`'s `sample_row()` off a `_COLS` list — the same mechanism
+`gps_accuracy_m`/`eta_full_min` use — **not** in `routers/api_device.py`.
+
+Motion is a **device-level** fact (one phone, one Activity Recognition reading) written onto
+**every pack's** row, so with 8 packs each reading is stored 8 times. Accepted because the
+duplicated values are identical within an upload batch and the whole batch is already gzipped,
+which should collapse them — **the actual wire-cost delta has not been measured yet** (a later
+task); if it turns out material, the documented fallback is to populate the fields only on the
+staged base's rows.
+
+This closes an observability gap that cost three days to diagnose by hand: the phone is reachable
+over ADB only on home Wi-Fi, and `logcat`'s default 256 KiB ring buffer had to be hand-raised to
+32 MiB to survive one outing — the evidence rotated away twice before that. With these columns the
+same diagnosis is a SQL query:
+
+```sql
+-- What does AR actually report while stationary?
+SELECT motion_activity, motion_confidence, count(*)
+FROM samples WHERE ts_ms > … GROUP BY 1,2 ORDER BY 3 DESC;
+
+-- Does the gate's verdict track the readings, or is the debounce wrong?
+SELECT motion_activity, motion_confidence, motion_still, count(*)
+FROM samples WHERE ts_ms > … GROUP BY 1,2,3;
+
+-- Was GPS on during transit, and what did the phone think it was doing?
+SELECT to_timestamp(ts_ms/1000), lat IS NOT NULL AS has_gps, motion_activity, motion_still, current_a
+FROM samples WHERE ts_ms BETWEEN … AND … ORDER BY ts_ms;
+```
+
+That last query is precisely the question that cost three days.
+
 **WebUI v1 layout (`web/src/App.tsx`, served at `/v1/` since 2026-08-04):** the dashboard is the **main stage** + **All Batteries**; a
 header **⚙ toggle** opens a **Settings** view (battery-profile panel + device admin — kept off the
 main page). Header also has a **°C/°F** unit toggle (`localStorage["bmsmon-temp-unit"]`, default the

@@ -38,6 +38,9 @@ class SampleIn(BaseModel):
     lon: float | None = None
     gps_accuracy_m: float | None = None
     eta_full_min: float | None = None
+    motion_activity: str | None = None
+    motion_confidence: int | None = None
+    motion_still: bool | None = None
 
     @field_validator("cells")
     @classmethod
@@ -46,6 +49,16 @@ class SampleIn(BaseModel):
         # so truncate here to keep the WS broadcast (raw model_dump()) in agreement
         # with fleet_snapshot instead of diverging on non-4-element uploads.
         return v[:4] if v else v
+
+    @field_validator("motion_confidence")
+    @classmethod
+    def _clip_conf(cls, v: int | None) -> int | None:
+        # Clamp rather than reject (Field(ge=0, le=100) would 422 the WHOLE batch on one bad
+        # value, and the phone treats a 422 as Poison and DROPS it — losing real telemetry to
+        # save one bogus confidence reading). insert_samples is one set-based statement per
+        # batch, so an unbounded int here would otherwise reach `$N::smallint[]` and 500 the
+        # entire batch instead of just this field.
+        return v if v is not None and 0 <= v <= 100 else None
 
 
 class IngestBody(BaseModel):

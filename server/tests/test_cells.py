@@ -67,3 +67,22 @@ def test_sample_in_cells_none_stays_none():
     s = SampleIn(ts_ms=1, address=A)
     assert s.cells is None
     assert s.model_dump()["cells"] is None
+
+
+def test_sample_in_clips_out_of_range_motion_confidence():
+    # A Field(ge=0, le=100) constraint would 422 the WHOLE request body -- the phone treats a 422
+    # as Poison and drops it, losing every other sample in the batch to save one bogus reading.
+    # Clamping to None degrades gracefully instead; $N::smallint[] would otherwise reject
+    # anything outside +/-32767 and 500 the whole batch (insert_samples is one statement).
+    s = SampleIn(ts_ms=1, address=A, motion_confidence=99999)
+    assert s.motion_confidence is None
+
+
+def test_sample_in_clips_negative_motion_confidence():
+    s = SampleIn(ts_ms=1, address=A, motion_confidence=-1)
+    assert s.motion_confidence is None
+
+
+def test_sample_in_keeps_motion_confidence_in_range():
+    s = SampleIn(ts_ms=1, address=A, motion_confidence=42)
+    assert s.motion_confidence == 42

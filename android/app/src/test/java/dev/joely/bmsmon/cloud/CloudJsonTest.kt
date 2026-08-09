@@ -1,6 +1,7 @@
 package dev.joely.bmsmon.cloud
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -183,5 +184,32 @@ class CloudJsonTest {
             null, 99, 100f, 88f, 12, 3.31f, 3.34f, false, null,
         )
         assertTrue(!js.contains("\"cells\""))
+    }
+
+    @Test fun motionFieldsAreEncodedWhenPresent() {
+        val s = CloudJson.sampleJson(
+            tsMs = 1_700_000_000_000L, address = "AA:BB", advertisedName = null, alias = null,
+            groupId = null, state = "Idle", soc = 50f, currentA = 0f, powerW = 0f, voltageV = 13.2f,
+            tempC = 25f, mosfetTempC = null, soh = null, fullChargeAh = null, remainingAh = null,
+            cycles = null, cellMinV = null, cellMaxV = null, regen = false, linkEvent = null,
+            motionActivity = "IN_VEHICLE", motionConfidence = 90, motionStill = false,
+        )
+        assertTrue(s.contains("\"motion_activity\":\"IN_VEHICLE\""))
+        assertTrue(s.contains("\"motion_confidence\":90"))
+        assertTrue(s.contains("\"motion_still\":false"))
+    }
+
+    // The omission is what makes this free when motion sensing is unavailable — assert it, do not
+    // assume it. `explicitNulls = false` should drop the keys entirely rather than emit nulls.
+    @Test fun motionFieldsAreOmittedEntirelyWhenAbsent() {
+        val s = CloudJson.sampleJson(
+            tsMs = 1_700_000_000_000L, address = "AA:BB", advertisedName = null, alias = null,
+            groupId = null, state = "Idle", soc = 50f, currentA = 0f, powerW = 0f, voltageV = 13.2f,
+            tempC = 25f, mosfetTempC = null, soh = null, fullChargeAh = null, remainingAh = null,
+            cycles = null, cellMinV = null, cellMaxV = null, regen = false, linkEvent = null,
+        )
+        assertFalse(s.contains("motion_activity"))
+        assertFalse(s.contains("motion_confidence"))
+        assertFalse(s.contains("motion_still"))
     }
 }
