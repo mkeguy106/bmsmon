@@ -90,7 +90,19 @@ fun gpsShouldRun(
  * 0–100 confidence; [atMs] is wall-clock (`System.currentTimeMillis()`), the same clock
  * [foldMotion] compares against.
  */
-data class MotionReading(val still: Boolean, val confidence: Int, val atMs: Long)
+data class MotionReading(
+    val still: Boolean,
+    val confidence: Int,
+    val atMs: Long,
+    /**
+     * Most probable detected activity, as a readable name (`STILL`, `IN_VEHICLE`, `UNKNOWN`, …).
+     *
+     * Carried purely so it can be uploaded — `foldMotion` never reads it. It exists because
+     * `still = false` collapses `UNKNOWN@41` and `IN_VEHICLE@90` into the same value, and telling
+     * those apart from the server is the entire reason this field was added.
+     */
+    val activity: String,
+)
 
 /** Minimum confidence before a STILL reading is trusted enough to pause GNSS. */
 const val STILL_CONFIDENCE_MIN = 75

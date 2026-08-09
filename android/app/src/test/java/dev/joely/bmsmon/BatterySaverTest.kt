@@ -219,8 +219,8 @@ class BatterySaverTest {
     // measured from the last CONFIDENT reading, so uncertainty can hold the verdict but cannot
     // postpone failing open.
 
-    private fun reading(still: Boolean, conf: Int, age: Long, now: Long = 10_000_000L) =
-        MotionReading(still = still, confidence = conf, atMs = now - age)
+    private fun reading(still: Boolean, conf: Int, age: Long, now: Long = 10_000_000L, activity: String = "STILL") =
+        MotionReading(still = still, confidence = conf, atMs = now - age, activity = activity)
 
     /** A closed gate as production reaches it: the last confident reading is [atMs]. */
     private fun closedGate(atMs: Long) =
@@ -289,7 +289,7 @@ class BatterySaverTest {
         val t0 = 10_000_000L
         var gate = MotionGate()
         repeat(STILL_DEBOUNCE_N) { n ->
-            val r = MotionReading(still = true, confidence = 99, atMs = t0 + n * 6_000L)
+            val r = MotionReading(still = true, confidence = 99, atMs = t0 + n * 6_000L, activity = "STILL")
             repeat(11) { i ->      // ~11 gate evaluations per reading
                 gate = foldMotion(gate, r, r.atMs + i * 500L)
                 assertEquals(n + 1, gate.stillRun)
@@ -306,13 +306,13 @@ class BatterySaverTest {
         var gate = foldMotion(MotionGate(), reading(still = true, conf = 99, age = 0, now = t0), t0)
         assertEquals(1, gate.stillRun)
         val t1 = t0 + 1_000L
-        val held = foldMotion(gate, MotionReading(still = false, confidence = 41, atMs = t1), t1)
+        val held = foldMotion(gate, MotionReading(still = false, confidence = 41, atMs = t1, activity = "UNKNOWN"), t1)
         assertEquals(gate, held)
         // The hold contributed nothing: the run still only needs STILL_DEBOUNCE_N - 1 more
         // confident-STILL readings to close, not a fresh count from zero.
         repeat(STILL_DEBOUNCE_N - 1) { n ->
             val at = t0 + 6_000L * (n + 1)
-            gate = foldMotion(gate, MotionReading(still = true, confidence = 99, atMs = at), at)
+            gate = foldMotion(gate, MotionReading(still = true, confidence = 99, atMs = at, activity = "STILL"), at)
         }
         assertTrue(gate.still)
     }
@@ -342,14 +342,14 @@ class BatterySaverTest {
         // Uncertain readings keep landing, each one fresh in its own right.
         var t = closedAt + 10_000L
         while (t <= closedAt + MOTION_STALE_MS) {
-            gate = foldMotion(gate, MotionReading(still = false, confidence = 41, atMs = t), t)
+            gate = foldMotion(gate, MotionReading(still = false, confidence = 41, atMs = t, activity = "UNKNOWN"), t)
             assertTrue("gate must hold while confident evidence is still fresh at t=$t", gate.still)
             t += 10_000L
         }
         // One tick past MOTION_STALE_MS since the last CONFIDENT reading — even though the newest
         // reading of any kind is only 10 s old — the gate fails open and GNSS resumes.
         val past = closedAt + MOTION_STALE_MS + 1
-        gate = foldMotion(gate, MotionReading(still = false, confidence = 41, atMs = past), past)
+        gate = foldMotion(gate, MotionReading(still = false, confidence = 41, atMs = past, activity = "UNKNOWN"), past)
         assertEquals(MotionGate(), gate)
     }
 
@@ -358,11 +358,11 @@ class BatterySaverTest {
         val t0 = 10_000_000L
         var gate = closedGate(t0)
         val at = t0 + MOTION_STALE_MS - 1_000L
-        gate = foldMotion(gate, MotionReading(still = true, confidence = 99, atMs = at), at)
+        gate = foldMotion(gate, MotionReading(still = true, confidence = 99, atMs = at, activity = "STILL"), at)
         assertTrue(gate.still)
         // Past the ORIGINAL deadline but inside the refreshed one: still closed.
         val later = t0 + MOTION_STALE_MS + 1_000L
-        gate = foldMotion(gate, MotionReading(still = false, confidence = 41, atMs = later), later)
+        gate = foldMotion(gate, MotionReading(still = false, confidence = 41, atMs = later, activity = "UNKNOWN"), later)
         assertTrue(gate.still)
     }
 
@@ -393,5 +393,24 @@ class BatterySaverTest {
                 confidentlyStill = closed.still,
             ),
         )
+    }
+
+    // The reading must carry the activity NAME, not just the still/not-still collapse — the whole
+    // point of uploading it is telling "UNKNOWN@41" apart from "IN_VEHICLE@90", which both map to
+    // still=false and are indistinguishable without it.
+    @Test fun motionReadingCarriesTheActivityName() {
+        val r = MotionReading(still = false, confidence = 90, atMs = 1_000L, activity = "IN_VEHICLE")
+        assertEquals("IN_VEHICLE", r.activity)
+        assertFalse(r.still)
+    }
+
+    // Adding the field must not disturb the gate: foldMotion ignores it entirely.
+    @Test fun activityNameDoesNotAffectTheGateVerdict() {
+        val now = 10_000_000L
+        var g = MotionGate()
+        repeat(STILL_DEBOUNCE_N) { i ->
+            g = foldMotion(g, MotionReading(true, 99, now - (STILL_DEBOUNCE_N - i) * 1_000L, "STILL"), now)
+        }
+        assertTrue(g.still)
     }
 }

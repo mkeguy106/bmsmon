@@ -49,6 +49,7 @@ class MotionSource(private val context: Context) {
                     still = still,
                     confidence = top.confidence,
                     atMs = System.currentTimeMillis(),
+                    activity = activityName(top.type),
                 ),
             )
         }
@@ -150,7 +151,7 @@ class MotionSource(private val context: Context) {
 }
 
 /** Human-readable name for a [DetectedActivity] `type` constant, for the diagnostic log above. */
-private fun activityName(type: Int): String = when (type) {
+internal fun activityName(type: Int): String = when (type) {
     DetectedActivity.IN_VEHICLE -> "IN_VEHICLE"
     DetectedActivity.ON_BICYCLE -> "ON_BICYCLE"
     DetectedActivity.ON_FOOT -> "ON_FOOT"
