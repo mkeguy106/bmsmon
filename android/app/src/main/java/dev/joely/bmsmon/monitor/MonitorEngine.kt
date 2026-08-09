@@ -684,7 +684,7 @@ class MonitorEngine(
         reporter?.report(
             addr, roster.batteryAt(addr)?.advertisedName, roster.batteryAt(addr)?.alias,
             group?.id, t, now, regen, uploadFix?.lat, uploadFix?.lon, uploadFix?.accuracyM, etaFullMin,
-            motion?.activity, motion?.confidence, gate.still,
+            motion?.activity, motion?.confidence, gate.still, motion?.atMs,
         )
         if (logging) {
             val header = (ProfileRegistry.profileFor(roster.batteryAt(addr)?.advertisedName)
