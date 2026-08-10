@@ -837,7 +837,13 @@ open items from 2026-07-15 are closed; every constant held except one reseed and
   low start SOC.
 
 **Next check (~2026-09).** Open: re-verify whPerMile as outing days accumulate, now on the
-corrected current-sign basis.
+corrected current-sign basis. Added 2026-08-10: decide the **AR power-cost** keep/revert
+(protocol + day-0 baseline: `docs/ar-power-cost-protocol.md`; 2026-08-10 is the first comparable
+day, since it is the first full day the GPS pause actually worked); measure the **motion-column
+wire cost** (real gzipped batch delta; documented fallback is populating the fields only on the
+staged base's rows); and **re-quantify the GNSS-off duty and saving under the silence-as-stillness
+gate** — the recorded ≈15 mA figure was measured for the discharge-only era's 68.4% duty, and the
+new gate holds GNSS off through whole parked nights, so the real saving should be larger.
 
 Garbage-frame guard: `parseTelemetry` realigns to the `01 93 55 AA` status header (BLE
 notification fragments can prepend stale bytes, which previously decoded as soc=0/37.6 V and
