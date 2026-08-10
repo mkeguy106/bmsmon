@@ -112,6 +112,15 @@ class MotionSource(private val context: Context) {
      * thread, same as callers of [start]/[stop], so in practice this never contends — but nothing
      * here assumes that, and the [requesting] guard makes a late/duplicate callback (e.g. after an
      * explicit [stop] already tore things down) a safe no-op rather than a double-unregister.
+     *
+     * Also clears [cache], mirroring [stop]. Under silence-as-stillness the staleness bound was
+     * deleted from `foldMotion` (BatterySaver.kt) — silence now closes the gate rather than
+     * expiring it — so a reading left behind by a now-dead subscription would feed the gate
+     * forever: [current] keeps returning the stale STILL and the gate stays closed with zero live
+     * signal, e.g. after a failed [maybeResubscribe] refresh. Clearing it fails open (`foldMotion`'s
+     * null-reading branch), and the recovered subscription's next reading restarts the run, so a
+     * transient failure costs only the ~10 min close hold before the gate can shut again — the
+     * safe direction.
      */
     @Synchronized
     private fun onSubscribeFailed(e: Throwable) {
@@ -119,6 +128,7 @@ class MotionSource(private val context: Context) {
         if (!requesting) return
         requesting = false
         runCatching { context.unregisterReceiver(receiver) }
+        cache.set(null)
     }
 
     /** Latest reading, or null when none has arrived — null fails open to "not still". */

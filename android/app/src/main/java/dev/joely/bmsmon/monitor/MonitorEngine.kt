@@ -451,12 +451,12 @@ class MonitorEngine(
     @Volatile private var gpsWanted = false
     @Volatile private var gpsPauseParked = true
 
-    // Debounced motion-gate state (see foldMotion). Only ever read/written inside applyGpsGate
-    // and shutdownGps, both @Synchronized on this engine, so this does not need @Volatile the
-    // way gpsWanted/gpsPauseParked do (those are written from outside the lock too). Callers
-    // that need the folded verdict (e.g. the upload path in onPoll) must use applyGpsGate's
-    // return value rather than reading this field directly — a direct read is unsynchronized
-    // and was exactly the bug a prior review caught here.
+    // Silence-as-stillness motion-gate state (see foldMotion). Only ever read/written inside
+    // applyGpsGate and shutdownGps, both @Synchronized on this engine, so this does not need
+    // @Volatile the way gpsWanted/gpsPauseParked do (those are written from outside the lock
+    // too). Callers that need the folded verdict (e.g. the upload path in onPoll) must use
+    // applyGpsGate's return value rather than reading this field directly — a direct read is
+    // unsynchronized and was exactly the bug a prior review caught here.
     private var motionGate = MotionGate()
 
     /** Record whether GPS capture is wanted at all; the parked gate decides if it actually runs. */
@@ -516,9 +516,19 @@ class MonitorEngine(
      * (`MotionGate.lastConfidentAtMs`), so one reading advances the hold clock once rather than
      * ~11 times per evaluation; it still re-derives the verdict from the clock on every call, so
      * the `STILL_CLOSE_HOLD_MS` close fires off the wall clock even when no new readings arrive —
-     * silence closes the gate; only a null reading or confident non-STILL can reopen it. Without
-     * that dedup a single spurious STILL at a stop light would close the gate ~1.5 s later — a
-     * GNSS restart and a hole in the track per misread, which is the flapping the dedup exists.
+     * silence closes the gate; only a null reading or confident non-STILL can reopen it.
+     *
+     * Under the OLD counted debounce (`STILL_DEBOUNCE_N` fresh readings inside a stale window)
+     * this dedup was correctness machinery: folding once per evaluation instead of once per
+     * reading silently collapsed `N=3` to an effective `N=1`, so a single spurious STILL closed
+     * the gate on the very next re-evaluation and the next confident reading reopened it — a real
+     * flap (see CLAUDE.md, "Folds are deduped by reading identity"). That hazard does not carry
+     * over to the current hold-based rules: a re-folded confident-STILL reading still lands on
+     * `foldMotion`'s `reading.still` branch, `stillSinceMs = prev.stillSinceMs ?: reading.atMs`
+     * preserves the run's original start, and the gate still needs the full `STILL_CLOSE_HOLD_MS`
+     * no matter how many times one reading gets refolded. The dedup is therefore no longer
+     * correctness machinery here — it's a fast-path idempotence guard that spares ~11 redundant
+     * `foldMotion` calls per evaluation for the same cached reading.
      */
     @Synchronized
     private fun applyGpsGate(now: Long): Pair<MotionReading?, MotionGate> {
