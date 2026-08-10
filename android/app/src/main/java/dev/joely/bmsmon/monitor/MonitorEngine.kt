@@ -513,15 +513,21 @@ class MonitorEngine(
      * per pack (~80–115×/min across the fleet at [STAGE_POLL_MS]/[SLOW_POLL_MS]) against ~10
      * Activity Recognition broadcasts a minute, and [MotionSource.current] returns the same cached
      * reading until a new broadcast lands. [foldMotion] therefore dedupes by reading identity
-     * (`MotionGate.lastConfidentAtMs`), so one reading advances the debounce run once rather than
-     * ~11 times; it still re-evaluates staleness on every call, so the fail-open deadline keeps
-     * running off the wall clock. Without that dedup [STILL_DEBOUNCE_N] collapsed to an effective
-     * 1 and a single spurious STILL at a stop light closed the gate ~1.5 s later — a GNSS restart
-     * and a hole in the track per misread, which is the flapping the debounce exists to remove.
+     * (`MotionGate.lastConfidentAtMs`), so one reading advances the hold clock once rather than
+     * ~11 times per evaluation; it still re-derives the verdict from the clock on every call, so
+     * the `STILL_CLOSE_HOLD_MS` close fires off the wall clock even when no new readings arrive —
+     * silence closes the gate; only a null reading or confident non-STILL can reopen it. Without
+     * that dedup a single spurious STILL at a stop light would close the gate ~1.5 s later — a
+     * GNSS restart and a hole in the track per misread, which is the flapping the dedup exists.
      */
     @Synchronized
     private fun applyGpsGate(now: Long): Pair<MotionReading?, MotionGate> {
-        if (gpsWanted && gpsPauseParked) motionSource.start() else motionSource.stop()
+        if (gpsWanted && gpsPauseParked) {
+            motionSource.start()
+            motionSource.maybeResubscribe(now)
+        } else {
+            motionSource.stop()
+        }
         val reading = motionSource.current()
         motionGate = foldMotion(motionGate, reading, now)
         val active = gpsShouldRun(
@@ -557,9 +563,9 @@ class MonitorEngine(
      * [motionSource] is stopped here for the same reason as [locationSource]: it is the other
      * resource [applyGpsGate] owns under this lock, and leaving it subscribed with monitoring
      * torn down would be a live Activity Recognition subscription nothing ever reads again.
-     * [motionGate] is reset alongside it so a stale debounce run cannot survive a stop and carry
-     * over into the next monitoring session — a fresh session should need [STILL_DEBOUNCE_N]
-     * fresh confident-STILL readings, not inherit a run counted before the phone last moved.
+     * [motionGate] is reset alongside it so a stale stillness run cannot survive a stop and carry
+     * over into the next monitoring session — a fresh session must start with no holdover from
+     * before the phone last moved or monitoring was off.
      */
     @Synchronized
     private fun shutdownGps() {
@@ -764,11 +770,10 @@ class MonitorEngine(
                 // every pack on its 6-hourly learn pass (up to ~800k rows/pack), so gating after
                 // it would tack that pass's duration onto this loop's period on exactly those
                 // passes; gating first keeps this loop's period equal to PARKED_HOLD_MS.
-                // Note this driver alone cannot close the motion gate quickly: foldMotion folds
-                // one reading per call, so three ticks (~15 min) of confident-STILL samples are
-                // needed, and any staleness gap in between resets the run. That is fine — it is a
-                // backstop against a stalled onPoll pinning GNSS on, and its failure direction is
-                // GPS staying on. onPoll remains the driver that actually closes the gate.
+                // This driver can also CLOSE the motion gate: foldMotion re-derives the verdict
+                // from the clock on every fold, so a tick past STILL_CLOSE_HOLD_MS closes it even
+                // with onPoll stalled (worst case one tick of lag, erring toward GPS-on). It also
+                // drives MotionSource.maybeResubscribe via applyGpsGate.
                 runCatching { applyGpsGate(now()) }
                 runCatching { rangePass() }
                 delay(5 * 60_000L)
