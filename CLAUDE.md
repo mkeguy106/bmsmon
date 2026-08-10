@@ -431,12 +431,13 @@ fires when a frame arrives), `setDisabled()` (**"Disconnect all"** cancels every
 may never fire again with monitoring still on), and `startRangeLoop()`'s **5-minute tick** (Bluetooth
 off or every pack out of range stalls `onPoll` indefinitely, freezing `lastDischargeAt` and pinning
 GNSS on; the loop's period equals `PARKED_HOLD_MS`, so the *discharge* half of the gate overshoots by
-at most one hold. It is **not** a fast path for the motion half: `foldMotion` folds one reading per
-call, so this driver alone needs `STILL_DEBOUNCE_N` ticks — ~15 min of sampled confident-STILL — to
-close the gate, and a staleness gap in between restarts the run. That is acceptable because it is a
-backstop whose failure direction is GPS staying on; `onPoll` is the driver that actually closes the
-gate). Teardown
-goes through `shutdownGps()`, which drops intent and request together under the same lock —
+at most one hold. It **can** now close the motion half on its own: `foldMotion` re-derives the
+verdict from the clock on every call, so once a confident STILL reading has started a run — most
+often relayed via `onPoll` — a single subsequent tick past `STILL_CLOSE_HOLD_MS` closes the gate
+outright, no per-tick accumulation needed. It remains a backstop for STARTING a run, since it can't
+manufacture a reading `onPoll` never saw; that backstop's failure direction is GPS staying on, and
+`onPoll` is still the driver that usually closes the gate first). Teardown goes through
+`shutdownGps()`, which drops intent and request together under the same lock —
 `ble.stop()` cancels the control-loop job but cannot preempt an in-flight `onPoll`, so an
 unsynchronized teardown lets that call's `locationSource.start()` land *after* `stop()`.
 `MonitoringService` re-derives its FGS type from `gpsActive`, adding/removing
@@ -475,7 +476,7 @@ dead** — no hold length covers a 70-minute outing. Option (d), suppressing the
 live, stays **rejected**: the cloud channel is deliberately one-way phone→server and that would
 invert the architecture.
 
-**The fix (option (c)): pausing now requires BOTH no-discharge AND a debounced confident-still
+**The fix (option (c)): pausing now requires BOTH no-discharge AND a confident-still
 verdict** from the phone's own motion. Misclassification is safe in both directions — when the chair
 drives under its own power it *is* discharging, so that branch was already covered; AR wrongly saying
 "still" in a vehicle is today's behavior (no regression) and wrongly saying "moving" while parked is
@@ -492,44 +493,69 @@ the same trace (N=2 → 98%, N=1 → 100%; 3 is the smallest N that still demand
 evidence). The conceptual error is the thing to remember: **`UNKNOWN@41` is absence of evidence, not
 evidence of motion.** Treating uncertainty as movement was the entire defect.
 
-`foldMotion(prev, reading, nowMs)` (`model/BatterySaver.kt` — pure, no clock, JVM-tested) folds one
-reading at a time into a `MotionGate`, **asymmetrically**, in this branch order:
+`foldMotion(prev, reading, nowMs)` (`model/BatterySaver.kt` — pure, no clock, JVM-tested) was
+**reworked 2026-08-09 to silence-as-stillness semantics** (spec:
+`docs/superpowers/specs/2026-08-09-silence-as-stillness-motion-gate-design.md`), because the
+first night of motion telemetry proved AR delivery is **motion-triggered at the sensor level** —
+4 readings in ~18 h while genuinely parked, rich ~5.7 s cadence in vehicles — so the original
+debounce-and-staleness rule demanded evidence that never arrives and the gate **never closed in
+the recorded telemetry era** (70,779 rows, zero closes, GNSS on all night). Silence after a
+confident STILL is stillness evidence, not signal loss. Branch order, still load-bearing:
 
-- **null, or the reading itself older than `MOTION_STALE_MS` (150_000)** → **fails open**, gate reset.
-- **already folded** — `reading.atMs == gate.lastConfidentAtMs` → returns `prev` untouched (see the
-  dedup note below).
-- **confidence < `STILL_CONFIDENCE_MIN` (75)** → **holds `prev` unchanged**, *but only while
-  confident evidence is still fresh*: past `MOTION_STALE_MS` since the last confident reading it
-  fails open anyway. Uncertainty neither pauses nor resumes, and it cannot postpone fail-open either.
-- **confident `STILL`** → run++, gate closes once the run reaches `STILL_DEBOUNCE_N = 3`, and the
-  reading's timestamp becomes the new `lastConfidentAtMs`.
-- **confident non-`STILL`** → reopens on a **single** reading, so getting into a vehicle resumes GNSS
-  at the first solid sample rather than after N of them.
+- **null reading** → fails open, gate reset — every unusable-signal path (permission denied, AR
+  unavailable, no reading yet, source stopped) still lands here.
+- **already folded** (`reading.atMs == gate.lastConfidentAtMs`) → holds the run and **re-derives
+  the verdict from the clock** — this is the branch silence closes through, since gate
+  evaluations keep arriving (per BLE frame + the 5-min range tick) while readings do not.
+- **uncertain** (confidence < `STILL_CONFIDENCE_MIN` 75) → same as already-folded: uncertainty
+  neither starts, breaks, nor ends a run, and there is no longer a staleness deadline.
+- **confident STILL** → starts the run if none (`stillSinceMs` = the reading's own `atMs`), else
+  keeps its start; the verdict closes once the run is `STILL_CLOSE_HOLD_MS` (**10 min**,
+  inclusive) old.
+- **confident non-STILL** → reopens on a **single** reading, run cleared (unchanged).
 
-**Folds are deduped by reading identity, and that is what makes N mean anything.** The engine
-evaluates the gate on every BLE frame (~80–115×/min across the fleet) while AR broadcasts arrive
-~10×/min, and `MotionSource.current()` returns the same cached reading in between — so folding on
-every *evaluation* counted one reading ~11 times and collapsed `STILL_DEBOUNCE_N` to an **effective
-1**. Invisible while stationary (nothing ever reopens the gate, which is why the on-device 5m18s hold
-looked right), but in transit a single spurious `STILL@96` at a stop light closed the gate ~1.5 s
-later and the next confident `IN_VEHICLE` reopened it — a GNSS restart and a hole in the track per
-misread, i.e. exactly the flapping the debounce exists to remove. Fixed by carrying the last folded
-confident reading's timestamp **on `MotionGate` itself** (`lastConfidentAtMs`), so the dedup lives in
-the pure function rather than as engine state — and so `shutdownGps()`'s existing gate reset clears
-it too. **One field, two jobs, deliberately**: it is both the dedup key and the fail-open deadline,
-which works because only confident readings ever change the gate (re-folding an uncertain one is
-already idempotent). Staleness is still re-evaluated on **every** call, so the deadline runs off the
-wall clock, not off reading arrivals. Corollary worth stating plainly: **this reduces the measured
-saving** — the gate now takes three genuine readings (~18 s at the observed cadence), not ~1.5 s, to
-close. That is the correct direction.
+`MOTION_STALE_MS` and `STILL_DEBOUNCE_N` are **deleted**. The hold replaces the debounce's
+anti-flap job (a stoplight STILL must survive 10 uncontradicted minutes; in-vehicle delivery
+contradicts it in seconds), and 10 min was chosen over 5 so train-station stops rarely close the
+gate mid-trip — one that does self-corrects on departure vibration at the cost of one GNSS
+restart. The inverted risk — a silently-dead AR subscription holding the gate **closed** while
+parked — was explicitly accepted, bounded by the discharge clause (chair outings discharge at the
+start, and `gpsShouldRun` still requires BOTH halves to pause) and by
+`MotionSource.maybeResubscribe`: the same PendingIntent's update request is re-issued every
+`RESUBSCRIBE_MS` (6 h) from `applyGpsGate`, and since a fresh request delivers one immediate
+reading, each refresh doubles as a stillness probe. Restarts self-heal: the subscribe burst's one
+reading starts a run and the gate closes 10 min later, where the old rules left a restarted gate
+open forever.
 
-**Branch order is load-bearing: staleness is checked *before* both the dedup and the uncertainty
-hold**, so a dead signal can never hold the gate shut. Every unusable-signal path — permission
-denied, AR unavailable on the device, subscription lapsed, process restarted with no reading yet,
-updates gone stale, only low-confidence readings arriving — fails open to GPS-on. That is the user's
-explicit choice: never lose an outing, even at the cost of the saving. The single-sample
-`confidentlyStill()` predicate is **deleted**; the name survives only as `gpsShouldRun`'s parameter,
-which the gate's `still` verdict now feeds.
+**Folds are deduped by reading identity, and that dedup still matters.** The engine evaluates the
+gate on every BLE frame (~80–115×/min across the fleet) while AR broadcasts arrive ~10×/min, and
+`MotionSource.current()` returns the same cached reading in between — so folding on every
+*evaluation* used to count one reading ~11 times, which (under the old `STILL_DEBOUNCE_N`-counted
+design) collapsed the debounce to an **effective 1**. Invisible while stationary (nothing ever
+reopened the gate, which is why the on-device 5m18s hold looked right at the time), but in transit a
+single spurious `STILL@96` at a stop light closed the gate ~1.5 s later and the next confident
+`IN_VEHICLE` reopened it — a GNSS restart and a hole in the track per misread. Fixed 2026-08-07 by
+carrying the last-folded confident reading's timestamp **on `MotionGate` itself**
+(`lastConfidentAtMs`), so the dedup lives in the pure function rather than as engine state — and so
+`shutdownGps()`'s existing gate reset clears it too. **Under the 2026-08-09 silence-as-stillness
+rework the field keeps only its dedup-key job** — matching a fresh reading's `atMs` against the last
+one folded — since the fail-open deadline it used to double as died with `MOTION_STALE_MS`; the
+run's own clock (`stillSinceMs`, re-derived by `withClock` on every call) is what now decides the
+verdict, not this field.
+
+**Branch order is still load-bearing, though the order and its job changed.** Current order: null
+reading → dedup → uncertainty → confident STILL → confident non-STILL. The verdict is re-derived
+from the clock on both the dedup and uncertainty branches — that is the branch silence closes
+through, since gate evaluations keep arriving (per BLE frame plus the 5-min range tick) while
+readings do not. Only the null-reading branch still guarantees fail-open: permission denied, AR
+unavailable on the device, subscription lapsed, process restarted with no reading yet — all land
+there and read GPS-on, the user's explicit choice to never lose an outing even at the cost of the
+saving. Two paths that used to fail open no longer do, by design: "updates gone stale" and "a run of
+only low-confidence readings" — there is no staleness deadline left to trip, so uncertainty just
+holds whatever verdict is already in force, and a gate that has legitimately closed now stays closed
+through silence instead of reopening on a clock (the inverted risk the fold-rules block above
+accepts). The single-sample `confidentlyStill()` predicate is **deleted**; the name survives only as
+`gpsShouldRun`'s parameter, which the gate's `still` verdict now feeds.
 
 Plumbing: `motion/MotionSource.kt` wraps Play Services **periodic** Activity Recognition (~30 s
 requested), mirroring `location/LocationSource.kt`, and logs every reading (activity name +
@@ -541,7 +567,7 @@ original non-firing take three rounds to diagnose. `MonitorEngine` owns the `Mot
 exactly the configuration a user picks to keep their track), and folds each reading **inside the same
 `@Synchronized applyGpsGate`** that writes `gpsActive` (same lock discipline as `locationSource`, so
 a `start()` can't land after a concurrent teardown's `stop()`); `shutdownGps()` stops the source and
-**resets the gate**, so a stale debounce run cannot survive a stop. Three build pitfalls, all
+**resets the gate**, so a stale stillness run cannot survive a stop. Three build pitfalls, all
 **silent** failures rather than crashes: the AR `PendingIntent` must be `FLAG_MUTABLE` (Play Services
 fills the `ActivityRecognitionResult` extra into it) **and** explicit
 (`Intent(ACTION).setPackage(packageName)`) — Android 14+ throws `IllegalArgumentException` for
@@ -569,30 +595,11 @@ recording: the probe (`:arprobe`, branch `experiment/ar-power-probe`) has no for
 is not resident, whereas the app is, so it may be an **invalid proxy** for in-app delivery — but
 nothing supports preferring transitions, and the periodic stream is demonstrably rich enough.
 
-**The saving is PARTIAL, not full, and the tuning fix for it is OPEN.** Play Services' periodic
-delivery is genuinely **bursty** — multi-minute silent gaps — and every gap longer than
-`MOTION_STALE_MS` (150 s) trips staleness and reopens the gate. Measured on-device 2026-08-07: every
-reopen tied to staleness firing at 150.067 s / 150.170 s after the last reading, **zero** instances of
-the old reopen-on-`UNKNOWN` bug, and the gate held closed for one unbroken **5m18s** stretch — then
-cycled open→closed→open→closed→open over ~16 min and sat open the final 7+ min with no readings at all
-(no crash, no subscription error, device awake, not in Doze). **Read the *closing* half of that trace
-with care: it was captured while folds still happened per gate evaluation, so the gate was closing
-after one reading, not three** — the reopen timings and the sparsity finding stand, the close timings
-describe superseded behaviour, and the duty cycle it implies is an over-estimate. Delivery sparsity is
-a **different problem** from the flapping the hysteresis fixed, and it bounds the achievable saving.
-**Lengthening `MOTION_STALE_MS` (~10–15 min) to ride out the gaps is UNDECIDED** — it is only safe if
-AR reliably emits a confident non-`STILL` when motion starts, since reopening would then no longer be
-backstopped by staleness, and **that is untested**. Do not record it as settled either way. Also
-still open: **AR's true power cost is unmeasured.** The ~18 h probe run produced no detectable cost
-(global `sensors` 0.00161 → 0.00133 mAh/h), but that is a **null result, not a measured number** — AR
-executes inside Play Services and nothing accrues to the caller's uid, and the phone was on the
-charger for all but 2 minutes of the window. If periodic AR costs more than the ~15 mA the pause
-saves, the feature is a **net loss and should be reverted**; the check is total phone drain across
-comparable days from `batterystats`, not per-uid attribution. **Also still owed: a real vehicle
-outing**, confirming GNSS stays active in transit and that fixes above 5 m/s reappear — the metric
-that has read zero since 2026-08-03 — and, with it, a fresh duty-cycle trace now that closing takes
-three genuine readings. Both owed on-device checks (that one, and the settings line's two permission
-states above) are **unperformed**, not pending-and-fine.
+**The 2026-08-08 "partial saving / MOTION_STALE_MS tuning OPEN" question is RESOLVED by the
+2026-08-09 rework above** — the first night of motion telemetry showed the saving was not partial
+but **zero** (the gate never closed), the staleness window was the wrong knob entirely, and
+silence-as-stillness replaced it. AR's true power cost remains unmeasured (its revert condition
+stands), and the wire-cost measurement is still owed.
 
 **No server or WebUI change was required** for either half of this: every GPS read path already
 filters `lat IS NOT NULL AND lon IS NOT NULL` (`server/app/db/queries.py:539`, `:623`),
@@ -977,22 +984,28 @@ the motion **gate's own verdict**, `MotionGate.still`), all nullable.
 
 A fourth column, `motion_at_ms` (bigint — `MotionReading.atMs`, the reading's own wall-clock
 timestamp, same device clock as `ts_ms`), was added 2026-08-08 and deployed 2026-08-09 (spec:
-`docs/superpowers/specs/2026-08-08-motion-staleness-telemetry-design.md`): `ts_ms - motion_at_ms`
-is the reading's age, which separates "gate failed open on staleness" from "debounce not yet met",
-and distinct `motion_at_ms` values identify individual readings, making the Play Services
-delivery-gap distribution measurable from prod SQL. It is null exactly when
-`motion_activity`/`motion_confidence` are; garbage values clamp to null server-side
+`docs/superpowers/specs/2026-08-08-motion-staleness-telemetry-design.md`): `ts_ms - motion_at_ms` is
+the reading's age — under the original design this separated "gate failed open on staleness" from
+"debounce not yet met" (both retired by the 2026-08-09 rework described above) — and distinct
+`motion_at_ms` values still identify individual readings, making the Play Services delivery-gap
+distribution measurable from prod SQL, which remains the column's enduring purpose. It is null
+exactly when `motion_activity`/`motion_confidence` are; garbage values clamp to null server-side
 (`_clip_motion_at`, mirroring `_clip_conf`).
 
-**The verdict is stored as its own column rather than derived from the reading** because the
-gate's debounce (`STILL_DEBOUNCE_N = 3` consecutive confident-STILL readings to close the gate;
-one confident non-STILL reading to reopen it) carries state across
-readings, and an uncertain reading (confidence `< STILL_CONFIDENCE_MIN`) **holds the previous
-verdict** instead of resetting it — so a single row's activity+confidence can't reconstruct what
-the gate was doing without replaying its whole fold history. Recording only the reading would show
-`STILL@100` without revealing the gate was still mid-debounce; recording only the verdict would
-show the gate never closing without revealing a run of `UNKNOWN@41` readings was why. This is the
-whole justification for three columns instead of two. `MotionReading` (`model/BatterySaver.kt`)
+**The verdict is stored as its own column rather than derived from the reading** because the gate
+carries state across readings that a single row can't reconstruct. Under the current (2026-08-09
+silence-as-stillness) design, that state is a hold clock: one confident STILL reading starts a run
+(`stillSinceMs`), and the verdict closes once the run has stood **10 min** (`STILL_CLOSE_HOLD_MS`)
+uncontradicted — including by silence, since the verdict is re-derived from the clock on every fold,
+not only on fresh readings. (The design this column originally shipped against — superseded the very
+next day — instead closed on `STILL_DEBOUNCE_N = 3` consecutive confident-STILL readings and
+reopened on a single confident non-STILL.) An uncertain reading (confidence `<
+STILL_CONFIDENCE_MIN`) still **holds the previous verdict** instead of resetting it — so a single
+row's activity+confidence still can't reconstruct what the gate was doing without replaying its
+whole fold history. Recording only the reading would show `STILL@100` without revealing whether the
+10-min hold had already elapsed; recording only the verdict would show the gate closed without
+revealing which reading, and when, started the run. This is the whole justification for three
+columns instead of two. `MotionReading` (`model/BatterySaver.kt`)
 now carries the activity name alongside `still`/`confidence`/`atMs` — previously mapped only for a
 log line and discarded — via `MotionSource.activityName()` (widened from private to `internal` so
 the upload path reuses the same mapping instead of duplicating it). The wire class is `SampleJson`
@@ -1026,7 +1039,7 @@ same diagnosis is a SQL query:
 SELECT motion_activity, motion_confidence, count(*)
 FROM samples WHERE ts_ms > … GROUP BY 1,2 ORDER BY 3 DESC;
 
--- Does the gate's verdict track the readings, or is the debounce wrong?
+-- Does the gate's verdict track the readings, or is the hold timing wrong?
 SELECT motion_activity, motion_confidence, motion_still, count(*)
 FROM samples WHERE ts_ms > … GROUP BY 1,2,3;
 
@@ -1355,10 +1368,9 @@ but `IN_VEHICLE` → GPS **stays** on; parked and still on arrival → gate clos
 transitions across two real vehicle trips on 2026-08-07; the periodic API logged 859 `IN_VEHICLE`
 readings across one. Do not revisit transitions without new evidence.
 
-Still open, unchanged: the saving remains **partial** (Play Services delivers in bursts, so the gate
-cycles while parked), the `MOTION_STALE_MS` tuning is still **undecided**, and AR's own power cost is
-still **unmeasured** with its revert condition intact — net loss if it exceeds the ~15 mA the pause
-saves. Also still unverified: the settings line's two permission states.
+Still open after the 2026-08-09 silence-as-stillness rework: AR's own power cost is still
+**unmeasured** with its revert condition intact, and the wire-cost measurement is still owed. Also
+still unverified: the settings line's two permission states.
 
 **Motion telemetry deployed and confirmed 2026-08-08 19:55.** Server deployed first, then the APK —
 that order is load-bearing: a new phone against the old server has its keys silently ignored
