@@ -155,11 +155,12 @@ class MotionSource(private val context: Context) {
      * a silently-dead Play Services subscription can hold the gate CLOSED while parked, so the
      * request is refreshed every [RESUBSCRIBE_MS]; a failure routes through the same
      * [onSubscribeFailed] rollback as [start], after which the next gate evaluation's [start]
-     * rebuilds the subscription from scratch. Observed on both post-restart subscribes: a fresh
-     * request delivers one immediate reading, so each refresh doubles as a stillness probe — it
-     * either confirms the run or reveals motion and reopens the gate (expected for the refresh
-     * path too, but unverified — checked on-device after deploy). No-op unless currently
-     * subscribed and due.
+     * rebuilds the subscription from scratch. Field-checked 2026-08-10: unlike a fresh
+     * register+request (which delivers one immediate reading), a refresh elicits NO reading — the
+     * overnight 6 h refresh produced none while the fresh installs' bursts always did. So this is
+     * subscription hygiene only, not a stillness probe; the gate held closed across two refresh
+     * cycles and reopened instantly (reading age 1 s) when the vehicle moved, which is the
+     * behavior this backstop protects. No-op unless currently subscribed and due.
      */
     @Synchronized
     fun maybeResubscribe(nowMs: Long) {

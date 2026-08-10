@@ -522,14 +522,20 @@ restart. The inverted risk — a silently-dead AR subscription holding the gate 
 parked — was explicitly accepted, bounded by the discharge clause (chair outings discharge at the
 start, and `gpsShouldRun` still requires BOTH halves to pause) and by
 `MotionSource.maybeResubscribe`: the same PendingIntent's update request is re-issued every
-`RESUBSCRIBE_MS` (6 h) from `applyGpsGate`, and since a fresh request delivers one immediate
-reading, each refresh doubles as a stillness probe. Restarts self-heal: the subscribe burst's one
+`RESUBSCRIBE_MS` (6 h) from `applyGpsGate`. (Field-checked 2026-08-10: a refresh elicits **no**
+immediate reading — only fresh register+request cycles produce the burst — so the refresh is
+subscription hygiene, not a stillness probe.) Restarts self-heal: the subscribe burst's one
 reading starts a run and the gate closes 10 min later, where the old rules left a restarted gate
 open forever. **Deployed + field-verified 2026-08-09 evening:** the first close in the telemetry
 era landed at exactly reading-age 600 s (silence on the cached burst reading, inclusive boundary)
-and GPS fixes went ~47/min → 0 the next minute. Still owed on-device: reopen-from-closed on a real
-vehicle outing (the safety-critical half — never yet field-observed; diagnosable from prod SQL when
-it happens) and observing a 6 h re-subscribe delivering its probe reading.
+and GPS fixes went ~47/min → 0 the next minute. **Fully field-verified 2026-08-10 on a real
+vehicle outing:** the overnight hold ran ~12 h on one cached reading (GNSS off 03:00–10:00 UTC
+straight, zero false reopens, across two silent 6 h refreshes); both vehicle legs reopened the
+gate on the FIRST confident `IN_VEHICLE@90` at reading age **1 s** (13:20:34 outbound — GPS was
+already on via the discharge clause, the two-clause redundancy working; 15:51:47 return); AR
+delivered ~200 readings/h in motion vs 1/night still, and none of them produced a false mid-drive
+close; arrival re-closed the gate at exactly the 10-min hold (13:41:57). Every open on-device
+verification for this feature is now done.
 
 **Folds are deduped by reading identity, and that dedup still matters.** The engine evaluates the
 gate on every BLE frame (~80–115×/min across the fleet) while AR broadcasts arrive ~10×/min, and
