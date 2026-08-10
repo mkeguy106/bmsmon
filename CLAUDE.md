@@ -525,7 +525,11 @@ start, and `gpsShouldRun` still requires BOTH halves to pause) and by
 `RESUBSCRIBE_MS` (6 h) from `applyGpsGate`, and since a fresh request delivers one immediate
 reading, each refresh doubles as a stillness probe. Restarts self-heal: the subscribe burst's one
 reading starts a run and the gate closes 10 min later, where the old rules left a restarted gate
-open forever.
+open forever. **Deployed + field-verified 2026-08-09 evening:** the first close in the telemetry
+era landed at exactly reading-age 600 s (silence on the cached burst reading, inclusive boundary)
+and GPS fixes went ~47/min → 0 the next minute. Still owed on-device: reopen-from-closed on a real
+vehicle outing (the safety-critical half — never yet field-observed; diagnosable from prod SQL when
+it happens) and observing a 6 h re-subscribe delivering its probe reading.
 
 **Folds are deduped by reading identity, and that dedup still matters.** The engine evaluates the
 gate on every BLE frame (~80–115×/min across the fleet) while AR broadcasts arrive ~10×/min, and
