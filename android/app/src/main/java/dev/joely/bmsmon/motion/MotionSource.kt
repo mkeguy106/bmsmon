@@ -31,6 +31,7 @@ class MotionSource(private val context: Context) {
     private val client = ActivityRecognition.getClient(context)
     private val cache = AtomicReference<MotionReading?>(null)
     private var requesting = false
+    private var lastRequestAtMs = 0L
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
@@ -91,6 +92,7 @@ class MotionSource(private val context: Context) {
         }.isSuccess
         if (!registered) return
         requesting = true
+        lastRequestAtMs = System.currentTimeMillis()
         runCatching { client.requestActivityUpdates(INTERVAL_MS, pendingIntent()) }
             .onSuccess { task -> task.addOnFailureListener { e -> onSubscribeFailed(e) } }
             .onFailure { e -> onSubscribeFailed(e) }
@@ -110,6 +112,15 @@ class MotionSource(private val context: Context) {
      * thread, same as callers of [start]/[stop], so in practice this never contends — but nothing
      * here assumes that, and the [requesting] guard makes a late/duplicate callback (e.g. after an
      * explicit [stop] already tore things down) a safe no-op rather than a double-unregister.
+     *
+     * Also clears [cache], mirroring [stop]. Under silence-as-stillness the staleness bound was
+     * deleted from `foldMotion` (BatterySaver.kt) — silence now closes the gate rather than
+     * expiring it — so a reading left behind by a now-dead subscription would feed the gate
+     * forever: [current] keeps returning the stale STILL and the gate stays closed with zero live
+     * signal, e.g. after a failed [maybeResubscribe] refresh. Clearing it fails open (`foldMotion`'s
+     * null-reading branch), and the recovered subscription's next reading restarts the run, so a
+     * transient failure costs only the ~10 min close hold before the gate can shut again — the
+     * safe direction.
      */
     @Synchronized
     private fun onSubscribeFailed(e: Throwable) {
@@ -117,6 +128,7 @@ class MotionSource(private val context: Context) {
         if (!requesting) return
         requesting = false
         runCatching { context.unregisterReceiver(receiver) }
+        cache.set(null)
     }
 
     /** Latest reading, or null when none has arrived — null fails open to "not still". */
@@ -137,12 +149,36 @@ class MotionSource(private val context: Context) {
         cache.set(null)
     }
 
+    /**
+     * Re-issue the periodic-updates request on the same PendingIntent (FLAG_UPDATE_CURRENT makes
+     * it a refresh, not a re-registration — the receiver is untouched). Under silence-as-stillness
+     * a silently-dead Play Services subscription can hold the gate CLOSED while parked, so the
+     * request is refreshed every [RESUBSCRIBE_MS]; a failure routes through the same
+     * [onSubscribeFailed] rollback as [start], after which the next gate evaluation's [start]
+     * rebuilds the subscription from scratch. Observed on both post-restart subscribes: a fresh
+     * request delivers one immediate reading, so each refresh doubles as a stillness probe — it
+     * either confirms the run or reveals motion and reopens the gate (expected for the refresh
+     * path too, but unverified — checked on-device after deploy). No-op unless currently
+     * subscribed and due.
+     */
+    @Synchronized
+    fun maybeResubscribe(nowMs: Long) {
+        if (!requesting || nowMs - lastRequestAtMs < RESUBSCRIBE_MS) return
+        lastRequestAtMs = nowMs
+        runCatching { client.requestActivityUpdates(INTERVAL_MS, pendingIntent()) }
+            .onSuccess { task -> task.addOnFailureListener { e -> onSubscribeFailed(e) } }
+            .onFailure { e -> onSubscribeFailed(e) }
+    }
+
     companion object {
         private const val TAG = "MotionSource"
         private const val ACTION = "dev.joely.bmsmon.MOTION_UPDATE"
 
         /** ~30 s. Fast enough to notice a van pulling away, slow enough to stay cheap. */
         private const val INTERVAL_MS = 30_000L
+
+        /** Refresh the AR subscription this often — see [maybeResubscribe]. */
+        internal const val RESUBSCRIBE_MS = 6 * 3_600_000L
 
         fun hasPermission(context: Context): Boolean =
             ContextCompat.checkSelfPermission(context, Manifest.permission.ACTIVITY_RECOGNITION) ==

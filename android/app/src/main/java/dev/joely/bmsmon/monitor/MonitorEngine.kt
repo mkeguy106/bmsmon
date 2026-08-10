@@ -451,12 +451,12 @@ class MonitorEngine(
     @Volatile private var gpsWanted = false
     @Volatile private var gpsPauseParked = true
 
-    // Debounced motion-gate state (see foldMotion). Only ever read/written inside applyGpsGate
-    // and shutdownGps, both @Synchronized on this engine, so this does not need @Volatile the
-    // way gpsWanted/gpsPauseParked do (those are written from outside the lock too). Callers
-    // that need the folded verdict (e.g. the upload path in onPoll) must use applyGpsGate's
-    // return value rather than reading this field directly — a direct read is unsynchronized
-    // and was exactly the bug a prior review caught here.
+    // Silence-as-stillness motion-gate state (see foldMotion). Only ever read/written inside
+    // applyGpsGate and shutdownGps, both @Synchronized on this engine, so this does not need
+    // @Volatile the way gpsWanted/gpsPauseParked do (those are written from outside the lock
+    // too). Callers that need the folded verdict (e.g. the upload path in onPoll) must use
+    // applyGpsGate's return value rather than reading this field directly — a direct read is
+    // unsynchronized and was exactly the bug a prior review caught here.
     private var motionGate = MotionGate()
 
     /** Record whether GPS capture is wanted at all; the parked gate decides if it actually runs. */
@@ -513,15 +513,31 @@ class MonitorEngine(
      * per pack (~80–115×/min across the fleet at [STAGE_POLL_MS]/[SLOW_POLL_MS]) against ~10
      * Activity Recognition broadcasts a minute, and [MotionSource.current] returns the same cached
      * reading until a new broadcast lands. [foldMotion] therefore dedupes by reading identity
-     * (`MotionGate.lastConfidentAtMs`), so one reading advances the debounce run once rather than
-     * ~11 times; it still re-evaluates staleness on every call, so the fail-open deadline keeps
-     * running off the wall clock. Without that dedup [STILL_DEBOUNCE_N] collapsed to an effective
-     * 1 and a single spurious STILL at a stop light closed the gate ~1.5 s later — a GNSS restart
-     * and a hole in the track per misread, which is the flapping the debounce exists to remove.
+     * (`MotionGate.lastConfidentAtMs`), so one reading advances the hold clock once rather than
+     * ~11 times per evaluation; it still re-derives the verdict from the clock on every call, so
+     * the `STILL_CLOSE_HOLD_MS` close fires off the wall clock even when no new readings arrive —
+     * silence closes the gate; only a null reading or confident non-STILL can reopen it.
+     *
+     * Under the OLD counted debounce (`STILL_DEBOUNCE_N` fresh readings inside a stale window)
+     * this dedup was correctness machinery: folding once per evaluation instead of once per
+     * reading silently collapsed `N=3` to an effective `N=1`, so a single spurious STILL closed
+     * the gate on the very next re-evaluation and the next confident reading reopened it — a real
+     * flap (see CLAUDE.md, "Folds are deduped by reading identity"). That hazard does not carry
+     * over to the current hold-based rules: a re-folded confident-STILL reading still lands on
+     * `foldMotion`'s `reading.still` branch, `stillSinceMs = prev.stillSinceMs ?: reading.atMs`
+     * preserves the run's original start, and the gate still needs the full `STILL_CLOSE_HOLD_MS`
+     * no matter how many times one reading gets refolded. The dedup is therefore no longer
+     * correctness machinery here — it's a fast-path idempotence guard that spares ~11 redundant
+     * `foldMotion` calls per evaluation for the same cached reading.
      */
     @Synchronized
     private fun applyGpsGate(now: Long): Pair<MotionReading?, MotionGate> {
-        if (gpsWanted && gpsPauseParked) motionSource.start() else motionSource.stop()
+        if (gpsWanted && gpsPauseParked) {
+            motionSource.start()
+            motionSource.maybeResubscribe(now)
+        } else {
+            motionSource.stop()
+        }
         val reading = motionSource.current()
         motionGate = foldMotion(motionGate, reading, now)
         val active = gpsShouldRun(
@@ -557,9 +573,9 @@ class MonitorEngine(
      * [motionSource] is stopped here for the same reason as [locationSource]: it is the other
      * resource [applyGpsGate] owns under this lock, and leaving it subscribed with monitoring
      * torn down would be a live Activity Recognition subscription nothing ever reads again.
-     * [motionGate] is reset alongside it so a stale debounce run cannot survive a stop and carry
-     * over into the next monitoring session — a fresh session should need [STILL_DEBOUNCE_N]
-     * fresh confident-STILL readings, not inherit a run counted before the phone last moved.
+     * [motionGate] is reset alongside it so a stale stillness run cannot survive a stop and carry
+     * over into the next monitoring session — a fresh session must start with no holdover from
+     * before the phone last moved or monitoring was off.
      */
     @Synchronized
     private fun shutdownGps() {
@@ -764,11 +780,10 @@ class MonitorEngine(
                 // every pack on its 6-hourly learn pass (up to ~800k rows/pack), so gating after
                 // it would tack that pass's duration onto this loop's period on exactly those
                 // passes; gating first keeps this loop's period equal to PARKED_HOLD_MS.
-                // Note this driver alone cannot close the motion gate quickly: foldMotion folds
-                // one reading per call, so three ticks (~15 min) of confident-STILL samples are
-                // needed, and any staleness gap in between resets the run. That is fine — it is a
-                // backstop against a stalled onPoll pinning GNSS on, and its failure direction is
-                // GPS staying on. onPoll remains the driver that actually closes the gate.
+                // This driver can also CLOSE the motion gate: foldMotion re-derives the verdict
+                // from the clock on every fold, so a tick past STILL_CLOSE_HOLD_MS closes it even
+                // with onPoll stalled (worst case one tick of lag, erring toward GPS-on). It also
+                // drives MotionSource.maybeResubscribe via applyGpsGate.
                 runCatching { applyGpsGate(now()) }
                 runCatching { rangePass() }
                 delay(5 * 60_000L)
