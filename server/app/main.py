@@ -12,7 +12,7 @@ from app.db.partitions import ensure_partitions_for_range
 from app.db.pool import create_pool
 from app.db.queries import scrub_expired_gps
 from app.db.rollup import run_rollup_pass
-from app.routers import api_device, share, web, ws
+from app.routers import api_device, api_widget, share, web, ws
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +144,12 @@ def create_app() -> FastAPI:
     app.state.device_touch = TouchThrottle(interval_s=60.0)
     # SEC-4: per-IP limiter for the unauthenticated /api/v1/enroll (see app/ratelimit.py).
     app.state.enroll_limiter = RateLimiter()
+    # Widgets poll on a timer with a key they already hold, so legitimate traffic
+    # never trips this; it exists to make key guessing pointless. Roomier than the
+    # enroll limiter because four widgets share one desktop's IP.
+    app.state.apikey_limiter = RateLimiter(max_attempts=240, window_s=60)
     app.include_router(api_device.router)
+    app.include_router(api_widget.router)
     app.include_router(web.router)
     app.include_router(ws.router)
     # Per-IP limiter for the public /share zone. A guest page polls every 4 s = 15/min,

@@ -1190,6 +1190,66 @@ endpoints) lives as a **Devices section inside Settings** (`DevicesPanel.tsx`), 
 entry — so there is no longer any "SOON" item. Roadmap/spec:
 `docs/superpowers/specs/2026-07-12-webui-v2-roadmap.md`.
 
+### Read-only API keys (`/api/v1/groups`, desktop widgets)
+
+A third identity path, added 2026-08-25 for the KDE desktop widgets. The other two cannot
+serve a headless client: device JWTs authorise the **write** path (`/ingest`), and Authentik
+authorises **browsers** (`/web/*`, `/ws`). A widget has no browser session to carry SSO, and
+must not be able to write anything.
+
+It lives under `/api/`, which Traefik already routes **past** Authentik — so this needed no
+reverse-proxy change, which is the reason for the prefix choice.
+
+```
+GET /api/v1/groups          X-API-Key: <key>
+```
+
+Returns every battery pair with its packs' latest telemetry:
+
+```jsonc
+{"now_ms":…, "stale_ms":90000, "power_full_w":300,
+ "groups":[{"id":"2012","label":"Base 2012","status":"in-use","connected":true,
+            "last_seen_ms":…,
+            "packs":[{"letter":"A","alias":"2012 · A","address":"C8:…","ts_ms":…,
+                      "age_ms":1200,"connected":true,"soc":72.0,"voltage_v":13.2,
+                      "current_a":-4.1,"power_w":-54.0,"temp_c":22,"soh":100, …}]}]}
+```
+
+Security model (`server/app/auth/api_key.py`), mirroring the share-token one:
+
+- **256-bit keys**, `secrets.token_urlsafe(32)`; only the **sha256** is stored, so a dump of
+  `api_keys` yields nothing usable. A lost key is re-minted, never recovered.
+- Lookup is **by hash**, so no secret is ever compared in Python — there is no string
+  comparison to leak timing.
+- Unknown and revoked keys return the **same bare 401**, byte-identical, so a prober cannot
+  tell "was valid, now revoked" from "never existed" (asserted in `test_api_widget.py`).
+- A per-IP rate limiter (`app.state.apikey_limiter`, 240/min — four widgets share one
+  desktop IP) throttles guessing *before* the database is touched.
+- **Read-only by construction.** No route here mutates, and a key presented to `/ingest`
+  still gets 401 — there is a test for exactly that.
+- **No GPS, no device identity.** `lat`/`lon`/`gps_accuracy_m`/`device_id` are in the fleet
+  row and are deliberately withheld; `PACK_FIELDS` is an allow-list, so exposing a new field
+  is a deliberate act rather than an accident. `test_gps_is_never_exposed` greps the raw
+  response body for those names.
+- `Cache-Control: no-store` on every response.
+
+**Staleness and the status ladder are evaluated server-side** (`STALE_MS = 90_000`,
+`_status()`), mirroring `web/src/v2/useFleetData.ts` and `fleet.ts` `baseStatus`, so there is
+one implementation of "is this pack live" rather than one per client. Keep the three in step
+if the threshold ever moves. Disconnected packs keep their last-known telemetry and are
+flagged `connected: false` instead of being dropped — the widget dims rather than blanks,
+matching the WebUI and Android All-Batteries behaviour.
+
+**Managing keys.** WebUI → Settings → **API keys** (admin-gated, `ApiKeysPanel.tsx`): create,
+see last-used, revoke. The plaintext is shown exactly once, at mint. There is also a CLI for
+when the WebUI is not reachable:
+
+```bash
+docker exec -it bmsmon-api python -m tools.api_key_admin mint "desktop widgets"
+docker exec -it bmsmon-api python -m tools.api_key_admin list
+docker exec -it bmsmon-api python -m tools.api_key_admin revoke <id>
+```
+
 ### Location sharing (public /share/ zone)
 
 Time-limited public share links let a named guest follow the chair live:

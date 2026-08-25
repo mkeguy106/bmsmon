@@ -154,3 +154,36 @@ export const getShares = async (): Promise<{ shares: ShareRow[] }> => {
 
 export const revokeShare = async (id: number): Promise<unknown> =>
   fetch(`/web/shares/${id}`, { method: "DELETE" }).then(j);
+
+// ---- read-only API keys for the desktop widgets ----
+
+export interface ApiKeyRow {
+  id: string;
+  name: string;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+
+/** Mint a key. The plaintext comes back exactly once — only its sha256 is stored,
+ *  so the caller must show it immediately or it is gone. */
+export const createApiKey = async (
+  name: string,
+): Promise<{ id: string; name: string; key: string }> => {
+  const r = await fetch("/web/api-keys", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  }).then(j);
+  if (!isObj(r) || typeof r.key !== "string") throw new Error("malformed /web/api-keys response");
+  return r as { id: string; name: string; key: string };
+};
+
+export const getApiKeys = async (): Promise<{ keys: ApiKeyRow[] }> => {
+  const r = await fetch("/web/api-keys").then(j);
+  if (!isObj(r) || !Array.isArray(r.keys)) throw new Error("malformed /web/api-keys response");
+  return { keys: r.keys as ApiKeyRow[] };
+};
+
+export const revokeApiKey = async (id: string): Promise<unknown> =>
+  fetch(`/web/api-keys/${id}`, { method: "DELETE" }).then(j);

@@ -158,6 +158,24 @@ class MintCodeResponse(BaseModel):
     expires_at: str
 
 
+class ApiKeyCreateBody(BaseModel):
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v: str) -> str:
+        v = v.strip()
+        if not v or len(v) > 80:
+            raise ValueError("name must be 1-80 characters")
+        return v
+
+
+class ApiKeyCreateResponse(BaseModel):
+    id: str
+    name: str
+    key: str  # plaintext, returned ONCE — only its sha256 is stored
+
+
 class ShareCreateBody(BaseModel):
     name: str
     duration: str  # "1h" | "1d" | "1w"

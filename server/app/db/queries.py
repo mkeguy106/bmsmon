@@ -630,3 +630,37 @@ async def gps_track_all(conn, from_ms: int, to_ms: int) -> list[dict]:
         from_ms, to_ms, GPS_ACCURACY_MAX_M,
     )
     return [dict(r) for r in rows]
+
+
+# ---- read-only API keys (desktop widgets; see app/auth/api_key.py) ----
+
+async def get_api_key(conn, key_hash: str):
+    """Look the key up BY HASH — never by comparing the secret itself."""
+    return await conn.fetchrow(
+        "SELECT id, name, revoked_at FROM api_keys WHERE key_hash = $1", key_hash)
+
+
+async def touch_api_key(conn, key_id) -> None:
+    await conn.execute(
+        "UPDATE api_keys SET last_used_at = now() WHERE id = $1", key_id)
+
+
+async def create_api_key(conn, name: str, key_hash: str) -> str:
+    row = await conn.fetchrow(
+        "INSERT INTO api_keys (name, key_hash) VALUES ($1, $2) RETURNING id",
+        name, key_hash)
+    return str(row["id"])
+
+
+async def list_api_keys(conn) -> list[dict]:
+    rows = await conn.fetch(
+        """SELECT id, name, created_at, last_used_at, revoked_at
+           FROM api_keys ORDER BY created_at""")
+    return [dict(r) for r in rows]
+
+
+async def revoke_api_key(conn, key_id) -> bool:
+    row = await conn.fetchrow(
+        """UPDATE api_keys SET revoked_at = now()
+           WHERE id = $1 AND revoked_at IS NULL RETURNING id""", key_id)
+    return row is not None

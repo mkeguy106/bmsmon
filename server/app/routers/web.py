@@ -7,11 +7,13 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, Query, Response
 
 from app.auth.authentik import AuthUser, current_user, require_admin
+from app.auth.api_key import hash_key as hash_api_key
 from app.auth.enroll import generate_code, hash_code
 from app.charge_sessions import detect_charge_sessions
 from app.db import queries as q
 from app.db.pool import get_pool
-from app.models import MintCodeResponse, NoteBody, OkResponse, ShareCreateBody, ShareCreateResponse
+from app.models import (ApiKeyCreateBody, ApiKeyCreateResponse, MintCodeResponse, NoteBody,
+                        OkResponse, ShareCreateBody, ShareCreateResponse)
 from app.util import jsonable
 
 router = APIRouter(prefix="/web")
@@ -197,3 +199,32 @@ async def revoke_share(share_id: int, user: AuthUser = Depends(require_admin),
     async with pool.acquire() as conn:
         await q.revoke_location_share(conn, share_id, int(time.time() * 1000))
     return {"revoked": share_id}
+
+
+# ---- read-only API keys for the desktop widgets (app/auth/api_key.py) ----
+# Admin-gated for the same reason shares are: a key grants access without a browser
+# session, so minting one is the same trust class as minting an enroll code.
+
+@router.post("/api-keys", response_model=ApiKeyCreateResponse)
+async def create_api_key(body: ApiKeyCreateBody, user: AuthUser = Depends(require_admin),
+                         pool=Depends(get_pool)):
+    """Mint a read-only telemetry key. The plaintext leaves the server only here —
+    only its sha256 is stored, so a lost key is re-minted rather than recovered."""
+    key = secrets.token_urlsafe(32)
+    async with pool.acquire() as conn:
+        key_id = await q.create_api_key(conn, body.name, hash_api_key(key))
+    return ApiKeyCreateResponse(id=key_id, name=body.name, key=key)
+
+
+@router.get("/api-keys")
+async def list_api_keys(user: AuthUser = Depends(require_admin), pool=Depends(get_pool)):
+    async with pool.acquire() as conn:
+        return {"keys": jsonable(await q.list_api_keys(conn))}
+
+
+@router.delete("/api-keys/{key_id}")
+async def revoke_api_key(key_id: str, user: AuthUser = Depends(require_admin),
+                         pool=Depends(get_pool)):
+    async with pool.acquire() as conn:
+        ok = await q.revoke_api_key(conn, key_id)
+    return {"revoked": key_id if ok else None}

@@ -3,6 +3,7 @@ import { useV2Settings } from "../useV2Settings";
 import { Segmented } from "../components/Segmented";
 import { DevicesPanel } from "../components/DevicesPanel";
 import { SharesPanel } from "../components/SharesPanel";
+import { ApiKeysPanel } from "../components/ApiKeysPanel";
 
 function SettingRow<T extends string>({ label, options, value, onChange }: {
   label: string; options: { value: T; label: string }[]; value: T; onChange: (v: T) => void;
@@ -64,6 +65,10 @@ export function SettingsView() {
 
       <SettingsCard title="Location shares">
         <SharesPanel />
+      </SettingsCard>
+
+      <SettingsCard title="API keys">
+        <ApiKeysPanel />
       </SettingsCard>
 
       <SettingsCard title="About">

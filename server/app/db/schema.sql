@@ -197,3 +197,16 @@ CREATE TABLE IF NOT EXISTS location_shares (
   last_access_ms bigint,
   access_count bigint NOT NULL DEFAULT 0
 );
+
+-- Read-only API keys for headless telemetry clients (the desktop widgets).
+-- Distinct from device JWTs (write path) and Authentik (browser SSO): those cannot
+-- serve a widget, which has no browser session and must not be able to write.
+-- Only the sha256 is stored, so a dump of this table yields no usable key.
+CREATE TABLE IF NOT EXISTS api_keys (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text NOT NULL,
+  key_hash text UNIQUE NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  last_used_at timestamptz,
+  revoked_at timestamptz
+);
