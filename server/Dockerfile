@@ -20,6 +20,9 @@ RUN pip install --no-cache-dir -r requirements.lock
 # is not pip-installed: the old bare `pip install .` shipped zero code — pyproject has
 # no package config — and imports only worked through uvicorn's implicit CWD lookup).
 COPY server/app ./app
+# tools/ carries the API-key admin CLI, which is the documented fallback for
+# managing keys when the WebUI is unreachable — it has to be in the image.
+COPY server/tools ./tools
 COPY --from=web /web/dist ./web/dist
 ENV BMSMON_WEB_DIST=/app/web/dist PYTHONPATH=/app
 # Non-root runtime (SEC-11): nothing needs root — static assets are read-only and
