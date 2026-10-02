@@ -1405,7 +1405,17 @@ The untagged entries *are* the image. Bulk-deleting them strips the layers out f
 and the NAS `docker compose pull bmsmon-api` then fails with `manifest unknown`. `prune-ghcr.sh` is
 manifest-aware: it resolves each surviving index's children from the registry and only deletes an
 untagged version once nothing references it, aborting rather than guessing if a manifest won't
-resolve. It keeps the newest `KEEP` (default 10) tagged versions plus whatever carries `latest`.
+resolve. What survives is decided by the pure `.github/scripts/prune-select.jq`, unit-tested by
+`test-prune-select.sh` — which the prune job runs first, so a regression fails before anything is
+deleted: the newest `KEEP` (default 10) tagged versions, whatever carries `latest`, anything younger
+than `MIN_AGE_DAYS` (30 — one day in July produced 12 builds, more than `KEEP`), and the images of
+the newest `PROTECT_DEPLOYS` (3) `deploy/*` git tags, i.e. the running image and its rollback
+targets however many builds have landed since (see "Production deploy"). It refuses to prune at all
+if nothing carries `latest`, and a real (non-dry) run also refuses when the newest `deploy/*` tag
+matches no image version — the registry cannot know what the NAS runs, so that tag is the only
+record and pruning without it would be blind. It re-resolves every survivor and its children
+(before a dry run exits, after real deletes). Ad-hoc pins: the `protect` dispatch input
+(space-separated image tags).
 
 Two operational notes: `gh api --method DELETE` must **not** be passed `--silent` — it masks the exit
 status, so a loop reports success for every failed delete. And bmsmon is a **public** repo whose GHCR
@@ -1423,10 +1433,13 @@ stack is `~/qnap-nas-docker/bmsmon/docker-compose.yml`: `bmsmon-api`
 `${CONFDIR}/bmsmon/database`). Traefik splits routing: `/api/` → device-JWT auth (no Authentik);
 everything else → Authentik SSO.
 
-**Deploying a new server build** (the NAS does **not** auto-pull `:latest` — watchtower is monthly,
-and the qnap-nas-docker deploy runner only fires on `docker-compose.yml`/`.env` changes, and
-`up -d` alone won't re-pull an unchanged tag). After the image build finishes, pull + recreate just
-the API container:
+**Deploying a new server build.** Watchtower **does** pull `:latest` and recreate `bmsmon-api`
+unattended at 00:00 on the 1st of each month (`1.base` sets `WATCHTOWER_SCHEDULE=0 0 0 1 * *` with
+cleanup, and bmsmon carries no opt-out label yet); since 2026-10 CI moves `:latest` only after the
+test suites and an image boot-smoke pass, which bounds what that can ship. Nothing else pulls: the
+qnap-nas-docker deploy runner only fires on `docker-compose.yml`/`.env` changes, and `up -d` alone
+won't re-pull an unchanged tag. After the image build finishes, pull + recreate just the API
+container, then record the deploy (below):
 
 ```bash
 ssh joely@ddnas02 'bash -lc "cd /share/bsv/docker-compose && \
@@ -1434,6 +1447,30 @@ ssh joely@ddnas02 'bash -lc "cd /share/bsv/docker-compose && \
   docker compose --env-file .env -f bmsmon/docker-compose.yml up -d bmsmon-api"'
 curl -fsS https://bmsmon.covert.life/api/v1/health   # expect {"status":"ok"}
 ```
+
+**Record every deploy as a git tag** — `deploy/<UTC timestamp>` on the commit that went live. The
+tags are the deploy history (`git tag -l 'deploy/*'`), and `prune-ghcr.sh` never deletes the images
+of the newest three, so the running image and its rollback targets survive any number of later
+builds. Images built since 2026-10 carry `org.opencontainers.image.revision`, so read the sha off the
+running container instead of guessing what `:latest` was at pull time. Run it from the repo root; it
+is wrapped in `bash -c` so it works from fish too, and it stops with an error if the container has no
+such label (an image older than that) rather than tagging a guess:
+
+```bash
+bash -c '
+set -euo pipefail
+SHA=$(ssh joely@ddnas02 "bash -lc \"docker inspect bmsmon-api\"" \
+  | jq -r ".[0].Config.Labels[\"org.opencontainers.image.revision\"] // empty")
+if [ -z "$SHA" ]; then
+  echo "error: bmsmon-api carries no org.opencontainers.image.revision label (image older than 2026-10?) - tag the deployed commit by hand" >&2
+  exit 1
+fi
+TAG="deploy/$(date -u +%Y%m%dT%H%MZ)"
+git tag "$TAG" "$SHA" && git push origin "$TAG"
+'
+```
+
+(A `deploy/*` tag push triggers no workflow: `build-server` filters on branches only.)
 
 On startup the new container re-runs `schema.sql`, so additive columns/tables land automatically.
 Changes to the **stack** itself (`bmsmon/docker-compose.yml` or the shared `.env`) deploy

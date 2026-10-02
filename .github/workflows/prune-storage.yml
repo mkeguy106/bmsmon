@@ -5,6 +5,10 @@ name: prune-storage
 #   ghcr      - retire old sha-tagged images + their now-orphaned child manifests
 #   artifacts - sweep any Actions artifact older than the retention window
 #
+# The ghcr job self-tests its selection logic first (test-prune-select.sh) and never deletes the
+# newest KEEP tagged images, :latest, anything younger than MIN_AGE_DAYS, or the images of the
+# newest PROTECT_DEPLOYS deploy/* git tags (the running image and its rollback targets).
+#
 # The build workflow itself no longer uploads .dockerbuild records
 # (DOCKER_BUILD_RECORD_UPLOAD=false), so the artifact job is a backstop for
 # anything a future workflow starts leaving behind.
@@ -21,6 +25,10 @@ on:
         description: "How many newest tagged images to retain"
         type: string
         default: "10"
+      protect:
+        description: "Extra image tags to protect, space-separated (e.g. a sha you may roll back to)"
+        type: string
+        default: ""
 
 concurrency:
   group: prune-storage
@@ -34,6 +42,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Self-test the prune selection (nothing is deleted if this fails)
+        run: bash .github/scripts/test-prune-select.sh
       - name: Prune old image versions (manifest-aware)
         env:
           # bmsmon-server is a USER-scoped package. If GITHUB_TOKEN turns out to
@@ -42,6 +52,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GHCR_PRUNE_TOKEN || secrets.GITHUB_TOKEN }}
           DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '1' || '0' }}
           KEEP: ${{ inputs.keep || '10' }}
+          MIN_AGE_DAYS: "30"
+          PROTECT_DEPLOYS: "3"
+          PROTECT_TAGS: ${{ inputs.protect || '' }}
+          REPO: ${{ github.event.repository.name }}
         run: bash .github/scripts/prune-ghcr.sh
 
       - name: Verify production can still pull :latest
