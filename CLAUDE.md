@@ -1200,6 +1200,12 @@ Enforced in the app itself (not delegated to Traefik/Authentik) and pinned by te
   static files and the WebSocket 101. Traefik's own 404/502 while `bmsmon-api` is down
   never carries it. That is how the phone tells "the app rejected this batch" from "the
   app isn't there" (DATA-14). Keep `ApiMarkerMiddleware` the last `add_middleware` call.
+- **One request-body cap for every route** (`BodySizeLimitMiddleware`,
+  `BMSMON_MAX_BODY_BYTES`, default 1 MiB). A `Content-Length` over the cap gets a 413
+  before the route, and any rate limiter, runs. Bodies without or lying about
+  `Content-Length` are counted as they stream and cut off at the cap. This is what bounds
+  `/api/v1/enroll` (SEC-17). `_read_body`'s own caps on ingest/config stay as a second
+  line, plus the gunzip ceiling.
 
 ### Read-only API keys (`/api/v1/groups`, desktop widgets)
 

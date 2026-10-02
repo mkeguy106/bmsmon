@@ -5,8 +5,12 @@ and must never buffer a streaming body. The ORDER is set in app.main.create_app 
 read the comment there before adding another.
 """
 
-from starlette.responses import PlainTextResponse
+from fastapi import HTTPException
+from starlette.datastructures import Headers
+from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from app.config import settings
 
 # C1 (cross-plan contract): every response this app generates carries this header, so
 # the phone can tell an app-level rejection (a real 4xx from a route) from Traefik's own
@@ -53,3 +57,46 @@ async def marked_internal_error(request, exc: Exception) -> PlainTextResponse:
     (and logged by uvicorn) after this response is sent."""
     return PlainTextResponse("Internal Server Error", status_code=500,
                              headers={API_MARKER_HEADER: API_MARKER_VALUE})
+
+
+class BodySizeLimitMiddleware:
+    """SEC-17 / C4: ONE request-body cap (settings.max_body_bytes) for every HTTP route.
+
+    A declared Content-Length over the cap is refused with 413 before the route (and any
+    rate limiter) runs. A body without (or lying about) Content-Length is counted as it
+    streams, and the read that crosses the cap raises HTTPException(413), which the
+    ExceptionMiddleware turns into the same response. Nothing past the cap is buffered.
+    This is what bounds /api/v1/enroll, whose pydantic body FastAPI would otherwise read
+    whole, pre-auth. The device routes keep their own caps in _read_body as a second line.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        limit = settings.max_body_bytes  # read per request: tests override it
+        declared = Headers(scope=scope).get("content-length")
+        if declared is not None:
+            try:
+                too_big = int(declared) > limit
+            except ValueError:
+                too_big = False  # malformed header: the streamed count below still bounds it
+            if too_big:
+                response = JSONResponse({"detail": "body too large"}, status_code=413)
+                await response(scope, receive, send)
+                return
+        received = 0
+
+        async def capped_receive() -> Message:
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > limit:
+                    raise HTTPException(413, "body too large")
+            return message
+
+        await self.app(scope, capped_receive, send)

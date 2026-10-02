@@ -22,8 +22,9 @@ class Settings:
     # AND configure Traefik to inject the header (middleware customRequestHeaders) on the
     # Authentik-routed router. /api/v1/* is unaffected (device-JWT auth).
     proxy_secret: str = os.environ.get("BMSMON_PROXY_SECRET", "")
-    # Request-body caps for the device endpoints (/api/v1/ingest, /api/v1/config): max bytes read
-    # off the wire, and max decompressed size when the body is gzipped (anti gzip-bomb).
+    # Request-body caps. max_body_bytes caps EVERY route's body off the wire (one ASGI
+    # middleware, app/middleware.py BodySizeLimitMiddleware — SEC-17); max_gunzip_bytes caps
+    # the decompressed size of the gzipped device bodies (/api/v1/ingest, /config).
     max_body_bytes: int = int(os.environ.get("BMSMON_MAX_BODY_BYTES", str(1 * 1024 * 1024)))
     max_gunzip_bytes: int = int(os.environ.get("BMSMON_MAX_GUNZIP_BYTES", str(8 * 1024 * 1024)))
     # Sanity window for device-supplied sample timestamps (ts_ms). ts_ms drives monthly

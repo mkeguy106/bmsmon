@@ -121,7 +121,8 @@ def create_app() -> FastAPI:
     app = FastAPI(title="bmsmon", lifespan=lifespan)
     from starlette.middleware.gzip import GZipMiddleware
 
-    from app.middleware import ApiMarkerMiddleware, marked_internal_error
+    from app.middleware import (ApiMarkerMiddleware, BodySizeLimitMiddleware,
+                                marked_internal_error)
     # Unhandled exceptions -> a 500 that still carries the C1 marker (see the handler).
     app.add_exception_handler(Exception, marked_internal_error)
     # MIDDLEWARE ORDER: Starlette wraps in REVERSE order of add_middleware, so the LAST
@@ -132,6 +133,8 @@ def create_app() -> FastAPI:
     # skipped by GZipMiddleware itself, and ingest is unaffected — its gzipped
     # *request* bodies are decompressed in the router, not by middleware.
     app.add_middleware(GZipMiddleware, minimum_size=1024)
+    # SEC-17: cap every route's request body (wraps GZip; sits inside the marker).
+    app.add_middleware(BodySizeLimitMiddleware)
     app.add_middleware(ApiMarkerMiddleware)  # keep LAST
     from app.auth.device_jwt import JtiCache
     from app.caching import TouchThrottle, TtlCache
