@@ -13,13 +13,12 @@ import pytest
 
 from app.db import queries as q
 from app.db import rollup as ru
+from tests.identities import VIEWER_H as USER
 
 A = "C8:47:80:15:67:44"
 A2 = "C8:47:80:15:62:1B"
 DEV = "00000000-0000-0000-0000-000000000001"
 B = ru.ROLLUP_BUCKET_MS
-USER = {"X-authentik-username": "joel",
-        "X-authentik-groups": "Covert.life - Full App Access - User Group"}
 
 
 async def _seed_registry(conn):

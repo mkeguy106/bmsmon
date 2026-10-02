@@ -2,7 +2,7 @@
 
 Usage:
   1) Mint a code (admin):  curl -XPOST -H 'X-authentik-username: dev' \
-       -H 'X-authentik-groups: Covert.life - Full App Access - User Group' \
+       -H 'X-authentik-groups: Covert.Life - bmsmon - Admin Group' \
        http://localhost:8000/web/enroll-codes
      ...or run with BMSMON_DEV_TRUST_HEADERS=1 and use --mint.
   2) python tools/fake_feeder.py --base http://localhost:8000 --code <CODE>
@@ -45,7 +45,7 @@ def main():
     if args.mint:
         _, b = _post(args.base + "/web/enroll-codes", b"", {
             "X-authentik-username": "dev",
-            "X-authentik-groups": "Covert.life - Full App Access - User Group"})
+            "X-authentik-groups": "Covert.Life - bmsmon - Admin Group"})
         code = json.loads(b)["code"]
         print("minted code", code)
 

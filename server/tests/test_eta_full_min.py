@@ -10,8 +10,8 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from starlette.testclient import TestClient
 
 from app.main import create_app
+from tests.identities import ADMIN_H, VIEWER_H
 
-ADMIN = "Covert.life - Full App Access - User Group"
 A = "C8:47:80:15:67:44"
 
 
@@ -28,8 +28,7 @@ def _bh(body: bytes) -> str:
 
 def test_ingest_and_fleet_roundtrip_eta():
     with TestClient(create_app()) as tc:
-        code = tc.post("/web/enroll-codes", headers={
-            "X-authentik-username": "t", "X-authentik-groups": ADMIN}).json()["code"]
+        code = tc.post("/web/enroll-codes", headers=ADMIN_H).json()["code"]
         priv, pub_b64 = _kp()
         device_id = tc.post("/api/v1/enroll", json={
             "code": code, "install_uuid": f"eta-{uuid.uuid4().hex}",
@@ -41,6 +40,6 @@ def test_ingest_and_fleet_roundtrip_eta():
                           "jti": uuid.uuid4().hex, "bh": _bh(body)}, priv, algorithm="ES256")
         r = tc.post("/api/v1/ingest", content=body, headers={"Authorization": f"Bearer {tok}"})
         assert r.status_code == 200
-        fleet = tc.get("/web/fleet", headers={"X-authentik-username": "t"}).json()["fleet"]
+        fleet = tc.get("/web/fleet", headers=VIEWER_H).json()["fleet"]
         row = next(x for x in fleet if x["address"] == A)
         assert abs(row["eta_full_min"] - 171.7) < 0.5

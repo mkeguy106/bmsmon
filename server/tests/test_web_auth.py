@@ -1,56 +1,104 @@
-ADMIN = "Covert.life - Full App Access - User Group"
+"""Identity + group gate for /web/* (SEC-13/SEC-20). Being authenticated is not enough:
+viewers need BMSMON_VIEWER_GROUP (or the admin group), admin routes need
+BMSMON_ADMIN_GROUP, and every check fails CLOSED."""
+import logging
+
+from tests.identities import ADMIN_H, OUTSIDER_H, VIEWER_GROUP, VIEWER_H, identity
+
+SAMPLES_URL = "/web/samples?address=C8:47:80:15:67:44&from_ms=0&to_ms=1"
+TRACK_URL = "/web/track?address=C8:47:80:15:67:44&from_ms=0&to_ms=1"
+
+ADMIN_ONLY = [
+    ("GET", SAMPLES_URL, None),
+    ("GET", "/web/devices", None),
+    ("POST", "/web/enroll-codes", None),
+    ("DELETE", "/web/devices/00000000-0000-0000-0000-000000000000", None),
+    ("GET", "/web/shares", None),
+    ("POST", "/web/shares", {"name": "Dave", "duration": "1h"}),
+    ("DELETE", "/web/shares/1", None),
+    ("GET", "/web/api-keys", None),
+    ("POST", "/web/api-keys", {"name": "w"}),
+    ("DELETE", "/web/api-keys/00000000-0000-0000-0000-000000000000", None),
+]
 
 
 async def test_fleet_requires_identity(client):
-    r = await client.get("/web/fleet")
-    assert r.status_code == 401
+    assert (await client.get("/web/fleet")).status_code == 401
 
 
-async def test_fleet_ok_with_authentik_headers(client):
-    r = await client.get("/web/fleet", headers={
-        "X-authentik-username": "joel", "X-authentik-groups": ADMIN})
+async def test_fleet_ok_for_viewer(client):
+    r = await client.get("/web/fleet", headers=VIEWER_H)
     assert r.status_code == 200
     assert r.json()["fleet"] == []
 
 
-async def test_mint_code_requires_admin_group(client):
-    r = await client.post("/web/enroll-codes", headers={
-        "X-authentik-username": "rando", "X-authentik-groups": "Some Other Group"})
+async def test_non_member_is_403_on_location_and_other_reads(client):
+    # SEC-13: any Authentik login used to be enough to read live + historical GPS.
+    for url in ("/web/fleet", TRACK_URL, "/web/history", "/web/notes"):
+        assert (await client.get(url, headers=OUTSIDER_H)).status_code == 403, url
+
+
+async def test_user_with_no_groups_header_is_403(client):
+    r = await client.get("/web/fleet", headers={"X-authentik-username": "nobody"})
     assert r.status_code == 403
 
 
+async def test_group_match_is_exact_and_case_sensitive(client):
+    # Fail closed: a case variant (e.g. the old lowercase spelling) is not membership.
+    near_miss = identity("x", VIEWER_GROUP.swapcase())
+    assert (await client.get("/web/fleet", headers=near_miss)).status_code == 403
+
+
+async def test_viewer_group_found_among_several_pipe_separated(client):
+    # Review Focus 1: Authentik sends every group, pipe-separated, in no particular order.
+    h = identity("x", "Family Photos", VIEWER_GROUP, "Media")
+    assert (await client.get("/web/fleet", headers=h)).status_code == 200
+
+
+async def test_admin_alone_counts_as_viewer(client):
+    # The owner may sit only in the owner-only admin group; the dashboard must still open.
+    assert (await client.get("/web/fleet", headers=ADMIN_H)).status_code == 200
+
+
+async def test_empty_viewer_group_setting_fails_closed(client, set_setting):
+    set_setting("viewer_group", "")
+    assert (await client.get("/web/fleet", headers=VIEWER_H)).status_code == 403
+    assert (await client.get("/web/fleet", headers=ADMIN_H)).status_code == 200
+
+
+async def test_admin_only_routes_refuse_a_household_viewer(client):
+    # SEC-20: being in the household access group no longer grants admin.
+    for method, url, body in ADMIN_ONLY:
+        r = await client.request(method, url, headers=VIEWER_H, json=body)
+        assert r.status_code == 403, (method, url)
+
+
+async def test_admin_only_routes_refuse_outsiders(client):
+    for method, url, body in ADMIN_ONLY:
+        r = await client.request(method, url, headers=OUTSIDER_H, json=body)
+        assert r.status_code == 403, (method, url)
+
+
 async def test_admin_can_mint_code(client):
-    r = await client.post("/web/enroll-codes", headers={
-        "X-authentik-username": "joel", "X-authentik-groups": ADMIN})
+    r = await client.post("/web/enroll-codes", headers=ADMIN_H)
     assert r.status_code == 200
     assert len(r.json()["code"]) == 20
 
 
-NON_ADMIN = {"X-authentik-username": "rando", "X-authentik-groups": "Some Other Group"}
-ADMIN_H = {"X-authentik-username": "joel", "X-authentik-groups": ADMIN}
-SAMPLES_URL = "/web/samples?address=C8:47:80:15:67:44&from_ms=0&to_ms=1"
-
-
-# /web/samples and /web/devices expose full GPS history + device enumeration → admin-only.
-
-async def test_samples_requires_admin(client):
-    assert (await client.get(SAMPLES_URL, headers=NON_ADMIN)).status_code == 403
-
-
-async def test_samples_admin_ok(client):
+async def test_samples_and_devices_admin_ok(client):
     r = await client.get(SAMPLES_URL, headers=ADMIN_H)
-    assert r.status_code == 200
-    assert r.json()["samples"] == []
-
-
-async def test_devices_requires_admin(client):
-    assert (await client.get("/web/devices", headers=NON_ADMIN)).status_code == 403
-
-
-async def test_devices_admin_ok(client):
+    assert r.status_code == 200 and r.json()["samples"] == []
     r = await client.get("/web/devices", headers=ADMIN_H)
-    assert r.status_code == 200
-    assert r.json()["devices"] == []
+    assert r.status_code == 200 and r.json()["devices"] == []
+
+
+async def test_denials_are_logged_once_per_user(client, caplog):
+    caplog.set_level(logging.WARNING, logger="app.auth.authentik")
+    h = identity("stray-account-for-log-test", "Some Other Group")
+    for _ in range(3):
+        assert (await client.get("/web/fleet", headers=h)).status_code == 403
+    hits = [r for r in caplog.records if "stray-account-for-log-test" in r.getMessage()]
+    assert len(hits) == 1
 
 
 # Proxy shared secret (BMSMON_PROXY_SECRET): when set, identity headers are only
@@ -58,25 +106,25 @@ async def test_devices_admin_ok(client):
 
 async def test_proxy_secret_missing_header_is_401(client, set_setting):
     set_setting("proxy_secret", "hunter2")
-    r = await client.get("/web/fleet", headers=ADMIN_H)
-    assert r.status_code == 401
+    assert (await client.get("/web/fleet", headers=VIEWER_H)).status_code == 401
 
 
 async def test_proxy_secret_wrong_value_is_401(client, set_setting):
     set_setting("proxy_secret", "hunter2")
-    r = await client.get("/web/fleet", headers={**ADMIN_H, "X-Bmsmon-Proxy-Secret": "nope"})
+    r = await client.get("/web/fleet", headers={**VIEWER_H, "X-Bmsmon-Proxy-Secret": "nope"})
     assert r.status_code == 401
 
 
 async def test_proxy_secret_correct_header_works(client, set_setting):
     set_setting("proxy_secret", "hunter2")
-    r = await client.get("/web/fleet", headers={**ADMIN_H, "X-Bmsmon-Proxy-Secret": "hunter2"})
+    r = await client.get("/web/fleet",
+                         headers={**VIEWER_H, "X-Bmsmon-Proxy-Secret": "hunter2"})
     assert r.status_code == 200
     assert r.json()["fleet"] == []
 
 
 async def test_proxy_secret_blocks_dev_trust_path_too(client, set_setting):
-    # the secret is checked BEFORE any identity source, including dev-trust
+    # The secret is checked BEFORE any identity source, including dev-trust.
     set_setting("proxy_secret", "hunter2")
     set_setting("dev_trust_headers", True)
     assert (await client.get("/web/fleet")).status_code == 401
@@ -85,17 +133,22 @@ async def test_proxy_secret_blocks_dev_trust_path_too(client, set_setting):
 
 
 async def test_proxy_secret_unset_ignores_header(client):
-    # default (unset) = feature off: current prod behavior preserved
-    r = await client.get("/web/fleet", headers=ADMIN_H)
-    assert r.status_code == 200
+    assert (await client.get("/web/fleet", headers=VIEWER_H)).status_code == 200
 
 
-# Dev-trust guard (SRV-8): BMSMON_DEV_TRUST_HEADERS grants synthetic admin to every
-# request, so it only activates when DATABASE_URL points at a local dev database.
+# Dev-trust guard (SRV-8): the synthetic identity only activates when DATABASE_URL points
+# at a local dev database, and it is a viewer AND an admin unless BMSMON_DEV_GROUPS says otherwise.
 
-async def test_dev_trust_works_with_local_db(client, set_setting):
-    set_setting("dev_trust_headers", True)  # test DB is localhost:5432 → qualifies
+async def test_dev_trust_identity_is_viewer_and_admin(client, set_setting):
+    set_setting("dev_trust_headers", True)  # test DB is localhost:5432, so this qualifies
     assert (await client.get("/web/fleet")).status_code == 200
+    assert (await client.post("/web/enroll-codes")).status_code == 200
+
+
+async def test_dev_groups_override_is_still_gated(client, set_setting):
+    set_setting("dev_trust_headers", True)
+    set_setting("dev_groups", ["Some Other Group"])
+    assert (await client.get("/web/fleet")).status_code == 403
 
 
 async def test_dev_trust_ignored_when_db_not_local(client, set_setting):

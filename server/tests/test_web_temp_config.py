@@ -1,9 +1,7 @@
 import uuid
 
 from app.db import queries as q
-
-USER = {"X-authentik-username": "joel",
-        "X-authentik-groups": "Covert.life - Full App Access - User Group"}
+from tests.identities import VIEWER_H as USER
 
 CFG = {"profile_id": "redodo-beken-bk-ble-1.0", "cold_caution_c": 5, "hot_caution_c": 45,
        "cold_crit_c": -12, "hot_crit_c": 53, "unit": "F", "updated_at_ms": 1782865938602}

@@ -1,8 +1,8 @@
 import asyncio
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
-from app.auth.authentik import resolve_user
+from app.auth.authentik import authorize
 from app.db import queries as q
 from app.util import jsonable
 
@@ -11,6 +11,8 @@ router = APIRouter()
 # WebSocket close codes (4000-4999 = application-defined).
 # 4401 mirrors HTTP 401 by convention.
 WS_UNAUTHORIZED = 4401
+# Authenticated but not in the viewer group (SEC-13); mirrors HTTP 403.
+WS_FORBIDDEN = 4403
 # Sent to a slow consumer whose event queue overflowed: the client is behind and
 # would otherwise be permanently stale (SRV-10). The browser's reconnect logic
 # re-opens the socket and gets a fresh snapshot.
@@ -24,13 +26,16 @@ KEEPALIVE_S = 25
 
 @router.websocket("/ws")
 async def ws(sock: WebSocket):
-    # Same identity resolution as /web/* (Authentik headers, proxy secret, dev-trust),
-    # applied to the handshake headers BEFORE any data flows: the snapshot + live
-    # samples include GPS coordinates. Accept-then-close(4401) so clients get a
-    # deterministic application close code rather than an opaque handshake failure.
-    if resolve_user(sock.headers) is None:
+    # Same gate as /web/* (authorize: identity + viewer group; Authentik headers, proxy
+    # secret, dev-trust), applied to the handshake headers BEFORE any data flows: the
+    # snapshot + live samples include GPS coordinates. Accept-then-close(4401/4403) so
+    # clients get a deterministic application close code rather than an opaque handshake
+    # failure.
+    try:
+        authorize(sock.headers)
+    except HTTPException as e:
         await sock.accept()
-        await sock.close(code=WS_UNAUTHORIZED)
+        await sock.close(code=WS_FORBIDDEN if e.status_code == 403 else WS_UNAUTHORIZED)
         return
     await sock.accept()
     pool = sock.app.state.pool

@@ -1,9 +1,7 @@
 from datetime import datetime, timezone
 
 from app.db import queries as q
-
-USER = {"X-authentik-username": "joel",
-        "X-authentik-groups": "Covert.life - Full App Access - User Group"}
+from tests.identities import VIEWER_H as USER
 
 A = "C8:47:80:15:67:44"
 DEV = "00000000-0000-0000-0000-000000000001"

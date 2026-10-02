@@ -1206,6 +1206,17 @@ Enforced in the app itself (not delegated to Traefik/Authentik) and pinned by te
   `Content-Length` are counted as they stream and cut off at the cap. This is what bounds
   `/api/v1/enroll` (SEC-17). `_read_body`'s own caps on ingest/config stay as a second
   line, plus the gunzip ceiling.
+- **Fail-closed group gate on `/web/*` and `/ws`** (`auth/authentik.py` `authorize`).
+  Being authenticated is not enough. Viewers need `BMSMON_VIEWER_GROUP` (default
+  `Covert.Life - Full App Access - User Group`). Admin routes (`/web/samples`, devices,
+  enroll codes, shares, API keys) need `BMSMON_ADMIN_GROUP` (default
+  `Covert.Life - bmsmon - Admin Group`, owner only), and an admin also counts as a viewer.
+  Matching is exact and case-sensitive against the pipe-separated `X-Authentik-Groups`,
+  and an empty setting matches nobody. A non-member gets 403 (`/ws` accepts, then closes
+  with **4403**); no identity stays 401/4401. Denials are logged at WARNING, once per user
+  per 5 min. Dev-trust's synthetic user is in both groups unless `BMSMON_DEV_GROUPS`
+  overrides it. Tests build headers from `server/tests/identities.py`; never hardcode a
+  group spelling in a test.
 
 ### Read-only API keys (`/api/v1/groups`, desktop widgets)
 

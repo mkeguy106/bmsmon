@@ -1,10 +1,7 @@
 """Admin-gated API-key management behind the WebUI settings panel."""
 
 from app.auth.api_key import hash_key
-
-ADMIN = {"X-authentik-username": "joel",
-         "X-authentik-groups": "Covert.life - Full App Access - User Group"}
-NON_ADMIN = {"X-authentik-username": "rando", "X-authentik-groups": "Some Other Group"}
+from tests.identities import ADMIN_H as ADMIN, VIEWER_H as NON_ADMIN
 
 
 async def test_api_keys_require_admin(client):
