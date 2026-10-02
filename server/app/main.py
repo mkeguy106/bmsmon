@@ -119,11 +119,20 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="bmsmon", lifespan=lifespan)
+    from starlette.middleware.gzip import GZipMiddleware
+
+    from app.middleware import ApiMarkerMiddleware, marked_internal_error
+    # Unhandled exceptions -> a 500 that still carries the C1 marker (see the handler).
+    app.add_exception_handler(Exception, marked_internal_error)
+    # MIDDLEWARE ORDER: Starlette wraps in REVERSE order of add_middleware, so the LAST
+    # call is the outermost layer. ApiMarkerMiddleware must stay last (outermost) so every
+    # response below it — including middleware-generated ones — gets X-Bmsmon-Api.
+    #
     # Compress large JSON responses (fleet/history/track payloads). Websockets are
     # skipped by GZipMiddleware itself, and ingest is unaffected — its gzipped
     # *request* bodies are decompressed in the router, not by middleware.
-    from starlette.middleware.gzip import GZipMiddleware
     app.add_middleware(GZipMiddleware, minimum_size=1024)
+    app.add_middleware(ApiMarkerMiddleware)  # keep LAST
     from app.auth.device_jwt import JtiCache
     from app.caching import TouchThrottle, TtlCache
     from app.live.bus import LiveBus

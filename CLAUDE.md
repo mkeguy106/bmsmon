@@ -1190,6 +1190,17 @@ endpoints) lives as a **Devices section inside Settings** (`DevicesPanel.tsx`), 
 entry — so there is no longer any "SOON" item. Roadmap/spec:
 `docs/superpowers/specs/2026-07-12-webui-v2-roadmap.md`.
 
+### Server access control & request hardening (2026-10 review, T1.6)
+
+Enforced in the app itself (not delegated to Traefik/Authentik) and pinned by tests:
+
+- **`X-Bmsmon-Api: 1` on every app-generated response** (`app/middleware.py`
+  `ApiMarkerMiddleware`, the outermost user middleware, plus the `marked_internal_error`
+  500 handler): 2xx, every 4xx (incl. 404 for unknown routes, 413, 422, 429), redirects,
+  static files and the WebSocket 101. Traefik's own 404/502 while `bmsmon-api` is down
+  never carries it. That is how the phone tells "the app rejected this batch" from "the
+  app isn't there" (DATA-14). Keep `ApiMarkerMiddleware` the last `add_middleware` call.
+
 ### Read-only API keys (`/api/v1/groups`, desktop widgets)
 
 A third identity path, added 2026-08-25 for the KDE desktop widgets. The other two cannot
