@@ -1217,6 +1217,11 @@ Enforced in the app itself (not delegated to Traefik/Authentik) and pinned by te
   per 5 min. Dev-trust's synthetic user is in both groups unless `BMSMON_DEV_GROUPS`
   overrides it. Tests build headers from `server/tests/identities.py`; never hardcode a
   group spelling in a test.
+- **`/web/track` span ≤ 31 days + 1 h** (`TRACK_MAX_SPAN_MS`). A wider span gets a 400,
+  not a clamp, so a map is never silently truncated; out-of-range timestamps get a 422.
+  The legitimate callers send one local day (≤ 25 h), the live day's incremental tail,
+  or Journey RANGE mode (whole local days; a calendar month across a DST change is
+  31 d + 1 h). The Journey RANGE picker should cap itself at 31 days.
 
 ### Read-only API keys (`/api/v1/groups`, desktop widgets)
 

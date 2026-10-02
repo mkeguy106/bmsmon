@@ -1,6 +1,9 @@
+import time
 from datetime import datetime, timezone
 
 from app.db import queries as q
+from app.routers.web import TRACK_MAX_SPAN_MS
+from tests.identities import OUTSIDER_H
 from tests.identities import VIEWER_H as USER
 
 A = "C8:47:80:15:67:44"
@@ -111,3 +114,57 @@ async def test_track_returns_accuracy_radius(app, client):
     assert len(points) == 2
     assert points[0]["acc"] == 20.0   # mean of 10 and 30
     assert points[1]["acc"] is None
+
+
+def test_track_span_limit_is_a_dst_month():
+    assert TRACK_MAX_SPAN_MS == 31 * 86_400_000 + 3_600_000
+
+
+async def test_track_accepts_the_widest_legitimate_range(client):
+    # Journey RANGE over 31 local days that include the DST fall-back night.
+    r = await client.get("/web/track", headers=USER,
+                         params={"address": A, "from_ms": 1_000,
+                                 "to_ms": 1_000 + TRACK_MAX_SPAN_MS})
+    assert r.status_code == 200
+    assert r.json()["points"] == []
+
+
+async def test_track_refuses_a_wider_range_with_400(client):
+    for to_ms in (TRACK_MAX_SPAN_MS + 1, 4_000_000_000_000):
+        r = await client.get("/web/track", headers=USER,
+                             params={"address": A, "from_ms": 0, "to_ms": to_ms})
+        assert r.status_code == 400, to_ms
+
+
+async def test_track_live_day_and_incremental_tail_still_work(client):
+    # The two shapes useTrack sends on every refresh: a whole day, and [seam, day end).
+    now = int(time.time() * 1000)
+    day0 = now - now % 86_400_000
+    for f, t in ((day0, day0 + 86_400_000), (now - 15_000, day0 + 86_400_000)):
+        r = await client.get("/web/track", headers=USER,
+                             params={"address": A, "from_ms": f, "to_ms": t})
+        assert r.status_code == 200, (f, t)
+
+
+async def test_track_reversed_range_is_an_empty_200(client):
+    r = await client.get("/web/track", headers=USER,
+                         params={"address": A, "from_ms": 2_000, "to_ms": 1_000})
+    assert r.status_code == 200 and r.json()["points"] == []
+
+
+async def test_track_garbage_timestamps_are_422_not_500(client):
+    for params in ({"from_ms": -1, "to_ms": 1}, {"from_ms": 10**18, "to_ms": 10**18 + 1}):
+        r = await client.get("/web/track", headers=USER, params={"address": A, **params})
+        assert r.status_code == 422, params
+
+
+async def test_track_is_403_for_non_members(client):
+    r = await client.get("/web/track", headers=OUTSIDER_H,
+                         params={"address": A, "from_ms": 0, "to_ms": 1})
+    assert r.status_code == 403
+
+
+async def test_track_auth_is_checked_before_the_span(client):
+    r = await client.get("/web/track",
+                         params={"address": A, "from_ms": 0, "to_ms": 4_000_000_000_000})
+    assert r.status_code == 401
