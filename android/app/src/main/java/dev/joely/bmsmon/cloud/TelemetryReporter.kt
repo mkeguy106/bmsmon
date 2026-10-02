@@ -265,7 +265,7 @@ class TelemetryReporter(
                 .header("Content-Encoding", "gzip")
                 .post(wire.toRequestBody("application/json".toMediaType()))
                 .build()
-            http.newCall(req).execute().use { classifyPost(it.code) }
+            http.newCall(req).execute().use { classifyPost(it.code, fromApi = it.header(API_MARKER_HEADER) != null) }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
