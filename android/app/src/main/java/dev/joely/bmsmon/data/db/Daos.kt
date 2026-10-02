@@ -36,6 +36,13 @@ data class RollupRow(
     val regen: Boolean,
 )
 
+/** One keyset page of a session's telemetry rows, in id order (DATA-16). index_samples_sessionId is
+ *  (sessionId, rowid), so this is a pure index range seek with no sort (RollupSqlTest pins it). */
+internal const val ROLLUP_PAGE_SQL =
+    "SELECT id, tsMs, soc, currentA, powerW, voltageV, tempC, soh, fullChargeAh, cycles, regen " +
+        "FROM samples WHERE sessionId = :sessionId AND id > :afterId AND linkEvent IS NULL " +
+        "ORDER BY id ASC LIMIT :limit"
+
 @Dao
 interface SampleDao {
     @Insert suspend fun insert(sample: SampleEntity): Long
@@ -43,6 +50,10 @@ interface SampleDao {
 
     @Query("SELECT * FROM samples WHERE sessionId = :sessionId ORDER BY tsMs ASC")
     suspend fun forSession(sessionId: Long): List<SampleEntity>
+
+    /** Blocking — the rollup pager calls it in a loop on the IO writer; never call on Main. */
+    @Query(ROLLUP_PAGE_SQL)
+    fun rollupPage(sessionId: Long, afterId: Long, limit: Int): List<RollupRow>
 
     @Query("SELECT * FROM samples WHERE address = :address AND linkEvent IS NULL ORDER BY tsMs ASC")
     suspend fun telemetryFor(address: String): List<SampleEntity>

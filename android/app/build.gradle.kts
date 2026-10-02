@@ -100,4 +100,7 @@ dependencies {
     implementation("com.google.android.gms:play-services-location:21.3.0")
 
     testImplementation("junit:junit:4.13.2")
+    // JVM SQLite for executing DAO SQL in unit tests (SqlTestDb). Same artifact/version Room's
+    // compile-time query verifier already pulls, so it resolves from the offline Gradle cache.
+    testImplementation("org.xerial:sqlite-jdbc:3.41.2.2")
 }

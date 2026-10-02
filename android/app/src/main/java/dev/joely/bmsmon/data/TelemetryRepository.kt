@@ -1,5 +1,6 @@
 package dev.joely.bmsmon.data
 
+import android.util.Log
 import androidx.room.withTransaction
 import dev.joely.bmsmon.data.db.BmsDatabase
 import dev.joely.bmsmon.data.db.RangeRowColumns
@@ -21,6 +22,11 @@ import java.io.File
 /** Samples per transaction during the legacy CSV backfill (DATA-8). */
 private const val IMPORT_CHUNK = 500
 
+private const val TAG = "TelemetryRepository"
+
+/** Rows per rollup page (DATA-16): ~1000 lean rows ≈ 150–200 KB, the only rows ever held. */
+private const val ROLLUP_PAGE = 1_000
+
 /**
  * Single facade for telemetry persistence (replaces TelemetryLogger). Writes are serialized through
  * an unlimited channel consumed by one coroutine, so callers (the BLE poll loop) never block and DB
@@ -39,26 +45,44 @@ class TelemetryRepository(private val db: BmsDatabase) {
     private var sinceLastPrune = 0
 
     init {
+        // Startup retention pass FIRST (DATA-6, reordered for DATA-16): bound the tables before any
+        // sweep work, so even a stub left by an enormous multi-day run is swept over at most the
+        // retention window. Its own op, so a prune failure cannot skip the sweep (or vice versa).
+        // (DATA-6 itself: pruning previously only ran from ingest's every-200th counter, so an
+        // install that mostly sits idle never pruned at all.)
+        ops.trySend { prune(System.currentTimeMillis()) }
         // Startup finalize-sweep for sessions orphaned by process death (DATA-2): rows inserted as
         // emptySession (sampleCount = 0) whose finalize never ran are invisible to the history DAOs
         // and their samples retention-prune away. Safe to finalize ALL zero-count stubs here:
         // nothing is open at construction (openSessionId starts empty) and every new run opens a
-        // NEW session row (advanceSession: no lastSampleTs → isNewSession → insert). Enqueued as
-        // the FIRST op on the serialized channel — before the consumer starts — so it always runs
-        // ahead of any new ingest and never blocks the constructing caller. (importCsvOnce bypasses
-        // the channel, but it's a one-time legacy backfill triggered later by the engine.)
+        // NEW session row (advanceSession: no lastSampleTs → isNewSession → insert). Enqueued
+        // before the consumer starts, so it runs ahead of any new ingest and never blocks the
+        // constructing caller. (importCsvOnce bypasses the channel, but it's a one-time legacy
+        // backfill triggered later by the engine.)
+        // Each stub is streamed in bounded pages and individually guarded: a stub that throws —
+        // anything, Errors included — is logged and deleted (a zero-count stub is invisible to
+        // History anyway) instead of escaping and crash-looping every launch (DATA-16).
         ops.trySend {
             for (stub in db.sessions().zeroCountStubs()) {
-                when (val action = orphanedSessionAction(stub.address, stub.id, db.samples().forSession(stub.id))) {
-                    is OrphanedSessionAction.Finalize -> db.sessions().update(action.rollup)
-                    OrphanedSessionAction.Delete -> db.sessions().deleteById(stub.id)
+                try {
+                    when (val action = orphanedSessionAction(accumulateSession(stub.address, stub.id))) {
+                        is OrphanedSessionAction.Finalize -> db.sessions().update(action.rollup)
+                        OrphanedSessionAction.Delete -> db.sessions().deleteById(stub.id)
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (t: Throwable) {
+                    Log.w(TAG, "orphan sweep: stub id=${stub.id} (${stub.address}) failed — deleting it", t)
+                    try {
+                        db.sessions().deleteById(stub.id)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (t2: Throwable) {
+                        // Skip it; the next stub must still be swept (it is retried next launch).
+                        Log.w(TAG, "orphan sweep: stub id=${stub.id} could not be deleted — skipping it", t2)
+                    }
                 }
             }
-            // Startup retention pass (DATA-6): pruning previously only ever ran from ingest's
-            // every-200th counter, so an install that mostly sits idle (logging off, or only
-            // decode_fail raw frames arriving) never pruned at all. One unconditional prune here
-            // bounds the DB regardless of what happens afterwards.
-            prune(System.currentTimeMillis())
         }
         scope.launch {
             for (op in ops) {
@@ -66,8 +90,12 @@ class TelemetryRepository(private val db: BmsDatabase) {
                     op()
                 } catch (e: CancellationException) {
                     throw e   // never swallow cancellation — the consumer must die with its scope
-                } catch (_: Exception) {
-                    // one failed op (e.g. transient DB error) must not kill the writer loop
+                } catch (t: Throwable) {
+                    // One failed op — a transient DB error, or an Error — must not kill the writer
+                    // loop, and must never escape this process-lifetime scope: there is no exception
+                    // handler, so an escape kills the process, and the foreground service and BLE
+                    // monitoring with it.
+                    Log.w(TAG, "telemetry op failed", t)
                 }
             }
         }
@@ -126,13 +154,23 @@ class TelemetryRepository(private val db: BmsDatabase) {
             .also { openSessionId[address] = it }
     }
 
-    /** Recompute and persist rollups for the pack's currently-open session, then forget it. */
+    /** Stream rollups for the pack's currently-open session into its row, then forget it (DATA-16:
+     *  never loads the session — a stable link used to keep one open for days, ~800k rows). */
     private suspend fun finalizeSession(address: String) {
         val id = openSessionId.remove(address) ?: return
-        val samples = db.samples().forSession(id)
-        if (samples.none { it.linkEvent == null }) return
-        db.sessions().update(computeRollup(address, id, samples))
+        val acc = accumulateSession(address, id)
+        if (acc.count == 0) return
+        db.sessions().update(acc.toRollup())
     }
+
+    /** One session's telemetry folded through [streamRollup] in [ROLLUP_PAGE]-row pages. The page
+     *  DAO is blocking, so this pins itself to IO (a no-op hop on the writer, which is already IO). */
+    private suspend fun accumulateSession(address: String, sessionId: Long): RollupAccumulator =
+        withContext(Dispatchers.IO) {
+            streamRollup(address, sessionId, ROLLUP_PAGE) { afterId, limit ->
+                db.samples().rollupPage(sessionId, afterId, limit)
+            }
+        }
 
     private fun emptySession(address: String, tsMs: Long) = SessionEntity(
         id = 0, address = address, startMs = tsMs, endMs = tsMs, sampleCount = 0,
@@ -212,9 +250,9 @@ class TelemetryRepository(private val db: BmsDatabase) {
         suspend fun localFinalize(addr: String) {
             val id = openId.remove(addr) ?: return
             flush()   // the rollup reads this session's samples — they must be persisted first
-            val samples = db.samples().forSession(id)
-            if (samples.none { it.linkEvent == null }) return
-            db.sessions().update(computeRollup(addr, id, samples))
+            val acc = accumulateSession(addr, id)
+            if (acc.count == 0) return
+            db.sessions().update(acc.toRollup())
         }
 
         for (file in files) {
