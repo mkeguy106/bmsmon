@@ -1,9 +1,8 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useTrack } from "../useTrack";
 import { cleanTrack } from "../model/cleanTrack";
 import { cumulativeMiles, tripSummary } from "../model/journey";
 import { useLocalStorage } from "../../useLocalStorage";
-import { groupBases, DAILY_DRIVER_BASE } from "../fleet";
 import { tripsCodec, type Trip } from "../trips";
 import { CommandFleetRail } from "../components/CommandFleetRail";
 import { CommandStage } from "../components/CommandStage";
@@ -11,6 +10,7 @@ import { CommandRange } from "../components/CommandRange";
 import { CommandAside } from "../components/CommandAside";
 import type { V2View } from "../nav";
 import type { FleetData } from "../useFleetData";
+import type { StageBase } from "../useStageBase";
 import { useNow } from "../../useNow";
 
 /**
@@ -18,17 +18,13 @@ import { useNow } from "../../useNow";
  * range · aside). Accepts the live fleet `data` as a PROP — the v2 App owns the
  * single live store and passes it in, so this view never opens a second store.
  */
-export function CommandView({ data, mobile, onOpen, tempF }: {
-  data: FleetData; mobile: boolean; onOpen: (v: V2View) => void; tempF: boolean;
+export function CommandView({ data, stage, mobile, onOpen, tempF }: {
+  data: FleetData; stage: StageBase; mobile: boolean; onOpen: (v: V2View) => void; tempF: boolean;
 }) {
-  // Which base occupies the stage — session state, seeded to the daily driver.
-  const [stageBaseId, setStageBaseId] = useState<string>(DAILY_DRIVER_BASE);
+  // Which base occupies the stage is decided ONCE, in App (useStageBase): seize, pin,
+  // in-use, hold, parked, daily driver. A rail tap pins.
+  const { bases, staged, reason, pinBase, clearPin } = stage;
   const [trips, setTrips] = useLocalStorage<Trip[]>("bmsmon-v2-trips", () => [], tripsCodec);
-
-  const bases = useMemo(
-    () => groupBases(data.items, data.staleAddrs), [data.items, data.staleAddrs]);
-  // Fall back to the first base when the seeded/pinned id isn't present yet.
-  const staged = bases.find((b) => b.id === stageBaseId) ?? bases[0];
 
   // Today's GPS track for the staged base (Phase-4 wiring: DRIVEN TODAY + route sketch).
   // Local midnight → now-ish window; a gentle 60 s refresh keeps Command cheaper than
@@ -83,10 +79,11 @@ export function CommandView({ data, mobile, onOpen, tempF }: {
   return (
     <div style={container}>
       <div style={{ order: mobile ? 3 : 0, minWidth: 0 }}>
-        <CommandFleetRail bases={bases} stageBaseId={staged.id} onStage={setStageBaseId} />
+        <CommandFleetRail bases={bases} stageBaseId={staged.id} onStage={pinBase} />
       </div>
       <div style={{ order: mobile ? 1 : 0, minWidth: 0, display: "flex", flexDirection: "column", gap: 16 }}>
-        <CommandStage base={staged} rangeParams={data.rangeParams} tempF={tempF} mobile={mobile} drivenToday={todaySummary} />
+        <CommandStage base={staged} reason={reason} onClearPin={clearPin} rangeParams={data.rangeParams}
+          tempF={tempF} mobile={mobile} drivenToday={todaySummary} />
         <CommandRange base={staged} rangeParams={data.rangeParams} trips={trips} onEditTrips={onEditTrips} />
       </div>
       <div style={{ order: mobile ? 4 : 0, minWidth: 0 }}>

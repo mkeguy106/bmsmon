@@ -14,6 +14,8 @@ import { AlertsView } from "./views/AlertsView";
 import { SettingsView } from "./views/SettingsView";
 import { useFleetData } from "./useFleetData";
 import { useV2Configs } from "./useV2Configs";
+import { useStageBase } from "./useStageBase";
+import { seizeThresholdFrom } from "./model/stageBase";
 import { ackAlert, deriveAlerts, pruneAcks, unackedCount, type AckMap, type V2Alert } from "./model/alerts";
 import type { V2View } from "./nav";
 
@@ -59,7 +61,10 @@ export default function App() {
   const data = useFleetData();
   const tempF = settings.tempUnitPref === "F";
 
-  const { tempConfig } = useV2Configs();
+  const { tempConfig, alertConfig } = useV2Configs();
+  // One stage selection for every view (WEB-12): seize → pin → in use → hold → parked →
+  // daily driver. Command, Journey and the Health hero all read this same answer.
+  const stage = useStageBase(data, seizeThresholdFrom(alertConfig));
   const alerts = useMemo(
     () => deriveAlerts(data.items, data.staleAddrs, tempConfig),
     [data.items, data.staleAddrs, tempConfig],
@@ -74,11 +79,11 @@ export default function App() {
   const unacked = unackedCount(alerts, acked);
 
   const content =
-    view === "command" ? <CommandView data={data} mobile={mobile} onOpen={setView} tempF={tempF} /> :
-    view === "health" ? <HealthView data={data} unit={settings.tempUnitPref} mobile={mobile} /> :
+    view === "command" ? <CommandView data={data} stage={stage} mobile={mobile} onOpen={setView} tempF={tempF} /> :
+    view === "health" ? <HealthView data={data} heroBase={stage.staged} unit={settings.tempUnitPref} mobile={mobile} /> :
     view === "journey" ? (
       <Suspense fallback={<ViewLoading />}>
-        <JourneyView data={data} theme={resolvedTheme} unit={settings.tempUnitPref} mobile={mobile} mapMetric={settings.mapMetricPref} />
+        <JourneyView data={data} base={stage.staged} theme={resolvedTheme} unit={settings.tempUnitPref} mobile={mobile} mapMetric={settings.mapMetricPref} />
       </Suspense>
     ) :
     view === "history" ? <HistoryView data={data} unit={settings.tempUnitPref} mobile={mobile} /> :

@@ -2,7 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { TempUnit } from "../../temp";
 import { useLocalStorage } from "../../useLocalStorage";
-import { groupBases, DAILY_DRIVER_BASE, isCharging } from "../fleet";
+import { isCharging, type Base } from "../fleet";
 import type { FleetData } from "../useFleetData";
 import { useTrack } from "../useTrack";
 import {
@@ -124,8 +124,9 @@ const overlayChrome: CSSProperties = {
   borderRadius: 6, padding: "6px 10px", fontSize: 11, letterSpacing: ".12em", zIndex: 1000,
 };
 
-export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
-  data: FleetData; theme: "dark" | "light"; unit: TempUnit; mobile: boolean; mapMetric: "power" | "soc";
+export function JourneyView({ data, base, theme, unit: _unit, mobile, mapMetric }: {
+  data: FleetData; base: Base | null; theme: "dark" | "light"; unit: TempUnit; mobile: boolean;
+  mapMetric: "power" | "soc";
 }) {
   const [dateSt, setDate] = useLocalStorage<JourneyDate>(
     "bmsmon-v2-journey", defaultJourneyDate, journeyDateCodec, "session");
@@ -155,9 +156,8 @@ export function JourneyView({ data, theme, unit: _unit, mobile, mapMetric }: {
     return [b.start, b.next];
   }, [st.dateMode, st.day, st.from, st.to]);
 
-  // ── Base = daily driver (fallback first). Its packs' addresses → the chair track. ──
-  const bases = useMemo(() => groupBases(data.items, data.staleAddrs), [data.items, data.staleAddrs]);
-  const base = bases.find((b) => b.id === DAILY_DRIVER_BASE) ?? bases[0];
+  // ── Base = the staged base (App's useStageBase), so riding on 2016 shows 2016's trail
+  //    and marker. Its packs' addresses → the chair track. ──
   const addresses = useMemo(() => (base ? base.packs.map((p) => p.item.address) : []), [base]);
 
   // Coarse local clock: window-liveness (day boundaries) and the 120 s marker

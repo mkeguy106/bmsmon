@@ -6,7 +6,7 @@ import type { HistPoint } from "../history";
 import type { FleetData } from "../useFleetData";
 import { useHistory } from "../useHistory";
 import { healthSummary, healthBoardOrder, packStatus, type PackStatus } from "../model/health";
-import { groupBases, DAILY_DRIVER_BASE, type BasePack, type BaseStatus } from "../fleet";
+import type { Base, BasePack, BaseStatus } from "../fleet";
 import { Bar, StatTile, Chip } from "../components/Atoms";
 import { Ago } from "../../components/Ago";
 import { Sparkline } from "../components/Sparkline";
@@ -141,8 +141,8 @@ function BoardRow({ item, connected, points, unit }: {
   );
 }
 
-export function HealthView({ data, unit, mobile }: {
-  data: FleetData; unit: TempUnit; mobile: boolean;
+export function HealthView({ data, heroBase, unit, mobile }: {
+  data: FleetData; heroBase: Base | null; unit: TempUnit; mobile: boolean;
 }) {
   // 24 h sparkline history is consumed ONLY by this view, so the hook lives
   // here (not in App): sessions parked on Command never poll /web/history, and
@@ -153,9 +153,6 @@ export function HealthView({ data, unit, mobile }: {
   // useFleetData, so these only recompute when the fleet really changed.
   const summary = useMemo(
     () => healthSummary(data.items, data.staleAddrs), [data.items, data.staleAddrs]);
-  const bases = useMemo(
-    () => groupBases(data.items, data.staleAddrs), [data.items, data.staleAddrs]);
-  const heroBase = bases.find((b) => b.id === DAILY_DRIVER_BASE) ?? bases[0];
   const board = useMemo(
     () => healthBoardOrder(data.items, data.staleAddrs), [data.items, data.staleAddrs]);
 
