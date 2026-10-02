@@ -69,7 +69,7 @@ If the BMS enters shutdown (0x60 or unknown command side effect):
 
 - **Service**: `0000FFE0-0000-1000-8000-00805f9b34fb`
 - **FFE1** (notify): BMS responses (UART RX from BMS MCU)
-- **FFE2** (write-no-response): Commands to BMS (UART TX to BMS MCU)
+- **FFE2** (write, with or without response — the Android app uses Write Request like the official app; the legacy `bmsmon.py` uses Write Command): Commands to BMS (UART TX to BMS MCU)
 - **FFE3** (notify/write): AT command interface for the Beken BLE module itself (not BMS data)
 - **Battery Service** (0x180F): Present but returns 0% always — non-functional placeholder
 - **TI OAD** (`f000ffc0-0451-4000-b000-000000000000`): Firmware update service, not used
@@ -176,8 +176,10 @@ Findings — these are the **reference behavior** to model the Android app's BLE
   `00 00 04 01 16 55 AA 1A` (`0x16` firmware), plus standard CCCD notification-enable writes.
   **No `0x60`, no `0x0A–0x0D`, no unknown opcodes.** Confirms the protocol is correct AND that
   our read-only app does exactly what the official app does — we are not stressing the BMS in any
-  way Redodo doesn't. (Only diff: Redodo uses ATT Write Request *with* response; we use Write
-  Command *without*. Functionally equivalent.)
+  way Redodo doesn't. (Write type: Redodo uses ATT Write Request *with* response, and so does the
+  Android app — `writeWithResponse = true` in `ble/profile/Profiles.kt` → `WRITE_TYPE_DEFAULT`. Only
+  the legacy `bmsmon.py` CLI sends Write Command *without* response (`response=False`); the module
+  accepts both.)
 - **Flaky GATT establishment is normal and is solved by patient retry, then hold.** Marginal packs
   failed to establish (connect, then GATT drops ~0.1–0.3 s later — the `GATT_CONN_FAILED_ESTABLISHMENT`
   / status-133 signature) and were retried with spacing until they stuck (one pack took ~8 tries
@@ -265,11 +267,16 @@ an incident, restore what the **user chose**, not the platform default.
 
 ## Architecture
 
+**Legacy CLI.** `bmsmon.py` is the original diagnostic tool, frozen since 2026-06-27 and deliberately
+not ported forward (review XC-5). The protocol reference is the Android app's `ble/BmsProtocol.kt`
+(`expectedStatusResponseLen`, header realignment, plausibility guard, `isSafeStatusFrame`); the CLI
+has none of those fixes. Use it for a quick look, not as ground truth, and don't model new work on it.
+
 Single-file script (`bmsmon.py`) with no packaging. Only external dependency is `bleak`.
 
 Key flow: `main()` → `scan_batteries()` or `query_battery(address)` → `parse_telemetry(data)` → `print_telemetry(dict)` or JSON output.
 
-- `query_battery()`: Finds device via BleakScanner, connects with BleakClient, subscribes to FFE1 notifications, writes QUERY_STATUS to FFE2, collects response fragments until ≥80 bytes
+- `query_battery()`: Finds device via BleakScanner, connects with BleakClient, subscribes to FFE1 notifications, writes QUERY_STATUS to FFE2 (Write Command), collects response fragments until ≥80 bytes — **the old BLE-1 defect, left in place only because the CLI is legacy**: a full 0x13 response is ~105 bytes, so this can return early with a truncated buffer, and `parse_telemetry()` raises `struct.error` on a 93–95-byte one. The Android app completes on the frame's own length (`expectedStatusResponseLen`) and realigns to `01 93 55 AA`.
 - `parse_telemetry()`: Decodes raw bytes into a dict using struct unpacking at fixed offsets (little-endian)
 - `is_compatible()`: Filters BLE scan results by `KNOWN_PREFIXES` tuple
 - No tests, no linting, no packaging — run directly with `python3 bmsmon.py`
@@ -364,7 +371,7 @@ re-enabling airplane mode),
 gnss **143 mAh ≈ 22 mA**, wifi 108 mAh ≈ 16.5 mA, GPU 57.3, bluetooth **19.3 mAh ≈ 3 mA**, TPU 18.4.
 The trigger was finding the phone net-discharging at **−174 mA while sitting on its wireless
 charger** at 11% SOC, ~3 h from dead. Pure logic in `model/BatterySaver.kt` — `lockRefreshRate` /
-`lockBrightness` / `gpsParked` / `gpsShouldRun`, no Android imports, 15 unit tests in
+`lockBrightness` / `gpsParked` / `gpsShouldRun`, no Android imports, unit-tested in
 `BatterySaverTest.kt`, same pure-and-total shape as `PowerPolicy`:
 
 - **Lower refresh rate on lock** — default **ON**. `preferredRefreshRate = LOCK_REFRESH_HZ` (60f)
@@ -612,10 +619,10 @@ silence-as-stillness replaced it. AR's true power cost remains unmeasured (its r
 stands), and the wire-cost measurement is still owed.
 
 **No server or WebUI change was required** for either half of this: every GPS read path already
-filters `lat IS NOT NULL AND lon IS NOT NULL` (`server/app/db/queries.py:539`, `:623`),
+filters `lat IS NOT NULL AND lon IS NOT NULL` (`queries.track_series`, `queries.gps_track_all`),
 `lat`/`lon`/`gps_accuracy_m` have always been nullable (the phone already uploads null coordinates
 whenever GPS is off or no fix is cached), the live marker already greys at 120 s to "last known +
-age", and the server suite passes unchanged (185 tests). Gaps were already first-class on the web
+age", and the server suite passed unchanged at the time. Gaps were already first-class on the web
 side.
 
 **Android's own Battery Saver is deliberately not relied on.** Read off the device (`dumpsys power`,
@@ -945,6 +952,9 @@ end, so it is the low end that sets the headline upper mileage.
 
 ## Development
 
+The commands below drive the **legacy** `bmsmon.py` CLI (see Architecture) — fine for a quick look at
+a pack, not ground truth. The one-at-a-time rule in "BLE Connection Notes" still applies.
+
 ```bash
 # Dependencies (Arch/CachyOS)
 sudo pacman -S python-bleak
@@ -973,7 +983,8 @@ batches to `POST /api/v1/ingest` (gzipped) + threshold config to `POST /api/v1/c
 reads `GET /web/fleet` + a `/ws` live feed + `GET /web/temp-config` (the read-only temperature
 mirror) + `GET /web/alert-config` (the read-only capacity-seize mirror), plus admin-gated
 `GET /web/samples`, `GET /web/devices`, `POST /web/enroll-codes`,
-`DELETE /web/devices/{id}`). The temperature config lives in the `device_temp_config` table
+`DELETE /web/devices/{id}` — which **revokes** the device; no un-revoke or delete path exists yet,
+review SEC-27/WEB-21). The temperature config lives in the `device_temp_config` table
 (per device+profile, latest-wins); the WebUI mirror (`web/src/temp.ts` + `TempGauge`/`TempBanner`/
 `TempOverlay`/`BatteryProfilePanel`) re-evaluates the same zone ladder read-only. The **capacity
 seize threshold** rides the same `POST /api/v1/config` body (optional flat `seize_soc`/`alerts_on`
@@ -1096,14 +1107,16 @@ deployed to prod** (`bmsmon.covert.life`), landing all six planned views: **Comm
 `/web/fleet` + `/ws`, plus a per-cell-voltage pipeline android `cells[]` → server `samples.cellN_v`
 → fleet snapshot `cells` → web), **Fleet Health** (tiles + 8-pack board + 24h sparkline off
 `GET /web/history`; **offline packs show their LAST-KNOWN SOC/capacity, muted + "last seen
-<ago>"** — same rule as v1 and the Command rail, because a pack out of BLE range still holds its
-charge and a blank "—" hid it. **Every summary tile counts offline packs on their last-known
+<ago>"** — same rule as v1, because a pack out of BLE range still holds its charge and a blank "—"
+hid it (the Command fleet rail does **not** follow it yet: it still blanks an offline pack's SOC to
+"—", review WEB-29). **Every summary tile counts offline packs on their last-known
 reading too** — `PACKS READY`, `NEED RECHARGE` and `FLEET CAPACITY` each footnote how much of
 their figure is stale ("incl. N offline · last known", from `readyStale`/`needRechargeStale`/
 `staleCounted`), so being away from the spares no longer reads as 0 ready / 0% capacity. The
 hero card's heading follows the base's real status instead of a hardcoded "In use now"),
 **Alerts** (capacity ladder + temp zones + cell imbalance, `localStorage`
-acknowledge), **Settings** (units/map trail/theme segmented toggles), **History** (per-base
+acknowledge), **Settings** (units/map trail/theme segmented toggles; v2's °C/°F defaults to °F and does not follow the
+phone's synced unit the way v1 does, review WEB-35), **History** (per-base
 capacity-fade/cell-imbalance/temperature trend charts with A/B breakdown, a charge-session log, and
 editable per-base notes, backed by `GET /web/trends`, `GET /web/charge-sessions`, and the
 **WebUI's first write path** `GET`/`POST /web/notes`), and **Journey** (GPS trip visualization —
@@ -1254,7 +1267,8 @@ docker exec -it bmsmon-api python -m tools.api_key_admin revoke <id>
 
 Time-limited public share links let a named guest follow the chair live:
 `https://bmsmon.covert.life/share/<token>` (token = `secrets.token_urlsafe(24)`; only
-sha256 stored in `location_shares`; link recoverable ONLY at creation). Traefik has a
+sha256 stored in `location_shares`, so the database cannot give the link back — it is shown only at
+creation). Traefik has a
 third zone — `PathPrefix(/share/)`, priority 100, `bmsmon-header` + `bmsmon-proxy-secret`
 (no Authentik; the proxy secret is there ONLY so the rate limiter can trust XFF for
 per-IP keying — `/share` endpoints never read identity headers) — and the guest page is
@@ -1492,6 +1506,10 @@ for cross-project reference, not a substitute for this CLAUDE.md's detail.
 - [litime-bluetooth-battery](https://github.com/chadj/litime-bluetooth-battery) — Another JS implementation
 - [Litime_BMS_ESP32](https://github.com/mirosieber/Litime_BMS_ESP32) — ESP32 Arduino library
 
+## Motion gate field log (2026-08-08)
+
+Historical record; the current design is the silence-as-stillness gate in the Android section.
+
 **VERIFIED IN THE FIELD 2026-08-08 — the motion gate works.** The outstanding vehicle-outing proof
 was performed: a real round trip, both legs fully traced.
 
@@ -1524,13 +1542,7 @@ Android failure. The three columns landed automatically on container start from 
 `schema.sql`, with no migration step. Clean cutover in prod at 19:55: zero rows carried motion before
 it, essentially every row after.
 
-**Known gap found immediately by using it:** the first production rows read
-`motion_activity=STILL, motion_confidence=100, motion_still=false` with zero discharge — a confident
-still reading with the gate still open, minutes after restart and well past the 3-reading debounce.
-That is consistent with the documented bursty-delivery limitation (a reading older than
-`MOTION_STALE_MS` fails open), **but the stored fields cannot distinguish it from "debounce not yet
-met"**, because the reading's age is not uploaded. Adding the reading timestamp — or a derived
-staleness flag — would close that. Worth doing before the next diagnostic cycle rather than during
-one, which is the same lesson that produced this feature.
-
-**CLOSED 2026-08-08: `motion_at_ms` ships exactly this** — see the motion-state paragraph above.
+The first production rows (`STILL@100` with the gate still open) could not be told apart from
+"debounce not yet met" because the reading's age was not uploaded; `motion_at_ms` (deployed
+2026-08-09) closed that gap. The debounce/`MOTION_STALE_MS` design it was diagnosing was itself
+replaced by the silence-as-stillness gate the same week — see the Android section.

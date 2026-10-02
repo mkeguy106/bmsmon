@@ -68,11 +68,12 @@ GPS-derived Command bits (DRIVEN TODAY, Today's Route mini-map) are **stubbed** 
 
 ### Phase 2 — Fleet Health + Alerts + Settings  ← **done**
 The three remaining zero-backend views. All drive off `/web/fleet` + `/ws` + `/web/{temp,alert,range}-config`:
+*(Correction 2026-10-02: as built, v2 never fetched `/web/alert-config` — its capacity ladder is a fixed constant in `v2/model/alerts.ts`; review findings WEB-12/XC-1.)*
 - **Fleet Health:** 8-pack board (capacity/health bars, temp, cycles, 24h sparkline, status). The
   24h sparkline needs a small recent-samples read — decide then whether to reuse `/web/samples`
   (admin) or add a light web-scoped recent-history endpoint (may pull this into Phase 3's endpoint work).
 - **Alerts:** derived live from the capacity ladder + temp envelope + cell-imbalance (>40 mV),
-  reusing `temp.ts` + ladder logic; acknowledge state in `localStorage`.
+  reusing `temp.ts` + ladder logic; acknowledge state in `localStorage` *(as built: in-memory React state for the tab's lifetime — review WEB-17)*.
 - **Settings:** units, map metric, theme, about — segmented toggles, persisted; reconcile with
   existing prefs.
 

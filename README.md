@@ -29,6 +29,12 @@ pip install bleak
 
 ## Usage
 
+> **Legacy CLI.** `bmsmon.py` is the original diagnostic tool and is no longer developed. It ends a
+> status read at ≥80 bytes and does not realign to the `01 93 55 AA` response header, so on a
+> fragmented or truncated notification it can report wrong values (or crash on a 93–95-byte
+> buffer). Use it for a quick look, not ground truth — the protocol reference is the Android app's
+> [`BmsProtocol.kt`](android/app/src/main/java/dev/joely/bmsmon/ble/BmsProtocol.kt).
+
 ```bash
 # Scan for batteries
 python3 bmsmon.py --scan
