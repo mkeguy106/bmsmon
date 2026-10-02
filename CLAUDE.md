@@ -1328,7 +1328,9 @@ deliberate batching win. Net: guest lag ~11 s → ~8 s average, ~35 s → ~17 s 
 
 **Local dev/test:** `docker compose -f server/docker-compose.dev.yml up -d` brings up a Postgres on
 `localhost:5432` (user/pw/db all `bmsmon`, matching the default `DATABASE_URL`). Run server tests
-with the venv: `cd server && .venv/bin/python -m pytest` (bare `python` lacks the deps).
+with the venv: `cd server && .venv/bin/python -m pytest` (bare `python` lacks the deps). Test-only
+deps are pinned in `server/requirements-dev.lock`; CI runs the suite on Python 3.12 in UTC (the venv
+may be newer) — "Image build" has the exact CI-equivalent command.
 
 **WebUI smoke test (Playwright, local):** seed the dev DB with a synthetic 4-pack fleet
 (`server/.venv/bin/python server/scripts/seed_dev.py` — TRUNCATES the dev DB, never point it at
@@ -1346,10 +1348,40 @@ renders as DISCONNECTED — useful for testing that state deliberately).
 
 ### Image build (GitHub Actions)
 
-`.github/workflows/build-server.yml` builds the multi-stage image (Node builds `web/dist` → Python
-serves API + static) and pushes `ghcr.io/mkeguy106/bmsmon-server:latest` (+ a `:<sha>` tag) on any
-push to `main` touching `server/**`, `web/**`, or that workflow. Watch a run with `gh run watch` or
+`.github/workflows/build-server.yml` is a gated pipeline (review SEC-16 — until 2026-10 it pushed
+`:latest` without running a single test):
+
+| Job | When | Does |
+|---|---|---|
+| `test-server` | every branch push touching the paths below; fork PRs | `check_workflows.py`, then the server suite on Python 3.12 against a `postgres:16-alpine` service |
+| `test-web` | same | `npm ci`, `tsc --noEmit -p .` (v2 + v1 + guest page), `vitest run` on Node 20 |
+| `build` | `main`, after both test jobs | builds the multi-stage image (Node builds `web/dist` → Python serves API + static) and pushes **only** `ghcr.io/mkeguy106/bmsmon-server:<full sha>`, labelled `org.opencontainers.image.revision=<sha>` |
+| `smoke` | `main`, after build | `.github/scripts/smoke-image.sh`: boots that exact image against an empty Postgres — `schema.sql` must apply from scratch, `/api/v1/health` must answer, `/` and `/v1/` must serve their shells, `tools.api_key_admin` must be in the image |
+| `promote` | `main`, after smoke | `docker buildx imagetools create` points `:latest` at the same manifest (no rebuild) and verifies the two digests match |
+
+Paths: `server/**`, `web/**`, `.github/workflows/build-server.yml`. Runs are serialized per ref and
+never cancelled on `main`, which keeps `:latest` monotonic; a failed run leaves `:latest` where it
+was, and a failed smoke leaves an orphan `:<sha>` that nothing deploys. (Re-running an *old* main
+run's `promote` would move `:latest` backwards — never use that as a rollback; see "Production
+deploy".) `.github/scripts/check_workflows.py` — first step of `test-server`, locally
+`python3 .github/scripts/check_workflows.py` — fails if an edit re-opens the gap: `:latest` named
+outside `promote`, `build` not needing both test jobs, an action not pinned to a full SHA, a
+cancellable `main` run, or `DOCKER_BUILD_RECORD_UPLOAD` back on. Watch a run with `gh run watch` or
 the Actions tab.
+
+Run what CI runs, locally (dev Postgres up; containers give CI's Python 3.12 / Node 20 / UTC):
+
+```bash
+python3 .github/scripts/check_workflows.py
+docker run --rm --network host -e PYTHONDONTWRITEBYTECODE=1 -v "$PWD/server:/src:ro" -w /src \
+  python:3.12-slim sh -c 'pip install -q -r requirements.lock -r requirements-dev.lock && python -m pytest -q -p no:cacheprovider'
+docker run --rm -e PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 -v "$PWD/web:/src:ro" node:20-alpine sh -c \
+  'mkdir /w && tar -C /src --exclude=./node_modules --exclude=./dist -cf - . | tar -C /w -xf - && cd /w && npm ci --no-audit --no-fund && npx tsc --noEmit -p . && npx vitest run'
+docker build -t bmsmon-server:smoke -f server/Dockerfile . && bash .github/scripts/smoke-image.sh bmsmon-server:smoke
+```
+
+The repo-root `.dockerignore` keeps a local build from copying host `web/node_modules`/`dist` over
+the image's own `npm ci` output.
 
 The job sets `DOCKER_BUILD_RECORD_UPLOAD: false`. Without it `docker/build-push-action@v6` uploads a
 ~63 KB `<owner>~<repo>~XXXXXX.dockerbuild` build record as an Actions artifact on **every** run;
