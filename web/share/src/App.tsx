@@ -2,20 +2,30 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { JourneyMap } from "../../src/v2/components/JourneyMap";
 import { appendTrack } from "../../src/v2/model/appendTrack";
 import { cleanTrack } from "../../src/v2/model/cleanTrack";
+import type { Hotspot } from "../../src/v2/model/journey";
 import type { LivePos } from "../../src/v2/model/live";
 import type { TrackPoint } from "../../src/v2/track";
-import { relAgo } from "../../src/util";
+import { useNow } from "../../src/useNow";
 import { visibleInterval } from "../../src/visiblePoll";
 import {
-  FEED_POLL_MS, FULL_REFRESH_MS, fetchFeed, isStale, remainingLabel, tokenFromPath,
-  type Feed, type FeedPoint,
+  FEED_POLL_MS, fetchFeed, remainingLabel, tokenFromPath, type Feed, type FeedPoint,
 } from "./feed";
+import { INITIAL_HEALTH, createFeedPoller, guestView, type BadgeTone, type PollHealth } from "./poll";
 import { ArrowPanel } from "./Arrow";
 import { Dock } from "./Dock";
 import { loadShareTheme, saveShareTheme, type ShareTheme } from "./theme";
 import { loadTrailMode, saveTrailMode, trailProps, type TrailMode } from "./trail";
 
 type Status = "loading" | "ok" | "ended" | "expired" | "error";
+
+/** Module-level so the map's trail effect (which lists hotspots as a dependency) does not
+ *  rebuild every polyline on each 1 s clock tick, as a fresh `[]` per render would. */
+const NO_HOTSPOTS: Hotspot[] = [];
+const BADGE_DOT: Record<BadgeTone, string> = {
+  ok: "var(--ok)", warn: "var(--warn)", lost: "var(--live)",
+};
+/** Shown only when the server's 48 h lookback holds no chair fix at all (C5). */
+const NO_FIX_TEXT = "No recent location from the chair.";
 
 export default function App() {
   const token = useMemo(() => tokenFromPath(window.location.pathname), []);
@@ -27,7 +37,10 @@ export default function App() {
   const trackRef = useRef<TrackPoint[]>(track);
   useEffect(() => { trackRef.current = track; }, [track]);
   const [status, setStatus] = useState<Status>("loading");
-  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [health, setHealth] = useState<PollHealth>(INITIAL_HEALTH);
+  // Ticking client clock: staleness and CONNECTION LOST must advance while polls are
+  // failing, which is exactly when no new data arrives to trigger a render (WEB-13).
+  const clientNow = useNow(1_000);
   const [guest, setGuest] = useState<LivePos | null>(null);
   const [theme, setTheme] = useState<ShareTheme>(() => loadShareTheme(localStorage));
   const [trailMode, setTrailMode] = useState<TrailMode>(() => loadTrailMode(localStorage));
@@ -40,47 +53,39 @@ export default function App() {
 
   useEffect(() => {
     if (!token) { setStatus("ended"); return; }
-    let alive = true;
-    let stopped = false;
     let stopPolling: (() => void) | null = null;
-    let lastFullMs = 0;
-    let dayStart: number | null = null;
-    // Once a poll resolves "ended"/"expired" the share is terminally over: stop
-    // polling so a later network blip can never flip the sticky terminal status
-    // to "error" (or a stray "ok").
-    const load = () => {
-      // Incremental from the newest bucket's START (it is still filling server-side, so
-      // it gets replaced). Fall back to a full fetch on the first load, whenever the
-      // trail is empty, and every FULL_REFRESH_MS as a drift safety net.
-      const prev = trackRef.current;
-      const seamT = prev.length > 0 && Date.now() - lastFullMs < FULL_REFRESH_MS
-        ? prev[prev.length - 1].t : null;
-      if (seamT == null) lastFullMs = Date.now();
-      return fetchFeed(token, seamT ?? undefined).then((r) => {
-        if (!alive || stopped) return;
-        setNowMs(Date.now());
-        if (r.kind === "ok") {
-          const incoming = r.feed.points.map(toTrackPoint);
-          // Midnight rolled over mid-session: the server's window moved, so replace
-          // rather than splice tomorrow's buckets onto yesterday's trail.
-          const rolled = dayStart != null && r.feed.day_start !== dayStart;
-          dayStart = r.feed.day_start;
-          if (rolled) { lastFullMs = 0; setTrack(incoming); }
-          else setTrack((cur) => appendTrack(cur, incoming, seamT ?? -Infinity));
-          setFeed(r.feed);
-          setStatus("ok");
-        } else if (r.kind === "error") setStatus((s) => (s === "ok" ? "ok" : "error"));
-        else {
-          stopped = true;
-          stopPolling?.();
-          setStatus(r.kind);
-        }
-      });
-    };
-    load();
+    // Single-flight: a slow or hung poll holds back the next tick instead of stacking
+    // requests (WEB-25); fetchFeed aborts at FETCH_TIMEOUT_MS so a hang becomes a failure.
+    const poller = createFeedPoller({
+      fetchFeed: (since) => fetchFeed(token, since),
+      seam: () => {
+        const t = trackRef.current;
+        return t.length > 0 ? t[t.length - 1].t : null;
+      },
+      now: Date.now,
+      onOk: ({ feed: f, replace, seam, health: h }) => {
+        const incoming = f.points.map(toTrackPoint);
+        // Midnight rolled over mid-session: the server's window moved, so replace rather
+        // than splice today's buckets onto yesterday's trail.
+        if (replace) setTrack(incoming);
+        else setTrack((cur) => appendTrack(cur, incoming, seam ?? -Infinity));
+        setFeed(f);
+        setHealth(h);
+        setStatus("ok");
+      },
+      onFail: (h) => {
+        setHealth(h);
+        // Before the first success there is nothing to show; after it the badge carries
+        // the failure (CONNECTION LOST) instead of replacing the whole page.
+        setStatus((s) => (s === "ok" ? "ok" : "error"));
+      },
+      // Terminally over: stop the timer so a later blip can't flip the sticky status.
+      onTerminal: (kind) => { stopPolling?.(); setStatus(kind); },
+    });
+    poller.tick();
     // Visibility-gated: a backgrounded guest tab stops polling and catches up on refocus.
-    stopPolling = visibleInterval(load, FEED_POLL_MS);
-    return () => { alive = false; stopPolling?.(); };
+    stopPolling = visibleInterval(poller.tick, FEED_POLL_MS);
+    return () => { poller.stop(); stopPolling?.(); };
   }, [token]);
 
   // cleanTrack + trailProps are O(points) passes; memoize so the guest's geolocation
@@ -90,6 +95,13 @@ export default function App() {
   // Hooks stay above the early returns; feed is null until the first poll lands.
   const cleaned = useMemo<TrackPoint[]>(() => cleanTrack(track), [track]);
   const trail = useMemo(() => trailProps(cleaned, trailMode), [cleaned, trailMode]);
+  // Identity-stable marker position (WEB-24): a new object on every render would make the
+  // map rebuild the marker icon — restarting its pulse — on every clock tick.
+  const lastFix = feed?.last ?? null;
+  const live = useMemo<LivePos | null>(
+    () => (lastFix ? { lat: lastFix.lat, lon: lastFix.lon, tsMs: lastFix.t } : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [lastFix?.lat, lastFix?.lon, lastFix?.t]);
 
   if (!token || status === "ended") return <Message text="This share link isn't available." />;
   if (status === "expired") {
@@ -99,9 +111,7 @@ export default function App() {
   if (status === "loading" || !feed) return <Message text="Loading…" />;
 
   const { points, segKinds } = trail;
-  const live: LivePos | null = feed.last
-    ? { lat: feed.last.lat, lon: feed.last.lon, tsMs: feed.last.t } : null;
-  const stale = isStale(feed.last, feed.now);
+  const view = guestView(feed.last, feed.now, health, clientNow);
 
   return (
     <div style={{ height: "100dvh", display: "flex", flexDirection: "column", overflow: "hidden" }}>
@@ -109,7 +119,7 @@ export default function App() {
         flexShrink: 0 }}>
         <span style={{ fontSize: 15, fontWeight: 600 }}>Following {feed.owner}</span>
         <span className="mono" style={{ marginLeft: "auto", fontSize: 11, color: "var(--text-3)" }}>
-          {remainingLabel(feed.expires_at, nowMs)}
+          {remainingLabel(feed.expires_at, view.serverNow)}
         </span>
         <button aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
           onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
@@ -120,21 +130,17 @@ export default function App() {
         </button>
       </div>
       <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
-        <JourneyMap points={points} segKinds={segKinds} hotspots={[]}
+        <JourneyMap points={points} segKinds={segKinds} hotspots={NO_HOTSPOTS}
           cursorIndex={Math.max(0, points.length - 1)} theme={theme}
-          live={live} liveStale={stale} fitKey={token} metric="power"
-          emptyText="Waiting for GPS…" fill guest={guest} />
-        <span className="mono" style={{ position: "absolute", top: 12, right: 12, zIndex: 1000,
-          display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderRadius: 8,
-          background: "rgba(9,9,11,.72)", color: "#e4e4e7", fontSize: 11, letterSpacing: 1 }}>
-          {stale ? (<>
-            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--warn)" }} />
-            LAST KNOWN{live ? ` · ${relAgo(live.tsMs, feed.now)}` : ""}
-          </>) : (<>
-            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--ok)",
-              boxShadow: "0 0 0 3px rgba(34,197,94,.2)" }} />
-            LIVE
-          </>)}
+          live={live} liveStale={view.markerStale} fitKey={token} metric="power"
+          emptyText={NO_FIX_TEXT} fill guest={guest} />
+        <span className="mono" role="status" style={{ position: "absolute", top: 12, right: 12,
+          zIndex: 1000, display: "flex", alignItems: "center", gap: 6, padding: "6px 10px",
+          borderRadius: 8, background: "rgba(9,9,11,.72)", color: "#e4e4e7", fontSize: 11,
+          letterSpacing: 1 }}>
+          <span style={{ width: 8, height: 8, borderRadius: "50%", background: BADGE_DOT[view.badge.tone],
+            ...(view.badge.tone === "ok" && { boxShadow: "0 0 0 3px rgba(34,197,94,.2)" }) }} />
+          {view.badge.text}
         </span>
         <div style={{ position: "absolute", bottom: 12, left: 12, zIndex: 1000,
           display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-start" }}>
@@ -155,8 +161,8 @@ export default function App() {
           </button>
         </div>
       </div>
-      <Dock status={feed.status} />
-      <ArrowPanel target={live} onGuest={setGuest} />
+      <Dock status={feed.status} dim={view.lost} />
+      <ArrowPanel target={live} targetNote={view.targetNote} onGuest={setGuest} />
     </div>
   );
 }
