@@ -6,7 +6,12 @@ import {
 
 export type AlertSeverity = "critical" | "warning";
 export interface V2Alert {
+  /** One condition on one pack (`cap:<addr>`, `temp:<addr>:<side>`, `cell:<addr>`). Stable
+   *  while the condition lasts — it does NOT change as the condition worsens; [rank] does. */
   id: string; address: string; severity: AlertSeverity;
+  /** How bad, within this id: capacity rung crossed (30%→1 … 5%→6), temperature zone rank
+   *  (1–4), cell imbalance 1 warning / 2 critical. An ack silences ranks up to the one acked. */
+  rank: number;
   title: string; msg: string; tsMs: number; kind: "capacity" | "temp" | "cell";
 }
 
@@ -33,6 +38,7 @@ export function deriveAlerts(
       if (rung != null) {
         const critical = i.soc <= CRITICAL_SOC;
         out.push({ id: `cap:${i.address}`, address: i.address, kind: "capacity",
+          rank: CAPACITY_LADDER.indexOf(rung) + 1,
           severity: critical ? "critical" : "warning",
           title: critical ? "Critically low" : "Low battery",
           msg: `${Math.round(i.soc)}% — recharge soon.`, tsMs: i.ts_ms });
@@ -43,7 +49,8 @@ export function deriveAlerts(
       const z = tempZone(i.temp_c, thr, env);
       if (z.rank >= 1) {
         const c = zoneCopy(z.key, thr, env);
-        out.push({ id: `temp:${i.address}`, address: i.address, kind: "temp",
+        // Per side: a hot ack must never silence a later cold alert on the same pack.
+        out.push({ id: `temp:${i.address}:${z.side}`, address: i.address, kind: "temp", rank: z.rank,
           severity: z.rank >= 3 ? "critical" : "warning", title: c.title, msg: c.msg, tsMs: i.ts_ms });
       }
     }
@@ -55,11 +62,52 @@ export function deriveAlerts(
     // 40/60 boundary is exact while the float artifact is absorbed. Display rounds.
     const EPS = 1e-6;
     if (dv != null && dv > 40 + EPS) {
-      out.push({ id: `cell:${i.address}`, address: i.address, kind: "cell",
-        severity: dv > 60 + EPS ? "critical" : "warning",
+      const critical = dv > 60 + EPS;
+      out.push({ id: `cell:${i.address}`, address: i.address, kind: "cell", rank: critical ? 2 : 1,
+        severity: critical ? "critical" : "warning",
         title: "Cell imbalance", msg: `Δ ${Math.round(dv)} mV across cells.`, tsMs: i.ts_ms });
     }
   }
   const rank = (s: AlertSeverity) => (s === "critical" ? 0 : 1);
   return out.sort((a, b) => rank(a.severity) - rank(b.severity) || b.tsMs - a.tsMs);
+}
+
+// ── Acknowledgement lifecycle (WEB-17) ─────────────────────────────────────
+// v1's nextAckedKey principle, generalised: an ack covers the condition AS SEEN. It holds
+// while the condition stays at or below the acked rank (a pack charging back up through
+// the rungs does not re-nag), re-arms the moment it gets worse (android: "acknowledged
+// thresholds silence until SOC drops to the next level"), and is forgotten once the
+// condition clears on a pack that is still reporting — so the next episode alerts afresh.
+
+export interface AckEntry { rank: number; address: string }
+export type AckMap = ReadonlyMap<string, AckEntry>;
+
+export function isAcked(acked: AckMap, a: V2Alert): boolean {
+  const e = acked.get(a.id);
+  return e != null && a.rank <= e.rank;
+}
+
+export function ackAlert(acked: AckMap, a: V2Alert): AckMap {
+  const next = new Map(acked);
+  next.set(a.id, { rank: a.rank, address: a.address });
+  return next;
+}
+
+/** Forget acks whose condition has cleared. A pack that has merely gone STALE keeps its
+ *  acks: deriveAlerts drops stale packs, so a BLE flap would otherwise re-nag on every
+ *  reconnect (the web twin of android BLE-24). Identity-stable when nothing is dropped. */
+export function pruneAcks(acked: AckMap, alerts: V2Alert[], staleAddrs: Set<string>): AckMap {
+  if (acked.size === 0) return acked;
+  const live = new Set(alerts.map((a) => a.id));
+  let next: Map<string, AckEntry> | null = null;
+  for (const [id, e] of acked) {
+    if (live.has(id) || staleAddrs.has(e.address)) continue;
+    if (next == null) next = new Map(acked);
+    next.delete(id);
+  }
+  return next ?? acked;
+}
+
+export function unackedCount(alerts: V2Alert[], acked: AckMap): number {
+  return alerts.filter((a) => !isAcked(acked, a)).length;
 }

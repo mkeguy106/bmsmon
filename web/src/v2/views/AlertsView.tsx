@@ -1,5 +1,5 @@
-import type { V2Alert, AlertSeverity } from "../model/alerts";
-import { CAPACITY_LADDER, CRITICAL_SOC } from "../model/alerts";
+import type { AckMap, V2Alert, AlertSeverity } from "../model/alerts";
+import { CAPACITY_LADDER, CRITICAL_SOC, isAcked } from "../model/alerts";
 import { useNow } from "../../useNow";
 
 /** "3s ago" / "5m ago" / "2h ago" / "1d ago". Clamps clock-skew negatives to "just now". */
@@ -43,7 +43,7 @@ function AckButton({ acked, onClick }: { acked: boolean; onClick: () => void }) 
 }
 
 function AlertRow({ alert, acked, onAck, now }: {
-  alert: V2Alert; acked: boolean; onAck: (id: string) => void; now: number;
+  alert: V2Alert; acked: boolean; onAck: (a: V2Alert) => void; now: number;
 }) {
   return (
     <div
@@ -68,7 +68,7 @@ function AlertRow({ alert, acked, onAck, now }: {
         <div style={{ fontSize: 12, color: "var(--text-3)", marginTop: 3 }}>{alert.msg}</div>
       </div>
       <div style={{ display: "flex", alignItems: "center", padding: "0 14px" }}>
-        <AckButton acked={acked} onClick={() => onAck(alert.id)} />
+        <AckButton acked={acked} onClick={() => onAck(alert)} />
       </div>
     </div>
   );
@@ -98,14 +98,14 @@ function ThresholdsFooter() {
 }
 
 export function AlertsView({ alerts, acked, onAck }: {
-  alerts: V2Alert[]; acked: Set<string>; onAck: (id: string) => void;
+  alerts: V2Alert[]; acked: AckMap; onAck: (a: V2Alert) => void;
 }) {
   // The 1 s clock lives HERE (this view renders the "Xs ago" labels), not in
   // the fleet-data hook — only the mounted Alerts view re-renders on the tick.
   const now = useNow(1000);
   // Stable partition: unacked first, acked last, order otherwise preserved
   // within each group (the caller has already sorted `alerts` by severity/recency).
-  const ordered = [...alerts].sort((a, b) => Number(acked.has(a.id)) - Number(acked.has(b.id)));
+  const ordered = [...alerts].sort((a, b) => Number(isAcked(acked, a)) - Number(isAcked(acked, b)));
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -116,7 +116,7 @@ export function AlertsView({ alerts, acked, onAck }: {
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {ordered.map((a) => (
-            <AlertRow key={a.id} alert={a} acked={acked.has(a.id)} onAck={onAck} now={now} />
+            <AlertRow key={a.id} alert={a} acked={isAcked(acked, a)} onAck={onAck} now={now} />
           ))}
         </div>
       )}
