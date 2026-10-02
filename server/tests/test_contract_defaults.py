@@ -24,3 +24,7 @@ def test_group_defaults():
         "Covert.Life - bmsmon - Admin Group",
         [],
     ]
+
+
+def test_ws_allowed_origins_default():
+    assert _defaults("s.ws_allowed_origins") == ["https://bmsmon.covert.life"]

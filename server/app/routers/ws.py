@@ -2,7 +2,8 @@ import asyncio
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
-from app.auth.authentik import authorize
+from app.auth.authentik import authorize, dev_trust_active
+from app.config import settings
 from app.db import queries as q
 from app.util import jsonable
 
@@ -23,9 +24,38 @@ WS_OVERFLOW = 4408
 # WebSockets aren't torn down by proxy idle timeouts, e.g. Traefik's 180s).
 KEEPALIVE_S = 25
 
+# The Vite dev server's origins (web/vite.config.ts proxies /ws without rewriting
+# Origin). Allowed ONLY while dev-trust is genuinely active (local DB), never in prod.
+DEV_ORIGINS = ("http://localhost:5173", "http://127.0.0.1:5173")
+
+
+def _norm_origin(origin: str) -> str:
+    return origin.strip().rstrip("/").lower()
+
+
+def origin_allowed(origin: str | None) -> bool:
+    """SEC-19 cross-site WebSocket hijacking guard: is this handshake's Origin allowed?
+
+    Prod: only settings.ws_allowed_origins (scheme + host + port, case-insensitive,
+    trailing slash ignored); a missing Origin is refused, since every browser sends one.
+    Dev-trust: also DEV_ORIGINS and a missing Origin.
+    """
+    dev = dev_trust_active()
+    if origin is None:
+        return dev
+    allowed = {_norm_origin(o) for o in settings.ws_allowed_origins}
+    if dev:
+        allowed.update(DEV_ORIGINS)
+    return _norm_origin(origin) in allowed
+
 
 @router.websocket("/ws")
 async def ws(sock: WebSocket):
+    # SEC-19: Origin first, BEFORE accept(): a cross-site page gets no upgrade at all
+    # (uvicorn answers a pre-accept close with an HTTP 403; the test client sees 4403).
+    if not origin_allowed(sock.headers.get("origin")):
+        await sock.close(code=WS_FORBIDDEN)
+        return
     # Same gate as /web/* (authorize: identity + viewer group; Authentik headers, proxy
     # secret, dev-trust), applied to the handshake headers BEFORE any data flows: the
     # snapshot + live samples include GPS coordinates. Accept-then-close(4401/4403) so

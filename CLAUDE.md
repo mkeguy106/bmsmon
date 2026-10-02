@@ -1222,6 +1222,12 @@ Enforced in the app itself (not delegated to Traefik/Authentik) and pinned by te
   The legitimate callers send one local day (≤ 25 h), the live day's incremental tail,
   or Journey RANGE mode (whole local days; a calendar month across a DST change is
   31 d + 1 h). The Journey RANGE picker should cap itself at 31 days.
+- **`/ws` checks Origin before `accept()`** (`routers/ws.py` `origin_allowed`). The Origin
+  must be in `BMSMON_WS_ALLOWED_ORIGINS` (default `https://bmsmon.covert.life`), or the
+  socket is closed with 4403. Uvicorn turns a pre-accept close into an HTTP 403 handshake
+  rejection. This blocks cross-site WebSocket hijacking from any same-site
+  `*.covert.life` page (SEC-19). Dev-trust mode also allows `http://localhost:5173`,
+  `http://127.0.0.1:5173` and a missing Origin (the Vite proxy and the smoke test).
 
 ### Read-only API keys (`/api/v1/groups`, desktop widgets)
 
@@ -1367,7 +1373,7 @@ with the venv: `cd server && .venv/bin/python -m pytest` (bare `python` lacks th
 (`server/.venv/bin/python server/scripts/seed_dev.py` — TRUNCATES the dev DB, never point it at
 prod), run the API with the built-in local identity (`BMSMON_DEV_TRUST_HEADERS=1
 server/.venv/bin/uvicorn app.main:app --port 8000` — dev-trust refuses non-local DATABASE_URLs, and
-without it /web/* 401s and the /ws close-after-accept loop starves the REST fallback), start
+without it /web/* 401s and the /ws close-after-accept loop starves the REST fallback; dev-trust is also what lets /ws accept the Vite dev server's http://localhost:5173 Origin), start
 `npx vite dev --port 5173` in `web/`, then `node scripts/smoke.mjs` (from `web/`). It screenshots
 all six v2 views (at `/`) + v1 (at `/v1/`) + preview.html into `web/smoke-shots/` (gitignored) and
 exits non-zero on any console error or page crash. Note the smoke test drives `vite dev`, which

@@ -64,6 +64,15 @@ class Settings:
     dev_groups: list[str] = field(
         default_factory=lambda: _split(os.environ.get("BMSMON_DEV_GROUPS", ""))
     )
+    # SEC-19: Origins allowed to open /ws (comma/pipe separated). Browsers always send
+    # Origin on a WebSocket handshake; without this check a page on any same-site
+    # *.covert.life app could ride the household's Authentik cookie onto the live GPS
+    # stream. Dev-trust mode additionally allows the Vite dev server and a missing Origin
+    # (routers/ws.py origin_allowed). Empty = nothing allowed (fail closed).
+    ws_allowed_origins: list[str] = field(
+        default_factory=lambda: _split(
+            os.environ.get("BMSMON_WS_ALLOWED_ORIGINS", "https://bmsmon.covert.life"))
+    )
     share_owner: str = os.environ.get("BMSMON_SHARE_OWNER", "Joely")
 
 
