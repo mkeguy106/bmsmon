@@ -20,6 +20,22 @@ data class RangeRowColumns(
     val regen: Boolean,
 )
 
+/** Lean projection the session rollup streams over (DATA-16) — telemetry rows only (the page query
+ *  excludes link events). 11 columns instead of 22, and only one page is ever held. */
+data class RollupRow(
+    val id: Long,
+    val tsMs: Long,
+    val soc: Float?,
+    val currentA: Float?,
+    val powerW: Float?,
+    val voltageV: Float?,
+    val tempC: Float?,
+    val soh: Int?,
+    val fullChargeAh: Float?,
+    val cycles: Int?,
+    val regen: Boolean,
+)
+
 @Dao
 interface SampleDao {
     @Insert suspend fun insert(sample: SampleEntity): Long

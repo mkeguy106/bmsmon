@@ -1,5 +1,6 @@
 package dev.joely.bmsmon.data
 
+import dev.joely.bmsmon.data.db.RollupRow
 import dev.joely.bmsmon.data.db.SampleEntity
 import dev.joely.bmsmon.data.db.SessionEntity
 
@@ -38,23 +39,44 @@ data class IrEstimate(val mohm: Float, val confidence: Float)
  * [confidence] scales with spread (1.0 at >= 4× the minimum spread).
  */
 fun estimateInternalResistanceMohm(dischargeSamples: List<SampleEntity>): IrEstimate? {
-    val pts = dischargeSamples.mapNotNull { sample ->
-        val i = sample.currentA ?: return@mapNotNull null
-        val v = sample.voltageV ?: return@mapNotNull null
-        i to v
+    val currents = FloatBuf()
+    val voltages = FloatBuf()
+    for (s in dischargeSamples) {
+        val i = s.currentA ?: continue
+        val v = s.voltageV ?: continue
+        currents.add(i)
+        voltages.add(v)
     }
-    if (pts.size < 2) return null
-    val currents = pts.map { it.first }
-    val spread = (currents.maxOrNull()!! - currents.minOrNull()!!)
+    return estimateInternalResistanceMohm(currents.values, voltages.values, currents.size)
+}
+
+/** The same two-pass regression over the first [n] entries of primitive arrays — what the
+ *  streaming rollup feeds. Operation order matches the list version exactly (bit-identical). */
+fun estimateInternalResistanceMohm(currents: FloatArray, voltages: FloatArray, n: Int): IrEstimate? {
+    if (n < 2) return null
+    var lo = currents[0]
+    var hi = currents[0]
+    for (k in 1 until n) {
+        lo = minOf(lo, currents[k])
+        hi = maxOf(hi, currents[k])
+    }
+    val spread = hi - lo
     if (spread < IR_MIN_CURRENT_SPREAD_A) return null
 
-    val meanI = currents.average()
-    val meanV = pts.map { it.second }.average()
+    var sumI = 0.0
+    var sumV = 0.0
+    for (k in 0 until n) {
+        sumI += currents[k]
+        sumV += voltages[k]
+    }
+    val meanI = sumI / n
+    val meanV = sumV / n
     var cov = 0.0
     var varI = 0.0
-    for ((i, v) in pts) {
-        cov += (i - meanI) * (v - meanV)
-        varI += (i - meanI) * (i - meanI)
+    for (k in 0 until n) {
+        val di = currents[k] - meanI
+        cov += di * (voltages[k] - meanV)
+        varI += di * di
     }
     if (varI == 0.0) return null
     val slopeOhm = cov / varI            // dV/dI = R (ohms)
@@ -76,69 +98,33 @@ sealed interface OrphanedSessionAction {
     object Delete : OrphanedSessionAction
 }
 
+/** The streamed decision: a stub whose stream folded no telemetry carries no run → delete. */
+fun orphanedSessionAction(acc: RollupAccumulator): OrphanedSessionAction =
+    if (acc.count > 0) OrphanedSessionAction.Finalize(acc.toRollup()) else OrphanedSessionAction.Delete
+
 fun orphanedSessionAction(
     address: String,
     sessionId: Long,
     samples: List<SampleEntity>,
-): OrphanedSessionAction =
-    if (samples.any { it.linkEvent == null }) {
-        OrphanedSessionAction.Finalize(computeRollup(address, sessionId, samples))
-    } else {
-        OrphanedSessionAction.Delete
+): OrphanedSessionAction = orphanedSessionAction(rollupAccumulatorOf(address, sessionId, samples))
+
+/** The SampleEntity → streaming-row projection. Callers must skip link-event rows. */
+fun SampleEntity.toRollupRow() = RollupRow(
+    id = id, tsMs = tsMs, soc = soc, currentA = currentA, powerW = powerW, voltageV = voltageV,
+    tempC = tempC, soh = soh, fullChargeAh = fullChargeAh, cycles = cycles, regen = regen,
+)
+
+/** Fold an in-memory, time-ordered list of a session's samples (link rows skipped). */
+fun rollupAccumulatorOf(address: String, sessionId: Long, samples: List<SampleEntity>): RollupAccumulator =
+    RollupAccumulator(address, sessionId).also { acc ->
+        for (s in samples) if (s.linkEvent == null) acc.add(s.toRollupRow())
     }
 
 /**
- * Compute a [SessionEntity] (rollups) from a session's [samples]. Link-event rows are ignored.
- * Discharge stats use samples with `currentA < -DISCHARGE_EPS`. Energy integrates each interval's
- * leading-sample power over its duration (gaps are already bounded by session segmentation).
+ * Compute a [SessionEntity] (rollups) from a session's time-ordered [samples]. Link-event rows are
+ * ignored. Discharge stats use samples with `currentA < -DISCHARGE_EPS`. Energy integrates each
+ * interval's leading-sample power over its duration. List-input form of [RollupAccumulator]; the
+ * app itself streams sessions through [streamRollup] and never loads one whole (DATA-16).
  */
-fun computeRollup(address: String, sessionId: Long, samples: List<SampleEntity>): SessionEntity {
-    val tel = samples.filter { it.linkEvent == null }
-    val startMs = tel.firstOrNull()?.tsMs ?: 0L
-    val endMs = tel.lastOrNull()?.tsMs ?: startMs
-    val socs = tel.mapNotNull { it.soc }
-    val discharge = tel.filter { (it.currentA ?: 0f) < -DISCHARGE_EPS }
-    val dischargePowers = discharge.mapNotNull { it.powerW }.sorted()
-
-    val peakPowerW = dischargePowers.lastOrNull() ?: 0f
-    val p95PowerW = if (dischargePowers.isEmpty()) 0f
-        else dischargePowers[(dischargePowers.size - 1) * 95 / 100]
-    val meanPowerW = if (dischargePowers.isEmpty()) 0f else dischargePowers.average().toFloat()
-    val peakCurrentA = discharge.mapNotNull { it.currentA }.minOrNull()?.let { -it } ?: 0f
-    val peakRegenW = tel.filter { it.regen }.mapNotNull { it.powerW }.maxOrNull() ?: 0f
-    val minVUnderLoad = discharge.mapNotNull { it.voltageV }.minOrNull() ?: 0f
-
-    var energyWh = 0f
-    for (i in 0 until tel.size - 1) {
-        val a = tel[i]
-        val dtH = (tel[i + 1].tsMs - a.tsMs).coerceAtLeast(0) / 3_600_000f
-        if ((a.currentA ?: 0f) < -DISCHARGE_EPS) energyWh += (a.powerW ?: 0f) * dtH
-    }
-
-    val ir = estimateInternalResistanceMohm(discharge)
-
-    return SessionEntity(
-        id = sessionId,
-        address = address,
-        startMs = startMs,
-        endMs = endMs,
-        sampleCount = tel.size,
-        peakPowerW = peakPowerW,
-        p95PowerW = p95PowerW,
-        meanPowerW = meanPowerW,
-        peakCurrentA = peakCurrentA,
-        peakRegenW = peakRegenW,
-        energyWh = energyWh,
-        socStart = socs.firstOrNull() ?: 0f,
-        socEnd = socs.lastOrNull() ?: 0f,
-        minSoc = socs.minOrNull() ?: 0f,
-        maxSoc = socs.maxOrNull() ?: 0f,
-        minVoltageUnderLoad = minVUnderLoad,
-        estInternalResistanceMohm = ir?.mohm,
-        irConfidence = ir?.confidence ?: 0f,
-        sohEnd = tel.mapNotNull { it.soh }.lastOrNull() ?: 0,
-        fullChargeAhEnd = tel.mapNotNull { it.fullChargeAh }.lastOrNull() ?: 0f,
-        cyclesEnd = tel.mapNotNull { it.cycles }.lastOrNull() ?: 0,
-        maxTempC = tel.mapNotNull { it.tempC }.maxOrNull() ?: 0f,
-    )
-}
+fun computeRollup(address: String, sessionId: Long, samples: List<SampleEntity>): SessionEntity =
+    rollupAccumulatorOf(address, sessionId, samples).toRollup()
