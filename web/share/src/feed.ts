@@ -9,6 +9,15 @@ export interface FeedPoint {
   current_a: number | null;
 }
 
+/** A bare chair fix — all the guest page needs for the marker, the badge and "Point me
+ *  there". The feed's `last` is typed as this, not FeedPoint: it is the newest fix from a
+ *  bounded server lookback (C5), and only t/lat/lon are promised for it. */
+export interface FeedFix {
+  t: number;
+  lat: number;
+  lon: number;
+}
+
 export interface GuestPack { label: string; soc: number }
 
 /** Deliberately minimal battery surface (2026-07-14 spec amendment): the active
@@ -25,8 +34,11 @@ export interface GuestStatus {
 export interface Feed {
   /** The whole day on a full poll; only buckets at/after `since` on an incremental one. */
   points: FeedPoint[];
-  /** Always the FULL trail's newest point, so a no-news poll can't blank the marker. */
-  last: FeedPoint | null;
+  /** The chair's newest fix from the server's bounded lookback (48 h), INDEPENDENT of the
+   *  today-only trail — so after local midnight it can be yesterday evening's fix while
+   *  `points` is empty. Never sliced by `since`, so a no-news poll can't blank the marker.
+   *  Null only when there is no fix in the lookback at all. */
+  last: FeedFix | null;
   expires_at: number;
   now: number;
   /** Start of the server's day window. A change means midnight rolled over mid-session,
@@ -51,6 +63,10 @@ export const FEED_POLL_MS = 4_000;
 /** Full-window refetch cadence — heals anything an increment can't see (see useTrack). */
 export const FULL_REFRESH_MS = 5 * 60_000;
 export const STALE_MS = 120_000; // mirrors v2 LIVE_STALE_MS
+/** A poll that hasn't answered in this long is aborted and counted as a failure (WEB-25).
+ *  Twice the poll period: a slow-but-working mobile link still gets through, a hung one
+ *  can't keep the page claiming LIVE. */
+export const FETCH_TIMEOUT_MS = 8_000;
 
 /** /share/<token> (optional trailing slash). Tokens are token_urlsafe(24) = 32 chars;
  *  require >=16 so /share/index.html and stray short paths never look like tokens. */
@@ -59,7 +75,7 @@ export function tokenFromPath(pathname: string): string | null {
   return m ? m[1] : null;
 }
 
-export function isStale(last: FeedPoint | null, nowMs: number): boolean {
+export function isStale(last: FeedFix | null, nowMs: number): boolean {
   return last == null || nowMs - last.t > STALE_MS;
 }
 
@@ -74,16 +90,23 @@ export function remainingLabel(expiresAt: number, nowMs: number): string {
 
 /** [since] is the newest bucket the caller already holds — its START, not one past it:
  *  that bucket is still filling server-side, so it gets re-sent and replaced. Omit it to
- *  fetch the whole day. */
-export async function fetchFeed(token: string, since?: number): Promise<FeedResult> {
+ *  fetch the whole day. The request — body included — is aborted after [timeoutMs] and
+ *  reported as an error, so a hung connection can never leave a poll pending forever. */
+export async function fetchFeed(
+  token: string, since?: number, timeoutMs: number = FETCH_TIMEOUT_MS,
+): Promise<FeedResult> {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
   try {
     const q = since != null ? `?since=${since}` : "";
-    const r = await fetch(`/share/${token}/feed${q}`);
+    const r = await fetch(`/share/${token}/feed${q}`, { signal: ctl.signal });
     if (r.status === 404) return { kind: "ended" };
     if (r.status === 410) return { kind: "expired" };
     if (!r.ok) return { kind: "error" };
     return { kind: "ok", feed: (await r.json()) as Feed };
   } catch {
     return { kind: "error" };
+  } finally {
+    clearTimeout(timer);
   }
 }

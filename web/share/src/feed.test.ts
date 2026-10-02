@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { FEED_POLL_MS, fetchFeed, isStale, remainingLabel, tokenFromPath } from "./feed";
+import {
+  FEED_POLL_MS, FETCH_TIMEOUT_MS, fetchFeed, isStale, remainingLabel, tokenFromPath,
+} from "./feed";
 
 describe("feed model", () => {
   it("tokenFromPath accepts /share/<token> only", () => {
@@ -15,8 +17,8 @@ describe("feed model", () => {
 
   it("isStale after 120s or with no fix", () => {
     expect(isStale(null, 1_000_000)).toBe(true);
-    expect(isStale({ t: 1_000_000 - 119_000, lat: 0, lon: 0, power_w: null, current_a: null }, 1_000_000)).toBe(false);
-    expect(isStale({ t: 1_000_000 - 121_000, lat: 0, lon: 0, power_w: null, current_a: null }, 1_000_000)).toBe(true);
+    expect(isStale({ t: 1_000_000 - 119_000, lat: 0, lon: 0 }, 1_000_000)).toBe(false);
+    expect(isStale({ t: 1_000_000 - 121_000, lat: 0, lon: 0 }, 1_000_000)).toBe(true);
   });
 
   it("remainingLabel formats h/m/d", () => {
@@ -28,7 +30,7 @@ describe("feed model", () => {
 });
 
 describe("fetchFeed", () => {
-  afterEach(() => { vi.unstubAllGlobals(); });
+  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
   const stubOk = () => {
     const spy = vi.fn(async (_url: string) => ({ ok: true, status: 200, json: async () => ({}) }));
@@ -56,5 +58,33 @@ describe("fetchFeed", () => {
 
   it("polls fast enough to beat the old 10 s cadence", () => {
     expect(FEED_POLL_MS).toBeLessThan(10_000);
+  });
+
+  // WEB-25: a request that never answers must not leave the page claiming LIVE forever.
+  it("aborts a hung request at the timeout and reports an error", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn((_url: string, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      })));
+    let settled = false;
+    const p = fetchFeed("tok", undefined, 8_000).then((r) => { settled = true; return r; });
+    await vi.advanceTimersByTimeAsync(7_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await p).kind).toBe("error");
+  });
+
+  it("clears its abort timer when the response lands in time", async () => {
+    vi.useFakeTimers();
+    stubOk();
+    await fetchFeed("tok");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  // Ruling C5: assert the timeout sits inside the 15 s window rather than pinning 8 000.
+  it("times out well inside the 15 s connection-lost window", () => {
+    expect(FETCH_TIMEOUT_MS).toBeLessThan(15_000);
+    expect(FETCH_TIMEOUT_MS).toBeGreaterThan(FEED_POLL_MS);
   });
 });
