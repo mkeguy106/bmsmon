@@ -844,7 +844,8 @@ open items from 2026-07-15 are closed; every constant held except one reseed and
   finish-hour histogram at each check-in and reopen if sessions start finishing 08:00–23:59 from a
   low start SOC.
 
-**Next check — overdue (was due ~2026-09); tracked with due dates in `docs/checkins/NEXT.md`.**
+**Next check — re-dated 2026-10-16 (slipped from ~2026-09); tracked with due dates in
+`docs/checkins/NEXT.md`.**
 That file is the single list of open check-in items — AR power-cost keep/revert, motion-column wire
 cost, GNSS-off duty re-quantification under the silence-as-stillness gate, whPerMile re-verify on the
 current-sign basis, and the charge finish-hour histogram. Add new items there, not here; write each

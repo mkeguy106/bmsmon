@@ -5,7 +5,8 @@ GPS pause saves? **Revert condition (standing):** if AR's cost exceeds the pause
 motion-gate feature is a net loss and should be reverted.
 
 **Status 2026-08-09:** protocol defined, baseline captured, measurement runs opportunistically —
-decision due at the ~2026-09 calibration check-in.
+decision due at calibration check-in #3, re-dated 2026-10-16 (slipped from ~2026-09;
+`docs/checkins/NEXT.md`).
 
 ## Why the obvious measurements don't work
 
@@ -49,7 +50,7 @@ off-charger is ideal but rare; the phone lives on the pad at night). Screen-on t
 subtracting `139 mA × screen-on fraction` before comparing. Charging-pad stretches are unusable
 (pad thermal feedback swamps 15 mA effects — the 60 Hz measurement already proved this).
 
-**Decision inputs at the ~2026-09 check-in:**
+**Decision inputs at check-in #3 (re-dated 2026-10-16 from ~2026-09):**
 1. GNSS duty under the new gate (from batterystats gnss time; sanity-checked against prod
    `motion_still` rows) — confirms the saving exists to be protected.
 2. Screen-normalized mA across ≥3 comparable stretches vs the 08-03 baseline.
