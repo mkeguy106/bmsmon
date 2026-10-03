@@ -90,7 +90,8 @@ class BmsRepository(
     private sealed class LoopEvent {
         data class ConnectSuccess(val addr: String, val session: BleSession) : LoopEvent()
         data class ConnectFailure(val addr: String) : LoopEvent()
-        data class PollFrame(val addr: String, val raw: ByteArray) : LoopEvent()
+        /** [tel] is null when the response didn't decode — still delivered for the decode_fail log. */
+        data class PollFrame(val addr: String, val raw: ByteArray, val tel: Telemetry?) : LoopEvent()
         data class PollDrop(val addr: String) : LoopEvent()
         object Kick : LoopEvent()
     }
@@ -333,15 +334,7 @@ class BmsRepository(
                     backoffUntil[event.addr] = now + profile.backoff.delayFor(fc)
                     if (fc >= profile.failThreshold) onReachable(event.addr, false)
                 }
-                is LoopEvent.PollFrame -> {
-                    val name = allTargets.firstOrNull { it.address == event.addr }?.name ?: event.addr
-                    val profile = ProfileRegistry.profileFor(name) ?: RedodoBekenProfile
-                    onPoll(
-                        event.addr,
-                        event.raw,
-                        BmsProtocol.parseTelemetry(event.raw, name, profile.layout, profile.responseHeader),
-                    )
-                }
+                is LoopEvent.PollFrame -> onPoll(event.addr, event.raw, event.tel)
                 is LoopEvent.PollDrop -> {
                     pollJobs.remove(event.addr)?.cancel()
                     held.remove(event.addr)?.close()
@@ -361,8 +354,13 @@ class BmsRepository(
      * Per-session poll loop: poll immediately, then delay between iterations. A single missed status
      * frame (timeout) is NOT fatal — the Beken module routinely skips/slows one notification on the
      * fast-polled stage, and tearing the link down + reconnecting on the first miss is what caused the
-     * "occasional stage disconnect". So a timeout retries in place up to [BatteryProfile.maxPollMisses]
+     * "occasional stage disconnect". So a miss retries in place up to [BatteryProfile.maxPollMisses]
      * consecutive misses before dropping; a hard error (link actually gone) drops immediately.
+     *
+     * The frame is parsed HERE, not on the control loop (UI-16): whether it decodes decides whether
+     * it resets the miss streak. An undecodable response is still delivered (tel = null) so the
+     * engine logs the decode_fail evidence, but it counts as a miss and keeps the normal cadence —
+     * the link answered, so the 0.5 s retry breather would only add load on a misbehaving module.
      */
     private suspend fun pollLoop(
         addr: String,
@@ -371,35 +369,41 @@ class BmsRepository(
         ch: Channel<LoopEvent>,
         wake: LoopWake,
     ) {
-        var consecutiveTimeouts = 0
+        var consecutiveMisses = 0
         while (true) {
             var raw: ByteArray? = null
+            var tel: Telemetry? = null
             val outcome = try {
                 raw = session.poll(POLL_TIMEOUT_MS)
-                if (raw != null) PollOutcome.FRAME else PollOutcome.TIMEOUT
+                tel = raw?.let { r ->
+                    val name = allTargets.firstOrNull { it.address == addr }?.name ?: addr
+                    BmsProtocol.parseTelemetry(r, name, profile.layout, profile.responseHeader)
+                }
+                pollOutcome(gotFrame = raw != null, decoded = tel != null)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.d(TAG, "poll $addr: ${e.message}")
                 PollOutcome.ERROR
             }
-            when (pollAction(outcome, consecutiveTimeouts, profile.maxPollMisses)) {
+            when (pollAction(outcome, consecutiveMisses, profile.maxPollMisses)) {
                 PollAction.DELIVER -> {
-                    consecutiveTimeouts = 0
-                    ch.trySend(LoopEvent.PollFrame(addr, raw!!))
-                    // BLE-6: wake the control loop so the frame is parsed/delivered NOW — without
-                    // this it sat in the channel until the next 1 s control tick, adding 0–1 s of
-                    // jitter to stage telemetry and delaying alert evaluation. wake is this
-                    // generation's own signal, so a stale worker can't wake the wrong loop.
-                    wake.wake()
-                    val pollMs = if (addr in stageAddrs) profile.stagePollMs else profile.slowPollMs
-                    delay(pollMs)
+                    consecutiveMisses = 0
+                    deliverFrame(addr, raw!!, tel, ch, wake)
+                    delay(pollCadenceMs(addr, profile))
                 }
                 PollAction.RETRY -> {
-                    consecutiveTimeouts++
-                    delay(POLL_RETRY_DELAY_MS)  // brief breather; keep the link open and re-poll
+                    consecutiveMisses++
+                    if (outcome == PollOutcome.UNDECODABLE) {
+                        deliverFrame(addr, raw!!, null, ch, wake)
+                        delay(pollCadenceMs(addr, profile))
+                    } else {
+                        delay(POLL_RETRY_DELAY_MS)  // brief breather; keep the link open and re-poll
+                    }
                 }
                 PollAction.DROP -> {
+                    // The final undecodable frame is still logged before the link is dropped.
+                    if (outcome == PollOutcome.UNDECODABLE) ch.trySend(LoopEvent.PollFrame(addr, raw!!, null))
                     ch.trySend(LoopEvent.PollDrop(addr))
                     wake.wake()  // BLE-6: mark unreachable + schedule the reconnect immediately
                     return
@@ -407,6 +411,27 @@ class BmsRepository(
             }
         }
     }
+
+    /**
+     * Hand one response to the control loop and wake it. BLE-6: without the wake the frame sat in
+     * the channel until the next 1 s control tick, adding 0–1 s of jitter to stage telemetry and
+     * delaying alert evaluation. [wake] is this generation's own signal, so a stale worker can't
+     * wake the wrong loop.
+     */
+    private fun deliverFrame(
+        addr: String,
+        raw: ByteArray,
+        tel: Telemetry?,
+        ch: Channel<LoopEvent>,
+        wake: LoopWake,
+    ) {
+        ch.trySend(LoopEvent.PollFrame(addr, raw, tel))
+        wake.wake()
+    }
+
+    /** Delay between polls of [addr]: fast on the stage, slow for background packs. */
+    private fun pollCadenceMs(addr: String, profile: BatteryProfile): Long =
+        if (addr in stageAddrs) profile.stagePollMs else profile.slowPollMs
 
     private companion object {
         const val TAG = "BmsRepository"

@@ -3,6 +3,7 @@ package dev.joely.bmsmon
 import dev.joely.bmsmon.ble.PollAction
 import dev.joely.bmsmon.ble.PollOutcome
 import dev.joely.bmsmon.ble.pollAction
+import dev.joely.bmsmon.ble.pollOutcome
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -37,5 +38,34 @@ class PollPolicyTest {
     @Test fun toleranceOfOneDropsOnFirstMiss() {
         // maxMisses = 1 restores the old drop-on-first-miss behavior.
         assertEquals(PollAction.DROP, pollAction(PollOutcome.TIMEOUT, 0, maxMisses = 1))
+    }
+
+    // --- UI-16: a response that never decodes is a miss, not a delivery ---
+
+    @Test fun pollOutcomeClassifiesDecodeFailureAsUndecodable() {
+        assertEquals(PollOutcome.TIMEOUT, pollOutcome(gotFrame = false, decoded = false))
+        assertEquals(PollOutcome.UNDECODABLE, pollOutcome(gotFrame = true, decoded = false))
+        assertEquals(PollOutcome.FRAME, pollOutcome(gotFrame = true, decoded = true))
+    }
+
+    @Test fun undecodableFrameRetriesLikeAMiss() {
+        assertEquals(PollAction.RETRY, pollAction(PollOutcome.UNDECODABLE, 0, maxMisses = 5))
+    }
+
+    @Test fun decodeFailOnlyPackEventuallyDrops() {
+        // The old loop counted any complete buffer as FRAME and reset the streak, so a pack whose
+        // every frame failed to parse stayed "connected" with a frozen SOC forever.
+        assertEquals(PollAction.RETRY, pollAction(PollOutcome.UNDECODABLE, 3, maxMisses = 5))
+        assertEquals(PollAction.DROP, pollAction(PollOutcome.UNDECODABLE, 4, maxMisses = 5))
+    }
+
+    @Test fun timeoutsAndDecodeFailuresShareOneStreak() {
+        // e.g. 3 timeouts, then an undecodable frame (miss #4), then a timeout (miss #5) → drop.
+        assertEquals(PollAction.RETRY, pollAction(PollOutcome.UNDECODABLE, 3, maxMisses = 5))
+        assertEquals(PollAction.DROP, pollAction(PollOutcome.TIMEOUT, 4, maxMisses = 5))
+    }
+
+    @Test fun aGoodFrameStillDeliversAfterUndecodableOnes() {
+        assertEquals(PollAction.DELIVER, pollAction(PollOutcome.FRAME, 4, maxMisses = 5))
     }
 }

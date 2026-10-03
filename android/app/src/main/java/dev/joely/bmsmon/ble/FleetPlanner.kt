@@ -26,30 +26,48 @@ data class PlannedDrop(val addr: String, val reason: DropReason)
 data class FleetPlan(val toConnect: List<String>, val toDisconnect: List<PlannedDrop>)
 
 /** Outcome of one poll attempt, fed to [pollAction]. */
-enum class PollOutcome { FRAME, TIMEOUT, ERROR }
+enum class PollOutcome {
+    FRAME,
+    TIMEOUT,
+    /** A complete response arrived but did not parse (UI-16) — a miss, see [pollAction]. */
+    UNDECODABLE,
+    ERROR,
+}
 
 /** What the poll loop does with one [PollOutcome]. */
 enum class PollAction { DELIVER, RETRY, DROP }
 
 /**
- * Decide what a persistent poll loop does after one poll, given how many *consecutive* timeouts
+ * Classify one poll (UI-16): only a response that PARSES is a delivered frame. A buffer that
+ * completes but fails realignment / the plausibility gate used to count as FRAME and reset the
+ * miss streak, keeping a decode-fail-only pack "connected" with a frozen SOC indefinitely.
+ */
+fun pollOutcome(gotFrame: Boolean, decoded: Boolean): PollOutcome = when {
+    !gotFrame -> PollOutcome.TIMEOUT
+    !decoded -> PollOutcome.UNDECODABLE
+    else -> PollOutcome.FRAME
+}
+
+/**
+ * Decide what a persistent poll loop does after one poll, given how many *consecutive* misses
  * have already happened and the profile's tolerance. Pure so the retry-before-drop policy is
  * unit-testable without BLE.
  *
  * A single missed status frame ([PollOutcome.TIMEOUT]) does NOT mean the link is dead — the Beken
  * module just skipped/slowed one notification. On the fast-polled stage this happens routinely, and
  * tearing the GATT link down + reconnecting on the first miss is what produced the "occasional stage
- * disconnect". So a timeout only drops once [maxMisses] consecutive misses accumulate; before that we
- * [RETRY] in place and keep the link. A hard [PollOutcome.ERROR] (e.g. STATE_DISCONNECTED) means the
- * link really is gone → [DROP] immediately. A [PollOutcome.FRAME] resets the streak → [DELIVER].
+ * disconnect". So a miss only drops once [maxMisses] consecutive misses accumulate; before that we
+ * [RETRY] in place and keep the link. An undecodable response is a miss too (UI-16). A hard
+ * [PollOutcome.ERROR] (STATE_DISCONNECTED, a failed write) means the link really is gone → [DROP]
+ * immediately. A [PollOutcome.FRAME] resets the streak → [DELIVER].
  *
- * @param priorConsecutiveTimeouts timeouts seen since the last delivered frame (before this outcome).
+ * @param priorConsecutiveTimeouts misses (timeouts or undecodable frames) since the last delivered frame.
  */
 fun pollAction(outcome: PollOutcome, priorConsecutiveTimeouts: Int, maxMisses: Int): PollAction =
     when (outcome) {
         PollOutcome.FRAME -> PollAction.DELIVER
         PollOutcome.ERROR -> PollAction.DROP
-        PollOutcome.TIMEOUT ->
+        PollOutcome.TIMEOUT, PollOutcome.UNDECODABLE ->
             if (priorConsecutiveTimeouts + 1 >= maxMisses) PollAction.DROP else PollAction.RETRY
     }
 
