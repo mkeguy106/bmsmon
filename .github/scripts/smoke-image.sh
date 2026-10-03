@@ -6,13 +6,22 @@
 #
 # Usage: smoke-image.sh <image-ref>
 # Needs: docker; a Postgres at $SMOKE_DATABASE_URL (default: the CI service / local dev DB on
-# 127.0.0.1:5432, user/password/db all "bmsmon"); host port 8000 free (--network host).
+# 127.0.0.1:5432, user/password/db all "bmsmon"); host port 8000 free (--network host) -- the
+# script refuses to start if anything already answers there.
 set -euo pipefail
 
 IMAGE="${1:?usage: smoke-image.sh <image-ref>}"
 DB_URL="${SMOKE_DATABASE_URL:-postgresql://bmsmon:bmsmon@127.0.0.1:5432/bmsmon}"
 NAME="bmsmon-smoke-$$"
 BASE="http://127.0.0.1:8000"
+
+# The container binds host port 8000 (--network host). If something already answers there --
+# a local `uvicorn --port 8000`, say -- every HTTP check below would be talking to IT, and the
+# smoke could pass without this image ever serving a request. Refuse instead.
+if curl -s -o /dev/null --max-time 5 "$BASE/"; then
+  echo "!! something is already serving $BASE -- stop it first; refusing to smoke against it" >&2
+  exit 1
+fi
 
 cleanup() {
   local status=$?
