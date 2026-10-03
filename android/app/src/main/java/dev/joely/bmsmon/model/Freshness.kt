@@ -15,20 +15,26 @@ package dev.joely.bmsmon.model
  *
  * Alerting rule (decided 2026-10-02): a reading drives alerts, the seize and the stage while it is
  * from THIS monitoring session — LIVE, or STALE with a known age ([drivesAlerts]). A STALE reading
- * cannot change, so it can only HOLD an alert its own LIVE frame already raised (it never
- * escalates one); dropping it instead would cancel and re-arm a critical alarm every time a low
- * pack missed two polls. The persisted seed and DISCONNECTED packs (unreachable, or silent past
+ * cannot change, so it mostly HOLDS an alert its own LIVE frame already raised; dropping it instead
+ * would cancel and re-arm a critical alarm every time a low pack missed two polls. It can still
+ * raise one first-time: a reading ≤ [STALE_MAX_MS] old can trigger a pack's first capacity
+ * notification or the seize once the 30 s charge latch expires (or after a config change) — the
+ * same decision 30 s of live Idle frames would have made, so this is accepted (it errs toward
+ * alerting). The persisted seed and DISCONNECTED packs (unreachable, or silent past
  * [STALE_MAX_MS]) never drive anything — "we alert on live data, not on absence" still stands.
  */
 
 /** Grace past a pack's poll interval before its reading stops counting as LIVE: two missed polls
- *  (2 × (4 s poll timeout + 0.5 s retry breather)). One routine missed notification on the stage
- *  — a ~6 s gap — must not flicker the stage to STALE. */
-const val LIVE_GRACE_MS = 9_000L
+ *  (2 × (4 s poll timeout + 0.5 s retry breather) = 9 s) plus ~1 s for the round-trip of the poll
+ *  that finally answers. On the stage that frame lands ~10.6–11.0 s after the last one, inside the
+ *  1.5 s + 10 s window. One routine missed notification — a ~6 s gap — must not flicker to STALE. */
+const val LIVE_GRACE_MS = 10_000L
 
 /** Backstop: a pack still "reachable" with no parsed frame for this long reads DISCONNECTED.
  *  Normal paths drop the link well before this (5 misses ≈ 24 s, or within one poll of a
- *  STATE_DISCONNECTED since BLE-18); this bounds any path that doesn't. */
+ *  STATE_DISCONNECTED since BLE-18); this bounds any path that doesn't. The UI applies it within
+ *  its 1 s check; the engine re-decides on every BLE event, so its alerts and seize stop within
+ *  ≤ 60 s, plus up to one 10 s tick (MonitorEngine's STAGE_TICK_MS) when no BLE event arrives. */
 const val STALE_MAX_MS = 60_000L
 
 sealed interface Freshness {
@@ -76,12 +82,16 @@ fun decisionView(fleet: Map<String, BatteryStatus>, nowElapsedMs: Long): Map<Str
         if (s.reachable && !freshness(s, nowElapsedMs).drivesAlerts()) s.copy(reachable = false) else s
     }
 
-/** Compact age for "updated 14s ago" / "last seen 3 min ago". */
-fun formatAge(ageMs: Long): String = when {
-    ageMs < 60_000L -> "${ageMs / 1_000L}s"
-    ageMs < 3_600_000L -> "${ageMs / 60_000L} min"
-    ageMs < 86_400_000L -> "${ageMs / 3_600_000L} h"
-    else -> "${ageMs / 86_400_000L} d"
+/** Compact age for "updated 14s ago" / "last seen 3 min ago". A negative age (a frame stamped
+ *  just after the clock was read) formats as "0s". */
+fun formatAge(ageMs: Long): String {
+    val age = ageMs.coerceAtLeast(0L)
+    return when {
+        age < 60_000L -> "${age / 1_000L}s"
+        age < 3_600_000L -> "${age / 60_000L} min"
+        age < 86_400_000L -> "${age / 3_600_000L} h"
+        else -> "${age / 86_400_000L} d"
+    }
 }
 
 /** The user-facing freshness phrase for a list/detail row, or null when LIVE (render the BMS

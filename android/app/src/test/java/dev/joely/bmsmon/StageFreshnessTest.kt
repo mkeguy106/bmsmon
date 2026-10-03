@@ -131,7 +131,7 @@ class StageFreshnessTest {
 
     @Test fun tickAdvancesTheClockOnceAPackGoesStale() {
         val s = state(live(60f), live(61f))   // frames 500 ms old
-        val later = nowE + 15_000L             // 15.5 s old: past 1.5 s cadence + 9 s grace
+        val later = nowE + 15_000L             // 15.5 s old: past 1.5 s cadence + 10 s grace
         val t = s.freshnessTick(nowMs = 1_000L, elapsedMs = later)
         assertEquals(later, t.nowElapsedMs)
         assertEquals(15_500L, t.stageItems()[0].staleAgeMs)

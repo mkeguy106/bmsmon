@@ -55,14 +55,31 @@ class FreshnessTest {
         assertEquals(Freshness.Stale(edge + 1), freshness(status(edge + 1, cadence = SLOW_POLL_MS), now))
     }
 
-    // Review Focus 1: a pack last polled at the slow cadence and then promoted to the stage (seize,
-    // or the other base starts driving) is judged by the cadence it was LAST POLLED at, so it can't
-    // flash STALE in the seconds before its first stage-cadence frame.
+    // M2: "two missed polls" must include the round-trip of the poll that finally answers. Frame at
+    // t0 on the stage; poll 1 at 1.5 s times out at 5.5 s; after the 0.5 s breather poll 2 goes out
+    // at 6.0 s and times out at 10.0 s; poll 3 goes out at 10.5 s and its frame lands ~10.6–11.0 s.
+    @Test fun twoMissedStagePollsAndTheAnsweringRoundTripStayLive() {
+        assertEquals(Freshness.Live, freshness(status(11_000L), now))
+        assertEquals(10_000L, LIVE_GRACE_MS)
+    }
+
+    // A pack last polled at the slow cadence and then promoted to the stage (seize, or the other
+    // base starts driving) is judged by the cadence it was LAST POLLED at, so it can't flash STALE
+    // in the seconds before its first stage-cadence frame.
     @Test fun promotedPackKeepsTheWindowOfTheCadenceItWasLastPolledAt() {
         assertEquals(Freshness.Live, freshness(status(12_000L, cadence = SLOW_POLL_MS), now))
     }
 
-    // Review Focus 2: the UI clock can be read a moment before the engine stamps a frame.
+    // An explicit pollIntervalMs overrides the cadence the pack was last polled at.
+    @Test fun anExplicitPollIntervalOverridesTheStampedCadence() {
+        val s = status(15_000L, cadence = SLOW_POLL_MS)                       // LIVE on its own cadence
+        assertEquals(Freshness.Live, freshness(s, now))
+        assertEquals(Freshness.Stale(15_000L), freshness(s, now, pollIntervalMs = STAGE_POLL_MS))
+        val t = status(15_000L, cadence = STAGE_POLL_MS)                      // STALE on its own cadence
+        assertEquals(Freshness.Live, freshness(t, now, pollIntervalMs = SLOW_POLL_MS))
+    }
+
+    // The UI clock can be read a moment before the engine stamps a frame.
     @Test fun frameStampedAfterTheUiClockReadsLive() {
         val s = BatteryStatus(tel, reachable = true, lastFrameAtElapsedMs = now + 40L, frameIntervalMs = STAGE_POLL_MS)
         assertEquals(Freshness.Live, freshness(s, now))
@@ -122,6 +139,12 @@ class FreshnessTest {
         assertEquals("59 min", formatAge(3_599_999L))
         assertEquals("1 h", formatAge(3_600_000L))
         assertEquals("2 d", formatAge(2 * 86_400_000L))
+    }
+
+    @Test fun aNegativeAgeFormatsAsZero() {
+        // A frame stamped just after the UI clock was read must never render "Updated -1s ago".
+        assertEquals("0s", formatAge(-1L))
+        assertEquals("0s", formatAge(-90_000L))
     }
 
     @Test fun labels() {

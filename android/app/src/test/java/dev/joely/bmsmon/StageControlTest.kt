@@ -66,7 +66,8 @@ class StageControlTest {
         r: Roster = roster,
         disabled: Set<String> = emptySet(),
         alerts: AlertConfig? = ladder,
-    ) = engineDecision(r, fleet, nowE, nowMs, emptyMap(), cfg, current, disabled, alerts, emptyMap())
+        chargeAt: Map<String, Long> = emptyMap(),
+    ) = engineDecision(r, fleet, nowE, nowMs, emptyMap(), cfg, current, disabled, alerts, chargeAt)
 
     // --- the seize rule itself: unchanged, byte for byte ---
 
@@ -113,7 +114,7 @@ class StageControlTest {
 
     @Test fun staleSessionReadingHoldsItsNotification() {
         val a = addrs("2016").first()
-        val stale = live(12f).copy(lastFrameAtElapsedMs = nowE - 15_000L)   // past the 10.5 s stage window
+        val stale = live(12f).copy(lastFrameAtElapsedMs = nowE - 15_000L)   // past the 11.5 s stage window
         val plan = reconcileFleetNotifications(decide(mapOf(a to stale)).capacity!!, mapOf(a to 15))
         assertFalse(a in plan.cancel)
         assertFalse(a in plan.notify)
@@ -138,6 +139,25 @@ class StageControlTest {
 
     @Test fun noAlertConfigYetMeansNoCapacityEvaluation() {
         assertNull(decide(base("2016", 5f), alerts = null).capacity)
+    }
+
+    // --- the per-pack charge latch the engine carries between decisions (UI-9) ---
+
+    @Test fun aChargingFrameAdvancesTheChargeLatch() {
+        val a = addrs("2016").first()
+        val d = decide(mapOf(a to live(12f, BatteryState.Charging)), chargeAt = mapOf(a to 5L))
+        assertEquals(nowMs, d.chargeAt.getValue(a))
+        // An Idle flap inside the hold reads as charging, so the low pack is still not notified.
+        val flap = decide(mapOf(a to live(12f)), chargeAt = d.chargeAt)
+        assertEquals(nowMs, flap.chargeAt.getValue(a))
+        assertTrue(flap.capacity!!.getValue(a).charging)
+    }
+
+    @Test fun withNoAlertConfigTheInputLatchIsCarriedUnchanged() {
+        val a = addrs("2016").first()
+        val latch = mapOf(a to 5L)
+        val d = decide(mapOf(a to live(12f, BatteryState.Charging)), alerts = null, chargeAt = latch)
+        assertEquals(latch, d.chargeAt)
     }
 
     // --- UI-29: roster membership and the empty-stage fallback ---
@@ -202,11 +222,14 @@ class StageControlTest {
         )
         assertEquals(pin, held.target)
         assertTrue(held.pinned)
+        // Expired, with the stage still sitting on the pinned base (current = pin): the target
+        // matches the pin, so only the time clause can make it unpinned.
         val expired = resolveEngineStage(
             roster, emptyMap(), emptyMap(),
             StageConfig(dailyDriverId = "2012", manualStage = pin, manualPinnedAt = nowMs - PIN_HOLD_MS),
-            StageTarget.Base("2012"), nowMs,
+            pin, nowMs,
         )
+        assertEquals(pin, expired.target)
         assertFalse(expired.pinned)
     }
 

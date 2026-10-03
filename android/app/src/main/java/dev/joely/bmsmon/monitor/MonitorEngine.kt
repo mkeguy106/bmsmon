@@ -459,9 +459,12 @@ class MonitorEngine(
         }
     }
 
-    /** Disable packs: mark them unreachable in the state FIRST (synchronously — reachability has a
-     *  single writer, so a just-disconnected pack can never flash back to "connected" while its
-     *  worker tears down), then cancel their BLE workers. */
+    /** Disable packs: record them, then mark them unreachable in the state (synchronously), then
+     *  cancel their BLE workers. A worker's cancellation is cooperative, so a frame or connect
+     *  already in flight can still reach [onPoll]/[onReachable] after this returns; both ignore a
+     *  disabled address — re-checked inside their state update, so one racing this call can't
+     *  commit after it either — which is what keeps a just-disconnected pack from flashing back
+     *  to "connected" (or driving an alert or the seize) while its worker tears down. */
     fun setDisabled(addresses: Set<String>) {
         disabledAddrs = addresses.map { it.uppercase() }.toSet()
         _state.update { st ->
@@ -615,8 +618,16 @@ class MonitorEngine(
         importChecked = true
         scope.launch {
             val dir = filesDir ?: return@launch
-            repository.importCsvOnce(listOf(File(dir, "usage_log.csv"), File(dir, "usage_log.1.csv")))
-            markImported()
+            // runCatching: no CoroutineExceptionHandler on this scope — an IOException or
+            // SQLiteException here used to kill the process (and monitoring with it), again on every
+            // app open while the flag stayed false. A failure leaves the flag unset, so the next
+            // process start retries.
+            runCatching {
+                repository.importCsvOnce(listOf(File(dir, "usage_log.csv"), File(dir, "usage_log.1.csv")))
+                markImported()
+            }.onFailure {
+                if (it !is CancellationException) Log.w(TAG, "legacy CSV import failed; retried next process start", it)
+            }
         }
     }
 
@@ -827,6 +838,9 @@ class MonitorEngine(
     fun telemetrySnapshot(): Map<String, Telemetry> =
         _state.value.fleet.filterValues { it.telemetry != null }.mapValues { it.value.telemetry!! }
 
+    /** A user-disconnected pack ([setDisabled]); [disabledAddrs] is stored uppercased. */
+    private fun isDisabled(addr: String) = addr.uppercase() in disabledAddrs
+
     private fun onPoll(addr: String, raw: ByteArray, t: Telemetry?) {
         // UI-29: a frame already in flight when its pack was removed from the roster must not
         // re-add it to the fleet as a ghost (setRoster pruned it).
@@ -836,6 +850,10 @@ class MonitorEngine(
             if (logging) repository.ingestRawOnly(addr, raw, "decode_fail", now)
             return
         }
+        // M1: a frame already in flight when the user disconnected this pack must not revive it
+        // (reachable + a fresh stamp = LIVE, able to alert or seize, for up to 60 s). Re-checked
+        // inside the state update below for a setDisabled that lands between here and there.
+        if (isDisabled(addr)) return
         val st0 = _state.value
         val group = roster.groupOf(addr)
         // Regen is judged against the group's last-discharge time BEFORE this sample updates it.
@@ -859,6 +877,9 @@ class MonitorEngine(
         val frameAt = elapsedNow()
         val cadence = if (addr.uppercase() in stageAddrs) profile.stagePollMs else profile.slowPollMs
         _state.update { st ->
+            // Read inside the CAS loop: if setDisabled's own update commits first, this retries,
+            // sees the pack disabled, and leaves it unreachable.
+            if (isDisabled(addr)) return@update st
             val fleet = st.fleet + (addr to (st.fleet[addr] ?: BatteryStatus()).copy(
                 telemetry = t, reachable = true, etaFullMin = etaFullMin, range = range,
                 lastFrameAtElapsedMs = frameAt, frameIntervalMs = cadence,
@@ -916,26 +937,34 @@ class MonitorEngine(
 
     private fun onReachable(addr: String, reachable: Boolean) {
         val was = _state.value.fleet[addr]?.reachable == true
+        // The value actually committed: M1 — a user-disconnected pack is never marked reachable,
+        // not even by a connect that completed just as the user disconnected it. Read inside the
+        // CAS loop, like onPoll, so a racing setDisabled can't be overtaken.
+        var up = reachable
         _state.update { st ->
             if (roster.batteryAt(addr) == null) {
                 // UI-29: a removed pack's final link-down must not keep it in the fleet. A frame
                 // in flight while setRoster pruned it can still have re-added it after the prune,
                 // so REMOVE it here rather than merely skipping (that would leave the ghost
                 // reading "reachable" — counted as connected and persisted with the snapshot).
+                up = reachable
                 st.copy(fleet = st.fleet - addr, regenAddrs = st.regenAddrs - addr)
             } else {
-                val fleet = st.fleet + (addr to (st.fleet[addr] ?: BatteryStatus()).copy(reachable = reachable))
+                up = reachable && !isDisabled(addr)
+                val fleet = st.fleet + (addr to (st.fleet[addr] ?: BatteryStatus()).copy(reachable = up))
                 st.copy(
                     fleet = fleet,
-                    regenAddrs = if (reachable) st.regenAddrs else st.regenAddrs - addr,
-                    lastDischargeAt = recomputeLastDischarge(decisionView(fleet, elapsedNow()), st.lastDischargeAt, now()),
+                    regenAddrs = if (up) st.regenAddrs else st.regenAddrs - addr,
+                    lastDischargeAt = recomputeLastDischarge(
+                        decisionView(fleet, elapsedNow()), st.lastDischargeAt, now(),
+                    ),
                 )
             }
         }
-        if (reachable != was) {
+        if (up != was) {
             val ts = now()
-            if (logging) repository.logLink(addr, reachable, ts)
-            reporter?.reportLink(addr, roster.batteryAt(addr)?.alias, roster.groupOf(addr)?.id, reachable, ts)
+            if (logging) repository.logLink(addr, up, ts)
+            reporter?.reportLink(addr, roster.batteryAt(addr)?.alias, roster.groupOf(addr)?.id, up, ts)
         }
         // Stage + alert evaluation runs right after this returns — see the BLE wiring in start().
     }

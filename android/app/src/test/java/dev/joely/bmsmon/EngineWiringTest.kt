@@ -58,4 +58,32 @@ class EngineWiringTest {
         val body = flat.substringAfter("fun forceStage(target: StageTarget) {").substringBefore("fun setStageConfig(")
         assertTrue(body.contains("persistStage(target)"))
     }
+
+    // M1: a poll worker's cancellation is cooperative, so a frame (or a connect) already in flight
+    // when the user disconnects a pack still reaches the engine after setDisabled. It must not mark
+    // that pack reachable — a fresh stamp would read LIVE and could alert or seize for up to 60 s.
+    @Test fun anInFlightFrameNeverRevivesADisabledPack() {
+        val onPoll = flat.substringAfter("private fun onPoll(").substringBefore("private fun onReachable(")
+        val early = onPoll.indexOf("if (isDisabled(addr)) return ")
+        val update = onPoll.indexOf("_state.update { st ->")
+        assertTrue("onPoll returns early for a disabled pack", early in 0 until update)
+        val lambda = onPoll.substring(update).substringBefore("val fleet = st.fleet +")
+        assertTrue(
+            "…and re-checks inside the CAS loop, so a racing setDisabled can't be overtaken",
+            lambda.contains("if (isDisabled(addr)) return@update st"),
+        )
+    }
+
+    @Test fun aDisabledPackIsNeverMarkedReachable() {
+        val onReachable = flat.substringAfter("private fun onReachable(").substringBefore("private suspend fun learnTail(")
+        assertTrue(onReachable.contains("up = reachable && !isDisabled(addr)"))
+        assertTrue(onReachable.contains(".copy(reachable = up)"))
+        assertFalse(onReachable.contains(".copy(reachable = reachable)"))
+    }
+
+    // M7: no CoroutineExceptionHandler on the engine scope — an unguarded import throw kills the process.
+    @Test fun theLegacyCsvImportCannotCrashTheProcess() {
+        val body = flat.substringAfter("fun importLegacyCsvIfNeeded(").substringBefore("@Volatile private var gpsWanted")
+        assertTrue(body.contains("runCatching { repository.importCsvOnce("))
+    }
 }
