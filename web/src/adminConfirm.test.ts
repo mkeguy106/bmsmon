@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { DeviceRow } from "./types";
-import { lastSeenMs, restoreDeviceConfirm, revokeDeviceConfirm } from "./adminConfirm";
+import {
+  backdropDismisses, lastSeenMs, restoreDeviceConfirm, revokeApiKeyConfirm, revokeDeviceConfirm,
+  revokeShareConfirm,
+} from "./adminConfirm";
 
 const NOW = Date.parse("2026-10-03T12:00:00Z");
 const dev = (o: Partial<DeviceRow> = {}): DeviceRow => ({
@@ -47,5 +50,26 @@ describe("lastSeenMs", () => {
     expect(lastSeenMs(dev({ last_seen_at: "2026-10-03T11:58:00+00:00" }))).toBe(NOW - 2 * 60_000);
     expect(lastSeenMs(dev({ last_seen_at: null }))).toBeNull();
     expect(lastSeenMs(dev({ last_seen_at: "yesterday-ish" }))).toBeNull();
+  });
+});
+
+describe("revokeShareConfirm / revokeApiKeyConfirm", () => {
+  it("names the guest and says the link can't be brought back", () => {
+    const t = revokeShareConfirm("Dave");
+    expect(t).toMatch(/^Revoke the live-location link for "Dave"\?/);
+    expect(t).toContain("can't be undone");
+  });
+
+  it("names the key and says what stops updating", () => {
+    const t = revokeApiKeyConfirm("desktop widgets");
+    expect(t).toMatch(/^Revoke the API key "desktop widgets"\?/);
+    expect(t).toContain("desktop widgets, stops updating");
+  });
+});
+
+describe("backdropDismisses", () => {
+  it("lets the backdrop close the dialog only before a link exists", () => {
+    expect(backdropDismisses(null)).toBe(true);
+    expect(backdropDismisses("https://bmsmon.example/share/abc")).toBe(false);
   });
 });

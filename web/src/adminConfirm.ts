@@ -32,3 +32,13 @@ export function revokeDeviceConfirm(d: DeviceRow, all: readonly DeviceRow[], now
 
 export const restoreDeviceConfirm = (d: DeviceRow): string =>
   `Restore "${deviceName(d)}"?\n\nIt can upload telemetry again with its existing key. No re-enrollment is needed.`;
+
+export const revokeShareConfirm = (name: string): string =>
+  `Revoke the live-location link for "${name}"?\n\nThey stop seeing the chair within seconds. This can't be undone; create a new link if they still need one.`;
+
+export const revokeApiKeyConfirm = (name: string): string =>
+  `Revoke the API key "${name}"?\n\nAnything using it, such as the desktop widgets, stops updating. This can't be undone; mint a new key instead.`;
+
+/** The share link is shown exactly once, so once it exists a stray tap on the backdrop must
+ *  not discard it: only Done closes the dialog then. */
+export const backdropDismisses = (url: string | null): boolean => url == null;

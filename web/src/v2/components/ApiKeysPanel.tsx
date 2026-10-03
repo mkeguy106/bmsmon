@@ -1,5 +1,6 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { createApiKey, getApiKeys, revokeApiKey, type ApiKeyRow } from "../../api";
+import { revokeApiKeyConfirm } from "../../adminConfirm";
 
 const errKind = (e: unknown): "auth" | "net" =>
   e instanceof Error && (e.message === "401" || e.message === "403") ? "auth" : "net";
@@ -53,10 +54,13 @@ export function ApiKeysPanel() {
         : "Couldn't create the key — check the connection and try again."));
   };
 
-  const revoke = (id: string) => revokeApiKey(id)
-    .then(() => { setActionErr(null); refresh(); })
-    .catch((e) => setActionErr(errKind(e) === "auth" ? AUTH_MSG
-      : "Couldn't revoke the key — check the connection and try again."));
+  const revoke = (k: ApiKeyRow) => {
+    if (!window.confirm(revokeApiKeyConfirm(k.name))) return;
+    revokeApiKey(k.id)
+      .then(() => { setActionErr(null); refresh(); })
+      .catch((e) => setActionErr(errKind(e) === "auth" ? AUTH_MSG
+        : "Couldn't revoke the key — check the connection and try again."));
+  };
 
   const copy = (k: string) => {
     navigator.clipboard?.writeText(k).then(() => setCopied(true)).catch(() => setCopied(false));
@@ -125,7 +129,7 @@ export function ApiKeysPanel() {
                 <td className="mono" style={{ color: "var(--text-3)" }}>{ago(k.last_used_at)}</td>
                 <td style={{ textAlign: "right" }}>
                   {!k.revoked_at && (
-                    <button style={btn} onClick={() => revoke(k.id)}>Revoke</button>
+                    <button style={btn} onClick={() => revoke(k)}>Revoke</button>
                   )}
                 </td>
               </tr>

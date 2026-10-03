@@ -1,5 +1,6 @@
 import { useState, type CSSProperties } from "react";
 import { createShare } from "../../api";
+import { backdropDismisses } from "../../adminConfirm";
 
 const DURATIONS = [
   { value: "1h", label: "1 hour" },
@@ -44,7 +45,7 @@ export function ShareDialog({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <div style={backdrop} onClick={onClose}>
+    <div style={backdrop} onClick={backdropDismisses(url) ? onClose : undefined}>
       <div style={card} onClick={(e) => e.stopPropagation()}>
         <div className="eyebrow" style={{ marginBottom: 12 }}>Share live location</div>
         {url == null ? (
