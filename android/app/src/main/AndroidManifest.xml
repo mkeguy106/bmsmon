@@ -37,6 +37,9 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Android 13+: runtime-granted, for the ongoing foreground-service notification. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- BLE-17: restore monitoring headlessly after a reboot or an app update (incl. adb install -r).
+         Only when monitoring was on and BLE is granted; never relaunches the Activity. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Vibration for critical low-battery alert notifications. Install-time, auto-granted. -->
     <uses-permission android:name="android.permission.VIBRATE" />
     <!-- Read connectivity (Wi-Fi vs cellular) for the locked-screen status strip. Install-time. -->
@@ -75,6 +78,17 @@
             android:name=".monitor.MonitoringService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice|location" />
+
+        <!-- exported="false": system broadcasts (BOOT_COMPLETED, MY_PACKAGE_REPLACED) are still
+             delivered; no other app can trigger a restore. -->
+        <receiver
+            android:name=".monitor.BootRestoreReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <receiver
             android:name=".BmsDeviceAdminReceiver"

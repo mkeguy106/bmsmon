@@ -113,3 +113,20 @@ fun monitoringNotificationText(st: MonitorState): String {
         }
     }
 }
+
+/** `Intent.ACTION_BOOT_COMPLETED` / `ACTION_MY_PACKAGE_REPLACED`, as literals so the rule stays
+ *  JVM-pure (pinned to the platform by BootRestoreTest). Not LOCKED_BOOT_COMPLETED: settings and
+ *  the database live in credential-encrypted storage, unlocked only by BOOT_COMPLETED. */
+internal const val ACTION_BOOT_COMPLETED = "android.intent.action.BOOT_COMPLETED"
+internal const val ACTION_MY_PACKAGE_REPLACED = "android.intent.action.MY_PACKAGE_REPLACED"
+
+fun isRestoreTrigger(action: String?): Boolean =
+    action == ACTION_BOOT_COMPLETED || action == ACTION_MY_PACKAGE_REPLACED
+
+/**
+ * BLE-17: restore monitoring headlessly after a reboot or an app update only when monitoring was
+ * on when the phone went down ([monitoringPersisted]; null = settings unreadable → don't guess)
+ * and the BLE grant is still in place (a connectedDevice FGS needs it; see BLE-26).
+ */
+fun shouldRestoreMonitoring(action: String?, monitoringPersisted: Boolean?, blePermitted: Boolean): Boolean =
+    isRestoreTrigger(action) && monitoringPersisted == true && blePermitted
