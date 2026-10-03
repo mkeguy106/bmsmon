@@ -93,6 +93,11 @@ class BleSession(
             WriteResult.REFUSED, WriteResult.BUSY -> return null
             WriteResult.LINK_ERROR -> throw IllegalStateException("status write failed: link unusable")
         }
+        // A disconnect that landed between the check above and arming `response` was missed by the
+        // callback's completeExceptionally (response was still the old/null deferred). The callback
+        // sets linkLost BEFORE it reads response and we arm response BEFORE this read (both
+        // volatile), so at least one side always observes the other: never wait out the timeout.
+        if (linkLost) throw IllegalStateException("link lost")
         return withTimeoutOrNull(timeoutMs) { resp.await() }
     }
 

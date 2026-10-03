@@ -142,7 +142,7 @@ enum class WriteResult { WRITTEN, REFUSED, BUSY, LINK_ERROR }
 internal const val GATT_WRITE_SUCCESS = 0
 internal const val GATT_WRITE_REQUEST_BUSY = 201
 
-/** API 33+ `writeCharacteristic` status → outcome. BUSY = a GATT op is still queued on a live link
+/** API 33+ characteristic-write status → outcome. BUSY = a GATT op is still queued on a live link
  *  (a miss); anything else non-success (not connected, not allowed, unknown) = the link is unusable. */
 fun classifyWriteStatus(status: Int): WriteResult = when (status) {
     GATT_WRITE_SUCCESS -> WriteResult.WRITTEN
@@ -150,6 +150,6 @@ fun classifyWriteStatus(status: Int): WriteResult = when (status) {
     else -> WriteResult.LINK_ERROR
 }
 
-/** Pre-33 `writeCharacteristic` returns only a Boolean, which can't tell busy from gone: a miss. */
+/** The pre-33 characteristic write returns only a Boolean, which can't tell busy from gone: a miss. */
 fun classifyLegacyWrite(accepted: Boolean): WriteResult =
     if (accepted) WriteResult.WRITTEN else WriteResult.BUSY
