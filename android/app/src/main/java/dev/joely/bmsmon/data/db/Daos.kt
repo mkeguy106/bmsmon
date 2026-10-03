@@ -56,6 +56,39 @@ data class IvBinMoments(
 /** Per-session cell-imbalance aggregate (mV = (cellMax − cellMin)·1000) for one pack (DATA-15). */
 data class CellSessionStats(val sessionId: Long, val n: Long, val sumMv: Double, val maxMv: Double)
 
+/** One row of the V–I stride walk (currentA/voltageV non-null by the query's WHERE). */
+data class IvPoint(val id: Long, val tsMs: Long, val currentA: Float, val voltageV: Float)
+
+/** Raw V/I moments per integer-SOC bin for one pack (DATA-15) — the regression without the rows.
+ *  CAST truncates like Kotlin's Float.toInt(); a NULL soc forms its own (bin = NULL) group. */
+internal const val IV_MOMENTS_BY_SOC_BIN_SQL =
+    "SELECT CAST(soc AS INTEGER) AS bin, COUNT(*) AS n, " +
+        "SUM(currentA) AS sumI, SUM(voltageV) AS sumV, SUM(currentA * currentA) AS sumII, " +
+        "SUM(currentA * voltageV) AS sumIV, SUM(voltageV * voltageV) AS sumVV, " +
+        "MIN(currentA) AS minI, MAX(currentA) AS maxI, MIN(voltageV) AS minV, MAX(voltageV) AS maxV " +
+        "FROM samples WHERE address = :address AND linkEvent IS NULL " +
+        "AND currentA IS NOT NULL AND voltageV IS NOT NULL " +
+        "GROUP BY bin"
+
+/** Per-session cell-Δ sums for one pack (DATA-15). */
+internal const val CELL_STATS_BY_SESSION_SQL =
+    "SELECT sessionId, COUNT(*) AS n, " +
+        "SUM((cellMaxV - cellMinV) * 1000.0) AS sumMv, MAX((cellMaxV - cellMinV) * 1000.0) AS maxMv " +
+        "FROM samples WHERE address = :address AND linkEvent IS NULL " +
+        "AND cellMinV IS NOT NULL AND cellMaxV IS NOT NULL AND cellMaxV >= cellMinV " +
+        "GROUP BY sessionId"
+
+/** The I/V row [skip] positions after the keyset (afterTs, afterId) in (tsMs, id) order — one
+ *  stride step (DATA-15). index_samples_address_tsMs is (address, tsMs, rowid), so SQLite seeks
+ *  into the index and walks it in order with no sort (HealthSqlTest pins the plan); skipped rows
+ *  are filter-checked but never returned. `id % k` sampling was rejected: packs' rows interleave
+ *  in one id sequence, so it can alias to zero rows for a pack. */
+internal const val IV_ROW_AFTER_SQL =
+    "SELECT id, tsMs, currentA, voltageV FROM samples " +
+        "WHERE address = :address AND tsMs >= :afterTs AND (tsMs > :afterTs OR id > :afterId) " +
+        "AND linkEvent IS NULL AND currentA IS NOT NULL AND voltageV IS NOT NULL " +
+        "ORDER BY tsMs ASC, id ASC LIMIT 1 OFFSET :skip"
+
 /** One keyset page of a session's telemetry rows, in id order (DATA-16). index_samples_sessionId is
  *  (sessionId, rowid), so this is a pure index range seek with no sort (RollupSqlTest pins it). */
 internal const val ROLLUP_PAGE_SQL =
@@ -75,8 +108,16 @@ interface SampleDao {
     @Query(ROLLUP_PAGE_SQL)
     fun rollupPage(sessionId: Long, afterId: Long, limit: Int): List<RollupRow>
 
-    @Query("SELECT * FROM samples WHERE address = :address AND linkEvent IS NULL ORDER BY tsMs ASC")
-    suspend fun telemetryFor(address: String): List<SampleEntity>
+    @Query(IV_MOMENTS_BY_SOC_BIN_SQL)
+    suspend fun ivMomentsBySocBin(address: String): List<IvBinMoments>
+
+    @Query(CELL_STATS_BY_SESSION_SQL)
+    suspend fun cellStatsBySession(address: String): List<CellSessionStats>
+
+    /** Blocking — called ~700–1400 times per pack in a tight loop on IO; a suspend hop per row
+     *  would dominate the walk. Never call on Main. */
+    @Query(IV_ROW_AFTER_SQL)
+    fun ivRowAfter(address: String, afterTs: Long, afterId: Long, skip: Int): IvPoint?
 
     @Query("SELECT * FROM samples WHERE address = :address AND tsMs >= :sinceMs AND linkEvent IS NULL ORDER BY tsMs ASC")
     suspend fun since(address: String, sinceMs: Long): List<SampleEntity>

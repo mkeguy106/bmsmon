@@ -67,6 +67,7 @@ import dev.joely.bmsmon.model.resolveStage
 import dev.joely.bmsmon.model.targetFor
 import dev.joely.bmsmon.ui.theme.DefaultAccent
 import dev.joely.bmsmon.ui.theme.DefaultPower
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -74,6 +75,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 enum class Screen { Home, Settings, Detail, History, Review, Timeline }
@@ -560,12 +562,17 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     fun openTimeline(sessionId: Long) = _state.update { it.copy(screen = Screen.Timeline, timelineSession = sessionId) }
     fun closeTimeline() = _state.update { it.copy(screen = Screen.Review) }
 
-    /** Build one pack's full derived health (resistance, V–I cloud, cell Δ, usage) off Room. */
+    /**
+     * Build one pack's derived health (resistance, V–I cloud, cell Δ, usage). Main-safe (DATA-15 /
+     * UI-17): the repository runs the aggregates and the stride walk on IO and returns only
+     * O(bins + sessions + ~700 points); the residual math runs on Default. This used to load the
+     * pack's entire 14-day history as full rows and analyse it on Main.
+     */
     suspend fun loadPackHealth(address: String): PackHealth {
         val alias = _state.value.roster.batteryAt(address)?.alias ?: address
         val sessions = engine.history.sessions(address).first()
-        val samples = engine.history.telemetry(address)
-        return buildPackHealth(address, alias, sessions, samples)
+        val inputs = engine.history.healthInputs(address)
+        return withContext(Dispatchers.Default) { buildPackHealth(address, alias, sessions, inputs) }
     }
 
     /** Build derived health for every roster pack that has recorded sessions (Group health). */

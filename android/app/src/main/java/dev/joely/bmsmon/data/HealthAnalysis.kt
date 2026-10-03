@@ -2,6 +2,7 @@ package dev.joely.bmsmon.data
 
 import dev.joely.bmsmon.data.db.CellSessionStats
 import dev.joely.bmsmon.data.db.IvBinMoments
+import dev.joely.bmsmon.data.db.IvPoint
 import dev.joely.bmsmon.data.db.SampleEntity
 import dev.joely.bmsmon.data.db.SessionEntity
 import kotlin.math.roundToInt
@@ -304,6 +305,40 @@ fun viScatter(samples: List<SampleEntity>, rMohm: Float?, maxPoints: Int = SCATT
     viScatterFrom(pooledMoments(ivBinMomentsOf(samples)), stridedScatter(samples, maxPoints), rMohm)
 
 /**
+ * Exact row-stride walk for the V–I cloud (DATA-15): rows 0, step, 2·step… of a pack's I/V rows in
+ * (tsMs, id) order — the same points [stridedScatter] picks from the full list — fetched ONE at a
+ * time by keyset + OFFSET (`SampleDao.ivRowAfter`), so only picked rows are ever materialized and
+ * SQLite steps over the rest in index order. [fetch] returns the row `skip` positions after the
+ * keyset, or null past the end. Bounded by [cap] even if rows keep arriving mid-walk.
+ */
+fun stridePoints(
+    step: Int,
+    cap: Int = scatterPointCap(),
+    fetch: (afterTs: Long, afterId: Long, skip: Int) -> IvPoint?,
+): List<ScatterPoint> {
+    require(step >= 1) { "step must be ≥ 1" }
+    val out = ArrayList<ScatterPoint>()
+    var afterTs = Long.MIN_VALUE
+    var afterId = Long.MIN_VALUE
+    var skip = 0
+    while (out.size < cap) {
+        val r = fetch(afterTs, afterId, skip) ?: break
+        out += ScatterPoint(r.currentA, r.voltageV)
+        afterTs = r.tsMs
+        afterId = r.id
+        skip = step - 1
+    }
+    return out
+}
+
+/** Assemble [HealthInputs] from the two aggregates plus the stride walk (step from the I/V row count). */
+fun healthInputsFrom(
+    bins: List<IvBinMoments>,
+    cells: List<CellSessionStats>,
+    fetchStride: (afterTs: Long, afterId: Long, skip: Int) -> IvPoint?,
+): HealthInputs = HealthInputs(bins, cells, stridePoints(scatterStep(bins.sumOf { it.n }), fetch = fetchStride))
+
+/**
  * Peak-pool a session's raw [samples] into ~[buckets] time buckets so transient spikes survive
  * downsampling: discharge & regen power are **max-pooled**, voltage is **min-pooled** (the deepest
  * sag is kept), SOC takes the last value, and a bucket is flagged [TimelineBucket.link] if any BLE
@@ -402,11 +437,3 @@ fun buildPackHealth(
         scatter = viScatterFrom(pooledMoments(inputs.bins), inputs.scatter, resistance?.rMohm),
     )
 }
-
-/** TEMPORARY list overload so BatteryViewModel still compiles; deleted with the SQL wiring (next task). */
-fun buildPackHealth(
-    address: String,
-    alias: String,
-    sessions: List<SessionEntity>,
-    samples: List<SampleEntity>,
-): PackHealth = buildPackHealth(address, alias, sessions, healthInputsOf(samples))

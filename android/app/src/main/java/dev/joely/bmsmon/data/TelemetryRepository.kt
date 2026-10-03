@@ -220,9 +220,19 @@ class TelemetryRepository(private val db: BmsDatabase) {
     fun sessions(address: String): Flow<List<SessionEntity>> = db.sessions().forAddress(address)
     fun allSessions(): Flow<List<SessionEntity>> = db.sessions().all()
 
-    /** All stored telemetry rows for one pack (link rows excluded), oldest first — for derived-R,
-     *  the V–I cloud and cell-imbalance analysis. */
-    suspend fun telemetry(address: String): List<SampleEntity> = db.samples().telemetryFor(address)
+    /**
+     * Everything History/Review needs for one pack, without materializing its rows (DATA-15): two
+     * aggregate queries (per-SOC-bin V/I moments, per-session cell Δ) and an exact row-stride walk
+     * for the ≤ ~700-point V–I cloud. Replaces `telemetry(address)`, which loaded the pack's whole
+     * 14-day history (~800k full rows ≈ 220–350 MB against a 256 MB heap) — an OOM that took the
+     * foreground service and BLE monitoring down with the History screen. Off-main (IO).
+     */
+    suspend fun healthInputs(address: String): HealthInputs = withContext(Dispatchers.IO) {
+        healthInputsFrom(
+            bins = db.samples().ivMomentsBySocBin(address),
+            cells = db.samples().cellStatsBySession(address),
+        ) { afterTs, afterId, skip -> db.samples().ivRowAfter(address, afterTs, afterId, skip) }
+    }
 
     /** Telemetry rows for one pack since [sinceMs] (link rows excluded), oldest first — for tail learning. */
     suspend fun recentSamples(address: String, sinceMs: Long): List<SampleEntity> =
