@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -7,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.config import settings
+from app.config import CARTO_KEY_ENV, parse_carto_key, settings
 from app.db.partitions import ensure_partitions_for_range
 from app.db.pool import create_pool
 from app.db.queries import scrub_expired_gps
@@ -35,6 +36,17 @@ def configure_logging() -> None:
     handler.set_name(_LOG_HANDLER_NAME)
     handler.setFormatter(logging.Formatter(LOG_FORMAT))
     log.addHandler(handler)
+
+
+def warn_on_invalid_carto_key() -> None:
+    """One WARNING when BMSMON_CARTO_KEY is set but was dropped as invalid (config.py
+    parse_carto_key). Runs once per create_app(), i.e. once per process in prod, after
+    configure_logging so it carries the normal log format. It names the variable and the
+    reason and NEVER the value: the key is a credential, and the logs are not secret."""
+    _key, problem = parse_carto_key(os.environ.get(CARTO_KEY_ENV))
+    if problem:
+        logger.warning("%s ignored: %s. The Journey and share maps will show CARTO's "
+                       "keyless placeholder tiles.", CARTO_KEY_ENV, problem)
 
 
 # GPS retention scrub cadence: once shortly after startup, then daily.
@@ -140,6 +152,7 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     configure_logging()
+    warn_on_invalid_carto_key()
     app = FastAPI(title="bmsmon", lifespan=lifespan)
     from starlette.middleware.gzip import GZipMiddleware
 
@@ -213,7 +226,6 @@ def create_app() -> FastAPI:
     async def v2_moved_to_root() -> RedirectResponse:
         return RedirectResponse("/", status_code=307)
 
-    import os
     web_dist = os.environ.get("BMSMON_WEB_DIST", "/app/web/dist")
     if os.path.isdir(web_dist):
         app.mount("/", CachedStaticFiles(directory=web_dist, html=True), name="web")

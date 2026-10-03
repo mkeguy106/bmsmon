@@ -41,6 +41,7 @@ VIEWER_ROUTES = [
     ("GET", "/web/temp-config", None),
     ("GET", "/web/alert-config", None),
     ("GET", "/web/range-config", None),
+    ("GET", "/web/map-config", None),
     ("GET", "/web/history", None),
     ("GET", "/web/trends?address=C8:47:80:15:67:44&from_ms=0&to_ms=1", None),
     ("GET", "/web/charge-sessions?address=C8:47:80:15:67:44", None),

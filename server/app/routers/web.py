@@ -5,11 +5,13 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.responses import JSONResponse
 
 from app.auth.authentik import AuthUser, current_user, require_admin
 from app.auth.api_key import hash_key as hash_api_key
 from app.auth.enroll import generate_code, hash_code
 from app.charge_sessions import detect_charge_sessions
+from app.config import settings
 from app.db import queries as q
 from app.db.pool import get_pool
 from app.models import (ApiKeyCreateBody, ApiKeyCreateResponse, MintCodeResponse, NoteBody,
@@ -66,6 +68,16 @@ async def range_config(user: AuthUser = Depends(current_user), pool=Depends(get_
     """Read-only mirror of the learned discharge-range bands the phone pushed (one-way)."""
     async with pool.acquire() as conn:
         return {"configs": jsonable(await q.get_range_config_all(conn))}
+
+
+@router.get("/map-config")
+async def map_config(user: AuthUser = Depends(current_user)):
+    """Runtime basemap config for the Journey map: the CARTO key from BMSMON_CARTO_KEY, or
+    null when it is unset or invalid (the map then shows CARTO's placeholder tiles). It
+    lives only in the NAS env, never in the public repo or image, so the browser gets it
+    here. no-store: a credential has no business in a proxy or browser cache."""
+    return JSONResponse({"carto_key": settings.carto_key},
+                        headers={"Cache-Control": "no-store"})
 
 
 @router.get("/history")

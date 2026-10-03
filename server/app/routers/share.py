@@ -4,7 +4,8 @@ these are reachable by anyone holding a share URL (capability link). Security mo
 indistinguishable bare 404, expired gets a human page, every response is
 no-store/no-referrer, and a per-IP rate limiter throttles scanning. Guests see today's
 GPS trail plus one "where is it now" marker (the newest fix within LAST_FIX_LOOKBACK_MS),
-and never battery fields beyond the minimal dock status (see queries.gps_track_all)."""
+and never battery fields beyond the minimal dock status (see queries.gps_track_all). The
+guest map also gets the CARTO basemap key from /share/{token}/map-config."""
 
 import os
 import time
@@ -209,6 +210,17 @@ async def _resolve(request: Request, token: str, pool) -> tuple[str, dict | None
     return share_status(share, int(time.time() * 1000)), share
 
 
+async def _active_share(request: Request, token: str, pool) -> dict:
+    """The JSON endpoints' gate: the active share, else unknown/revoked -> the identical
+    bare 404 and expired -> 410 (the HTML page renders its own expired page instead)."""
+    status, share = await _resolve(request, token, pool)
+    if status == "gone":
+        raise HTTPException(404, "Not Found", headers=_SEC_HEADERS)
+    if status == "expired":
+        raise HTTPException(410, "share expired", headers=_SEC_HEADERS)
+    return share
+
+
 @router.get("/{token}")
 async def share_page(token: str, request: Request, pool=Depends(get_pool)):
     status, _share = await _resolve(request, token, pool)
@@ -221,14 +233,19 @@ async def share_page(token: str, request: Request, pool=Depends(get_pool)):
     return FileResponse(index, headers=_SEC_HEADERS)
 
 
+@router.get("/{token}/map-config")
+async def share_map_config(token: str, request: Request, pool=Depends(get_pool)):
+    """The basemap key for the guest map (see /web/map-config): same token gate, limiter
+    and headers as the feed, so only a live share link can read it. Deliberately NOT a
+    view: it leaves last_access/access_count (and the touch throttle) alone."""
+    await _active_share(request, token, pool)
+    return JSONResponse({"carto_key": settings.carto_key}, headers=_SEC_HEADERS)
+
+
 @router.get("/{token}/feed")
 async def share_feed(token: str, request: Request, since: str | None = None,
                      pool=Depends(get_pool)):
-    status, share = await _resolve(request, token, pool)
-    if status == "gone":
-        raise HTTPException(404, "Not Found", headers=_SEC_HEADERS)
-    if status == "expired":
-        raise HTTPException(410, "share expired", headers=_SEC_HEADERS)
+    share = await _active_share(request, token, pool)
     from_ms, now_ms = day_window_ms(datetime.now(timezone.utc))
     state = request.app.state
     # Per-share state above (expiry/410/revocation) and the guest *status* below stay

@@ -1,9 +1,35 @@
 import os
+import re
 from dataclasses import dataclass, field
 
 
 def _split(v: str) -> list[str]:
     return [s for s in (p.strip() for p in v.replace("|", ",").split(",")) if s]
+
+
+CARTO_KEY_ENV = "BMSMON_CARTO_KEY"
+_CARTO_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
+_CARTO_KEY_MIN, _CARTO_KEY_MAX = 8, 128
+
+
+def parse_carto_key(raw: str | None) -> tuple[str | None, str | None]:
+    """BMSMON_CARTO_KEY -> (key, problem). Unset -> (None, None): having no key is a normal
+    state (dev, CI), not a misconfiguration. Surrounding whitespace and quotes are stripped
+    (a quoted .env value); what remains must be 8-128 of [A-Za-z0-9_-], else (None, problem).
+    `problem` describes only the KIND of fault and never contains any part of the value:
+    it is a credential, and `problem` goes into the log (main.py warn_on_invalid_carto_key)."""
+    if raw is None:
+        return None, None
+    v = raw.strip().strip("\"'").strip()
+    if not v:
+        return None, "it is set but empty"
+    if not _CARTO_KEY_RE.fullmatch(v):
+        return None, "it may contain only A-Z, a-z, 0-9, '_' and '-'"
+    if len(v) < _CARTO_KEY_MIN:
+        return None, f"it is shorter than {_CARTO_KEY_MIN} characters"
+    if len(v) > _CARTO_KEY_MAX:
+        return None, f"it is longer than {_CARTO_KEY_MAX} characters"
+    return v, None
 
 
 @dataclass(frozen=True)
@@ -77,6 +103,15 @@ class Settings:
             os.environ.get("BMSMON_WS_ALLOWED_ORIGINS", "https://bmsmon.covert.life"))
     )
     share_owner: str = os.environ.get("BMSMON_SHARE_OWNER", "Joely")
+    # CARTO basemap key for the Journey map and the guest share page; without one CARTO
+    # serves "API KEY REQUIRED" placeholder tiles. The repo and the GHCR image are public,
+    # so it is RUNTIME-ONLY: set on the NAS, served to viewers by GET /web/map-config and
+    # to active share links by GET /share/{token}/map-config, never committed and never
+    # baked into a build. An invalid value becomes None with one startup warning that never
+    # includes it; repr=False keeps it out of any repr(settings).
+    carto_key: str | None = field(
+        default_factory=lambda: parse_carto_key(os.environ.get(CARTO_KEY_ENV))[0],
+        repr=False)
 
 
 settings = Settings()
