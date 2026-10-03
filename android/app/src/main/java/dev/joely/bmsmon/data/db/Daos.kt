@@ -36,6 +36,26 @@ data class RollupRow(
     val regen: Boolean,
 )
 
+/** Raw V-on-I regression moments for one pack's rows in one integer-SOC bin (DATA-15). [bin] null
+ *  groups rows with no SOC — kept so the scatter's global fit (all bins pooled) covers exactly the
+ *  rows the old list analysis used. Column names match IV_MOMENTS_BY_SOC_BIN_SQL (Task 8). */
+data class IvBinMoments(
+    val bin: Int?,
+    val n: Long,
+    val sumI: Double,
+    val sumV: Double,
+    val sumII: Double,
+    val sumIV: Double,
+    val sumVV: Double,
+    val minI: Double,
+    val maxI: Double,
+    val minV: Double,
+    val maxV: Double,
+)
+
+/** Per-session cell-imbalance aggregate (mV = (cellMax − cellMin)·1000) for one pack (DATA-15). */
+data class CellSessionStats(val sessionId: Long, val n: Long, val sumMv: Double, val maxMv: Double)
+
 /** One keyset page of a session's telemetry rows, in id order (DATA-16). index_samples_sessionId is
  *  (sessionId, rowid), so this is a pure index range seek with no sort (RollupSqlTest pins it). */
 internal const val ROLLUP_PAGE_SQL =
