@@ -16,6 +16,27 @@ from app.routers import api_device, api_widget, share, web, ws
 
 logger = logging.getLogger(__name__)
 
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+_LOG_HANDLER_NAME = "bmsmon"
+
+
+def configure_logging() -> None:
+    """SRV-21/C3: give the `app` logger hierarchy its own INFO handler. Under uvicorn the
+    root logger has no handlers and sits at WARNING, so `logger.info` lines (rollup, GPS
+    scrub) were discarded and warnings printed bare via logging.lastResort. Idempotent
+    (create_app runs once per test). propagate stays True so pytest's caplog, which hooks
+    the root logger, still sees app records; uvicorn attaches no root handler, so lines
+    are not printed twice in prod."""
+    log = logging.getLogger("app")
+    log.setLevel(logging.INFO)
+    if any(h.get_name() == _LOG_HANDLER_NAME for h in log.handlers):
+        return
+    handler = logging.StreamHandler()
+    handler.set_name(_LOG_HANDLER_NAME)
+    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    log.addHandler(handler)
+
+
 # GPS retention scrub cadence: once shortly after startup, then daily.
 GPS_SCRUB_INITIAL_DELAY_S = 30
 GPS_SCRUB_INTERVAL_S = 24 * 3600
@@ -118,12 +139,25 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    configure_logging()
     app = FastAPI(title="bmsmon", lifespan=lifespan)
+    from starlette.middleware.gzip import GZipMiddleware
+
+    from app.middleware import (ApiMarkerMiddleware, BodySizeLimitMiddleware,
+                                marked_internal_error)
+    # Unhandled exceptions -> a 500 that still carries the C1 marker (see the handler).
+    app.add_exception_handler(Exception, marked_internal_error)
+    # MIDDLEWARE ORDER: Starlette wraps in REVERSE order of add_middleware, so the LAST
+    # call is the outermost layer. ApiMarkerMiddleware must stay last (outermost) so every
+    # response below it — including middleware-generated ones — gets X-Bmsmon-Api.
+    #
     # Compress large JSON responses (fleet/history/track payloads). Websockets are
     # skipped by GZipMiddleware itself, and ingest is unaffected — its gzipped
     # *request* bodies are decompressed in the router, not by middleware.
-    from starlette.middleware.gzip import GZipMiddleware
     app.add_middleware(GZipMiddleware, minimum_size=1024)
+    # SEC-17: cap every route's request body (wraps GZip; sits inside the marker).
+    app.add_middleware(BodySizeLimitMiddleware)
+    app.add_middleware(ApiMarkerMiddleware)  # keep LAST
     from app.auth.device_jwt import JtiCache
     from app.caching import TouchThrottle, TtlCache
     from app.live.bus import LiveBus
@@ -132,9 +166,12 @@ def create_app() -> FastAPI:
     app.state.bus = LiveBus()
     # Process-local perf state (single worker, SRV-8; app-scoped like the limiters so
     # each test app starts fresh). See routers/share.py for the TTL/interval rationale.
-    from app.routers.share import TOUCH_INTERVAL_S, TRACK_CACHE_TTL_S
+    from app.routers.share import LAST_FIX_CACHE_TTL_S, TOUCH_INTERVAL_S, TRACK_CACHE_TTL_S
     app.state.share_track_cache = TtlCache(ttl_s=TRACK_CACHE_TTL_S)
     app.state.share_discharge_cache = TtlCache(ttl_s=TRACK_CACHE_TTL_S)
+    # C5: the share marker's 48 h last-fix lookback, used only while today's trail is
+    # empty; its own 5 min TTL (see LAST_FIX_CACHE_TTL_S for why that is safe).
+    app.state.share_last_fix_cache = TtlCache(ttl_s=LAST_FIX_CACHE_TTL_S)
     # Last base the guest dock resolved to — rung 3 of the share ladder ("parked: stay
     # put"). Memory only: on restart the dock falls back to the discharge hold/freshest
     # sample, which is exactly the cold-start behaviour the ladder is written for.
@@ -142,12 +179,19 @@ def create_app() -> FastAPI:
     app.state.share_touch = TouchThrottle(interval_s=TOUCH_INTERVAL_S)
     # devices.last_seen_at write throttle (see routers/api_device.py).
     app.state.device_touch = TouchThrottle(interval_s=60.0)
+    # C3: invalid-sample/range-row WARNINGs, at most once per device per kind per interval.
+    app.state.reject_log = TouchThrottle(interval_s=api_device.REJECT_LOG_INTERVAL_S)
     # SEC-4: per-IP limiter for the unauthenticated /api/v1/enroll (see app/ratelimit.py).
     app.state.enroll_limiter = RateLimiter()
     # Widgets poll on a timer with a key they already hold, so legitimate traffic
     # never trips this; it exists to make key guessing pointless. Roomier than the
     # enroll limiter because four widgets share one desktop's IP.
     app.state.apikey_limiter = RateLimiter(max_attempts=240, window_s=60)
+    # SEC-18: per-DEVICE upload budget (keyed by device_id after the signature verifies,
+    # never by IP — see INGEST_MAX_PER_MIN for why it can't throttle an outbox drain).
+    from app.ratelimit import INGEST_MAX_PER_MIN, INGEST_WINDOW_S
+    app.state.ingest_limiter = RateLimiter(max_attempts=INGEST_MAX_PER_MIN,
+                                           window_s=INGEST_WINDOW_S)
     app.include_router(api_device.router)
     app.include_router(api_widget.router)
     app.include_router(web.router)

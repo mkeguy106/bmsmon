@@ -11,9 +11,21 @@ class Settings:
     database_url: str = os.environ.get(
         "DATABASE_URL", "postgresql://bmsmon:bmsmon@localhost:5432/bmsmon"
     )
+    # SEC-13/SEC-20: bmsmon enforces Authentik group membership ITSELF, fail-closed, on
+    # /web/* and /ws (auth/authentik.py authorize) instead of trusting that the Authentik
+    # application binding is right; it had none until 2026-08-23. Exact, case-sensitive
+    # match against X-Authentik-Groups; an empty value matches nobody.
+    # Surrounding whitespace is stripped from both values, so a stray space or newline in
+    # the stack .env cannot lock everyone out.
+    # Viewers may read the dashboard: live + historical GPS.
+    viewer_group: str = os.environ.get(
+        "BMSMON_VIEWER_GROUP", "Covert.Life - Full App Access - User Group"
+    ).strip()
+    # Admins may mint share links / API keys / enroll codes and revoke devices. OWNER ONLY,
+    # never the household access group (SEC-20). An admin also counts as a viewer.
     admin_group: str = os.environ.get(
-        "BMSMON_ADMIN_GROUP", "Covert.life - Full App Access - User Group"
-    )
+        "BMSMON_ADMIN_GROUP", "Covert.Life - bmsmon - Admin Group"
+    ).strip()
     # Optional shared secret between the reverse proxy (Traefik) and the app. When set, every
     # /web/* request and the /ws handshake must carry an X-Bmsmon-Proxy-Secret header exactly
     # matching this value BEFORE any X-Authentik-* identity header is trusted — defense in depth
@@ -22,8 +34,9 @@ class Settings:
     # AND configure Traefik to inject the header (middleware customRequestHeaders) on the
     # Authentik-routed router. /api/v1/* is unaffected (device-JWT auth).
     proxy_secret: str = os.environ.get("BMSMON_PROXY_SECRET", "")
-    # Request-body caps for the device endpoints (/api/v1/ingest, /api/v1/config): max bytes read
-    # off the wire, and max decompressed size when the body is gzipped (anti gzip-bomb).
+    # Request-body caps. max_body_bytes caps EVERY route's body off the wire (one ASGI
+    # middleware, app/middleware.py BodySizeLimitMiddleware — SEC-17); max_gunzip_bytes caps
+    # the decompressed size of the gzipped device bodies (/api/v1/ingest, /config).
     max_body_bytes: int = int(os.environ.get("BMSMON_MAX_BODY_BYTES", str(1 * 1024 * 1024)))
     max_gunzip_bytes: int = int(os.environ.get("BMSMON_MAX_GUNZIP_BYTES", str(8 * 1024 * 1024)))
     # Sanity window for device-supplied sample timestamps (ts_ms). ts_ms drives monthly
@@ -48,10 +61,20 @@ class Settings:
     # auth.authentik.dev_trust_active().
     dev_trust_headers: bool = os.environ.get("BMSMON_DEV_TRUST_HEADERS", "0") == "1"
     dev_user: str = os.environ.get("BMSMON_DEV_USER", "dev@covert.life")
+    # Groups of the synthetic dev-trust identity. Empty (default) = viewer AND admin (see
+    # auth.authentik.resolve_user); set it to try the UI as e.g. a plain viewer.
     dev_groups: list[str] = field(
+        default_factory=lambda: _split(os.environ.get("BMSMON_DEV_GROUPS", ""))
+    )
+    # SEC-19: Origins allowed to open /ws (comma/pipe separated). Browsers always send
+    # Origin on a WebSocket handshake; without this check a page on any same-site
+    # *.covert.life app could ride the household's Authentik cookie onto the live GPS
+    # stream. Dev-trust mode additionally allows the Vite dev server, a missing Origin and
+    # a same-origin page (routers/ws.py origin_allowed). Empty = nothing allowed (fail
+    # closed).
+    ws_allowed_origins: list[str] = field(
         default_factory=lambda: _split(
-            os.environ.get("BMSMON_DEV_GROUPS", "Covert.life - Full App Access - User Group")
-        )
+            os.environ.get("BMSMON_WS_ALLOWED_ORIGINS", "https://bmsmon.covert.life"))
     )
     share_owner: str = os.environ.get("BMSMON_SHARE_OWNER", "Joely")
 

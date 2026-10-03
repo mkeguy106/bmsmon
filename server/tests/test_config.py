@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from app.db import queries as q
+from tests.identities import VIEWER_H as USER
 
 
 def _keypair():
@@ -49,7 +50,7 @@ async def test_config_accepts_gzipped_signed_body(app, client):
                           headers={"Authorization": f"Bearer {_token(priv, device_id, body)}",
                                    "Content-Type": "application/json", "Content-Encoding": "gzip"})
     assert r.status_code == 200
-    assert r.json() == {"ok": True}
+    assert r.json() == {"ok": True, "dropped": 0}
     async with app.state.pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM device_temp_config WHERE device_id=$1", device_id)
     assert row["cold_crit_c"] == -12
@@ -75,9 +76,6 @@ async def test_config_upserts_latest(app, client):
 
 ENVELOPE = {"cutoff_cold_c": -20.0, "cutoff_hot_c": 60.0, "charge_lock_cold_c": 0.0,
             "charge_lock_hot_c": 50.0, "charge_resume_cold_c": 5.0}
-
-USER = {"X-authentik-username": "joel",
-        "X-authentik-groups": "Covert.life - Full App Access - User Group"}
 
 
 async def test_config_with_envelope_is_mirrored_in_web_get(app, client):

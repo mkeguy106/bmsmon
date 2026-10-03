@@ -2,11 +2,10 @@
 import time
 
 from app.db import queries as q
+from tests.identities import ADMIN_H
 
 A = "C8:47:80:15:67:44"
 DEV = "00000000-0000-0000-0000-000000000002"
-ADMIN_H = {"X-authentik-username": "joel",
-           "X-authentik-groups": "Covert.life - Full App Access - User Group"}
 
 DAY_MS = 86_400_000
 

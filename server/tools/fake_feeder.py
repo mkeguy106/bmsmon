@@ -1,11 +1,11 @@
 """Enroll a synthetic device and stream fake telemetry so the WebUI shows live data.
 
 Usage:
-  1) Mint a code (admin):  curl -XPOST -H 'X-authentik-username: dev' \
-       -H 'X-authentik-groups: Covert.life - Full App Access - User Group' \
-       http://localhost:8000/web/enroll-codes
-     ...or run with BMSMON_DEV_TRUST_HEADERS=1 and use --mint.
-  2) python tools/fake_feeder.py --base http://localhost:8000 --code <CODE>
+  With the API on dev-trust (BMSMON_DEV_TRUST_HEADERS=1 against a local DB), whose
+  synthetic identity is an admin, let the feeder mint its own enroll code:
+    python tools/fake_feeder.py --base http://localhost:8000 --mint
+  Otherwise mint a code as an admin (WebUI Settings > Devices) and pass it:
+    python tools/fake_feeder.py --base http://localhost:8000 --code <CODE>
 """
 import argparse
 import base64
@@ -37,15 +37,19 @@ def _bh(body: bytes) -> str:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="http://localhost:8000")
-    ap.add_argument("--code", required=True)
-    ap.add_argument("--mint", action="store_true", help="mint the code first (needs dev-trust)")
+    ap.add_argument("--code", help="an enroll code minted by an admin (omit with --mint)")
+    ap.add_argument("--mint", action="store_true",
+                    help="mint the enroll code as dev-trust's synthetic admin (needs the API "
+                         "on BMSMON_DEV_TRUST_HEADERS=1 against a local DB)")
     args = ap.parse_args()
+    if not args.mint and not args.code:
+        ap.error("pass --code <CODE>, or --mint on a dev-trust API")
 
     code = args.code
     if args.mint:
-        _, b = _post(args.base + "/web/enroll-codes", b"", {
-            "X-authentik-username": "dev",
-            "X-authentik-groups": "Covert.life - Full App Access - User Group"})
+        # No identity headers: dev-trust's synthetic user (an admin unless
+        # BMSMON_DEV_GROUPS says otherwise) is who mints, whatever the group names are.
+        _, b = _post(args.base + "/web/enroll-codes", b"")
         code = json.loads(b)["code"]
         print("minted code", code)
 

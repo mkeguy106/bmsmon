@@ -1190,6 +1190,74 @@ endpoints) lives as a **Devices section inside Settings** (`DevicesPanel.tsx`), 
 entry — so there is no longer any "SOON" item. Roadmap/spec:
 `docs/superpowers/specs/2026-07-12-webui-v2-roadmap.md`.
 
+### Server access control & request hardening (2026-10 review, T1.6)
+
+Enforced in the app itself (not delegated to Traefik/Authentik) and pinned by tests:
+
+- **`X-Bmsmon-Api: 1` on every app-generated response** (`app/middleware.py`
+  `ApiMarkerMiddleware`, the outermost user middleware, plus the `marked_internal_error`
+  500 handler): 2xx, every 4xx (incl. 404 for unknown routes, 413, 422, 429), redirects,
+  static files and the WebSocket 101. Traefik's own 404/502 while `bmsmon-api` is down
+  never carries it. That is how the phone tells "the app rejected this batch" from "the
+  app isn't there" (DATA-14). Keep `ApiMarkerMiddleware` the last `add_middleware` call.
+- **One request-body cap for every route** (`BodySizeLimitMiddleware`,
+  `BMSMON_MAX_BODY_BYTES`, default 1 MiB). A `Content-Length` over the cap gets a 413
+  before the route, and any rate limiter, runs. Bodies without or lying about
+  `Content-Length` are counted as they stream and cut off at the cap. This is what bounds
+  `/api/v1/enroll` (SEC-17). `_read_body`'s own caps on ingest/config stay as a second
+  line, plus the gunzip ceiling.
+- **Fail-closed group gate on `/web/*` and `/ws`** (`auth/authentik.py` `authorize`).
+  Being authenticated is not enough. Viewers need `BMSMON_VIEWER_GROUP` (default
+  `Covert.Life - Full App Access - User Group`). Admin routes (`/web/samples`, devices,
+  enroll codes, shares, API keys) need `BMSMON_ADMIN_GROUP` (default
+  `Covert.Life - bmsmon - Admin Group`, owner only), and an admin also counts as a viewer.
+  Matching is exact and case-sensitive against `X-Authentik-Groups`, which is split on
+  `|` only (a group name may contain a comma). An empty setting matches nobody, and
+  surrounding whitespace in either setting is ignored. A non-member gets 403 (`/ws`
+  accepts, then closes with **4403**); no identity stays 401/4401. Non-member denials are
+  logged at WARNING, once per user per 5 min. Dev-trust's synthetic user is in both
+  groups unless `BMSMON_DEV_GROUPS` overrides it. Tests build headers from
+  `server/tests/identities.py`; never hardcode a group spelling in a test.
+- **`/web/track` span ≤ 31 days + 1 h** (`TRACK_MAX_SPAN_MS`). A wider span gets a 400,
+  not a clamp, so a map is never silently truncated; out-of-range timestamps get a 422.
+  The legitimate callers send one local day (≤ 25 h), the live day's incremental tail,
+  or Journey RANGE mode (whole local days; a calendar month across a DST change is
+  31 d + 1 h). The Journey RANGE picker should cap itself at 31 days.
+- **`/ws` checks Origin before `accept()`** (`routers/ws.py` `origin_allowed`). The Origin
+  must be in `BMSMON_WS_ALLOWED_ORIGINS` (default `https://bmsmon.covert.life`), or the
+  socket is closed with 4403. Uvicorn turns a pre-accept close into an HTTP 403 handshake
+  rejection. This blocks cross-site WebSocket hijacking from any same-site
+  `*.covert.life` page (SEC-19). Dev-trust mode also allows `http://localhost:5173`,
+  `http://127.0.0.1:5173` and a missing Origin (the Vite proxy and the smoke test), plus
+  a same-origin page whose Origin host matches the request's `Host` (the built bundle
+  served by the local API, e.g. `http://localhost:8000`).
+- **Device requests authenticate before their body is touched** (SEC-18). `_authenticate`
+  runs first: bearer, device row, ES256 signature + required claims + exp/iat/aud
+  (`device_jwt.verify_token`), replay probe, per-device budget. Only then is the body read
+  and gunzipped. `verify_body` binds it (`bh`) and **only then burns the jti**, so a
+  request whose body fails (bad gzip, 413, hash mismatch) leaves its token reusable.
+  Unauthenticated callers never cause a body read or an inflate. The budget
+  (`ingest_limiter`, `INGEST_MAX_PER_MIN` = 3000/min, shared by ingest + config) is keyed
+  per **device after the signature verifies**, never per IP, so nobody without the device
+  key can spend it. A serial outbox drain tops out around 10–16 POST/s, well under it.
+  The `sub` is canonicalised once (`str(uuid.UUID(...))`), so every spelling of a device's
+  UUID shares one budget. Also fixed: a non-string or `{braced}`/`urn:uuid:` `sub`
+  (pre-auth), or a non-string `aud`, used to escape as a 500.
+- **Samples are validated one at a time** (C3/SRV-18). Only a malformed envelope is a
+  422: not JSON, not an object, no `samples` list, or a bad `batch_seq`. Each sample goes
+  through `SampleIn` on its own (`models.validate_each`), and invalid ones are dropped and
+  logged at WARNING: the first error's location + type only, never values (samples carry
+  GPS), at most once per device per kind per minute (schema, ts-window and address drops
+  each have their own window). The response is
+  `{"accepted", "dropped", "last_seq"}`, where `dropped` = schema + ts-window + address
+  drops. `/api/v1/config` does the same for `ranges[]` rows and answers
+  `{"ok", "dropped"}`. A value that validates but that its column cannot store (int4 or
+  float4 overflow, NaN/±inf, a NUL byte) never fails the batch either: optional fields
+  store NULL and NUL bytes are stripped (`models.py` `Int4OrNone`/`RealOrNone`/
+  `TextOrNone`; positional `cells` are nulled in place), while a required config field
+  with such a value drops its range row or 422s the config envelope. The `app` logger hierarchy logs at INFO with time/level/name
+  (`main.configure_logging`), so rollup, scrub and drop lines are visible in `docker logs`.
+
 ### Read-only API keys (`/api/v1/groups`, desktop widgets)
 
 A third identity path, added 2026-08-25 for the KDE desktop widgets. The other two cannot
@@ -1223,8 +1291,11 @@ Security model (`server/app/auth/api_key.py`), mirroring the share-token one:
   comparison to leak timing.
 - Unknown and revoked keys return the **same bare 401**, byte-identical, so a prober cannot
   tell "was valid, now revoked" from "never existed" (asserted in `test_api_widget.py`).
-- A per-IP rate limiter (`app.state.apikey_limiter`, 240/min — four widgets share one
-  desktop IP) throttles guessing *before* the database is touched.
+- A rate limiter (`app.state.apikey_limiter`, 240/min — four widgets share one desktop
+  IP) throttles guessing *before* the database is touched. It is per client IP when the
+  request carries the proxy secret: then the first `X-Forwarded-For` hop is trusted
+  (`test_proxy_limiter_keys.py`). The Traefik label that injects the secret on the
+  `bmsmon-api` router enables this; the enroll limiter works the same way.
 - **Read-only by construction.** No route here mutates, and a key presented to `/ingest`
   still gets 401 — there is a test for exactly that.
 - **No GPS, no device identity.** `lat`/`lon`/`gps_accuracy_m`/`device_id` are in the fleet
@@ -1326,6 +1397,15 @@ lowering it would roughly triple upload requests (battery + mobile data) and wal
 deliberate batching win. Net: guest lag ~11 s → ~8 s average, ~35 s → ~17 s worst. Spec:
 `docs/superpowers/specs/2026-08-02-share-feed-incremental-polling-design.md`.
 
+**2026-10 — the marker survives midnight (C5/WEB-20).** `last` is now `{t, lat, lon}` of
+the newest accuracy-gated fix in the last 48 h (`LAST_FIX_LOOKBACK_MS`), independent of
+the today-only trail. When today's trail has points, `last` is its head (no extra query).
+Otherwise it comes from `q.latest_gps_fix`, a per-pack LATERAL `ORDER BY ts DESC LIMIT 1`
+driven from `batteries` (never a month-to-date scan; bounded by 48 h of rows; cached
+5 min, since any fix stamped today lands in the trail instead). Before this, the
+overnight GNSS hold meant a carer opening the link in the morning got "Waiting for GPS…"
+until the chair moved. `t` is the fix's 15 s bucket start, like the trail.
+
 **Local dev/test:** `docker compose -f server/docker-compose.dev.yml up -d` brings up a Postgres on
 `localhost:5432` (user/pw/db all `bmsmon`, matching the default `DATABASE_URL`). Run server tests
 with the venv: `cd server && .venv/bin/python -m pytest` (bare `python` lacks the deps).
@@ -1334,7 +1414,7 @@ with the venv: `cd server && .venv/bin/python -m pytest` (bare `python` lacks th
 (`server/.venv/bin/python server/scripts/seed_dev.py` — TRUNCATES the dev DB, never point it at
 prod), run the API with the built-in local identity (`BMSMON_DEV_TRUST_HEADERS=1
 server/.venv/bin/uvicorn app.main:app --port 8000` — dev-trust refuses non-local DATABASE_URLs, and
-without it /web/* 401s and the /ws close-after-accept loop starves the REST fallback), start
+without it /web/* 401s and the /ws close-after-accept loop starves the REST fallback; dev-trust is also what lets /ws accept the Vite dev server's http://localhost:5173 Origin), start
 `npx vite dev --port 5173` in `web/`, then `node scripts/smoke.mjs` (from `web/`). It screenshots
 all six v2 views (at `/`) + v1 (at `/v1/`) + preview.html into `web/smoke-shots/` (gitignored) and
 exits non-zero on any console error or page crash. Note the smoke test drives `vite dev`, which
@@ -1404,6 +1484,8 @@ curl -fsS https://bmsmon.covert.life/api/v1/health   # expect {"status":"ok"}
 ```
 
 On startup the new container re-runs `schema.sql`, so additive columns/tables land automatically.
+If the nightly dump is holding `samples`, startup waits for it (retrying for up to ~5 min),
+then fails and the container restarts.
 Changes to the **stack** itself (`bmsmon/docker-compose.yml` or the shared `.env`) deploy
 differently: push them to the `~/qnap-nas-docker` repo's `master` and its self-hosted runner
 (`.github/workflows/deploy.yml`) SSHes in and restarts the changed service.

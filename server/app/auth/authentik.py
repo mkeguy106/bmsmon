@@ -6,9 +6,15 @@ from urllib.parse import urlparse
 from fastapi import HTTPException, Request
 from starlette.datastructures import Headers
 
+from app.caching import TouchThrottle
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Denied-access audit trail (SEC-13): one WARNING per user per interval, so a stray
+# account reloading the dashboard can't flood the 5 MB prod log. Process-local.
+_DENY_LOG_INTERVAL_S = 300.0
+_deny_log = TouchThrottle(interval_s=_DENY_LOG_INTERVAL_S)
 
 
 @dataclass
@@ -18,7 +24,10 @@ class AuthUser:
 
 
 def _split_groups(v: str) -> list[str]:
-    return [g.strip() for g in v.replace("|", ",").split(",") if g.strip()]
+    """X-Authentik-Groups as the outpost sends it: names joined with "|". Split on "|"
+    ONLY: a group name may itself contain a comma, and splitting on it would turn
+    "Friends, <admin group>" into membership of the admin group."""
+    return [g.strip() for g in v.split("|") if g.strip()]
 
 
 # DB hosts that identify a local dev environment (see dev_trust_active). "db" is the
@@ -61,7 +70,8 @@ def proxy_secret_ok(headers: Headers) -> bool:
 
 
 def resolve_user(headers: Headers) -> "AuthUser | None":
-    """Identity resolution shared by HTTP /web/* and the /ws WebSocket handshake.
+    """Identity only: WHO is calling. Never grants access by itself. Every /web/* route
+    and the /ws handshake go through authorize(), which adds the group gate.
 
     Checks the proxy shared secret BEFORE trusting any X-Authentik-* header (or the
     dev-trust path). Returns None when the request carries no trustworthy identity.
@@ -72,19 +82,47 @@ def resolve_user(headers: Headers) -> "AuthUser | None":
     if username:
         return AuthUser(username, _split_groups(headers.get("x-authentik-groups", "")))
     if dev_trust_active():
-        return AuthUser(settings.dev_user, list(settings.dev_groups))
+        # The local synthetic identity is a viewer AND an admin unless BMSMON_DEV_GROUPS
+        # overrides it (e.g. to try the dashboard as a plain viewer).
+        groups = list(settings.dev_groups) or [settings.viewer_group, settings.admin_group]
+        return AuthUser(settings.dev_user, groups)
     return None
 
 
-def current_user(request: Request) -> AuthUser:
-    user = resolve_user(request.headers)
+def is_admin(user: AuthUser) -> bool:
+    """Exact, case-sensitive membership; an empty setting matches nobody (fail closed)."""
+    return bool(settings.admin_group) and settings.admin_group in user.groups
+
+
+def is_viewer(user: AuthUser) -> bool:
+    """Viewer-group member, or admin: an admin also counts as a viewer."""
+    return ((bool(settings.viewer_group) and settings.viewer_group in user.groups)
+            or is_admin(user))
+
+
+def authorize(headers: Headers, *, admin: bool = False) -> AuthUser:
+    """THE access gate for /web/* and /ws (SEC-13/SEC-20), FAIL-CLOSED.
+
+    401 when there is no trustworthy identity, 403 when the identity is not a viewer
+    (or not an admin, for admin routes). /ws maps these to close codes 4401/4403.
+    """
+    user = resolve_user(headers)
     if user is None:
         raise HTTPException(401, "not authenticated")
+    if not is_viewer(user):
+        if _deny_log.should_touch(user.username):
+            logger.warning("access denied: %r is not in the viewer group", user.username)
+        raise HTTPException(403, "viewer group required")
+    if admin and not is_admin(user):
+        raise HTTPException(403, "admin group required")
     return user
+
+
+def current_user(request: Request) -> AuthUser:
+    """FastAPI dependency for every /web/* reader: an authorized viewer."""
+    return authorize(request.headers)
 
 
 def require_admin(request: Request) -> AuthUser:
-    user = current_user(request)
-    if settings.admin_group not in user.groups:
-        raise HTTPException(403, "admin group required")
-    return user
+    """FastAPI dependency for admin-only /web/* routes."""
+    return authorize(request.headers, admin=True)

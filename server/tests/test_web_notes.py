@@ -1,5 +1,4 @@
-USER = {"X-authentik-username": "joel",
-        "X-authentik-groups": "Covert.life - Full App Access - User Group"}
+from tests.identities import VIEWER_H as USER
 
 
 async def test_notes_round_trip_and_upsert(client):

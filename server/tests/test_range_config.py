@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from app.db import queries as q
+from tests.identities import VIEWER_H as USER
 
 
 def _keypair():
@@ -55,10 +56,6 @@ async def _post_cfg(client, priv, device_id, cfg):
     body = json.dumps(cfg).encode()
     return await client.post("/api/v1/config", content=body,
                              headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
-
-
-USER = {"X-authentik-username": "joel",
-        "X-authentik-groups": "Covert.life - Full App Access - User Group"}
 
 
 async def test_config_with_ranges_upserts_rows(app, client):

@@ -9,9 +9,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from app.db import queries as q
-
-USER = {"X-authentik-username": "joel",
-        "X-authentik-groups": "Covert.life - Full App Access - User Group"}
+from tests.identities import VIEWER_H as USER
 
 
 def _keypair():

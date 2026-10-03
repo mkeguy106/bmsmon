@@ -632,6 +632,37 @@ async def gps_track_all(conn, from_ms: int, to_ms: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def latest_gps_fix(conn, since_ms: int, to_ms: int) -> dict | None:
+    """Newest accuracy-gated GPS fix across the fleet in [since_ms, to_ms), as
+    {ts_ms, lat, lon}, or None. Feeds the share feed's `last` marker when today's trail
+    is empty (C5/WEB-20: GNSS is held off overnight).
+
+    Driven from the small `batteries` registry with a LATERAL `ORDER BY ts DESC LIMIT 1`
+    per pack, the same shape as recent_discharge_by_address. Each pack is one bounded
+    backward walk of the PK's (address, ts) prefix, never a fleet-wide window scan of
+    the month-to-date partition (SRV-16). Only `ts` predicates, which prune partitions
+    exactly: ts is ts_ms at ms precision (SRV-28). Measured on a 3.79 M-row month with
+    GNSS off for 11 h: 8x Index Scan Backward, 24 ms."""
+    row = await conn.fetchrow(
+        """SELECT s.ts_ms, s.lat, s.lon
+             FROM batteries b
+             JOIN LATERAL (
+                SELECT s.ts_ms, s.lat, s.lon FROM samples s
+                 WHERE s.address = b.address
+                   AND s.ts >= to_timestamp($1::double precision / 1000.0)
+                   AND s.ts < to_timestamp($2::double precision / 1000.0)
+                   AND s.link_event IS NULL AND s.lat IS NOT NULL AND s.lon IS NOT NULL
+                   AND (s.gps_accuracy_m IS NULL OR s.gps_accuracy_m <= $3)
+                 ORDER BY s.ts DESC
+                 LIMIT 1
+             ) s ON true
+            ORDER BY s.ts_ms DESC
+            LIMIT 1""",
+        since_ms, to_ms, GPS_ACCURACY_MAX_M,
+    )
+    return dict(row) if row else None
+
+
 # ---- read-only API keys (desktop widgets; see app/auth/api_key.py) ----
 
 async def get_api_key(conn, key_hash: str):

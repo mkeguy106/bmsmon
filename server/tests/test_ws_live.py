@@ -12,10 +12,12 @@ from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from app.main import create_app
+from tests.identities import ADMIN_H, OUTSIDER_H, VIEWER_H
 
-ADMIN = "Covert.life - Full App Access - User Group"
 A = "C8:47:80:15:67:44"
-AUTH = {"X-authentik-username": "t", "X-authentik-groups": ADMIN}
+# Browsers always send Origin on a WebSocket handshake, so the tests do too.
+ORIGIN = {"Origin": "https://bmsmon.covert.life"}
+AUTH = {**VIEWER_H, **ORIGIN}
 
 
 def _kp():
@@ -30,7 +32,7 @@ def _bh(body: bytes) -> str:
 
 
 def _enroll(tc):
-    code = tc.post("/web/enroll-codes", headers=AUTH).json()["code"]
+    code = tc.post("/web/enroll-codes", headers=ADMIN_H).json()["code"]
     priv, pub_b64 = _kp()
     device_id = tc.post("/api/v1/enroll", json={
         "code": code, "install_uuid": f"ws-{uuid.uuid4().hex}",
@@ -94,7 +96,7 @@ def test_ws_skips_historical_import_batches():
             r = _ingest(tc, priv, device_id,
                         [{"ts_ms": now_ms - 5000, "address": A, "soc": 11.0}], batch_seq=-1)
             assert r.status_code == 200
-            assert r.json() == {"accepted": 1, "last_seq": -1}  # stored, just not broadcast
+            assert r.json() == {"accepted": 1, "dropped": 0, "last_seq": -1}  # stored, just not broadcast
             r = _ingest(tc, priv, device_id,
                         [{"ts_ms": now_ms, "address": A, "soc": 22.0}], batch_seq=2)
             assert r.status_code == 200
@@ -127,10 +129,19 @@ def test_ws_slow_consumer_is_closed(monkeypatch):
 
 def test_ws_without_identity_is_closed_4401():
     with TestClient(create_app()) as tc:
-        with tc.websocket_connect("/ws") as ws:
+        with tc.websocket_connect("/ws", headers=ORIGIN) as ws:
             with pytest.raises(WebSocketDisconnect) as exc:
                 ws.receive_json()
             assert exc.value.code == 4401
+
+
+def test_ws_non_member_is_closed_4403():
+    # SEC-13: an Authentik login outside the viewer group gets no live GPS stream.
+    with TestClient(create_app()) as tc:
+        with tc.websocket_connect("/ws", headers={**OUTSIDER_H, **ORIGIN}) as ws:
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_json()
+            assert exc.value.code == 4403
 
 
 def test_ws_with_dev_trust_headers_works(set_setting):

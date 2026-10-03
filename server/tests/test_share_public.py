@@ -5,8 +5,10 @@ from httpx import ASGITransport, AsyncClient
 
 from app.auth.enroll import hash_code
 from app.db import queries as q
+from app.caching import TtlCache
 from app.routers.share import (
-    ACTIVE_HOLD_MS, STATUS_STALE_MS, day_window_ms, pick_guest_status, share_status,
+    ACTIVE_HOLD_MS, LAST_FIX_CACHE_TTL_S, LAST_FIX_LOOKBACK_MS, STATUS_STALE_MS,
+    TRACK_CACHE_TTL_S, day_window_ms, pick_guest_status, share_status,
 )
 
 DEV = "00000000-0000-0000-0000-000000000002"
@@ -449,3 +451,124 @@ async def test_active_page_serves_guest_shell(app, client, tmp_path, monkeypatch
     r = await client.get("/share/tok-page")
     assert r.status_code == 200
     assert b"guest-shell" in r.content
+
+
+# --- C5/WEB-20: `last` = newest fix within 48 h, independent of the today-only trail ---
+# GNSS is held off overnight (motion gate), so after local midnight today's trail is
+# empty until the chair moves. The guest must still see where it is parked.
+
+def _bucket(ts_ms: int) -> int:
+    return (ts_ms // 15_000) * 15_000
+
+
+async def _lookback_fixture(conn, token: str, now_ms: int):
+    await _seed_device(conn)
+    # The lookback is driven from the batteries registry (ingest always fills it).
+    await q.upsert_battery(conn, A, "R-12100", "2012 · A", "2012", now_ms)
+    await _mk_share(conn, token, now_ms, now_ms + 3_600_000)
+
+
+async def test_feed_last_survives_midnight_from_the_48h_lookback(app, client):
+    now_ms = int(time.time() * 1000)
+    last_night = day_window_ms(datetime.now(timezone.utc))[0] - 60_000
+    async with app.state.pool.acquire() as conn:
+        await _lookback_fixture(conn, "tok-night", now_ms)
+        await _seed_fix(conn, last_night - 3_600_000, 44.0, -88.0)
+        await _seed_fix(conn, last_night, 43.0, -87.9)
+    body = (await client.get("/share/tok-night/feed")).json()
+    assert body["points"] == []  # the trail is still today-only
+    assert body["last"] == {"t": _bucket(last_night), "lat": 43.0, "lon": -87.9}
+
+
+async def test_feed_last_ignores_fixes_older_than_48h(app, client):
+    now_ms = int(time.time() * 1000)
+    async with app.state.pool.acquire() as conn:
+        await _lookback_fixture(conn, "tok-old", now_ms)
+        await _seed_fix(conn, now_ms - LAST_FIX_LOOKBACK_MS - 60_000, 43.0, -87.9)
+    body = (await client.get("/share/tok-old/feed")).json()
+    assert body["points"] == [] and body["last"] is None
+
+
+async def test_feed_last_lookback_skips_coarse_fixes(app, client):
+    now_ms = int(time.time() * 1000)
+    last_night = day_window_ms(datetime.now(timezone.utc))[0] - 60_000
+    async with app.state.pool.acquire() as conn:
+        await _lookback_fixture(conn, "tok-coarse", now_ms)
+        await _seed_fix(conn, last_night - 600_000, 43.0, -87.9, accuracy_m=16.0)
+        await _seed_fix(conn, last_night, 43.03, -87.905, accuracy_m=400.0)  # gated out
+    body = (await client.get("/share/tok-coarse/feed")).json()
+    assert body["last"] == {"t": _bucket(last_night - 600_000), "lat": 43.0, "lon": -87.9}
+
+
+async def test_feed_last_is_t_lat_lon_and_matches_todays_trail_head(app, client):
+    now_ms = int(time.time() * 1000)
+    day_start = day_window_ms(datetime.now(timezone.utc))[0]
+    async with app.state.pool.acquire() as conn:
+        await _lookback_fixture(conn, "tok-head", now_ms)
+        # never before local midnight, or in the day's first second it misses today's trail
+        await _seed_fix(conn, max(now_ms - 1_000, day_start), 43.0, -87.9)
+    body = (await client.get("/share/tok-head/feed")).json()
+    head = body["points"][-1]
+    assert body["last"] == {"t": head["t"], "lat": head["lat"], "lon": head["lon"]}
+
+
+async def test_feed_last_lookback_is_cached_like_the_trail(app, client):
+    now_ms = int(time.time() * 1000)
+    last_night = day_window_ms(datetime.now(timezone.utc))[0] - 600_000
+    async with app.state.pool.acquire() as conn:
+        await _lookback_fixture(conn, "tok-lcache", now_ms)
+        await _seed_fix(conn, last_night, 43.0, -87.9)
+    first = (await client.get("/share/tok-lcache/feed")).json()["last"]
+    async with app.state.pool.acquire() as conn:
+        await _seed_fix(conn, last_night + 300_000, 43.5, -87.5)  # still before midnight
+    assert (await client.get("/share/tok-lcache/feed")).json()["last"] == first  # cache hit
+    app.state.share_last_fix_cache.clear()  # TTL lapse
+    assert (await client.get("/share/tok-lcache/feed")).json()["last"]["lat"] == 43.5
+
+
+async def test_feed_last_lookback_has_its_own_five_minute_cache(app, client):
+    # The fallback only runs while today's trail is empty, and any fix stamped today lands
+    # in that trail instead, so it can hold its answer far longer than the trail's 10 s.
+    assert app.state.share_track_cache.ttl_s == TRACK_CACHE_TTL_S == 10.0
+    assert app.state.share_last_fix_cache.ttl_s == LAST_FIX_CACHE_TTL_S == 300.0
+    clock = [0.0]
+    app.state.share_track_cache = TtlCache(TRACK_CACHE_TTL_S, clock=lambda: clock[0])
+    app.state.share_last_fix_cache = TtlCache(LAST_FIX_CACHE_TTL_S, clock=lambda: clock[0])
+    now_ms = int(time.time() * 1000)
+    last_night = day_window_ms(datetime.now(timezone.utc))[0] - 600_000
+    async with app.state.pool.acquire() as conn:
+        await _lookback_fixture(conn, "tok-l5min", now_ms)
+        await _seed_fix(conn, last_night, 43.0, -87.9)
+    first = (await client.get("/share/tok-l5min/feed")).json()["last"]
+    async with app.state.pool.acquire() as conn:  # a late drain of last night's fixes
+        await _seed_fix(conn, last_night + 300_000, 43.5, -87.5)
+    clock[0] = TRACK_CACHE_TTL_S + 1  # the trail cache has lapsed, the fallback has not
+    assert (await client.get("/share/tok-l5min/feed")).json()["last"] == first
+    clock[0] = LAST_FIX_CACHE_TTL_S
+    assert (await client.get("/share/tok-l5min/feed")).json()["last"]["lat"] == 43.5
+
+
+async def test_feed_last_lookback_ignores_since_slicing(app, client):
+    now_ms = int(time.time() * 1000)
+    last_night = day_window_ms(datetime.now(timezone.utc))[0] - 60_000
+    async with app.state.pool.acquire() as conn:
+        await _lookback_fixture(conn, "tok-lsince", now_ms)
+        await _seed_fix(conn, last_night, 43.0, -87.9)
+    body = (await client.get(f"/share/tok-lsince/feed?since={now_ms}")).json()
+    assert body["points"] == []
+    assert body["last"]["lat"] == 43.0
+
+
+async def test_latest_gps_fix_picks_newest_across_packs_and_months(app):
+    # A 48 h window opened on the 1st reaches back into the previous month's partition.
+    sep30 = int(datetime(2026, 9, 30, 23, 30, tzinfo=timezone.utc).timestamp() * 1000)
+    async with app.state.pool.acquire() as conn:
+        await _seed_device(conn)
+        await q.upsert_battery(conn, A, "R-12100", "2012 · A", "2012", sep30)
+        await q.upsert_battery(conn, SPARE, "R-12100", "2024 · A", "2024", sep30)
+        await _seed_fix(conn, sep30, 43.0, -87.9)  # newest, pack A, September
+        assert await q.insert_samples(conn, [q.sample_row(
+            DEV, SPARE, {"ts_ms": sep30 - 60_000, "lat": 44.0, "lon": -88.0})]) == 1
+        fix = await q.latest_gps_fix(conn, sep30 - 3_600_000, sep30 + 86_400_000)
+        assert fix == {"ts_ms": sep30, "lat": 43.0, "lon": -87.9}
+        assert await q.latest_gps_fix(conn, sep30 + 1, sep30 + 86_400_000) is None

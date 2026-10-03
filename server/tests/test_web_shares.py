@@ -2,10 +2,7 @@ import time
 
 from app.auth.enroll import hash_code
 from app.db import queries as q
-
-ADMIN = {"X-authentik-username": "joel",
-         "X-authentik-groups": "Covert.life - Full App Access - User Group"}
-NON_ADMIN = {"X-authentik-username": "rando", "X-authentik-groups": "Some Other Group"}
+from tests.identities import ADMIN_H as ADMIN, VIEWER_H as NON_ADMIN
 
 
 async def test_shares_require_admin(client):

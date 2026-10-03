@@ -4,7 +4,7 @@ import secrets
 import time
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from app.auth.authentik import AuthUser, current_user, require_admin
 from app.auth.api_key import hash_key as hash_api_key
@@ -17,6 +17,17 @@ from app.models import (ApiKeyCreateBody, ApiKeyCreateResponse, MintCodeResponse
 from app.util import jsonable
 
 router = APIRouter(prefix="/web")
+
+# SEC-13: /web/track returns GPS history (the same data class as the admin-only, 7-day
+# /web/samples), so its span is bounded. Legit callers (web/src/v2/useTrack.ts via the
+# Journey and Command views) ask for one local day (<= 25 h), the live day's
+# incremental tail, or a Journey RANGE of whole local days: a calendar month across the
+# DST fall-back night is 31 d + 1 h. Wider is refused (400), NOT clamped. Silently
+# returning a truncated track would draw a wrong map.
+TRACK_MAX_SPAN_MS = 31 * 86_400_000 + 3_600_000
+# Plausible epoch-ms ceiling (2100-01-01 UTC, same bound as SampleIn._clip_motion_at):
+# keeps to_timestamp() inside Postgres' range, so garbage params are a 422, never a 500.
+_EPOCH_MS_MAX = 4_102_444_800_000
 
 
 def _f(v):
@@ -99,9 +110,14 @@ async def charge_sessions(address: str, days: int = Query(30, ge=1, le=365),
 
 
 @router.get("/track")
-async def track(address: str, from_ms: int = Query(...), to_ms: int = Query(...),
+async def track(address: str,
+                from_ms: int = Query(..., ge=0, le=_EPOCH_MS_MAX),
+                to_ms: int = Query(..., ge=0, le=_EPOCH_MS_MAX),
                 user: AuthUser = Depends(current_user), pool=Depends(get_pool)):
-    """Read-only 15-second-bucketed per-pack GPS + discharge series for the Journey map."""
+    """Read-only 15-second-bucketed per-pack GPS + discharge series for the Journey map.
+    Span-bounded (TRACK_MAX_SPAN_MS); a reversed range is simply empty."""
+    if to_ms - from_ms > TRACK_MAX_SPAN_MS:
+        raise HTTPException(400, "track range too wide (max 31 days)")
     async with pool.acquire() as conn:
         rows = await q.track_series(conn, address, from_ms, to_ms)
     points = [{"t": int(r["bucket_ms"]), "lat": _f(r["lat"]), "lon": _f(r["lon"]),
