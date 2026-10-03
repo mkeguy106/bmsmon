@@ -5,6 +5,7 @@ import { useLocalStorage } from "../../useLocalStorage";
 import { isCharging, type Base } from "../fleet";
 import type { FleetData } from "../useFleetData";
 import { useTrack } from "../useTrack";
+import { useCartoKey } from "../useCartoKey";
 import {
   haversineMi, classifySegment, cumulativeMiles, detectHotspots, energySeries, tripSummary,
   clampTrackWindow,
@@ -135,6 +136,7 @@ export function JourneyView({ data, base, theme, unit: _unit, mobile, mapMetric 
     "bmsmon-v2-journey", () => true, journeyTrailCodec, "local");
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
+  const tileKey = useCartoKey();
 
   // Merged view of the two stores; `set` routes each field to its backend so
   // every `st.X` / `set({...})` call site downstream is unchanged.
@@ -295,7 +297,8 @@ export function JourneyView({ data, base, theme, unit: _unit, mobile, mapMetric 
             <JourneyMap points={points} segKinds={segKinds} hotspots={hotspots}
               cursorIndex={Math.max(0, points.length - 1)} theme={theme} live={live}
               liveStale={liveStale} fitKey={fitKey} metric={mapMetric} showTrail={st.showTrail}
-              emptyText={isLive ? "Waiting for GPS…" : "No GPS trip recorded"} fill />
+              emptyText={isLive ? "Waiting for GPS…" : "No GPS trip recorded"} fill
+              tileKey={tileKey} />
             {hasMapOverlayContent && (
               <>
                 {/* Overlay chrome is intentionally dark in both themes, so its text is pinned light. */}
@@ -348,7 +351,7 @@ export function JourneyView({ data, base, theme, unit: _unit, mobile, mapMetric 
             <div style={{ height: mapHeight, position: "relative" }}>
               <JourneyMap points={points} segKinds={segKinds} hotspots={hotspots}
                 cursorIndex={hi ?? -1} theme={theme} live={live} liveStale={liveStale} fitKey={fitKey}
-                metric={mapMetric} showTrail={st.showTrail} />
+                metric={mapMetric} showTrail={st.showTrail} tileKey={tileKey} />
               {(points.length > 0 || live != null) && (
                 <button className="mono" aria-pressed={st.showTrail}
                   onClick={() => set({ showTrail: !st.showTrail })}

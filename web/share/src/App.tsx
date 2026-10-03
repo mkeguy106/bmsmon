@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { JourneyMap } from "../../src/v2/components/JourneyMap";
+import { fetchCartoKey } from "../../src/v2/basemap";
 import { appendTrack } from "../../src/v2/model/appendTrack";
 import { cleanTrack } from "../../src/v2/model/cleanTrack";
 import type { Hotspot } from "../../src/v2/model/journey";
@@ -44,12 +45,23 @@ export default function App() {
   const [guest, setGuest] = useState<LivePos | null>(null);
   const [theme, setTheme] = useState<ShareTheme>(() => loadShareTheme(localStorage));
   const [trailMode, setTrailMode] = useState<TrailMode>(() => loadTrailMode(localStorage));
+  // CARTO basemap key, fetched once. Purely cosmetic: any failure (an ended or expired
+  // link included) leaves it null and the map on placeholder tiles. The feed poll alone
+  // decides the page's terminal states.
+  const [tileKey, setTileKey] = useState<string | null>(null);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     saveShareTheme(localStorage, theme);
   }, [theme]);
   useEffect(() => { saveTrailMode(localStorage, trailMode); }, [trailMode]);
+
+  useEffect(() => {
+    if (!token) return;
+    let alive = true;
+    void fetchCartoKey(`/share/${token}/map-config`).then((k) => { if (alive) setTileKey(k); });
+    return () => { alive = false; };
+  }, [token]);
 
   useEffect(() => {
     if (!token) { setStatus("ended"); return; }
@@ -133,7 +145,7 @@ export default function App() {
         <JourneyMap points={points} segKinds={segKinds} hotspots={NO_HOTSPOTS}
           cursorIndex={Math.max(0, points.length - 1)} theme={theme}
           live={live} liveStale={view.markerStale} fitKey={token} metric="power"
-          emptyText={NO_FIX_TEXT} fill guest={guest} />
+          emptyText={NO_FIX_TEXT} fill guest={guest} tileKey={tileKey} />
         <span className="mono" style={{ position: "absolute", top: 12, right: 12,
           zIndex: 1000, display: "flex", alignItems: "center", gap: 6, padding: "6px 10px",
           borderRadius: 8, background: "rgba(9,9,11,.72)", color: "#e4e4e7", fontSize: 11,

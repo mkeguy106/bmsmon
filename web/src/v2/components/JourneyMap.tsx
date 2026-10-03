@@ -4,6 +4,7 @@ import "leaflet/dist/leaflet.css";
 import type { TrackPoint } from "../track";
 import { dischargeColor, socColor, type SegKind, type Hotspot } from "../model/journey";
 import type { LivePos } from "../model/live";
+import { tileUrl } from "../basemap";
 
 /** Resolve a CSS custom property off :root to its concrete computed value. */
 function cssVar(name: string): string {
@@ -29,17 +30,16 @@ function makeColorCache(): (spec: string) => string {
   };
 }
 
-function tileUrl(theme: "dark" | "light"): string {
-  const style = theme === "dark" ? "dark_all" : "light_all";
-  return `https://{s}.basemaps.cartocdn.com/${style}/{z}/{x}/{y}{r}.png`;
-}
 const TILE_ATTRIB = "© OpenStreetMap contributors © CARTO";
 
-export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, live, liveStale, fitKey, metric, emptyText, fill, showTrail = true, guest = null }: {
+/** `tileKey` is the CARTO basemap key (see ../basemap). It usually arrives after the map
+ *  exists, so the tile layer is re-pointed when it does; without it CARTO serves
+ *  "API KEY REQUIRED" placeholder tiles and everything else still works. */
+export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, live, liveStale, fitKey, metric, emptyText, fill, showTrail = true, guest = null, tileKey = null }: {
   points: TrackPoint[]; segKinds: SegKind[]; hotspots: Hotspot[]; cursorIndex: number;
   theme: "dark" | "light"; live: LivePos | null; liveStale?: boolean; fitKey: string;
   metric: "power" | "soc"; emptyText?: string; fill?: boolean; showTrail?: boolean;
-  guest?: LivePos | null;
+  guest?: LivePos | null; tileKey?: string | null;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -113,13 +113,15 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
     }
   }, [live == null, fitKey]);
 
-  // --- Theme tiles: swap the CARTO layer when the app theme flips.
+  // --- CARTO tiles: one layer per map, re-pointed in place (setUrl redraws it) when the
+  //     app theme flips or the basemap key arrives, so neither leaves stale tiles behind.
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-    if (tileRef.current) { map.removeLayer(tileRef.current); tileRef.current = null; }
-    tileRef.current = L.tileLayer(tileUrl(theme), { attribution: TILE_ATTRIB, maxZoom: 19 }).addTo(map);
-  }, [theme, mapReady]);
+    const url = tileUrl(theme, tileKey);
+    if (tileRef.current) tileRef.current.setUrl(url);
+    else tileRef.current = L.tileLayer(url, { attribution: TILE_ATTRIB, maxZoom: 19 }).addTo(map);
+  }, [theme, tileKey, mapReady]);
 
   // --- Trail + hotspots. Rebuilt whenever the trip, its segmentation, or theme changes
   //     (theme re-resolves the grey transit color from --text-4).
