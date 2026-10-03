@@ -1,5 +1,7 @@
 """A DB outage is a marked 503 (transient, retry); a real crash stays a marked 500."""
 import asyncio
+import errno
+import socket
 
 import asyncpg
 import pytest
@@ -29,7 +31,9 @@ from app.middleware import API_MARKER_HEADER, API_MARKER_VALUE, is_db_unavailabl
     asyncpg.exceptions.InterfaceError("pool is closed"),
     asyncpg.exceptions.InterfaceError("connection is closed"),
     ConnectionRefusedError(111, "refused"),
-    OSError("unreachable"),
+    OSError(errno.ENETUNREACH, "unreachable"),
+    socket.gaierror(-2, "unknown host"),
+    TimeoutError(),
     asyncio.TimeoutError(),
 ])
 def test_classifier_true(exc):
@@ -39,6 +43,9 @@ def test_classifier_true(exc):
 @pytest.mark.parametrize("exc", [
     ValueError("x"),
     RuntimeError("boom"),
+    FileNotFoundError(2, "no such file"),
+    PermissionError(13, "denied"),
+    OSError(errno.ENOSPC, "no space"),
     asyncpg.exceptions.InterfaceError("cannot use Connection.transaction() in a manually started transaction"),
     asyncpg.exceptions.UniqueViolationError("dup"),
 ])

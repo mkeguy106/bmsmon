@@ -3,6 +3,7 @@ which used to print a full traceback for every single 503 (dozens a minute durin
 restart, against a 5 MB docker log cap). One WARNING line per exception class per 10 s
 instead. Share-zone errors keep the zone's no-store/no-referrer headers."""
 import logging
+import socket
 
 import asyncpg
 import pytest
@@ -96,3 +97,37 @@ def test_websocket_db_outage_closes_1011_without_reraising():
             with pytest.raises(WebSocketDisconnect) as closed:
                 ws.receive_text()
     assert closed.value.code == WS_INTERNAL_ERROR == 1011
+
+
+@pytest.mark.parametrize("exc", [
+    ConnectionRefusedError(111, "refused"),
+    socket.gaierror(-2, "unknown host"),
+    TimeoutError(),
+])
+async def test_network_errors_are_a_503_with_retry_after(app, exc):
+    _route(app, "/api/v1/__t_net", exc)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.get("/api/v1/__t_net")
+    assert r.status_code == 503
+    assert r.headers["Retry-After"] == "30"
+    assert r.headers[API_MARKER_HEADER] == API_MARKER_VALUE
+
+
+async def test_non_network_oserror_is_a_logged_marked_500(app, caplog):
+    caplog.set_level(logging.ERROR, logger="app.middleware")
+    _route(app, "/api/v1/__t_fnf", FileNotFoundError(2, "no such file"))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.get("/api/v1/__t_fnf")
+    assert r.status_code == 500
+    assert "Retry-After" not in r.headers
+    assert r.headers[API_MARKER_HEADER] == API_MARKER_VALUE
+    errors = [x for x in caplog.records if x.name == "app.middleware" and x.levelno == logging.ERROR]
+    assert len(errors) == 1 and errors[0].exc_info is not None
+
+
+async def test_plain_crash_still_propagates_to_uvicorn_for_its_traceback(app):
+    # The catch-all answers a marked 500 and re-raises: uvicorn logs the traceback.
+    _route(app, "/api/v1/__t_rt", RuntimeError("boom"))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        with pytest.raises(RuntimeError, match="boom"):
+            await c.get("/api/v1/__t_rt")

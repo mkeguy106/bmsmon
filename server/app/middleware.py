@@ -6,14 +6,16 @@ read the comment there before adding another.
 """
 
 import asyncio
+import errno
 import logging
+import socket
 
 import asyncpg
 from fastapi import HTTPException
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse, PlainTextResponse
-from starlette.websockets import WebSocket
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from starlette.websockets import WebSocket
 
 from app.config import settings
 
@@ -98,6 +100,10 @@ DB_UNAVAILABLE_LOG_INTERVAL_S = 10.0
 WS_INTERNAL_ERROR = 1011  # what uvicorn itself sent on an unhandled websocket error
 
 
+_NETWORK_ERRNOS = frozenset({errno.ECONNREFUSED, errno.ECONNRESET, errno.EHOSTUNREACH,
+                             errno.ENETUNREACH, errno.ETIMEDOUT, errno.EPIPE})
+
+
 def is_db_unavailable(exc: BaseException) -> bool:
     """True when exc means the database cannot be reached right now (restart, refused
     connection, exhausted or closed pool, acquire timeout) rather than a bug. Such a
@@ -108,8 +114,11 @@ def is_db_unavailable(exc: BaseException) -> bool:
     if isinstance(exc, asyncpg.exceptions.InterfaceError):
         msg = str(exc).lower()
         return any(m in msg for m in _CLOSED_MARKERS)
-    # OSError covers ConnectionRefusedError and (3.11+) asyncio.TimeoutError from acquire.
-    return isinstance(exc, (OSError, asyncio.TimeoutError))
+    # Network-shaped errors only. Any other OSError (FileNotFoundError, PermissionError,
+    # ENOSPC, ...) is a bug on this host, not a DB outage: it must stay a loud 500.
+    if isinstance(exc, (ConnectionError, socket.gaierror, TimeoutError, asyncio.TimeoutError)):
+        return True
+    return isinstance(exc, OSError) and exc.errno in _NETWORK_ERRNOS
 
 
 def error_headers(path: str) -> dict[str, str]:
