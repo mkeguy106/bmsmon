@@ -57,7 +57,8 @@ class BmsRepository(
     // Cap on simultaneous *connection attempts* (the LE initiator can't pursue many); one permit is
     // kept for stage packs (BLE-16, ConnectGate).
     private val gate = ConnectGate(total = 2)
-    // Monotonic time of the last app-resume kick (BLE-16). Written on the main thread (onResume).
+    // Monotonic time of the last app resume that retried every pack (BLE-16). Written on the main
+    // thread (onResume); cleared by stop(), so a new monitoring session starts with no limit.
     @Volatile private var lastResumeKickAt: Long? = null
 
     @Volatile private var allTargets: List<BmsTarget> = emptyList()
@@ -109,6 +110,8 @@ class BmsRepository(
         data class PollFrame(val addr: String, val attempt: Long, val raw: ByteArray, val tel: Telemetry?) : LoopEvent()
         data class PollDrop(val addr: String, val attempt: Long) : LoopEvent()
         object Kick : LoopEvent()
+        /** [Kick] for [addrs] only (BLE-16: a resume inside the rate limit retries the stage). */
+        data class KickPacks(val addrs: Set<String>) : LoopEvent()
     }
 
     /**
@@ -176,14 +179,27 @@ class BmsRepository(
         wake()
     }
 
-    /** App returned to the foreground: [kickAll], but at most once per [RESUME_KICK_MIN_INTERVAL_MS]
-     *  (BLE-16) — every screen glance used to reset every backoff. */
+    /**
+     * App returned to the foreground (BLE-16). The stage packs, the 1–2 the user is watching, are
+     * retried at once on every resume. Every other pack is retried ([kickAll]) at most once per
+     * [RESUME_KICK_MIN_INTERVAL_MS]: every screen glance used to reset every spare's backoff, so
+     * absent spares never climbed their ladder and kept the connect gate busy.
+     */
     fun kickOnResume() {
         val t = now()
-        if (!resumeKickDue(lastResumeKickAt, t)) return
-        lastResumeKickAt = t
-        Log.d(TAG, "resume kick: retrying every pack now")
-        kickAll()
+        if (resumeKickDue(lastResumeKickAt, t)) {
+            lastResumeKickAt = t
+            Log.d(TAG, "resume kick: retrying every pack now")
+            kickAll()
+        } else {
+            kickPacks(stageAddrs)
+        }
+    }
+
+    /** [kickAll] for [addrs] only: every other pack keeps its backoff. */
+    private fun kickPacks(addrs: Set<String>) {
+        resultChannel.trySend(LoopEvent.KickPacks(addrs))
+        wake()
     }
 
     fun stop() {
@@ -202,6 +218,7 @@ class BmsRepository(
         disabledAddrs = emptySet()
         stageInitialized = false
         stagePriorityUntil = 0L
+        lastResumeKickAt = null
     }
 
     /** BLE-22: one engine callback; a throw drops this event (logged, rate-limited) instead of the loop. */
@@ -451,6 +468,7 @@ class BmsRepository(
                     safely("onReachable ${event.addr}") { onReachable(event.addr, false) }
                 }
                 is LoopEvent.Kick -> links.kick()
+                is LoopEvent.KickPacks -> links.kick(event.addrs)
             }
         }
     }

@@ -103,4 +103,16 @@ class AttemptWiringTest {
         assertTrue(engine.contains("if (state == BluetoothAdapter.STATE_ON) ble.kickAll()"))
         assertTrue(engine.contains("fun kickOnResume() = ble.kickOnResume()"))
     }
+
+    // BLE-16: the rate limit is for spares only. Every resume retries the stage packs, the ones the
+    // user is watching; a monitoring stop forgets the last resume kick.
+    @Test fun everyResumeRetriesTheStagePacks() {
+        val resume = src.substringAfter("fun kickOnResume() {").substringBefore("fun stop() {")
+        assertTrue(resume.contains("if (resumeKickDue(lastResumeKickAt, t)) {"))
+        assertTrue(resume.contains("kickAll() } else { kickPacks(stageAddrs) }"))
+        val drain = src.substringAfter("private fun drainEvents(").substringBefore("private suspend fun pollLoop(")
+        assertTrue(drain.contains("is LoopEvent.KickPacks -> links.kick(event.addrs)"))
+        val stop = src.substringAfter("fun stop() {").substringBefore("private inline fun safely(")
+        assertTrue(stop.contains("lastResumeKickAt = null"))
+    }
 }

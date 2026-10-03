@@ -155,4 +155,15 @@ class LinkLedger<S : Any> {
         failCount.clear()
         garbageDrops.clear()
     }
+
+    /** Retry just [addrs] now, as [kick] would, and leave every other pack's backoff, failure count
+     *  and garbage streak alone. An app resume inside its rate limit retries the stage packs this
+     *  way (BLE-16). */
+    fun kick(addrs: Set<String>) {
+        for (addr in addrs) {
+            backoff.remove(addr)
+            failCount.remove(addr)
+            garbageDrops.remove(addr)
+        }
+    }
 }

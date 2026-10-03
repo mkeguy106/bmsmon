@@ -187,6 +187,27 @@ class LinkLedgerTest {
         assertEquals(RECONNECT_BACKOFF_MS, ledger.backoffSnapshot()[a])   // streak cleared too
     }
 
+    // BLE-16: an app resume inside the rate limit still retries the stage packs, as kick() would,
+    // and leaves every other pack's backoff, failure count and garbage streak alone.
+    @Test fun kickingSomePacksLeavesTheOthersBackingOff() {
+        val ledger = LinkLedger<String>()
+        val spare = "C8:47:80:15:DB:13"
+        val id = hold(ledger)
+        ledger.pollFrame(a, id, decoded = false)
+        ledger.pollDropped(a, id, spec, now = 0L)
+        repeat(2) { ledger.connectFailed(a, ledger.beginConnect(a), spec, failThreshold = 3, now = 0L) }
+        repeat(2) { ledger.connectFailed(spare, ledger.beginConnect(spare), spec, failThreshold = 3, now = 0L) }
+        ledger.kick(setOf(a))
+        assertEquals(mapOf(spare to 10_000L), ledger.backoffSnapshot())
+        // a starts over: its next failure is its first, not its third …
+        assertEquals(false, ledger.connectFailed(a, ledger.beginConnect(a), spec, failThreshold = 3, now = 0L))
+        val next = hold(ledger)
+        ledger.pollDropped(a, next, spec, now = 0L)
+        assertEquals(RECONNECT_BACKOFF_MS, ledger.backoffSnapshot()[a])   // … and its streak is gone
+        // The spare kept its count: its next failure is its third.
+        assertEquals(true, ledger.connectFailed(spare, ledger.beginConnect(spare), spec, failThreshold = 3, now = 0L))
+    }
+
     // A pack removed from the roster must not leave per-address state behind: re-added, it starts
     // from scratch. drop() alone keeps the counters (a disabled pack's backoff still applies).
     @Test fun aForgottenPackStartsFromScratch() {

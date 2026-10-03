@@ -221,15 +221,16 @@ fun classifyWriteStatus(status: Int): WriteResult = when (status) {
 fun classifyLegacyWrite(accepted: Boolean): WriteResult =
     if (accepted) WriteResult.WRITTEN else WriteResult.BUSY
 
-/** Least time between two app-resume kicks (BLE-16) — see [resumeKickDue]. */
+/** Least time between two app resumes that retry every pack (BLE-16) — see [resumeKickDue]. */
 const val RESUME_KICK_MIN_INTERVAL_MS = 5 * 60_000L
 
 /**
- * Whether an app resume may reset every backoff now (BLE-16). The kick used to run on every
+ * Whether an app resume may reset every pack's backoff now (BLE-16). The kick used to run on every
  * onResume — every screen glance on an unplugged phone — so absent spares never climbed their
- * backoff ladder and kept the connect gate busy. [lastAt] is the previous resume kick on the same
- * monotonic clock as [now] (null = none yet). A user Reconnect and Bluetooth coming back on still
- * kick at once ([BmsRepository.kickAll]).
+ * backoff ladder and kept the connect gate busy. [lastAt] is the previous resume that retried every
+ * pack, on the same monotonic clock as [now] (null = none yet). Only the spares are limited: every
+ * resume still retries the stage packs ([BmsRepository.kickOnResume]), and a user Reconnect and
+ * Bluetooth coming back on still retry every pack at once ([BmsRepository.kickAll]).
  */
 fun resumeKickDue(lastAt: Long?, now: Long, minIntervalMs: Long = RESUME_KICK_MIN_INTERVAL_MS): Boolean =
     lastAt == null || now - lastAt >= minIntervalMs

@@ -479,7 +479,8 @@ class MonitorEngine(
         reevaluate()   // the stage's BLE address set excludes disabled packs
     }
     fun kickAll() = ble.kickAll()
-    /** App resume (BLE-16): a rate-limited [kickAll]; see BmsRepository.kickOnResume. */
+    /** App resume (BLE-16): retries the stage packs every time and every pack at most once per
+     *  5 min; see BmsRepository.kickOnResume. */
     fun kickOnResume() = ble.kickOnResume()
 
     /** Mirror the alert settings from the ViewModel; re-evaluate so changes take effect at once. */
