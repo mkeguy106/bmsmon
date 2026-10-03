@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
-from app.auth.device_jwt import JwtError, unverified_sub, verify
+from app.auth.device_jwt import JwtError, unverified_sub, verify_body, verify_token
 from app.auth.enroll import hash_code
 from app.config import settings
 from app.db import queries as q
@@ -67,7 +67,7 @@ def _gunzip_capped(data: bytes, limit: int) -> bytes:
 
 
 async def _read_body(request: Request) -> bytes:
-    """Read the request body with size caps, BEFORE any signature verification.
+    """Read the request body with size caps. Called only AFTER _authenticate (SEC-18).
 
     Rejects declared Content-Length > max_body_bytes with 413 without reading;
     also enforces the cap while streaming (absent/lying Content-Length). If the
@@ -93,6 +93,51 @@ async def _read_body(request: Request) -> bytes:
     raw = b"".join(chunks)
     if request.headers.get("content-encoding", "").lower() == "gzip":
         raw = _gunzip_capped(raw, settings.max_gunzip_bytes)
+    return raw
+
+
+async def _authenticate(request: Request, pool) -> tuple[str, dict]:
+    """SEC-18 stage 1: authenticate a device request WITHOUT touching its body.
+
+    Bearer -> device row -> ES256 signature + required claims + exp/iat/aud
+    (device_jwt.verify_token) -> replay probe -> per-device budget. Only a request that
+    passes all of it ever has its body read and gunzipped (_read_verified_body). Never
+    burns the jti; see device_jwt.verify_body. Returns (device_id, claims).
+    """
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("bearer "):
+        raise HTTPException(401, "missing bearer")
+    token = auth[7:]
+    try:
+        device_id = unverified_sub(token)
+        uuid.UUID(device_id)
+    except (JwtError, ValueError, TypeError, AttributeError):
+        # AttributeError: a non-string sub (e.g. 123) used to escape as a pre-auth 500.
+        raise HTTPException(401, "bad token")
+    async with pool.acquire() as conn:
+        dev = await q.get_device(conn, device_id)
+    if dev is None or dev["revoked"]:
+        raise HTTPException(401, "unknown or revoked device")
+    try:
+        claims = verify_token(token, bytes(dev["public_key_spki"]))
+    except JwtError:
+        raise HTTPException(401, "bad signature")
+    if request.app.state.jti_cache.contains(claims["jti"]):
+        raise HTTPException(401, "bad signature")  # replay, refused before the body is read
+    if not request.app.state.ingest_limiter.allow(device_id):
+        logger.warning("device upload budget exceeded for %s", device_id)
+        raise HTTPException(429, "too many requests; slow down")
+    return device_id, claims
+
+
+async def _read_verified_body(request: Request, claims: dict) -> bytes:
+    """SEC-18 stage 2: read + gunzip the capped body, bind it to the token (bh), and only
+    then burn the jti. Returns the decompressed plaintext."""
+    raw = await _read_body(request)
+    try:
+        verify_body(claims, raw, request.app.state.jti_cache)
+    except JwtError:
+        raise HTTPException(401, "bad signature")
     return raw
 
 
@@ -135,60 +180,42 @@ async def enroll(body: EnrollBody, request: Request, pool=Depends(get_pool)):
 
 @router.post("/ingest", response_model=IngestResponse)
 async def ingest(request: Request, pool=Depends(get_pool)):
-    auth = request.headers.get("authorization", "")
-    if not auth.lower().startswith("bearer "):
-        raise HTTPException(401, "missing bearer")
-    token = auth[7:]
-    # The device may gzip the body to save bandwidth; _read_body caps the wire and
-    # decompressed sizes and returns the plaintext the JWT's body hash is over.
-    raw = await _read_body(request)
+    device_id, claims = await _authenticate(request, pool)
+    # The device may gzip the body; it is read (capped) and decompressed only now, after
+    # the token verified. The JWT's bh is over the decompressed plaintext.
+    raw = await _read_verified_body(request, claims)
     try:
-        device_id = unverified_sub(token)
-    except JwtError:
-        raise HTTPException(401, "bad token")
-    try:
-        uuid.UUID(device_id)
-    except (ValueError, TypeError):
-        raise HTTPException(401, "bad token")
+        body = IngestBody.model_validate_json(raw)
+    except ValidationError:
+        raise HTTPException(422, "invalid body")
+    # T2.3/SRV-5: drop (don't 4xx) samples whose device-supplied ts_ms is outside a
+    # sane window — ts_ms drives partition CREATE TABLEs and datetime conversion.
+    ts_min, ts_max = _partition_ts_window()
+    samples = [s for s in body.samples if ts_min <= s.ts_ms <= ts_max]
+    if len(samples) != len(body.samples):
+        bad = [s.ts_ms for s in body.samples if not (ts_min <= s.ts_ms <= ts_max)]
+        logger.warning(
+            "ingest: dropped %d/%d sample(s) with out-of-range ts_ms from device %s: %s",
+            len(bad), len(body.samples), device_id, bad[:10])
+    # SRV-13: same drop-don't-4xx policy for junk addresses, which would otherwise
+    # create permanent `batteries` registry rows (rule documented on _address_ok).
+    kept = [s for s in samples if _address_ok(s.address)]
+    if len(kept) != len(samples):
+        bad_addr = [s.address for s in samples if not _address_ok(s.address)]
+        logger.warning(
+            "ingest: dropped %d/%d sample(s) with invalid address from device %s: %s",
+            len(bad_addr), len(samples), device_id,
+            [a[:40].encode("ascii", "backslashreplace").decode() for a in bad_addr[:10]])
+    samples = kept
+    # model_dump() once per sample, reused for both the DB row and the WS publish
+    # below (it used to run twice per sample on the ingest hot path). sample_row
+    # and publish both only READ the dict, so sharing it is safe.
+    dumped = [s.model_dump() for s in samples]
+    rows = [q.sample_row(device_id, s.address, d) for s, d in zip(samples, dumped)]
+    # SRV-13: one registry upsert per unique address per batch (not per sample).
+    # Dict insertion order keeps the LAST-seen sample's alias/group per address.
+    by_addr = {s.address: s for s in samples}
     async with pool.acquire() as conn:
-        dev = await q.get_device(conn, device_id)
-        if dev is None or dev["revoked"]:
-            raise HTTPException(401, "unknown or revoked device")
-        try:
-            verify(token, bytes(dev["public_key_spki"]), raw, request.app.state.jti_cache)
-        except JwtError:
-            raise HTTPException(401, "bad signature")
-        try:
-            body = IngestBody.model_validate_json(raw)
-        except ValidationError:
-            raise HTTPException(422, "invalid body")
-        # T2.3/SRV-5: drop (don't 4xx) samples whose device-supplied ts_ms is outside a
-        # sane window — ts_ms drives partition CREATE TABLEs and datetime conversion.
-        ts_min, ts_max = _partition_ts_window()
-        samples = [s for s in body.samples if ts_min <= s.ts_ms <= ts_max]
-        if len(samples) != len(body.samples):
-            bad = [s.ts_ms for s in body.samples if not (ts_min <= s.ts_ms <= ts_max)]
-            logger.warning(
-                "ingest: dropped %d/%d sample(s) with out-of-range ts_ms from device %s: %s",
-                len(bad), len(body.samples), device_id, bad[:10])
-        # SRV-13: same drop-don't-4xx policy for junk addresses, which would otherwise
-        # create permanent `batteries` registry rows (rule documented on _address_ok).
-        kept = [s for s in samples if _address_ok(s.address)]
-        if len(kept) != len(samples):
-            bad_addr = [s.address for s in samples if not _address_ok(s.address)]
-            logger.warning(
-                "ingest: dropped %d/%d sample(s) with invalid address from device %s: %s",
-                len(bad_addr), len(samples), device_id,
-                [a[:40].encode("ascii", "backslashreplace").decode() for a in bad_addr[:10]])
-        samples = kept
-        # model_dump() once per sample, reused for both the DB row and the WS publish
-        # below (it used to run twice per sample on the ingest hot path). sample_row
-        # and publish both only READ the dict, so sharing it is safe.
-        dumped = [s.model_dump() for s in samples]
-        rows = [q.sample_row(device_id, s.address, d) for s, d in zip(samples, dumped)]
-        # SRV-13: one registry upsert per unique address per batch (not per sample).
-        # Dict insertion order keeps the LAST-seen sample's alias/group per address.
-        by_addr = {s.address: s for s in samples}
         async with conn.transaction():
             for s in by_addr.values():
                 await q.upsert_battery(conn, s.address, s.advertised_name, s.alias,
@@ -211,28 +238,13 @@ async def ingest(request: Request, pool=Depends(get_pool)):
 @router.post("/config", response_model=OkResponse)
 async def config(request: Request, pool=Depends(get_pool)):
     """One-way temperature-alert config push from the phone (same auth/gzip/verify as ingest)."""
-    auth = request.headers.get("authorization", "")
-    if not auth.lower().startswith("bearer "):
-        raise HTTPException(401, "missing bearer")
-    token = auth[7:]
-    raw = await _read_body(request)
+    device_id, claims = await _authenticate(request, pool)
+    raw = await _read_verified_body(request, claims)
     try:
-        device_id = unverified_sub(token)
-        uuid.UUID(device_id)
-    except (JwtError, ValueError, TypeError):
-        raise HTTPException(401, "bad token")
+        cfg = TempConfigBody.model_validate_json(raw)
+    except ValidationError:
+        raise HTTPException(422, "invalid body")
     async with pool.acquire() as conn:
-        dev = await q.get_device(conn, device_id)
-        if dev is None or dev["revoked"]:
-            raise HTTPException(401, "unknown or revoked device")
-        try:
-            verify(token, bytes(dev["public_key_spki"]), raw, request.app.state.jti_cache)
-        except JwtError:
-            raise HTTPException(401, "bad signature")
-        try:
-            cfg = TempConfigBody.model_validate_json(raw)
-        except ValidationError:
-            raise HTTPException(422, "invalid body")
         await q.upsert_temp_config(conn, device_id, cfg.model_dump())
         # Device-level capacity alert sync (parallel to temp config): only when the phone
         # includes it — a temp-only body leaves seize_soc None and the alert config untouched.

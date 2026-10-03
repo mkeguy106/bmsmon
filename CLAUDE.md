@@ -1228,6 +1228,16 @@ Enforced in the app itself (not delegated to Traefik/Authentik) and pinned by te
   rejection. This blocks cross-site WebSocket hijacking from any same-site
   `*.covert.life` page (SEC-19). Dev-trust mode also allows `http://localhost:5173`,
   `http://127.0.0.1:5173` and a missing Origin (the Vite proxy and the smoke test).
+- **Device requests authenticate before their body is touched** (SEC-18). `_authenticate`
+  runs first: bearer, device row, ES256 signature + required claims + exp/iat/aud
+  (`device_jwt.verify_token`), replay probe, per-device budget. Only then is the body read
+  and gunzipped. `verify_body` binds it (`bh`) and **only then burns the jti**, so a
+  request whose body fails (bad gzip, 413, hash mismatch) leaves its token reusable.
+  Unauthenticated callers never cause a body read or an inflate. The budget
+  (`ingest_limiter`, `INGEST_MAX_PER_MIN` = 3000/min, shared by ingest + config) is keyed
+  per **device after the signature verifies**, never per IP, so nobody without the device
+  key can spend it. A serial outbox drain tops out around 10–16 POST/s, well under it.
+  Also fixed: a non-string `sub` (pre-auth) or `aud` used to escape as a 500.
 
 ### Read-only API keys (`/api/v1/groups`, desktop widgets)
 

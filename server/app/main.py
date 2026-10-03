@@ -160,6 +160,11 @@ def create_app() -> FastAPI:
     # never trips this; it exists to make key guessing pointless. Roomier than the
     # enroll limiter because four widgets share one desktop's IP.
     app.state.apikey_limiter = RateLimiter(max_attempts=240, window_s=60)
+    # SEC-18: per-DEVICE upload budget (keyed by device_id after the signature verifies,
+    # never by IP — see INGEST_MAX_PER_MIN for why it can't throttle an outbox drain).
+    from app.ratelimit import INGEST_MAX_PER_MIN, INGEST_WINDOW_S
+    app.state.ingest_limiter = RateLimiter(max_attempts=INGEST_MAX_PER_MIN,
+                                           window_s=INGEST_WINDOW_S)
     app.include_router(api_device.router)
     app.include_router(api_widget.router)
     app.include_router(web.router)

@@ -1,4 +1,4 @@
-"""Small in-process rate limiter for the unauthenticated /api/v1/enroll endpoint (SEC-4).
+"""Small in-process rate limiters: /api/v1/enroll (SEC-4), API keys, the share zone, and the per-device ingest budget (SEC-18).
 
 Sliding-window over a deque of timestamps per client key. PROCESS-LOCAL by design:
 the server runs single-worker (see the JtiCache/SRV-8 note in auth/device_jwt.py and
@@ -21,6 +21,18 @@ from app.config import settings
 # code brute-forcing (codes are single-use and expire in 10 min anyway).
 ENROLL_MAX_ATTEMPTS = 10
 ENROLL_WINDOW_S = 300
+
+# Per-DEVICE budget for /api/v1/ingest + /api/v1/config (SEC-18), checked only AFTER the
+# device's token signature verifies, so nobody without the device key can spend it.
+# Never key this per IP: an IP bucket can be spent by anyone who shares (or appears to
+# share) the phone's address, so anonymous junk could 429 the phone. It must never
+# throttle a legitimate outbox drain. The phone drains SERIALLY
+# (TelemetryReporter.uploadLoop: the next POST only after the previous response + Room
+# peek/encode/gzip/Keystore sign), so it tops out around 10-16 POST/s (<= ~1000/min) even
+# on home Wi-Fi; steady state is ~5/min. 3000/min leaves >= 3x headroom over the fastest
+# plausible drain.
+INGEST_MAX_PER_MIN = 3000
+INGEST_WINDOW_S = 60
 
 
 class RateLimiter:

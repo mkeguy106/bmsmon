@@ -1,7 +1,8 @@
 """Body-size and gzip-decompression caps on /api/v1/ingest and /api/v1/config.
 
-The caps fire BEFORE any signature verification, so an unauthenticated attacker
-cannot make the server buffer or inflate arbitrary amounts of memory.
+The WIRE cap fires before anything else (BodySizeLimitMiddleware, every route). The
+gunzip cap runs only AFTER the device token verifies (SEC-18): an unauthenticated caller
+can never make the server inflate anything (see test_ingest_auth_order.py).
 """
 import gzip
 import json
@@ -25,30 +26,29 @@ async def test_config_rejects_oversize_body(client):
     assert r.status_code == 413
 
 
-async def test_ingest_rejects_gzip_bomb(client):
-    # small on the wire (passes the body cap), huge decompressed
-    plaintext_size = settings.max_gunzip_bytes + 1024
-    bomb = gzip.compress(b"\x00" * plaintext_size)
+async def test_gzip_bomb_from_an_enrolled_device_is_413(app, client):
+    # Small on the wire (passes the body cap), huge decompressed. The token is valid,
+    # so this reaches the gunzip ceiling.
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    plaintext = b"\x00" * (settings.max_gunzip_bytes + 1024)
+    bomb = gzip.compress(plaintext)
     assert len(bomb) < settings.max_body_bytes  # sanity: it slips past the wire cap
-    r = await client.post("/api/v1/ingest", content=bomb,
-                          headers={"Authorization": "Bearer whatever",
-                                   "Content-Encoding": "gzip"})
-    assert r.status_code == 413
+    for path in ("/api/v1/ingest", "/api/v1/config"):
+        r = await client.post(path, content=bomb,
+                              headers={"Authorization": f"Bearer {_token(priv, device_id, plaintext)}",
+                                       "Content-Encoding": "gzip"})
+        assert r.status_code == 413, path
 
 
-async def test_config_rejects_gzip_bomb(client):
-    bomb = gzip.compress(b"\x00" * (settings.max_gunzip_bytes + 1024))
-    r = await client.post("/api/v1/config", content=bomb,
-                          headers={"Authorization": "Bearer whatever",
-                                   "Content-Encoding": "gzip"})
-    assert r.status_code == 413
-
-
-async def test_ingest_rejects_truncated_gzip(client):
-    # valid gzip prefix cut short: incremental decompressor must flag it as bad (400)
-    gz = gzip.compress(json.dumps(_payload()).encode())
+async def test_truncated_gzip_from_an_enrolled_device_is_400(app, client):
+    # A valid gzip prefix cut short: the incremental decompressor must flag it (400).
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    body = json.dumps(_payload()).encode()
+    gz = gzip.compress(body)
     r = await client.post("/api/v1/ingest", content=gz[: len(gz) // 2],
-                          headers={"Authorization": "Bearer whatever",
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body)}",
                                    "Content-Encoding": "gzip"})
     assert r.status_code == 400
 
