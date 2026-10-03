@@ -132,3 +132,24 @@ internal inline fun isolateCallback(onError: (Exception) -> Unit, block: () -> U
         onError(e)
     }
 }
+
+/** What one status write did (BLE-18). The platform's return used to be ignored, so a write onto a
+ *  dead link silently waited out the whole poll timeout. */
+enum class WriteResult { WRITTEN, REFUSED, BUSY, LINK_ERROR }
+
+/** `BluetoothStatusCodes.SUCCESS` / `ERROR_GATT_WRITE_REQUEST_BUSY` (API 33), as literals so this
+ *  stays JVM-testable and lint-clean on minSdk 26 — pinned to the platform by LinkFailFastTest. */
+internal const val GATT_WRITE_SUCCESS = 0
+internal const val GATT_WRITE_REQUEST_BUSY = 201
+
+/** API 33+ `writeCharacteristic` status → outcome. BUSY = a GATT op is still queued on a live link
+ *  (a miss); anything else non-success (not connected, not allowed, unknown) = the link is unusable. */
+fun classifyWriteStatus(status: Int): WriteResult = when (status) {
+    GATT_WRITE_SUCCESS -> WriteResult.WRITTEN
+    GATT_WRITE_REQUEST_BUSY -> WriteResult.BUSY
+    else -> WriteResult.LINK_ERROR
+}
+
+/** Pre-33 `writeCharacteristic` returns only a Boolean, which can't tell busy from gone: a miss. */
+fun classifyLegacyWrite(accepted: Boolean): WriteResult =
+    if (accepted) WriteResult.WRITTEN else WriteResult.BUSY
