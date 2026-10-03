@@ -42,6 +42,23 @@ fun evalStageAlert(packs: List<PackSoc>, cfg: AlertConfig): AlertEval {
 }
 
 /**
+ * Re-arm hysteresis for an acknowledged capacity rung (M4): the ack for rung r is kept while the
+ * stage's lowest alert-driving pack reads below r + this margin. The BMS reports SOC as an integer
+ * percent and regen braking ticks it up by 1 % at a time, so without a margin a regen uptick at a
+ * rung boundary cleared the ack and the very next downtick re-flashed the rung mid-drive. 2 % is
+ * the smallest margin a single 1 % uptick can't cross. A stage change or real (non-regen) charging
+ * still clears acks at once.
+ */
+const val ACK_REARM_MARGIN_PCT = 2
+
+/** The acknowledged rungs still held at [lowSoc] (the stage's lowest alert-driving pack): an enabled
+ *  rung stays acknowledged until [lowSoc] reaches rung + [ACK_REARM_MARGIN_PCT]; with alerts off
+ *  nothing is held. Charging and stage changes are the caller's (they clear everything). */
+fun heldCapAcks(acks: Set<Int>, lowSoc: Float, cfg: AlertConfig): Set<Int> =
+    if (!cfg.alertsOn) emptySet()
+    else acks.filterTo(mutableSetOf()) { it in cfg.enabledThresholds && lowSoc < it + ACK_REARM_MARGIN_PCT }
+
+/**
  * Shared severity scale for the capacity-vs-temperature worst-of arbitration (UI-12). These used
  * to be raw literals aligned with `TempRank.ordinal`, which silently broke if the enum was ever
  * reordered — [tempSeverity] pins the mapping explicitly (exhaustive `when`, test-locked).
@@ -140,6 +157,7 @@ data class FleetNotify(
  * so two packs can hold two live low-battery notifications at once and a second low pack is never
  * masked by the first. A pack that has recovered/charged cancels; a pack that has dropped out of
  * [evals] entirely (unreachable / off BLE) also cancels — we alert on live data, not on absence.
+ * Only packs present in [last] (i.e. currently notified) are ever cancelled (BLE-28).
  */
 fun reconcileFleetNotifications(evals: Map<String, AlertEval>, last: Map<String, Int?>): FleetNotify {
     val newLast = mutableMapOf<String, Int?>()
@@ -149,10 +167,43 @@ fun reconcileFleetNotifications(evals: Map<String, AlertEval>, last: Map<String,
     for ((addr, eval) in evals) {
         val d = nextNotifyDecision(eval, last[addr])
         when {
-            d.cancel -> cancel += addr
+            // BLE-28: cancel only a pack that is actually showing a notification (has a baseline).
+            d.cancel -> if (addr in last) cancel += addr
             d.notify -> { notify += addr; newLast[addr] = d.newLastNotified }
             else -> newLast[addr] = d.newLastNotified  // same band → keep baseline, stay quiet
         }
     }
     return FleetNotify(newLast, cancel, notify)
+}
+
+/** Every alert-driving pack's own [AlertEval] plus the advanced per-pack charge latch. */
+data class FleetCapacity(val evals: Map<String, AlertEval>, val chargeAt: Map<String, Long>)
+
+/**
+ * Fleet-wide capacity evaluation (moved verbatim out of MonitorEngine.evaluateAlerts): every
+ * reachable pack in [fleet] — pass the freshness decision view, so seeds and silent packs are
+ * already unreachable — is evaluated against [cfg] on its own, with the per-pack charging
+ * hysteresis (UI-9) presented as `charging` so an Idle/Charging flap can't strobe notifications.
+ */
+fun fleetCapacityEvals(
+    fleet: Map<String, BatteryStatus>,
+    cfg: AlertConfig,
+    chargeAt: Map<String, Long>,
+    nowMs: Long,
+): FleetCapacity {
+    val nextCharge = chargeAt.toMutableMap()
+    val evals = fleet.mapNotNull { (addr, s) ->
+        val tel = s.telemetry?.takeIf { s.reachable } ?: return@mapNotNull null
+        val charging = tel.state == BatteryState.Charging
+        val hold = nextChargeHold(
+            charging = charging,
+            discharging = tel.state == BatteryState.Discharging,
+            lastChargingAt = chargeAt[addr] ?: 0L,
+            now = nowMs,
+        )
+        nextCharge[addr] = hold.lastChargingAt
+        val eval = evalStageAlert(listOf(PackSoc(tel.soc, charging)), cfg)
+        addr to (if (hold.holdActive && !eval.charging) eval.copy(charging = true) else eval)
+    }.toMap()
+    return FleetCapacity(evals, nextCharge)
 }

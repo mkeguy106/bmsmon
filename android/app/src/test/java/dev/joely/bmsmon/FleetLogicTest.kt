@@ -203,7 +203,7 @@ class FleetLogicTest {
 
     @Test fun stageItemsReadEngineComputedEta() {
         val fleet = roster.groupById("2012")!!.targets.associate {
-            it.address to BatteryStatus(tel(BatteryState.Charging), reachable = true, etaFullMin = 42f)
+            it.address to BatteryStatus(tel(BatteryState.Charging), reachable = true, etaFullMin = 42f, lastFrameAtElapsedMs = 0L)
         }
         val items = stageState(fleet).stageItems()
         assertEquals(2, items.size)

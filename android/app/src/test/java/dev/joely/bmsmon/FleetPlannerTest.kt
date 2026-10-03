@@ -3,6 +3,7 @@ package dev.joely.bmsmon
 import dev.joely.bmsmon.ble.delayFor
 import dev.joely.bmsmon.ble.DropReason
 import dev.joely.bmsmon.ble.PlannedDrop
+import dev.joely.bmsmon.ble.launchBarrierHolds
 import dev.joely.bmsmon.ble.planFleet
 import dev.joely.bmsmon.ble.profile.BackoffSpec
 import org.junit.Assert.assertEquals
@@ -128,5 +129,34 @@ class FleetPlannerPlanTest {
         // Barrier armed but stage not yet known (setStage hasn't landed): hold everyone for the tick.
         val p = plan(desired = setOf("A", "B"), stage = emptySet(), stageFirst = true)
         org.junit.Assert.assertEquals(emptyList<String>(), p.toConnect)
+    }
+}
+
+/** The launch barrier's rule, extracted verbatim from BmsRepository's control loop (T1.2 fix 1). */
+class LaunchBarrierTest {
+    private fun holds(
+        desired: Set<String> = setOf("A", "B", "C"), stage: Set<String> = setOf("A", "B"),
+        held: Set<String> = emptySet(), stageInitialized: Boolean = true, now: Long = 1_000L,
+    ) = launchBarrierHolds(desired, stage, held, stageInitialized, now, priorityUntil = 20_000L)
+
+    @Test fun holdsEveryoneUntilTheStageIsKnown() {
+        org.junit.Assert.assertTrue(holds(stage = emptySet(), stageInitialized = false))
+    }
+
+    @Test fun holdsUntilEveryDesiredStagePackIsHeld() {
+        org.junit.Assert.assertTrue(holds(held = setOf("A")))
+        org.junit.Assert.assertFalse(holds(held = setOf("A", "B")))
+    }
+
+    @Test fun aStageWithNoDesiredPackReleasesAtOnce() {
+        org.junit.Assert.assertFalse(holds(stage = emptySet()))
+        // A disabled stage pack isn't desired, so it can neither hold the barrier nor be admitted.
+        org.junit.Assert.assertFalse(holds(desired = setOf("C"), stage = setOf("A", "B")))
+        org.junit.Assert.assertFalse(holds(desired = setOf("A", "C"), stage = setOf("A", "B"), held = setOf("A")))
+    }
+
+    @Test fun theGraceWindowCapsIt() {
+        org.junit.Assert.assertFalse(holds(stageInitialized = false, now = 20_000L))
+        org.junit.Assert.assertFalse(holds(now = 25_000L))
     }
 }

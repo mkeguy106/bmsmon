@@ -1,5 +1,6 @@
 package dev.joely.bmsmon
 
+import dev.joely.bmsmon.model.ACK_REARM_MARGIN_PCT
 import dev.joely.bmsmon.model.AlertKind
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.BatteryStatus
@@ -12,14 +13,17 @@ import dev.joely.bmsmon.model.groupById
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Worst-of arbitration between capacity and temperature stage alerts, plus temp-ack re-arming.
- * Regression coverage for two safety bugs:
+ * Worst-of arbitration between capacity and temperature stage alerts, plus ack re-arming.
+ * Regression coverage for the safety bugs:
  *  - an acknowledged temp CRITICAL must not mask an un-acked (flashing) capacity alert;
- *  - temp acks must clear once the condition recovers, so a recurrence flashes again.
+ *  - temp and capacity acks must clear once the condition recovers (capacity acks also on a stage
+ *    change or when the stage starts charging), so a recurrence flashes again;
+ *  - ACKNOWLEDGE acks the alert the overlay displayed, never one re-derived at tap time.
  */
 class StageAlertArbitrationTest {
 
@@ -32,7 +36,7 @@ class StageAlertArbitrationTest {
     /** Fleet where every pack of base [gid] reports [soc] / [tempC], all reachable. */
     private fun fleetAt(gid: String, soc: Float, tempC: Float, charging: Boolean = false): Map<String, BatteryStatus> =
         DEFAULT_ROSTER.groupById(gid)!!.targets.associate {
-            it.address to BatteryStatus(tel(soc, tempC, charging), reachable = true)
+            it.address to BatteryStatus(tel(soc, tempC, charging), reachable = true, lastFrameAtElapsedMs = 0L)
         }
 
     // Redodo default temp thresholds: hotCrit 53 °C, hotCutoff 60 °C — 55 °C = CRITICAL, 60 °C = CUTOFF.
@@ -200,6 +204,7 @@ class StageAlertArbitrationTest {
                 Telemetry("x", soc = soc, powerW = 0f, current = 0f, voltage = 13f,
                     capacityAh = 50f, cellV = 3.3f, temp = 25f, state = BatteryState.Idle),
                 reachable = true,
+                lastFrameAtElapsedMs = 0L,
             )
         }
 
@@ -233,5 +238,198 @@ class StageAlertArbitrationTest {
         s = s.copy(fleet = s.fleet.mapValues { (_, st) -> st.copy(reachable = false) })
         s = s.withChargeHold(now = 1_000L + CHARGE_SUPPRESS_HOLD_MS + 1)
         assertFalse(s.stageChargeHold)
+    }
+
+    // --- UI-15: capacity acks re-arm (the capacity twin of tempAckRearmsAfterRecovery) ---
+
+    @Test fun capAckRearmsAfterRecovery() {
+        var s = stateAt(soc = 28f, tempC = 25f)
+        val shown = s.stageAlert()
+        assertEquals(30, shown.activeThreshold)
+        assertTrue(shown.flashing)
+        s = s.withAcknowledged(shown)
+        assertFalse(s.stageAlert().flashing)
+        // still crossed: the ack holds
+        assertEquals(setOf(30), s.withCapAcksPruned(s.stageTarget).acknowledgedThresholds)
+        // recovers above the rung on a live reading -> ack pruned
+        s = s.copy(fleet = fleetAt("2012", 45f, 25f)).withCapAcksPruned(s.stageTarget)
+        assertTrue(s.acknowledgedThresholds.isEmpty())
+        // the next crossing (e.g. the next day) flashes again
+        s = s.copy(fleet = fleetAt("2012", 29f, 25f))
+        assertTrue(s.stageAlert().flashing)
+    }
+
+    @Test fun capAckDoesNotCarryAcrossBases() {
+        var s = stateAt(soc = 28f, tempC = 25f)
+        s = s.withAcknowledged(s.stageAlert())
+        // another base (seize, swap) takes the stage at the same rung: it must flash, not inherit
+        val prev = s.stageTarget
+        s = s.copy(stageTarget = StageTarget.Base("2016"), fleet = s.fleet + fleetAt("2016", 28f, 25f))
+            .withCapAcksPruned(prev)
+        assertTrue(s.acknowledgedThresholds.isEmpty())
+        assertTrue(s.stageAlert().flashing)
+    }
+
+    @Test fun capAckClearsWhenTheStageStartsCharging() {
+        var s = stateAt(soc = 28f, tempC = 25f)
+        s = s.withAcknowledged(s.stageAlert())
+        s = s.copy(fleet = fleetAt("2012", 28f, 25f, charging = true)).withCapAcksPruned(s.stageTarget)
+        assertTrue(s.acknowledgedThresholds.isEmpty())
+    }
+
+    // --- M4: re-arm hysteresis. BMS SOC is an integer percent, so regen on the stage's lowest pack
+    //     ticks it 1 % back over a rung; without a margin that cleared the ack, and the next
+    //     downtick re-flashed the rung mid-drive. ---
+
+    @Test fun aOnePercentUptickKeepsTheCapAck() {
+        var s = stateAt(soc = 30f, tempC = 25f)
+        s = s.withAcknowledged(s.stageAlert())
+        assertEquals(setOf(30), s.acknowledgedThresholds)
+        s = s.copy(fleet = fleetAt("2012", 31f, 25f)).withCapAcksPruned(s.stageTarget)   // regen uptick
+        assertEquals(setOf(30), s.acknowledgedThresholds)
+        s = s.copy(fleet = fleetAt("2012", 30f, 25f)).withCapAcksPruned(s.stageTarget)   // back down
+        assertEquals(setOf(30), s.acknowledgedThresholds)
+        assertFalse("the acked rung must not re-flash", s.stageAlert().flashing)
+    }
+
+    @Test fun aRecoveryOfTheMarginRearmsTheCapAck() {
+        var s = stateAt(soc = 30f, tempC = 25f)
+        s = s.withAcknowledged(s.stageAlert())
+        s = s.copy(fleet = fleetAt("2012", 30f + ACK_REARM_MARGIN_PCT, 25f)).withCapAcksPruned(s.stageTarget)
+        assertTrue(s.acknowledgedThresholds.isEmpty())
+        s = s.copy(fleet = fleetAt("2012", 30f, 25f))
+        assertTrue("a genuine recovery re-arms the next crossing", s.stageAlert().flashing)
+    }
+
+    @Test fun realChargingStillClearsTheCapAckInsideTheMargin() {
+        var s = stateAt(soc = 30f, tempC = 25f)
+        s = s.withAcknowledged(s.stageAlert())
+        s = s.copy(fleet = fleetAt("2012", 31f, 25f, charging = true)).withCapAcksPruned(s.stageTarget)
+        assertTrue(s.acknowledgedThresholds.isEmpty())
+    }
+
+    @Test fun aDeeperRungStillFlashesThroughAHeldAck() {
+        // The margin only holds the acked rung; a further drop to the next one is a new alert.
+        var s = stateAt(soc = 30f, tempC = 25f)
+        s = s.withAcknowledged(s.stageAlert())
+        s = s.copy(fleet = fleetAt("2012", 25f, 25f)).withCapAcksPruned(s.stageTarget)
+        assertEquals(setOf(30), s.acknowledgedThresholds)
+        assertTrue(s.stageAlert().flashing)
+        assertEquals(25, s.stageAlert().activeThreshold)
+    }
+
+    @Test fun dropoutDoesNotPruneCapAcks() {
+        var s = stateAt(soc = 28f, tempC = 25f)
+        s = s.withAcknowledged(s.stageAlert())
+        val dropped = s.copy(fleet = s.fleet.mapValues { (_, st) -> st.copy(reachable = false) })
+        assertEquals(setOf(30), dropped.withCapAcksPruned(dropped.stageTarget).acknowledgedThresholds)
+    }
+
+    // --- UI-25: ACKNOWLEDGE acks what was DISPLAYED, never a re-derived alert ---
+
+    @Test fun ackAcksTheDisplayedRungNotTheCurrentOne() {
+        val shown = stateAt(soc = 26f, tempC = 25f).stageAlert()   // the overlay showed 30
+        assertEquals(30, shown.activeThreshold)
+        val moved = stateAt(soc = 24f, tempC = 25f)                // crossed 25 before the tap landed
+        val acked = moved.withAcknowledged(shown)
+        assertEquals(setOf(30), acked.acknowledgedThresholds)
+        assertTrue("25 was never shown - it must still flash", acked.stageAlert().flashing)
+        assertEquals(25, acked.stageAlert().activeThreshold)
+    }
+
+    @Test fun ackOfADisplayedCapacityAlertNeverSilencesATempAlertThatWonLater() {
+        val shown = stateAt(soc = 22f, tempC = 25f).stageAlert()   // capacity 25 shown
+        val now = stateAt(soc = 22f, tempC = 55f)                  // temp CRITICAL won before the tap
+        val acked = now.withAcknowledged(shown)
+        assertTrue(acked.acknowledgedTempKeys.isEmpty())
+        assertEquals(AlertKind.TEMPERATURE, acked.stageAlert().kind)
+        assertTrue(acked.stageAlert().flashing)
+    }
+
+    @Test fun ackOfADisplayedTempAlertAcksThatKey() {
+        val s = stateAt(soc = 80f, tempC = 55f)
+        assertEquals(setOf("temp:HOT:CRITICAL"), s.withAcknowledged(s.stageAlert()).acknowledgedTempKeys)
+    }
+
+    @Test fun ackOfAnAlertThatShowedNothingChangesNothing() {
+        val quiet = stateAt(soc = 80f, tempC = 25f)
+        assertSame(quiet, quiet.withAcknowledged(quiet.stageAlert()))
+    }
+
+    // --- the one derivation chain (engine emissions and the freshness tick share it) ---
+
+    @Test fun stageDerivationsRunTheWholeChain() {
+        // Charging latches the hold, and a recovered stage re-arms BOTH ack kinds, in one pass.
+        val s = stateAt(
+            soc = 80f, tempC = 25f, charging = true,
+            ackedTemp = setOf("temp:HOT:CRITICAL"), ackedCap = setOf(30),
+        )
+        val d = s.withStageDerivations(nowMs = 1_000L)
+        assertTrue(d.stageChargeHold)
+        assertTrue(d.acknowledgedTempKeys.isEmpty())
+        assertTrue(d.acknowledgedThresholds.isEmpty())
+    }
+
+    @Test fun stageDerivationsClearCapAcksOnAStageChange() {
+        var s = stateAt(soc = 28f, tempC = 25f)
+        s = s.withAcknowledged(s.stageAlert())
+        val prev = s.stageTarget
+        s = s.copy(stageTarget = StageTarget.Base("2016"), fleet = s.fleet + fleetAt("2016", 28f, 25f))
+        // the default prevTarget is the current stage: no change, the ack stays (it is for 2012)
+        assertEquals(setOf(30), s.withStageDerivations(nowMs = 1_000L).acknowledgedThresholds)
+        assertTrue(s.withStageDerivations(nowMs = 1_000L, prevTarget = prev).acknowledgedThresholds.isEmpty())
+    }
+
+    // --- regen is not a charge: a burst mid-drive must not re-arm an acked rung ---
+    // Production data (last 30 days): 86 of 531 regen samples carry BMS state=Charging.
+
+    private val stageAddrs = DEFAULT_ROSTER.groupById("2012")!!.targets.map { it.address }.toSet()
+
+    @Test fun regenBurstReadingChargingKeepsTheCapAck() {
+        var s = stateAt(soc = 28f, tempC = 25f)
+        s = s.withAcknowledged(s.stageAlert())
+        val burst = s.copy(fleet = fleetAt("2012", 28f, 25f, charging = true), regenAddrs = stageAddrs)
+        assertEquals(setOf(30), burst.withCapAcksPruned(burst.stageTarget).acknowledgedThresholds)
+    }
+
+    @Test fun theSameChargingFrameWithoutRegenClearsTheCapAck() {
+        var s = stateAt(soc = 28f, tempC = 25f)
+        s = s.withAcknowledged(s.stageAlert())
+        val charge = s.copy(fleet = fleetAt("2012", 28f, 25f, charging = true), regenAddrs = emptySet())
+        assertTrue(charge.withCapAcksPruned(charge.stageTarget).acknowledgedThresholds.isEmpty())
+    }
+
+    @Test fun regenBurstDoesNotReFlashAnAckedRungWhenItEnds() {
+        // The whole chain: the burst latches the charge hold (UI-9 suppression is unchanged) but
+        // keeps the ack; when the burst ends the pack is Discharging again and the rung stays quiet.
+        var s = stateAt(soc = 28f, tempC = 25f)
+        s = s.withAcknowledged(s.stageAlert())
+        s = s.copy(fleet = fleetAt("2012", 28f, 25f, charging = true), regenAddrs = stageAddrs)
+            .withStageDerivations(nowMs = 1_000L)
+        assertTrue(s.stageChargeHold)
+        assertEquals(setOf(30), s.acknowledgedThresholds)
+        s = s.copy(fleet = fleetAt("2012", 28f, 25f), regenAddrs = emptySet())
+            .withStageDerivations(nowMs = 2_000L)
+        assertFalse(s.stageChargeHold)
+        assertEquals(setOf(30), s.acknowledgedThresholds)
+        assertFalse(s.stageAlert().flashing)
+        assertTrue(s.stageAlert().present)
+    }
+
+    // --- UI-25: an ack for an alert shown on another stage is dropped ---
+
+    @Test fun ackLandingAfterTheStageChangedNeverAcksTheNewBase() {
+        val shown = stateAt(soc = 28f, tempC = 25f).stageAlert()
+        assertEquals(StageTarget.Base("2012"), shown.target)
+        // a seize/swap put base 2016 on the stage at the same rung before the tap landed
+        val swapped = stateAt(soc = 28f, tempC = 25f)
+            .copy(stageTarget = StageTarget.Base("2016"), fleet = fleetAt("2016", 28f, 25f))
+        assertSame(swapped, swapped.withAcknowledged(shown))
+        assertTrue(swapped.stageAlert().flashing)
+        // same for a temperature alert
+        val hot = stateAt(soc = 80f, tempC = 55f).stageAlert()
+        val hotSwapped = stateAt(soc = 80f, tempC = 55f)
+            .copy(stageTarget = StageTarget.Base("2016"), fleet = fleetAt("2016", 80f, 55f))
+        assertTrue(hotSwapped.withAcknowledged(hot).acknowledgedTempKeys.isEmpty())
     }
 }

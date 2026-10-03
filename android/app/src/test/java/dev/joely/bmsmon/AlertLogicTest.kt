@@ -21,7 +21,7 @@ class AlertLogicTest {
     /** Fleet where every address of base [gid] reports [soc], all reachable. */
     private fun fleetAt(gid: String, soc: Float): Map<String, BatteryStatus> =
         DEFAULT_ROSTER.groupById(gid)!!.targets.associate {
-            it.address to BatteryStatus(tel(soc), reachable = true)
+            it.address to BatteryStatus(tel(soc), reachable = true, lastFrameAtElapsedMs = 0L)
         }
 
     private fun stateAt(gid: String, soc: Float, enabled: Set<Int>, critical: Int) = UiState(

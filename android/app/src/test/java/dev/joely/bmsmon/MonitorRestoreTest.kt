@@ -4,13 +4,17 @@ import dev.joely.bmsmon.data.Persisted
 import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.Battery
 import dev.joely.bmsmon.model.DEFAULT_DIM_LEVEL
+import dev.joely.bmsmon.model.DEFAULT_GROUP_ID
 import dev.joely.bmsmon.model.DEFAULT_ROSTER
+import dev.joely.bmsmon.model.DEFAULT_STAGE_HOLD_MIN
 import dev.joely.bmsmon.model.Group
 import dev.joely.bmsmon.model.Roster
 import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.Telemetry
 import dev.joely.bmsmon.model.TempUnit
+import dev.joely.bmsmon.model.stageAddrsFor
 import dev.joely.bmsmon.monitor.MonitorState
+import dev.joely.bmsmon.monitor.RestorePlan
 import dev.joely.bmsmon.monitor.monitoringNotificationText
 import dev.joely.bmsmon.monitor.restorePlan
 import org.junit.Assert.assertEquals
@@ -40,12 +44,15 @@ class MonitorRestoreTest {
         enrolled: Boolean = false,
         gpsEnabled: Boolean? = null,
         gpsPauseParked: Boolean = true,
+        seizeLowToStage: Boolean = true,
+        dynamicStage: Boolean? = null,
+        stageHoldMinutes: Int? = null,
     ) = Persisted(
         accentArgb = null, powerArgb = null, manualMode = false, darkMode = false,
-        dailyDriverId = dailyDriverId, lastStage = lastStage, dynamicStage = null,
-        stageHoldMinutes = null, monitoring = monitoring, logging = logging,
+        dailyDriverId = dailyDriverId, lastStage = lastStage, dynamicStage = dynamicStage,
+        stageHoldMinutes = stageHoldMinutes, monitoring = monitoring, logging = logging,
         alertsOn = alertsOn, enabledThresholds = enabledThresholds,
-        criticalThreshold = criticalThreshold, seizeLowToStage = true, keepScreenOn = true, sortKey = null,
+        criticalThreshold = criticalThreshold, seizeLowToStage = seizeLowToStage, keepScreenOn = true, sortKey = null,
         filters = null, filterBaseId = null, lastTelemetry = lastTelemetry,
         tempFahrenheit = tempFahrenheit, roster = roster, appearance = null,
         autoLuxThreshold = null, locked = false, csvImported = false,
@@ -64,6 +71,8 @@ class MonitorRestoreTest {
         capacityAh = 50f, cellV = 3.3f, temp = 20f,
     )
 
+    private fun RestorePlan.addrs() = stageAddrsFor(stage, roster, disabled)
+
     // --- restorePlan ---
 
     @Test
@@ -75,7 +84,8 @@ class MonitorRestoreTest {
     fun `null roster falls back to default and stage restores from persisted base`() {
         val plan = restorePlan(persisted(lastStage = StageTarget.Base("2024")))!!
         assertEquals(DEFAULT_ROSTER, plan.roster)
-        assertEquals(setOf("C8:47:80:15:07:DE", "C8:47:80:15:25:01"), plan.stageAddrs)
+        assertEquals(StageTarget.Base("2024"), plan.stage)
+        assertEquals(setOf("C8:47:80:15:07:DE", "C8:47:80:15:25:01"), plan.addrs())
     }
 
     @Test
@@ -83,20 +93,21 @@ class MonitorRestoreTest {
         val plan = restorePlan(
             persisted(lastStage = StageTarget.Base("gone"), dailyDriverId = "2016"),
         )!!
-        assertEquals(setOf("C8:47:80:15:DB:13", "C8:47:80:15:25:9A"), plan.stageAddrs)
+        assertEquals(StageTarget.Base("2016"), plan.stage)
+        assertEquals(setOf("C8:47:80:15:DB:13", "C8:47:80:15:25:9A"), plan.addrs())
     }
 
     @Test
     fun `no persisted stage or daily driver uses first group`() {
         val plan = restorePlan(persisted())!!
         // DEFAULT_ROSTER's first group is 2012.
-        assertEquals(setOf("C8:47:80:15:67:44", "C8:47:80:15:62:1B"), plan.stageAddrs)
+        assertEquals(setOf("C8:47:80:15:67:44", "C8:47:80:15:62:1B"), plan.addrs())
     }
 
     @Test
     fun `single stage restores when the address is still in the roster`() {
         val plan = restorePlan(persisted(lastStage = StageTarget.Single("C8:47:80:15:25:01")))!!
-        assertEquals(setOf("C8:47:80:15:25:01"), plan.stageAddrs)
+        assertEquals(setOf("C8:47:80:15:25:01"), plan.addrs())
     }
 
     @Test
@@ -104,7 +115,7 @@ class MonitorRestoreTest {
         val plan = restorePlan(
             persisted(lastStage = StageTarget.Single("AA:BB:CC:DD:EE:FF"), dailyDriverId = "2023"),
         )!!
-        assertEquals(setOf("C8:47:80:46:0A:D6", "C8:47:80:45:90:FB"), plan.stageAddrs)
+        assertEquals(setOf("C8:47:80:46:0A:D6", "C8:47:80:45:90:FB"), plan.addrs())
     }
 
     @Test
@@ -116,7 +127,7 @@ class MonitorRestoreTest {
             ),
         )!!
         assertEquals(setOf("C8:47:80:15:67:44"), plan.disabled)
-        assertEquals(setOf("C8:47:80:15:62:1B"), plan.stageAddrs)
+        assertEquals(setOf("C8:47:80:15:62:1B"), plan.addrs())
     }
 
     @Test
@@ -127,7 +138,7 @@ class MonitorRestoreTest {
         )
         val plan = restorePlan(persisted(roster = roster, lastStage = StageTarget.Base("g1")))!!
         assertEquals(roster, plan.roster)
-        assertEquals(setOf("AA:BB:CC:DD:EE:FF"), plan.stageAddrs)
+        assertEquals(setOf("AA:BB:CC:DD:EE:FF"), plan.addrs())
     }
 
     @Test
@@ -188,6 +199,50 @@ class MonitorRestoreTest {
     fun `logging flag is restored`() {
         assertTrue(restorePlan(persisted(logging = true))!!.logging)
         assertFalse(restorePlan(persisted(logging = false))!!.logging)
+    }
+
+    // --- T1.2: the headless engine resolves the stage from the same inputs the app pushes ---
+
+    @Test
+    fun `stage config restores the persisted stage settings`() {
+        val plan = restorePlan(persisted(dynamicStage = false, stageHoldMinutes = 30, dailyDriverId = "2016"))!!
+        assertEquals("2016", plan.stageConfig.dailyDriverId)
+        assertFalse(plan.stageConfig.dynamicEnabled)
+        assertEquals(30 * 60_000L, plan.stageConfig.holdMs)
+        assertNull(plan.stageConfig.manualStage)   // pins never survive a restart, headless or not
+    }
+
+    @Test
+    fun `stage config defaults match a fresh install`() {
+        val c = restorePlan(persisted())!!.stageConfig
+        assertTrue(c.dynamicEnabled)
+        assertEquals(DEFAULT_STAGE_HOLD_MIN * 60_000L, c.holdMs)
+        assertEquals("2012", c.dailyDriverId)
+    }
+
+    // Same daily-driver reducer as the ViewModel (`p.dailyDriverId ?: DEFAULT_GROUP_ID`), not the
+    // old `?: ""` that silently fell through to the FIRST group. Only a roster whose first group
+    // isn't DEFAULT_GROUP_ID tells the two apart (DEFAULT_ROSTER's first group is 2012).
+    @Test
+    fun `daily driver defaults to DEFAULT_GROUP_ID even when it is not the first group`() {
+        val roster = Roster(
+            batteries = listOf(
+                Battery("AA:00:00:00:00:01", "R-1", "One", "2016"),
+                Battery("AA:00:00:00:00:02", "R-2", "Two", DEFAULT_GROUP_ID),
+            ),
+            groups = listOf(Group("2016", "2016"), Group(DEFAULT_GROUP_ID, "2012")),
+        )
+        val plan = restorePlan(persisted(roster = roster))!!
+        assertEquals(DEFAULT_GROUP_ID, plan.stageConfig.dailyDriverId)
+        assertEquals(StageTarget.Base(DEFAULT_GROUP_ID), plan.stage)
+    }
+
+    @Test
+    fun `headless seize threshold uses the same rule as the app`() {
+        assertEquals(30, restorePlan(persisted())!!.stageConfig.seizeThreshold)   // default ladder top
+        assertEquals(50, restorePlan(persisted(enabledThresholds = setOf(50, 20)))!!.stageConfig.seizeThreshold)
+        assertNull(restorePlan(persisted(seizeLowToStage = false))!!.stageConfig.seizeThreshold)
+        assertNull(restorePlan(persisted(alertsOn = false))!!.stageConfig.seizeThreshold)
     }
 
     // --- monitoringNotificationText (BLE-11 de-churn: text only changes when this changes) ---

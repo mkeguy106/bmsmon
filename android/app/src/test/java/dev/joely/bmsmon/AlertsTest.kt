@@ -2,13 +2,17 @@ package dev.joely.bmsmon
 
 import dev.joely.bmsmon.model.AlertConfig
 import dev.joely.bmsmon.model.AlertEval
+import dev.joely.bmsmon.model.BatteryState
+import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.CAP_SEVERITY_CRITICAL
 import dev.joely.bmsmon.model.CAP_SEVERITY_WARNING
 import dev.joely.bmsmon.model.CHARGE_SUPPRESS_HOLD_MS
 import dev.joely.bmsmon.model.PackSoc
 import dev.joely.bmsmon.model.SEVERITY_NONE
 import dev.joely.bmsmon.model.TempRank
+import dev.joely.bmsmon.model.Telemetry
 import dev.joely.bmsmon.model.evalStageAlert
+import dev.joely.bmsmon.model.fleetCapacityEvals
 import dev.joely.bmsmon.model.nextChargeHold
 import dev.joely.bmsmon.model.nextNotifyDecision
 import dev.joely.bmsmon.model.reconcileFleetNotifications
@@ -231,5 +235,43 @@ class AlertsTest {
         assertTrue(tempSeverity(TempRank.CUTOFF) > CAP_SEVERITY_CRITICAL)
         // caution/warning stay below both capacity severities (they never take the stage).
         assertTrue(tempSeverity(TempRank.WARNING) < CAP_SEVERITY_WARNING)
+    }
+
+    // --- BLE-28: only packs that were actually notified are ever cancelled ---
+
+    @Test fun healthyPackThatWasNeverNotifiedIsNotCancelled() {
+        // Previously every healthy/charging pack landed in the cancel set on every evaluation; the
+        // notifier skips packs it never posted, but a once-notified pack that recovered kept
+        // costing an nm.cancel IPC per evaluation — with BLE-14's every-frame evaluation that is
+        // ~2/s per such pack, for nothing.
+        val r = reconcileFleetNotifications(mapOf("A" to eval(null), "B" to eval(30, charging = true)), emptyMap())
+        assertTrue(r.cancel.isEmpty())
+    }
+
+    // --- fleetCapacityEvals: the engine's per-pack evaluation, extracted verbatim ---
+
+    private fun capTel(soc: Float, state: BatteryState) = Telemetry(
+        "x", soc = soc, powerW = 0f, current = 0f, voltage = 13f, capacityAh = soc,
+        cellV = 3.3f, temp = 25f, state = state,
+    )
+
+    @Test fun fleetEvalSkipsUnreachableAndEvaluatesEachPackAlone() {
+        val fleet = mapOf(
+            "A" to BatteryStatus(capTel(12f, BatteryState.Discharging), reachable = true),
+            "B" to BatteryStatus(capTel(80f, BatteryState.Idle), reachable = true),
+            "C" to BatteryStatus(capTel(5f, BatteryState.Idle), reachable = false),
+        )
+        val fc = fleetCapacityEvals(fleet, cfg(setOf(30, 15), critical = 15), emptyMap(), nowMs = 1_000L)
+        assertEquals(setOf("A", "B"), fc.evals.keys)
+        assertEquals(15, fc.evals.getValue("A").activeThreshold)
+        assertNull(fc.evals.getValue("B").activeThreshold)
+    }
+
+    @Test fun fleetEvalHoldsTheChargeLatchThroughAnIdleFlap() {
+        val charging = mapOf("A" to BatteryStatus(capTel(12f, BatteryState.Charging), reachable = true))
+        val first = fleetCapacityEvals(charging, cfg(setOf(15), critical = 15), emptyMap(), nowMs = 1_000L)
+        val idle = mapOf("A" to BatteryStatus(capTel(12f, BatteryState.Idle), reachable = true))
+        val second = fleetCapacityEvals(idle, cfg(setOf(15), critical = 15), first.chargeAt, nowMs = 2_000L)
+        assertTrue(second.evals.getValue("A").charging)   // latched: no cancel/re-notify strobe
     }
 }

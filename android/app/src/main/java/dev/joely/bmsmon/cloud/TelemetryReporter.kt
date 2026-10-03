@@ -1,6 +1,7 @@
 package dev.joely.bmsmon.cloud
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import java.io.ByteArrayOutputStream
 import java.util.zip.GZIPOutputStream
@@ -20,7 +21,6 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
@@ -70,7 +70,7 @@ class TelemetryReporter(
     private val settings: SettingsStore,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val http = OkHttpClient()
+    private val http = uploadHttpClient()
     private val conn = Connectivity(appContext)
     private val enqueueChannel = Channel<OutboxEntity>(Channel.UNLIMITED)
     @Volatile private var started = false
@@ -193,6 +193,8 @@ class TelemetryReporter(
         if (!p.enrolled || p.importDone || p.deviceId == null || p.apiBaseUrl == null) return
         var after = p.importWatermark
         val ingestUrl = CloudConfig(p.apiBaseUrl).ingestUrl
+        var poisonSkips = 0   // the import's own poison circuit breaker (DATA-14, see decideUpload)
+        var heldPageAfter: Long? = null   // the page the breaker is holding — logged once, not every 5 s retry
         while (true) {
             try {
                 val page = db.samples().pageAfter(after, IMPORT_PAGE)
@@ -211,13 +213,20 @@ class TelemetryReporter(
                 }
                 // seq = -1 marks this as an import batch; the server ignores seq ordering for imports.
                 val body = CloudJson.encodeBatch(seq = -1, rows = rows)
-                when (postSigned(ingestUrl, p.deviceId, body)) {
-                    PostResult.Ok -> {}
-                    PostResult.Poison ->
+                val result = postSigned(ingestUrl, p.deviceId, body)
+                val d = decideUpload(result, poisonSkips, authFailed = false)
+                poisonSkips = d.poisonSkipsSinceOk
+                when (d.step) {
+                    BatchStep.DELETE_ACCEPTED -> {}
+                    BatchStep.DELETE_POISON ->
                         // Permanently rejected page: skip it so the import can't stall forever.
                         // The rows themselves stay in the local Room samples table.
                         Log.w(TAG, "import: server permanently rejected page after id=$after (${page.size} rows) — skipping")
-                    else -> {
+                    BatchStep.BACK_OFF, BatchStep.BACK_OFF_AUTH -> {
+                        if (result == PostResult.Poison && heldPageAfter != after) {
+                            heldPageAfter = after
+                            Log.w(TAG, "import: page after id=$after rejected again with no 2xx since the last skip — holding it (poison breaker open)")
+                        }
                         delay(5000)
                         continue
                     }
@@ -265,7 +274,7 @@ class TelemetryReporter(
                 .header("Content-Encoding", "gzip")
                 .post(wire.toRequestBody("application/json".toMediaType()))
                 .build()
-            http.newCall(req).execute().use { classifyPost(it.code) }
+            http.newCall(req).execute().use { classifyPost(it.code, fromApi = it.header(API_MARKER_HEADER) != null) }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -278,6 +287,17 @@ class TelemetryReporter(
         // True while a started flush is draining the queue to empty (see shouldFlush). Stays true
         // across transient/auth retries so a failed batch's remainder never re-waits FLUSH_AGE_MS.
         var draining = false
+        // Poison circuit breakers (DATA-14, see decideUpload): one per stream — a reject of the
+        // config body says nothing about sample batches, and vice versa.
+        var ingestPoisonSkips = 0
+        var configPoisonSkips = 0
+        var heldConfig: String? = null   // the config the breaker is holding — logged once, not every pass
+        // The config push's own retry gate. A config the uploader keeps — Transient, AuthFailed, or a
+        // Poison the breaker holds — is not re-sent on every loop pass (that is a POST per drained
+        // batch, or per idle ~1.5 s pass); it follows the ingest backoff schedule (1 s doubling to
+        // 60 s) on its own clock, so a held config can never throttle sample uploads.
+        var configBackoff = 1000L
+        var configRetryAt = 0L   // SystemClock.elapsedRealtime(): monotonic, a wall-clock step can't strand it
         while (true) {
             try {
                 // Hot path (DATA-7): read the flow-fed snapshot — no per-iteration Persisted decode.
@@ -288,19 +308,34 @@ class TelemetryReporter(
                     continue
                 }
                 // One-way temperature-alert config push (latest-wins, durable across restarts):
-                // sign the plaintext + gzip like ingest, and clear only on success — except a
-                // permanent 4xx reject (WEB-6b): the server will never accept that body, so
-                // re-POSTing it every ~1.5 s forever is pure waste. Drop it and log; the next
-                // threshold change enqueues a fresh (presumably fixed) config.
-                if (conn.online.value) {
+                // sign the plaintext + gzip like ingest. Cleared on 2xx. The FIRST app-level
+                // permanent reject drops it (WEB-6b: re-POSTing a body the server will never accept
+                // is pure waste; the next threshold change enqueues a fresh one). A repeat reject
+                // before any 2xx trips the breaker — systematic rejection is a server problem, so
+                // the config stays pending instead of being thrown away.
+                if (conn.online.value && SystemClock.elapsedRealtime() >= configRetryAt) {
                     p.pendingTempConfig?.let { cfg ->
-                        when (postSigned(CloudConfig(base).configUrl, p.deviceId, cfg.toByteArray())) {
-                            PostResult.Ok -> settings.clearPendingTempConfig()
-                            PostResult.Poison -> {
+                        val result = postSigned(CloudConfig(base).configUrl, p.deviceId, cfg.toByteArray())
+                        val d = decideUpload(result, configPoisonSkips, authFailed)
+                        configPoisonSkips = d.poisonSkipsSinceOk
+                        when (d.step) {
+                            BatchStep.DELETE_ACCEPTED -> {
+                                settings.clearPendingTempConfig()
+                                configBackoff = 1000L
+                            }
+                            BatchStep.DELETE_POISON -> {
                                 Log.w(TAG, "config: server permanently rejected the temp-config push — dropping it (re-enqueued on the next threshold change)")
                                 settings.clearPendingTempConfig()
+                                configBackoff = 1000L
                             }
-                            else -> {}   // transient / auth: keep it pending, retry next pass
+                            BatchStep.BACK_OFF, BatchStep.BACK_OFF_AUTH -> {
+                                if (result == PostResult.Poison && heldConfig != cfg) {
+                                    heldConfig = cfg
+                                    Log.w(TAG, "config: rejected again with no 2xx since the last drop — keeping it pending (poison breaker open)")
+                                }
+                                configRetryAt = SystemClock.elapsedRealtime() + configBackoff
+                                configBackoff = (configBackoff * 2).coerceAtMost(60_000L)
+                            }
                         }
                     }
                 }
@@ -333,9 +368,12 @@ class TelemetryReporter(
                 // rate indicator records the actual wire bytes, not the plaintext size.
                 val body = CloudJson.encodeBatch(seq, rows.map { it.payload })
                 val wire = gzip(body)
-                when (postSigned(CloudConfig(base).ingestUrl, p.deviceId, body, wire)) {
-                    PostResult.Ok -> {
-                        authFailed = false
+                val result = postSigned(CloudConfig(base).ingestUrl, p.deviceId, body, wire)
+                val d = decideUpload(result, ingestPoisonSkips, authFailed)
+                ingestPoisonSkips = d.poisonSkipsSinceOk
+                authFailed = d.authFailed
+                when (d.step) {
+                    BatchStep.DELETE_ACCEPTED -> {
                         db.outbox().deleteUpTo(rows.last().id)
                         val now = System.currentTimeMillis()
                         lastUploadMs = now
@@ -345,16 +383,16 @@ class TelemetryReporter(
                         onStatus?.invoke(remaining.toLong(), lastUploadMs, uploadRate.kbps(now), authFailed)
                         backoff = 1000L
                     }
-                    PostResult.Poison -> {
-                        // The server permanently rejects this batch (4xx validation) — retrying it
-                        // forever would head-of-line block every later sample. Skip past it so the
-                        // queue drains; when logging is on the telemetry still lives in the Room
-                        // samples table and can be re-sent via the historical import.
-                        authFailed = false // a validation reject means auth itself passed
+                    BatchStep.DELETE_POISON -> {
+                        // The APP permanently rejects this batch (marker-carrying 400/413/422) and
+                        // the breaker allows one skip since the last 2xx — retrying it forever would
+                        // head-of-line block every later sample. When logging is on the telemetry
+                        // still lives in the Room samples table.
                         Log.w(
                             TAG,
                             "upload: server permanently rejected batch seq=$seq " +
-                                "(${rows.size} rows, outbox ids ${rows.first().id}..${rows.last().id}) — skipping past it",
+                                "(${rows.size} rows, outbox ids ${rows.first().id}..${rows.last().id}) — skipping past it; " +
+                                "another reject before any 2xx will be held",
                         )
                         db.outbox().deleteUpTo(rows.last().id)
                         val remaining = db.outbox().count()
@@ -365,11 +403,10 @@ class TelemetryReporter(
                         )
                         backoff = 1000L
                     }
-                    PostResult.AuthFailed -> {
+                    BatchStep.BACK_OFF_AUTH -> {
                         // Revoked device or >60 s clock skew: NEVER drop the rows — keep buffering
                         // and backing off, but surface the auth state so the UI can show it
                         // instead of "queued" forever.
-                        authFailed = true
                         onStatus?.invoke(
                             db.outbox().count().toLong(), lastUploadMs,
                             uploadRate.kbps(System.currentTimeMillis()), authFailed,
@@ -377,7 +414,10 @@ class TelemetryReporter(
                         delay(backoff)
                         backoff = (backoff * 2).coerceAtMost(60_000L)
                     }
-                    PostResult.Transient -> {
+                    BatchStep.BACK_OFF -> {
+                        if (result == PostResult.Poison) {
+                            Log.w(TAG, "upload: batch seq=$seq rejected again with no 2xx since the last skip — holding it (poison breaker open)")
+                        }
                         delay(backoff)
                         backoff = (backoff * 2).coerceAtMost(60_000L)
                     }

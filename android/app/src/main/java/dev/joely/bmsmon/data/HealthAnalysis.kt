@@ -1,7 +1,12 @@
 package dev.joely.bmsmon.data
 
+import dev.joely.bmsmon.data.db.CellSessionStats
+import dev.joely.bmsmon.data.db.IvBinMoments
+import dev.joely.bmsmon.data.db.IvPoint
 import dev.joely.bmsmon.data.db.SampleEntity
 import dev.joely.bmsmon.data.db.SessionEntity
+import dev.joely.bmsmon.data.db.SessionSpan
+import dev.joely.bmsmon.data.db.TimelineRow
 import kotlin.math.roundToInt
 
 /**
@@ -15,6 +20,11 @@ import kotlin.math.roundToInt
  * (OCV ≈ constant within a bin), regress within each bin, keep only well-conditioned bins, and take
  * the median of the surviving per-bin slopes. This mirrors the design handoff and reproduces the
  * reference values (A02214 ≈ 5.3 mΩ / 6 bins, A02345 ≈ 5.6 mΩ / 7 bins).
+ *
+ * Bounded reads (DATA-15 / UI-17): the app no longer loads a pack's rows to do this. The regression
+ * runs on raw per-SOC-bin moments and cell Δ on per-session sums, both aggregated by SQLite, and the
+ * V–I cloud is an exact keyset+OFFSET row stride. The list-input functions below are the in-memory
+ * twins of those queries, kept for tests and small inputs.
  */
 
 // --- per-bin resistance filter thresholds (from the handoff) ---
@@ -109,32 +119,34 @@ fun verdictFor(rMohm: Float?, cellDeltaMv: Float?): Verdict = when {
 
 // --- internals ----------------------------------------------------------------------------------
 
-private data class Fit(val slopeOhm: Double, val interceptV: Double, val r2: Double, val spreadA: Float)
+/** A V-on-I least-squares fit: slope = effective R (Ω), intercept = OCV (V), spread of current (A). */
+internal data class Fit(val slopeOhm: Double, val interceptV: Double, val r2: Double, val spreadA: Float)
 
 /**
- * Least-squares regression of terminal voltage on current. With the discharge-negative sign
- * convention V ≈ Voc + I·R, so the slope is the resistance in ohms and the intercept is the OCV.
- * Returns null when current has no spread (a vertical fit). Same math as
- * [estimateInternalResistanceMohm], reused here per SOC bin and globally for the scatter fit.
+ * Least-squares regression of terminal voltage on current from RAW moments (DATA-15) — the shape
+ * SQLite aggregates in one pass, so History never materializes rows. With the discharge-negative
+ * sign convention V ≈ Voc + I·R, so the slope is the resistance in ohms and the intercept the OCV.
+ * Centred sums are recovered as Σxy − ΣxΣy/n; against the old two-pass fit this agrees to ~1e-12
+ * (slope, relative) and ~1e-6 (r², absolute) even in a 50k-row, 1 mV-wide idle bin
+ * (HealthEquivalenceTest). Null when current has no spread — tested exactly via min == max, the
+ * old `sxx == 0` case, rather than through rounding.
  */
-private fun regress(pts: List<Pair<Float, Float>>): Fit? {
-    if (pts.size < 2) return null
-    var sx = 0.0; var sy = 0.0
-    for ((i, v) in pts) { sx += i; sy += v }
-    val n = pts.size
-    val meanX = sx / n; val meanY = sy / n
-    var sxx = 0.0; var sxy = 0.0; var syy = 0.0
-    var minX = Float.MAX_VALUE; var maxX = -Float.MAX_VALUE
-    for ((i, v) in pts) {
-        val dx = i - meanX; val dy = v - meanY
-        sxx += dx * dx; sxy += dx * dy; syy += dy * dy
-        if (i < minX) minX = i; if (i > maxX) maxX = i
-    }
+internal fun fitOf(m: IvBinMoments): Fit? {
+    if (m.n < 2 || m.maxI == m.minI) return null
+    val n = m.n.toDouble()
+    val meanX = m.sumI / n
+    val meanY = m.sumV / n
+    val sxx = (m.sumII - m.sumI * meanX).coerceAtLeast(0.0)
     if (sxx == 0.0) return null
+    val sxy = m.sumIV - m.sumI * meanY
+    val syy = if (m.maxV == m.minV) 0.0 else (m.sumVV - m.sumV * meanY).coerceAtLeast(0.0)
     val slope = sxy / sxx
-    val intercept = meanY - slope * meanX
-    val r2 = if (syy == 0.0) 0.0 else (sxy * sxy) / (sxx * syy)
-    return Fit(slope, intercept, r2, (maxX - minX))
+    return Fit(
+        slopeOhm = slope,
+        interceptV = meanY - slope * meanX,
+        r2 = if (syy == 0.0) 0.0 else (sxy * sxy) / (sxx * syy),
+        spreadA = m.maxI.toFloat() - m.minI.toFloat(),
+    )
 }
 
 private fun round1(x: Float): Float = (x * 10f).roundToInt() / 10f
@@ -150,22 +162,80 @@ private fun median(xs: List<Float>): Float {
 private fun ivRows(samples: List<SampleEntity>): List<SampleEntity> =
     samples.filter { it.linkEvent == null && it.currentA != null && it.voltageV != null }
 
+// --- in-memory twins of the history aggregates ---------------------------------------------------
+
+/** Twin of IV_MOMENTS_BY_SOC_BIN_SQL over a sample list: I/V telemetry rows grouped by integer SOC
+ *  (Float.toInt() truncates exactly like SQLite's CAST(soc AS INTEGER)); NULL SOC is its own group. */
+fun ivBinMomentsOf(samples: List<SampleEntity>): List<IvBinMoments> {
+    class Acc {
+        var n = 0L
+        var sI = 0.0; var sV = 0.0; var sII = 0.0; var sIV = 0.0; var sVV = 0.0
+        var minI = Double.POSITIVE_INFINITY; var maxI = Double.NEGATIVE_INFINITY
+        var minV = Double.POSITIVE_INFINITY; var maxV = Double.NEGATIVE_INFINITY
+    }
+    val byBin = LinkedHashMap<Int?, Acc>()
+    for (s in samples) {
+        if (s.linkEvent != null) continue
+        val i = s.currentA?.toDouble() ?: continue
+        val v = s.voltageV?.toDouble() ?: continue
+        val a = byBin.getOrPut(s.soc?.toInt()) { Acc() }
+        a.n++
+        a.sI += i; a.sV += v; a.sII += i * i; a.sIV += i * v; a.sVV += v * v
+        a.minI = minOf(a.minI, i); a.maxI = maxOf(a.maxI, i)
+        a.minV = minOf(a.minV, v); a.maxV = maxOf(a.maxV, v)
+    }
+    return byBin.map { (bin, a) -> IvBinMoments(bin, a.n, a.sI, a.sV, a.sII, a.sIV, a.sVV, a.minI, a.maxI, a.minV, a.maxV) }
+}
+
+/** Pool per-bin moments into one global row (bin = null): the scatter's fit spans every I/V row. */
+fun pooledMoments(bins: List<IvBinMoments>): IvBinMoments? {
+    if (bins.isEmpty()) return null
+    return IvBinMoments(
+        bin = null,
+        n = bins.sumOf { it.n },
+        sumI = bins.sumOf { it.sumI },
+        sumV = bins.sumOf { it.sumV },
+        sumII = bins.sumOf { it.sumII },
+        sumIV = bins.sumOf { it.sumIV },
+        sumVV = bins.sumOf { it.sumVV },
+        minI = bins.minOf { it.minI },
+        maxI = bins.maxOf { it.maxI },
+        minV = bins.minOf { it.minV },
+        maxV = bins.maxOf { it.maxV },
+    )
+}
+
+/** Twin of CELL_STATS_BY_SESSION_SQL: per-session sums of (cellMax − cellMin)·1000 mV over rows
+ *  carrying both, skipping impossible negative deltas (also applied to the per-session means now). */
+fun cellSessionStatsOf(samples: List<SampleEntity>): List<CellSessionStats> {
+    class Acc { var n = 0L; var sum = 0.0; var max = Double.NEGATIVE_INFINITY }
+    val bySession = LinkedHashMap<Long, Acc>()
+    for (s in samples) {
+        if (s.linkEvent != null) continue
+        val mn = s.cellMinV ?: continue
+        val mx = s.cellMaxV ?: continue
+        if (mx < mn) continue
+        val d = (mx.toDouble() - mn.toDouble()) * 1000.0
+        val a = bySession.getOrPut(s.sessionId) { Acc() }
+        a.n++
+        a.sum += d
+        a.max = maxOf(a.max, d)
+    }
+    return bySession.map { (id, a) -> CellSessionStats(id, a.n, a.sum, a.max) }
+}
+
 // --- public analysis ----------------------------------------------------------------------------
 
 /**
- * Effective internal resistance: bin samples by integer SOC%, regress V on I within each bin, keep
- * bins with current spread ≥ [BIN_MIN_SPREAD_A], r² ≥ [BIN_MIN_R2] and a plausible slope, then take
- * the median of the surviving slopes. Returns null if no bin survives.
+ * Effective internal resistance: regress V on I within each integer-SOC bin, keep bins with current
+ * spread ≥ [BIN_MIN_SPREAD_A], r² ≥ [BIN_MIN_R2] and a plausible slope, then take the median of the
+ * surviving slopes. Returns null if no bin survives.
  */
-fun effectiveResistance(samples: List<SampleEntity>): PackResistance? {
-    val byBin = HashMap<Int, MutableList<Pair<Float, Float>>>()
-    for (s in ivRows(samples)) {
-        val soc = s.soc ?: continue
-        byBin.getOrPut(soc.toInt()) { mutableListOf() }.add(s.currentA!! to s.voltageV!!)
-    }
+fun effectiveResistanceFromBins(bins: List<IvBinMoments>): PackResistance? {
     val perBin = ArrayList<SocBinResistance>()
-    for ((soc, pts) in byBin) {
-        val fit = regress(pts) ?: continue
+    for (m in bins) {
+        val soc = m.bin ?: continue
+        val fit = fitOf(m) ?: continue
         if (fit.spreadA < BIN_MIN_SPREAD_A) continue
         if (fit.r2 < BIN_MIN_R2) continue
         val mohm = (fit.slopeOhm * 1000.0).toFloat()
@@ -180,40 +250,51 @@ fun effectiveResistance(samples: List<SampleEntity>): PackResistance? {
     )
 }
 
-/** Cell imbalance (mV) over the samples that carried per-cell min/max. Null if never sampled. */
-fun cellImbalance(samples: List<SampleEntity>): CellImbalance? {
-    val deltas = ArrayList<Float>()
-    val sessions = HashSet<Long>()
-    for (s in samples) {
-        val mn = s.cellMinV ?: continue
-        val mx = s.cellMaxV ?: continue
-        val d = (mx - mn) * 1000f
-        if (d < 0f) continue
-        deltas.add(d)
-        sessions.add(s.sessionId)
-    }
-    if (deltas.isEmpty()) return null
+/** List-input form of [effectiveResistanceFromBins]. */
+fun effectiveResistance(samples: List<SampleEntity>): PackResistance? =
+    effectiveResistanceFromBins(ivBinMomentsOf(samples))
+
+/** Cell imbalance (mV) pooled over every session's sums. Null if never sampled. */
+fun cellImbalanceFrom(stats: List<CellSessionStats>): CellImbalance? {
+    val sampled = stats.filter { it.n > 0 }
+    if (sampled.isEmpty()) return null
+    val n = sampled.sumOf { it.n }
     return CellImbalance(
-        meanMv = round1(deltas.average().toFloat()),
-        maxMv = round1(deltas.max()),
-        sessionsSampled = sessions.size,
+        meanMv = round1((sampled.sumOf { it.sumMv } / n).toFloat()),
+        maxMv = round1(sampled.maxOf { it.maxMv }.toFloat()),
+        sessionsSampled = sampled.size,
     )
 }
 
+/** List-input form of [cellImbalanceFrom]. */
+fun cellImbalance(samples: List<SampleEntity>): CellImbalance? = cellImbalanceFrom(cellSessionStatsOf(samples))
+
+/** Mean cell Δ (mV, round1) per session id — the per-run usage metric. */
+fun cellDeltaBySession(stats: List<CellSessionStats>): Map<Long, Float> =
+    stats.filter { it.n > 0 }.associate { it.sessionId to round1((it.sumMv / it.n).toFloat()) }
+
+/** Row stride of the V–I cloud: every [scatterStep]-th I/V row in time order. */
+fun scatterStep(ivRowCount: Long, maxPoints: Int = SCATTER_MAX_POINTS): Int =
+    maxOf(1L, ivRowCount / maxPoints).toInt()
+
+/** Exact upper bound on stride output: n/⌊n/m⌋ < 2m for n ≥ m, and n < m points otherwise. */
+fun scatterPointCap(maxPoints: Int = SCATTER_MAX_POINTS): Int = 2 * maxPoints
+
+/** List-input stride: rows 0, step, 2·step… of the I/V rows (the points old viScatter drew). */
+fun stridedScatter(samples: List<SampleEntity>, maxPoints: Int = SCATTER_MAX_POINTS): List<ScatterPoint> {
+    val rows = ivRows(samples)
+    val step = scatterStep(rows.size.toLong(), maxPoints)
+    return (rows.indices step step).map { ScatterPoint(rows[it].currentA!!, rows[it].voltageV!!) }
+}
+
 /**
- * Downsampled V–I operating cloud plus the fit line to draw. The fit's [ViScatter.ocv] is the
- * global regression intercept (the open-circuit voltage at I=0); [ViScatter.rMohm] is the binned
+ * The V–I cloud plus the fit line to draw. [ViScatter.ocv] is the global regression intercept (the
+ * open-circuit voltage at I=0) over [global] (all bins pooled); [ViScatter.rMohm] is the binned
  * median resistance when available (the headline number), falling back to the global slope.
  */
-fun viScatter(samples: List<SampleEntity>, rMohm: Float?, maxPoints: Int = SCATTER_MAX_POINTS): ViScatter? {
-    val rows = ivRows(samples)
-    if (rows.size < 2) return null
-    val iv = rows.map { it.currentA!! to it.voltageV!! }
-    val fit = regress(iv) ?: return null
-    val step = maxOf(1, rows.size / maxPoints)
-    val pts = ArrayList<ScatterPoint>()
-    var k = 0
-    while (k < iv.size) { pts.add(ScatterPoint(iv[k].first, iv[k].second)); k += step }
+fun viScatterFrom(global: IvBinMoments?, pts: List<ScatterPoint>, rMohm: Float?): ViScatter? {
+    if (global == null || global.n < 2) return null
+    val fit = fitOf(global) ?: return null
     return ViScatter(
         pts = pts,
         rMohm = rMohm ?: round1((fit.slopeOhm * 1000.0).toFloat()),
@@ -221,62 +302,134 @@ fun viScatter(samples: List<SampleEntity>, rMohm: Float?, maxPoints: Int = SCATT
     )
 }
 
+/** List-input form of [viScatterFrom]. */
+fun viScatter(samples: List<SampleEntity>, rMohm: Float?, maxPoints: Int = SCATTER_MAX_POINTS): ViScatter? =
+    viScatterFrom(pooledMoments(ivBinMomentsOf(samples)), stridedScatter(samples, maxPoints), rMohm)
+
 /**
- * Peak-pool a session's raw [samples] into ~[buckets] time buckets so transient spikes survive
- * downsampling: discharge & regen power are **max-pooled**, voltage is **min-pooled** (the deepest
- * sag is kept), SOC takes the last value, and a bucket is flagged [TimelineBucket.link] if any BLE
- * link event fell in it. Never stride-samples — that would drop the spikes that matter.
+ * Exact row-stride walk for the V–I cloud (DATA-15): rows 0, step, 2·step… of a pack's I/V rows in
+ * (tsMs, id) order — the same points [stridedScatter] picks from the full list — fetched ONE at a
+ * time by keyset + OFFSET (`SampleDao.ivRowAfter`), so only picked rows are ever materialized and
+ * SQLite steps over the rest in index order. [fetch] returns the row `skip` positions after the
+ * keyset, or null past the end. Bounded by [cap] even if rows keep arriving mid-walk.
  */
-fun peakPool(samples: List<SampleEntity>, buckets: Int = TIMELINE_BUCKETS): List<TimelineBucket> {
-    if (samples.isEmpty()) return emptyList()
-    val startMs = samples.first().tsMs
-    val endMs = samples.last().tsMs
-    val span = (endMs - startMs).coerceAtLeast(1L)
-    val n = buckets.coerceIn(1, maxOf(1, samples.size))
-
-    val dis = FloatArray(n)
-    val reg = FloatArray(n)
-    val minV = arrayOfNulls<Float>(n)
-    val soc = arrayOfNulls<Float>(n)
-    val link = BooleanArray(n)
-    val used = BooleanArray(n)
-    val ts = LongArray(n) { startMs + (span * it) / n }
-
-    for (s in samples) {
-        val b = (((s.tsMs - startMs) * n) / span).toInt().coerceIn(0, n - 1)
-        used[b] = true
-        if (s.linkEvent != null) { link[b] = true; continue }
-        val cur = s.currentA ?: 0f
-        val pw = s.powerW ?: 0f                 // magnitude (V·|I|)
-        if (cur < -DISCHARGE_EPS) { if (pw > dis[b]) dis[b] = pw }
-        else if (cur > DISCHARGE_EPS) { if (pw > reg[b]) reg[b] = pw }
-        s.voltageV?.let { v -> if (minV[b] == null || v < minV[b]!!) minV[b] = v }
-        s.soc?.let { soc[b] = it }
-    }
-    val out = ArrayList<TimelineBucket>(n)
-    for (b in 0 until n) {
-        if (!used[b]) continue
-        out.add(TimelineBucket(ts[b], dis[b], reg[b], minV[b], soc[b], link[b]))
+fun stridePoints(
+    step: Int,
+    cap: Int = scatterPointCap(),
+    fetch: (afterTs: Long, afterId: Long, skip: Int) -> IvPoint?,
+): List<ScatterPoint> {
+    require(step >= 1) { "step must be ≥ 1" }
+    val out = ArrayList<ScatterPoint>()
+    var afterTs = Long.MIN_VALUE
+    var afterId = Long.MIN_VALUE
+    var skip = 0
+    while (out.size < cap) {
+        val r = fetch(afterTs, afterId, skip) ?: break
+        out += ScatterPoint(r.currentA, r.voltageV)
+        afterTs = r.tsMs
+        afterId = r.id
+        skip = step - 1
     }
     return out
 }
 
+/** Assemble [HealthInputs] from the two aggregates plus the stride walk (step from the I/V row count). */
+fun healthInputsFrom(
+    bins: List<IvBinMoments>,
+    cells: List<CellSessionStats>,
+    fetchStride: (afterTs: Long, afterId: Long, skip: Int) -> IvPoint?,
+): HealthInputs = HealthInputs(bins, cells, stridePoints(scatterStep(bins.sumOf { it.n }), fetch = fetchStride))
+
 /**
- * Assemble a [PackHealth] from a pack's stored session rollups ([sessions]) and its full-resolution
- * telemetry ([samples], all sessions, link rows included). Derived R / scatter / cell-imbalance come
- * from the raw samples; per-session cell Δ is computed by grouping samples by session.
+ * Peak-pool a session's rows into ~[TIMELINE_BUCKETS] time buckets so transient spikes survive
+ * downsampling: discharge & regen power are **max-pooled**, voltage is **min-pooled** (the deepest
+ * sag is kept), SOC takes the last value, and a bucket is flagged [TimelineBucket.link] if any BLE
+ * link event fell in it. Never stride-samples — that would drop the spikes that matter.
+ *
+ * Streaming form (DATA-15): the bucket geometry is fixed up front from the session's row count and
+ * time span (one aggregate query) and rows are folded one at a time in bounded pages, so opening a
+ * multi-day legacy session no longer materializes it. Rows outside [startMs, endMs] — an open
+ * session still growing, or a stepped-back clock — clamp into the edge buckets. "Last SOC" follows
+ * feed order (production: id order, equal to time order unless the clock stepped back).
+ */
+class PeakPooler(private val startMs: Long, endMs: Long, rowCount: Long, buckets: Int = TIMELINE_BUCKETS) {
+    private val span = (endMs - startMs).coerceAtLeast(1L)
+    private val n = buckets.coerceIn(1, rowCount.coerceIn(1L, Int.MAX_VALUE.toLong()).toInt())
+    private val dis = FloatArray(n)
+    private val reg = FloatArray(n)
+    private val minV = arrayOfNulls<Float>(n)
+    private val socLast = arrayOfNulls<Float>(n)
+    private val link = BooleanArray(n)
+    private val used = BooleanArray(n)
+
+    fun add(tsMs: Long, isLink: Boolean, currentA: Float?, powerW: Float?, voltageV: Float?, soc: Float?) {
+        val b = (((tsMs - startMs) * n) / span).toInt().coerceIn(0, n - 1)
+        used[b] = true
+        if (isLink) {
+            link[b] = true
+            return
+        }
+        val cur = currentA ?: 0f
+        val pw = powerW ?: 0f                 // magnitude (V·|I|)
+        if (cur < -DISCHARGE_EPS) { if (pw > dis[b]) dis[b] = pw }
+        else if (cur > DISCHARGE_EPS) { if (pw > reg[b]) reg[b] = pw }
+        voltageV?.let { v -> val m = minV[b]; if (m == null || v < m) minV[b] = v }
+        soc?.let { socLast[b] = it }
+    }
+
+    fun buckets(): List<TimelineBucket> {
+        val out = ArrayList<TimelineBucket>(n)
+        for (b in 0 until n) {
+            if (!used[b]) continue
+            out.add(TimelineBucket(startMs + (span * b) / n, dis[b], reg[b], minV[b], socLast[b], link[b]))
+        }
+        return out
+    }
+}
+
+/** Stream one session through a [PeakPooler] in [pageSize]-row keyset pages ([fetch] = `SampleDao.timelinePage`). */
+fun poolTimeline(span: SessionSpan, pageSize: Int, fetch: (afterId: Long, limit: Int) -> List<TimelineRow>): List<TimelineBucket> {
+    val start = span.startMs
+    val end = span.endMs
+    if (span.n == 0L || start == null || end == null) return emptyList()
+    val pool = PeakPooler(start, end, span.n)
+    forEachKeysetPage(pageSize, fetch, TimelineRow::id) { r ->
+        pool.add(r.tsMs, r.isLink, r.currentA, r.powerW, r.voltageV, r.soc)
+    }
+    return pool.buckets()
+}
+
+/** List-input form of [PeakPooler] over a time-ordered sample list. */
+fun peakPool(samples: List<SampleEntity>, buckets: Int = TIMELINE_BUCKETS): List<TimelineBucket> {
+    if (samples.isEmpty()) return emptyList()
+    val pool = PeakPooler(samples.first().tsMs, samples.last().tsMs, samples.size.toLong(), buckets)
+    for (s in samples) pool.add(s.tsMs, s.linkEvent != null, s.currentA, s.powerW, s.voltageV, s.soc)
+    return pool.buckets()
+}
+
+/** Everything History needs from a pack's samples, in O(bins + sessions + points) memory (DATA-15). */
+data class HealthInputs(
+    val bins: List<IvBinMoments>,
+    val cells: List<CellSessionStats>,
+    val scatter: List<ScatterPoint>,
+)
+
+/** In-memory inputs from a sample list (tests and small inputs; the app aggregates in SQL). */
+fun healthInputsOf(samples: List<SampleEntity>, maxPoints: Int = SCATTER_MAX_POINTS): HealthInputs =
+    HealthInputs(ivBinMomentsOf(samples), cellSessionStatsOf(samples), stridedScatter(samples, maxPoints))
+
+/**
+ * Assemble a [PackHealth] from a pack's stored session rollups ([sessions]) and its aggregated
+ * [inputs]. Derived R / scatter / cell imbalance come from the aggregates; per-session cell Δ is the
+ * per-session mean.
  */
 fun buildPackHealth(
     address: String,
     alias: String,
     sessions: List<SessionEntity>,
-    samples: List<SampleEntity>,
+    inputs: HealthInputs,
 ): PackHealth {
-    val cellBySession = samples
-        .filter { it.cellMinV != null && it.cellMaxV != null }
-        .groupBy { it.sessionId }
-        .mapValues { (_, rows) -> round1(rows.map { (it.cellMaxV!! - it.cellMinV!!) * 1000f }.average().toFloat()) }
-
+    val cellBySession = cellDeltaBySession(inputs.cells)
     val rollups = sessions.map { s ->
         val disc = s.peakCurrentA > 0f || s.energyWh > 0f
         SessionRollup(
@@ -296,7 +449,7 @@ fun buildPackHealth(
         )
     }
     val loaded = rollups.filter { it.disc }
-    val resistance = effectiveResistance(samples)
+    val resistance = effectiveResistanceFromBins(inputs.bins)
     return PackHealth(
         address = address,
         alias = alias,
@@ -308,8 +461,8 @@ fun buildPackHealth(
         minVload = loaded.mapNotNull { it.minVload }.minOrNull(),
         dischCount = loaded.size,
         sessionCount = rollups.size,
-        cell = cellImbalance(samples),
+        cell = cellImbalanceFrom(inputs.cells),
         resistance = resistance,
-        scatter = viScatter(samples, resistance?.rMohm),
+        scatter = viScatterFrom(pooledMoments(inputs.bins), inputs.scatter, resistance?.rMohm),
     )
 }

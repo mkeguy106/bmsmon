@@ -49,8 +49,9 @@ data class StageInputs(
     val groups: List<BatteryGroup>,
     /**
      * SOC at/below which a reachable pack seizes the stage (safety override), or null to disable.
-     * The ViewModel sets this to the highest enabled capacity-alert threshold when the "pull low
-     * packs to stage" setting and alerts are both on.
+     * The engine fills it from [StageConfig.seizeThreshold] — pushed by the ViewModel, or rebuilt
+     * from the persisted settings by the headless restore plan — which is [seizeThresholdFor]: the
+     * highest enabled capacity-alert threshold when alerts and "Pull low packs to stage" are both on.
      */
     val seizeThreshold: Int? = null,
 )
@@ -133,6 +134,14 @@ data class BatteryStatus(
     /** Discharge-remaining estimate for the latest sample — engine-computed once per poll,
      *  same single-writer pattern as [etaFullMin]. Null while charging or with no capacity. */
     val range: PackRange? = null,
+    /** `SystemClock.elapsedRealtime()` of this pack's last PARSED frame this monitoring session;
+     *  null for a restored seed or a pack not heard from yet. Stamped only by MonitorEngine.onPoll
+     *  (UI-16) and never persisted, so nothing restored from settings can ever read LIVE. */
+    val lastFrameAtElapsedMs: Long? = null,
+    /** Poll cadence in force when that frame arrived (stage vs background) — the window
+     *  [freshness] judges it by, so a pack just promoted to the stage isn't called STALE before
+     *  its first fast poll. */
+    val frameIntervalMs: Long = SLOW_POLL_MS,
 )
 
 /**
@@ -175,9 +184,10 @@ fun isRegen(t: Telemetry, groupLastDischargeAt: Long?, now: Long): Boolean =
     t.current > REGEN_EPS && groupLastDischargeAt != null && (now - groupLastDischargeAt) < REGEN_WINDOW_MS
 
 /**
- * One pack on the stage, with its live regen flag. [connected] is false when the pack isn't
- * currently reachable over BLE (or has never reported) — the stage then shows it as DISCONNECTED
- * instead of a misleading 0%/low-battery state. [telemetry] is the last-known reading when present.
+ * One pack on the stage, with its live regen flag. [connected] is false when the pack has no reading
+ * from THIS session that may drive the stage (unreachable, only the restored seed, or silent past
+ * [STALE_MAX_MS] — see [freshness]) — the stage then shows it as DISCONNECTED instead of a
+ * misleading 0%/low-battery state. [telemetry] is the last-known reading when present.
  */
 data class StageItem(
     val telemetry: Telemetry,
@@ -185,6 +195,9 @@ data class StageItem(
     val connected: Boolean = true,
     val etaFullMin: Float? = null,
     val range: PackRange? = null,
+    /** Non-null when [connected] but STALE (UI-16): this session's last reading, older than the
+     *  pack's live window — the stage keeps the number but mutes it and says how old it is. */
+    val staleAgeMs: Long? = null,
 )
 
 /**

@@ -68,7 +68,7 @@ fun HomeScreen(
     topBar: TopBarActions,
     fleet: FleetActions,
     rosterEdit: RosterActions,
-    onAcknowledge: () -> Unit,
+    onAcknowledge: (StageAlert) -> Unit,
     onHomePageChanged: (Int) -> Unit,
     locked: Boolean,
 ) {
@@ -141,7 +141,7 @@ private val overlayTextShadow = androidx.compose.ui.graphics.Shadow(
 
 /** Full-screen pulsing wash + naming headline + bottom Acknowledge bar, severity-colored. */
 @Composable
-internal fun DangerOverlay(alert: StageAlert, onAcknowledge: () -> Unit) {
+internal fun DangerOverlay(alert: StageAlert, onAcknowledge: (StageAlert) -> Unit) {
     val flashColor = if (alert.critical) AlertCritical else AlertWarn
     val peak = if (alert.critical) 0.58f else 0.34f
     val duration = if (alert.critical) 1000 else 1500
@@ -197,7 +197,7 @@ internal fun DangerOverlay(alert: StageAlert, onAcknowledge: () -> Unit) {
                 .clip(RoundedCornerShape(13.dp))
                 .background(flashColor)
                 .border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(13.dp))
-                .clickable(onClick = onAcknowledge)
+                .clickable(onClick = { onAcknowledge(alert) })   // UI-25: ack exactly what is on screen
                 .padding(16.dp),
             contentAlignment = Alignment.Center,
         ) {

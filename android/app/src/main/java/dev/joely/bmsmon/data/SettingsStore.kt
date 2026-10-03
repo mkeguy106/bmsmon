@@ -1,6 +1,7 @@
 package dev.joely.bmsmon.data
 
 import android.content.Context
+import android.util.Log
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
@@ -23,10 +24,19 @@ import androidx.datastore.preferences.core.Preferences
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import java.io.IOException
 import org.json.JSONArray
 import org.json.JSONObject
 
-private val Context.dataStore by preferencesDataStore("bms_settings")
+private const val TAG = "SettingsStore"
+
+private val Context.dataStore by preferencesDataStore(
+    name = "bms_settings",
+    // DATA-21: a corrupt file becomes defaults instead of a crash loop on every start.
+    corruptionHandler = settingsCorruptionHandler { e ->
+        Log.e(TAG, "bms_settings is corrupt — replaced with defaults (re-enable monitoring / re-enroll)", e)
+    },
+)
 
 data class Persisted(
     val accentArgb: Int?,
@@ -136,14 +146,20 @@ class SettingsStore(private val context: Context) {
         val PENDING_TEMP_CONFIG = stringPreferencesKey("pending_temp_config")
     }
 
-    suspend fun load(): Persisted = decode(context.dataStore.data.first())
+    suspend fun load(): Persisted =
+        decode(context.dataStore.data.orEmptyOnIoError(::logReadFailure).first())
+
+    private fun logReadFailure(e: IOException) {
+        Log.w(TAG, "bms_settings read failed", e)
+    }
 
     /**
      * Live view of the persisted settings: emits the current snapshot immediately on collect and
      * again on every change. Lets long-lived consumers (the TelemetryReporter) keep a cached
      * volatile copy instead of re-decoding the whole blob on a polling loop (DATA-5/DATA-7).
      */
-    val persisted: Flow<Persisted> = context.dataStore.data.map(::decode)
+    val persisted: Flow<Persisted> =
+        context.dataStore.data.retryOnIoError(onError = ::logReadFailure).map(::decode)
 
     private fun decode(p: Preferences): Persisted {
         return Persisted(

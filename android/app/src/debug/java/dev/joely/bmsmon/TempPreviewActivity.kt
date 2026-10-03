@@ -17,8 +17,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import dev.joely.bmsmon.model.BatteryState
+import dev.joely.bmsmon.model.DEFAULT_GROUP_ID
 import dev.joely.bmsmon.model.GaugeSide
 import dev.joely.bmsmon.model.StageItem
+import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.Telemetry
 import dev.joely.bmsmon.model.TempEnvelope
 import dev.joely.bmsmon.model.TempThresholds
@@ -72,7 +74,7 @@ private fun TempPreview(dark: Boolean, showOverlay: Boolean) {
                     mutableStateOf(
                         StageAlert(
                             flashing = true, critical = true, lowSoc = 78, activeThreshold = null,
-                            ackEffective = emptySet(),
+                            target = StageTarget.Base(DEFAULT_GROUP_ID),
                             kind = dev.joely.bmsmon.model.AlertKind.TEMPERATURE,
                             headline = "TEMPERATURE",
                             detail = "CRITICAL · COLD · 2012·A · 11°F TO CUTOFF",

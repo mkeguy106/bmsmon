@@ -46,6 +46,10 @@ class BleSession(
     @Volatile private var connectReady: CompletableDeferred<Boolean>? = null
     @Volatile private var response: CompletableDeferred<ByteArray>? = null
 
+    // BLE-18: set on STATE_DISCONNECTED (GATT callback thread), read by poll() on a repository
+    // coroutine. A session is single-use (a new BleSession per connect attempt), so it never resets.
+    @Volatile private var linkLost = false
+
     /** Connect, discover services, and enable FFE1 notifications. Returns true once ready. */
     suspend fun connect(timeoutMs: Long): Boolean {
         val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -67,8 +71,12 @@ class BleSession(
         return withTimeoutOrNull(timeoutMs) { ready.await() } ?: false
     }
 
-    /** Send STATUS and collect the complete response frame, or null on timeout. */
+    /** Send STATUS and collect the complete response frame, or null on a miss. Throws when the link
+     *  is gone (BLE-18) — pollLoop maps that to PollOutcome.ERROR → the link drops at once. */
     suspend fun poll(timeoutMs: Long): ByteArray? {
+        // The link dropped while no poll was armed: fail now instead of after ~22 s of timeouts
+        // during which the stage showed the last reading as live.
+        if (linkLost) throw IllegalStateException("link lost")
         val g = gatt ?: return null
         val ch = ffe2 ?: return null
         val resp = CompletableDeferred<ByteArray>()
@@ -79,7 +87,17 @@ class BleSession(
             response = resp
             buffer.clear()
         }
-        if (!writeStatus(g, ch)) return null  // refused unsafe frame → fail this poll (no write happened)
+        when (writeStatus(g, ch)) {
+            WriteResult.WRITTEN -> Unit
+            // Nothing was written this round (unsafe frame refused, or a GATT op still queued): a miss.
+            WriteResult.REFUSED, WriteResult.BUSY -> return null
+            WriteResult.LINK_ERROR -> throw IllegalStateException("status write failed: link unusable")
+        }
+        // A disconnect that landed between the check above and arming `response` was missed by the
+        // callback's completeExceptionally (response was still the old/null deferred). The callback
+        // sets linkLost BEFORE it reads response and we arm response BEFORE this read (both
+        // volatile), so at least one side always observes the other: never wait out the timeout.
+        if (linkLost) throw IllegalStateException("link lost")
         return withTimeoutOrNull(timeoutMs) { resp.await() }
     }
 
@@ -113,9 +131,10 @@ class BleSession(
      * ([BmsProtocol.isSafeStatusFrame]: length 8, STATUS opcode, valid checksum) — so an accidental
      * in-place mutation anywhere can never change the bytes sent to a live battery. A plain runtime
      * `if` on the write path, structurally impossible to compile out (never `assert`).
-     * @return false if the frame was refused (nothing written) — the caller fails the poll.
+     * @return REFUSED if the frame was refused (nothing written); otherwise the platform's verdict
+     *         on the write (BLE-18) — the caller fails the poll on anything but WRITTEN.
      */
-    private fun writeStatus(g: BluetoothGatt, ch: BluetoothGattCharacteristic): Boolean {
+    private fun writeStatus(g: BluetoothGatt, ch: BluetoothGattCharacteristic): WriteResult {
         val frame = profile.statusFrame.copyOf()
         if (!BmsProtocol.isSafeStatusFrame(frame)) {
             Log.e(
@@ -123,21 +142,20 @@ class BleSession(
                 "REFUSED write to $address: status frame failed safety validation: " +
                     frame.joinToString(" ") { "%02X".format(it) },
             )
-            return false
+            return WriteResult.REFUSED
         }
         val type = if (profile.writeWithResponse) BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
                    else BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-        if (Build.VERSION.SDK_INT >= 33) {
-            g.writeCharacteristic(ch, frame, type)
+        return if (Build.VERSION.SDK_INT >= 33) {
+            classifyWriteStatus(g.writeCharacteristic(ch, frame, type))
         } else {
             @Suppress("DEPRECATION")
             run {
                 ch.writeType = type
                 ch.value = frame
-                g.writeCharacteristic(ch)
+                classifyLegacyWrite(g.writeCharacteristic(ch))
             }
         }
-        return true
     }
 
     private val callback = object : BluetoothGattCallback() {
@@ -151,6 +169,7 @@ class BleSession(
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> g.discoverServices()
                 BluetoothProfile.STATE_DISCONNECTED -> {
+                    linkLost = true   // BLE-18: the next poll fails fast even if none is armed now
                     connectReady?.complete(false)
                     response?.completeExceptionally(IllegalStateException("disconnected"))
                 }

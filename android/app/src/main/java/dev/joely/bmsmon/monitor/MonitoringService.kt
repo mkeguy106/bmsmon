@@ -15,6 +15,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import dev.joely.bmsmon.BmsApp
+import dev.joely.bmsmon.ble.hasBlePermissions
 import dev.joely.bmsmon.location.LocationSource
 import dev.joely.bmsmon.MainActivity
 import dev.joely.bmsmon.R
@@ -35,9 +36,16 @@ import kotlinx.coroutines.launch
  *
  * Lifecycle:
  *  - START: promote to foreground (connectedDevice type) and stream the engine state to the notification.
- *  - engine monitoring -> false (in-app Stop, or [ACTION_STOP]): tear down the service.
+ *    A null intent (START_STICKY restart) or [ACTION_RESTORE] (boot / app update, BLE-17) first
+ *    restores monitoring headlessly from the persisted settings.
+ *  - [ACTION_STOP] — the notification's Stop, and the in-app Stop, which routes through it: stop the
+ *    engine, persist `monitoring = false` (BLE-30) so a later reboot / update restore can't undo the
+ *    user's Stop, and tear down.
+ *  - engine monitoring -> false: tear down the service.
  *  - app swiped away (onTaskRemoved): cleanly stop the engine (disconnecting every BLE link) and exit,
- *    so closing the app never leaves a zombie connection blocking the phone app.
+ *    so closing the app never leaves a zombie connection blocking the phone app. Deliberately does
+ *    NOT persist `monitoring = false`: a swipe means "close the app", not "stop monitoring" — the
+ *    next app open resumes monitoring, and on this dedicated device a reboot brings it back too.
  */
 class MonitoringService : Service() {
 
@@ -63,20 +71,41 @@ class MonitoringService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
-            engine.stop()  // Notification "Stop" tapped: drop BLE links cleanly, then exit.
+            // User Stop (notification or in-app): persist it first (BLE-30), then drop BLE links
+            // cleanly and exit.
+            engine.persistMonitoringOff()
+            engine.stop()
             stopCleanly()
             return START_NOT_STICKY
         }
-        startForegroundCompat(buildNotification(monitoringNotificationText(engine.state.value)))
+        // BLE-26: promote FIRST, then check the BLE grant. startForegroundService() leaves an
+        // obligation to call startForeground(); stopping the service before meeting it crashes the
+        // app (ForegroundServiceDidNotStartInTimeException), and not every caller can guarantee
+        // the grant — a cancelled permission request returns an empty "all granted" result, and a
+        // revocation can land between the start and here. A startForeground() that completes OR is
+        // refused discharges the obligation, so attempting it before the check makes the teardown
+        // safe on every path. On Android 14+ a connectedDevice FGS without BLUETOOTH_CONNECT is
+        // refused with SecurityException: caught here, where it used to crash-loop sticky restarts.
+        // Only the FIRST promotion can end the service: a refused RE-promotion (collectorJob set ⇒
+        // already foreground) keeps the foreground state it had, so tearing down would only lose it.
+        val firstPromotion = collectorJob == null
+        val promoted = runCatching {
+            startForegroundCompat(buildNotification(monitoringNotificationText(engine.state.value)))
+        }.onFailure { Log.w(TAG, "startForeground refused", it) }.isSuccess
+        if (firstPromotion && (!promoted || !hasBlePermissions(this))) {
+            Log.w(TAG, if (promoted) "BLE permission missing — not monitoring" else "not promoted — not monitoring")
+            stopCleanly()
+            return START_NOT_STICKY
+        }
         acquireWakeLock()
         if (collectorJob == null) {
-            // A null intent means a START_STICKY restart: the OS killed the process while
-            // monitoring was on and brought the service back — the fresh engine is idle, so
-            // restore monitoring headlessly from the persisted settings. If monitoring wasn't
+            // No ViewModel to drive us — restore headlessly from the persisted settings: a
+            // START_STICKY restart (null intent: the OS killed the process while monitoring was on)
+            // or the boot / package-replaced receiver (ACTION_RESTORE, BLE-17). If monitoring wasn't
             // actually on (or BLE permission is gone), exit quietly instead of collecting.
-            val stickyRestart = intent == null
+            val restore = intent == null || intent.action == ACTION_RESTORE
             collectorJob = scope.launch {
-                if (stickyRestart && !engine.restoreFromPersisted()) {
+                if (restore && !engine.restoreFromPersisted()) {
                     stopCleanly()
                     return@launch
                 }
@@ -214,11 +243,16 @@ class MonitoringService : Service() {
         private const val NOTIF_ID = 1
         private const val WAKE_TAG = "bmsmon:monitoring"
         const val ACTION_STOP = "dev.joely.bmsmon.action.STOP_MONITORING"
+        /** Boot / package-replaced restore (BLE-17): routes through restoreFromPersisted(). */
+        const val ACTION_RESTORE = "dev.joely.bmsmon.action.RESTORE_MONITORING"
 
-        fun start(context: android.content.Context) {
-            val intent = Intent(context, MonitoringService::class.java)
-            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
-            else context.startService(intent)
+        fun startRestore(context: android.content.Context) = startInForeground(context, ACTION_RESTORE)
+
+        fun start(context: android.content.Context) = startInForeground(context, action = null)
+
+        // minSdk 26: startForegroundService() always exists.
+        private fun startInForeground(context: android.content.Context, action: String?) {
+            context.startForegroundService(Intent(context, MonitoringService::class.java).setAction(action))
         }
 
         fun stop(context: android.content.Context) {
