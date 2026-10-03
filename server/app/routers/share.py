@@ -8,7 +8,6 @@ and never battery fields beyond the minimal dock status (see queries.gps_track_a
 guest map also gets the CARTO basemap key from /share/{token}/map-config."""
 
 import os
-import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -33,6 +32,12 @@ background:#09090b;color:#f4f4f5;font-family:Inter,system-ui,sans-serif;text-ali
 padding:24px}p{color:#a1a1aa}</style></head>
 <body><div><h2>This location share has expired</h2>
 <p>Ask for a new link to keep following along.</p></div></body></html>"""
+
+
+def utcnow() -> datetime:
+    """The share zone's one clock: share expiry, the guest's 'today' window and the dock's
+    staleness all read it. Tests pin it, so they do not depend on the time of day they run."""
+    return datetime.now(timezone.utc)
 
 
 def share_status(share: dict | None, now_ms: int) -> str:
@@ -207,7 +212,7 @@ async def _resolve(request: Request, token: str, pool) -> tuple[str, dict | None
         raise HTTPException(429, "too many requests", headers=_SEC_HEADERS)
     async with pool.acquire() as conn:
         share = await q.get_location_share(conn, hash_code(token))
-    return share_status(share, int(time.time() * 1000)), share
+    return share_status(share, int(utcnow().timestamp() * 1000)), share
 
 
 async def _active_share(request: Request, token: str, pool) -> dict:
@@ -246,7 +251,7 @@ async def share_map_config(token: str, request: Request, pool=Depends(get_pool))
 async def share_feed(token: str, request: Request, since: str | None = None,
                      pool=Depends(get_pool)):
     share = await _active_share(request, token, pool)
-    from_ms, now_ms = day_window_ms(datetime.now(timezone.utc))
+    from_ms, now_ms = day_window_ms(utcnow())
     state = request.app.state
     # Per-share state above (expiry/410/revocation) and the guest *status* below stay
     # per-request; only the fleet-wide GPS trail — identical for every guest — is cached.
