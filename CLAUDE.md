@@ -602,7 +602,8 @@ ignored and `vm.startMonitoring()` stays unconditional: neither permission may e
 monitoring. `Settings › Battery saver` carries a **read-only**
 line, "Motion sensing active" / "Motion sensing unavailable — GPS won't pause", so a denied
 permission cannot silently disable the saving while the toggle still reads on. *(Its two states have
-not yet been confirmed on-device — an owed verification, not a completed one.)*
+not yet been confirmed on-device — an owed verification, not a completed one; tracked in
+`docs/checkins/NEXT.md`.)*
 
 **The Activity Transition API was measured and rejected**, reversing the recommendation an earlier
 revision of the design carried. Armed with transitions at 13:18 on 2026-08-07 (standby bucket 10,
@@ -616,7 +617,7 @@ nothing supports preferring transitions, and the periodic stream is demonstrably
 2026-08-09 rework above** — the first night of motion telemetry showed the saving was not partial
 but **zero** (the gate never closed), the staleness window was the wrong knob entirely, and
 silence-as-stillness replaced it. AR's true power cost remains unmeasured (its revert condition
-stands), and the wire-cost measurement is still owed.
+stands), and the wire-cost measurement is still owed — both tracked in `docs/checkins/NEXT.md`.
 
 **No server or WebUI change was required** for either half of this: every GPS read path already
 filters `lat IS NOT NULL AND lon IS NOT NULL` (`queries.track_series`, `queries.gps_track_all`),
@@ -843,14 +844,11 @@ open items from 2026-07-15 are closed; every constant held except one reseed and
   finish-hour histogram at each check-in and reopen if sessions start finishing 08:00–23:59 from a
   low start SOC.
 
-**Next check (~2026-09).** Open: re-verify whPerMile as outing days accumulate, now on the
-corrected current-sign basis. Added 2026-08-10: decide the **AR power-cost** keep/revert
-(protocol + day-0 baseline: `docs/ar-power-cost-protocol.md`; 2026-08-10 is the first comparable
-day, since it is the first full day the GPS pause actually worked); measure the **motion-column
-wire cost** (real gzipped batch delta; documented fallback is populating the fields only on the
-staged base's rows); and **re-quantify the GNSS-off duty and saving under the silence-as-stillness
-gate** — the recorded ≈15 mA figure was measured for the discharge-only era's 68.4% duty, and the
-new gate holds GNSS off through whole parked nights, so the real saving should be larger.
+**Next check — overdue (was due ~2026-09); tracked with due dates in `docs/checkins/NEXT.md`.**
+That file is the single list of open check-in items — AR power-cost keep/revert, motion-column wire
+cost, GNSS-off duty re-quantification under the silence-as-stillness gate, whPerMile re-verify on the
+current-sign basis, and the charge finish-hour histogram. Add new items there, not here; write each
+pass up as a dated `docs/calibration-checkin-YYYY-MM-DD.md` and fold constant changes into this file.
 
 Garbage-frame guard: `parseTelemetry` realigns to the `01 93 55 AA` status header (BLE
 notification fragments can prepend stale bytes, which previously decoded as soc=0/37.6 V and
@@ -1498,6 +1496,9 @@ A high-level summary of this project also lives in the Obsidian vault at
 the project's status or architecture changes meaningfully — it's a snapshot
 for cross-project reference, not a substitute for this CLAUDE.md's detail.
 
+Open measurement, verification and decision items live in `docs/checkins/NEXT.md`, each with a due
+date — check it at the start of any calibration or battery-saver work.
+
 ## Related Projects
 
 - [aiobmsble](https://github.com/patman15/aiobmsble) — Python async BLE BMS library (has `redodo_bms.py`)
@@ -1531,9 +1532,9 @@ but `IN_VEHICLE` → GPS **stays** on; parked and still on arrival → gate clos
 transitions across two real vehicle trips on 2026-08-07; the periodic API logged 859 `IN_VEHICLE`
 readings across one. Do not revisit transitions without new evidence.
 
-Still open after the 2026-08-09 silence-as-stillness rework: AR's own power cost is still
-**unmeasured** with its revert condition intact, and the wire-cost measurement is still owed. Also
-still unverified: the settings line's two permission states.
+The follow-ups this work left open — AR's own power cost (revert condition intact), the
+motion-column wire cost, and the settings line's two permission states — are tracked with due dates
+in `docs/checkins/NEXT.md`.
 
 **Motion telemetry deployed and confirmed 2026-08-08 19:55.** Server deployed first, then the APK —
 that order is load-bearing: a new phone against the old server has its keys silently ignored
