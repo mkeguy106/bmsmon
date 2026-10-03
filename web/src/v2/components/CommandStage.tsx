@@ -8,6 +8,7 @@ import type { StageReason } from "../model/stageBase";
 import { Ring } from "./Ring";
 import { StatTile, CellTiles, Chip, LastKnownNote } from "./Atoms";
 import { sohColor } from "../colors";
+import { fmtDist, type DistUnit } from "../../units";
 
 const STATUS_COLOR: Record<BaseStatus, string> = {
   "in-use": "var(--ok)", charging: "var(--warn)", backup: "var(--ok)",
@@ -109,9 +110,9 @@ function runtimeTile(range: RangeState): { label: string; value: string; sub?: R
   };
 }
 
-export function CommandStage({ base, view, reason = null, onClearPin, tempF, mobile, drivenToday }: {
+export function CommandStage({ base, view, reason = null, onClearPin, tempF, distUnit, mobile, drivenToday }: {
   base: Base; view: BaseView; reason?: StageReason | null; onClearPin?: () => void;
-  tempF: boolean; mobile: boolean; drivenToday: TripSummary;
+  tempF: boolean; distUnit: DistUnit; mobile: boolean; drivenToday: TripSummary;
 }) {
   const flowLabel = base.status === "in-use" ? "DRAW NOW" : view.charging ? "CHARGE IN" : "FLOW";
   const flowValue = view.flowW == null ? "—" : `${Math.round(view.flowW)} W`;
@@ -165,8 +166,8 @@ export function CommandStage({ base, view, reason = null, onClearPin, tempF, mob
           <FlowTile label={flowLabel} value={flowValue} />
           <FlowTile label={runtime.label} value={runtime.value} sub={runtime.sub} />
           <FlowTile label="DRIVEN TODAY"
-            value={drivenToday.miles > 0.05 ? `${drivenToday.activeMiles.toFixed(1)} mi` : "—"}
-            sub={drivenToday.transitMiles > 0.05 ? `+${drivenToday.transitMiles.toFixed(1)} transit` : undefined} />
+            value={drivenToday.miles > 0.05 ? fmtDist(drivenToday.activeMiles, distUnit) : "—"}
+            sub={drivenToday.transitMiles > 0.05 ? `+${fmtDist(drivenToday.transitMiles, distUnit)} transit` : undefined} />
         </div>
       </div>
     </div>

@@ -4,6 +4,8 @@
 // (the tilt inputs live in the phone's Room DB). Design:
 // docs/superpowers/specs/2026-07-11-discharge-estimate-design.md
 
+import { distLabel, toDist, type DistUnit } from "./units";
+
 export const NOMINAL_PACK_V = 12.8;
 
 export interface RangeBand { lo: number; hi: number }
@@ -85,11 +87,15 @@ export function minRange(ranges: PackRange[]): PackRange {
   }));
 }
 
-/** "~37–50 mi · ~9–13h use · ~5–9 days" (days when the low bound exceeds 48 h, else hours). */
-export function formatRangeLine(r: PackRange): string {
-  const miles = r.milesHi < 10
-    ? `~${r.milesLo.toFixed(1)}–${r.milesHi.toFixed(1)} mi`
-    : `~${Math.round(r.milesLo)}–${Math.round(r.milesHi)} mi`;
+/** "~37–50 mi · ~9–13h use · ~5–9 days" (days when the low bound exceeds 48 h, else hours).
+ *  [unit] converts the distance only; the bands stay in miles (units.ts). */
+export function formatRangeLine(r: PackRange, unit: DistUnit = "mi"): string {
+  const lo = toDist(r.milesLo, unit);
+  const hi = toDist(r.milesHi, unit);
+  const u = distLabel(unit);
+  const miles = hi < 10
+    ? `~${lo.toFixed(1)}–${hi.toFixed(1)} ${u}`
+    : `~${Math.round(lo)}–${Math.round(hi)} ${u}`;
   const use = `~${Math.round(r.activeHLo)}–${Math.round(r.activeHHi)}h use`;
   const wall = r.wallHLo > 48
     ? `~${Math.round(r.wallHLo / 24)}–${Math.round(r.wallHHi / 24)} days`

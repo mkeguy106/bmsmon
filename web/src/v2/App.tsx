@@ -85,12 +85,13 @@ export default function App() {
   const content =
     view === "command" ? (
       <CommandView data={data} stage={stage} mobile={mobile} onOpen={setView} tempF={tempF}
-        tempConfig={tempConfig} />
+        tempConfig={tempConfig} distUnit={settings.distUnit} />
     ) :
     view === "health" ? <HealthView data={data} heroBase={stage.staged} unit={settings.tempUnitPref} mobile={mobile} /> :
     view === "journey" ? (
       <Suspense fallback={<ViewLoading />}>
-        <JourneyView data={data} base={stage.staged} theme={resolvedTheme} unit={settings.tempUnitPref} mobile={mobile} mapMetric={settings.mapMetricPref} />
+        <JourneyView data={data} base={stage.staged} theme={resolvedTheme} unit={settings.tempUnitPref}
+          mobile={mobile} mapMetric={settings.mapMetricPref} distUnit={settings.distUnit} />
       </Suspense>
     ) :
     view === "history" ? <HistoryView data={data} unit={settings.tempUnitPref} mobile={mobile} /> :

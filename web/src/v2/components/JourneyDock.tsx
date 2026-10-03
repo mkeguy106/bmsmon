@@ -2,6 +2,7 @@ import type { CSSProperties } from "react";
 import type { BasePack } from "../fleet";
 import type { TripSummary } from "../model/journey";
 import { dockCapacity, dockFlow, type FlowKind } from "../model/dock";
+import { distLabel, toDist, type DistUnit } from "../../units";
 
 const eyebrow: CSSProperties = {
   fontSize: 10, letterSpacing: ".14em", color: "var(--text-4)", width: 46, flexShrink: 0,
@@ -31,9 +32,12 @@ function Fill({ frac, background }: { frac: number; background: string }) {
 }
 
 /** Mobile Journey dock: one trip line + pair-capacity line + single-direction flow line. */
-export function JourneyDock({ summary, packs }: { summary: TripSummary; packs: BasePack[] }) {
+export function JourneyDock({ summary, packs, distUnit }: {
+  summary: TripSummary; packs: BasePack[]; distUnit: DistUnit;
+}) {
   const cap = dockCapacity(packs);
   const flow = dockFlow(packs);
+  const d = (mi: number) => toDist(mi, distUnit).toFixed(1);
   const sep = <span style={{ color: "var(--text-4)" }}>·</span>;
   const b = (t: string) => <b style={{ color: "var(--text)", fontSize: 14 }}>{t}</b>;
   return (
@@ -44,9 +48,9 @@ export function JourneyDock({ summary, packs }: { summary: TripSummary; packs: B
     }}>
       <div style={{ fontSize: 13, color: "var(--text-2)", display: "flex", gap: 6,
         flexWrap: "wrap", alignItems: "baseline" }}>
-        {b(`${summary.miles.toFixed(1)} mi`)}{sep}
-        <span>ACT {b(summary.activeMiles.toFixed(1))}</span>{sep}
-        <span>TRN {b(summary.transitMiles.toFixed(1))}</span>{sep}
+        {b(`${d(summary.miles)} ${distLabel(distUnit)}`)}{sep}
+        <span>ACT {b(d(summary.activeMiles))}</span>{sep}
+        <span>TRN {b(d(summary.transitMiles))}</span>{sep}
         <span>PEAK {b(`${Math.round(summary.peakW)} W`)}</span>
       </div>
       <div style={rowStyle}>

@@ -5,6 +5,7 @@ import type { Trip, TripVerdict } from "../trips";
 import { classifyTrip } from "../trips";
 import { Ago } from "../../components/Ago";
 import { Chip } from "./Atoms";
+import { fmtDist, toDist, type DistUnit } from "../../units";
 
 const VERDICT_TONE: Record<TripVerdict, string> = {
   go: "var(--ok)", tight: "var(--warn)", "no-go": "var(--live)",
@@ -13,13 +14,15 @@ const VERDICT_LABEL: Record<TripVerdict, string> = {
   go: "GO", tight: "TIGHT", "no-go": "NO-GO",
 };
 
-function milesText(lo: number, hi: number): string {
+/** The range band in the display unit (the model is in miles). */
+function distText(loMi: number, hiMi: number, u: DistUnit): string {
+  const lo = toDist(loMi, u), hi = toDist(hiMi, u);
   return hi < 10 ? `${lo.toFixed(1)}–${hi.toFixed(1)}` : `${Math.round(lo)}–${Math.round(hi)}`;
 }
 
 /** "Can you make it?": the staged base's range, bounded by its weaker pack (baseView). */
-export function CommandRange({ view, trips, onEditTrips }: {
-  view: BaseView; trips: Trip[]; onEditTrips: () => void;
+export function CommandRange({ view, trips, onEditTrips, distUnit }: {
+  view: BaseView; trips: Trip[]; onEditTrips: () => void; distUnit: DistUnit;
 }) {
   const header = (
     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -57,7 +60,7 @@ export function CommandRange({ view, trips, onEditTrips }: {
 
   const r = range.range;
   const lk = range.lastKnown;
-  const typical = Math.round((r.milesLo + r.milesHi) / 2);
+  const typical = Math.round(toDist((r.milesLo + r.milesHi) / 2, distUnit));
 
   return (
     <div className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -65,12 +68,14 @@ export function CommandRange({ view, trips, onEditTrips }: {
       <div style={{ display: "flex", alignItems: "flex-end", gap: 14, flexWrap: "wrap" }}>
         <div>
           <div className="mono" style={{ fontSize: 30, fontWeight: 700, lineHeight: 1 }}>
-            {milesText(r.milesLo, r.milesHi)}
+            {distText(r.milesLo, r.milesHi, distUnit)}
           </div>
-          <div className="eyebrow" style={{ marginTop: 4 }}>miles · typical ~{typical}</div>
+          <div className="eyebrow" style={{ marginTop: 4 }}>
+            {distUnit === "km" ? "km" : "miles"} · typical ~{typical}
+          </div>
         </div>
         <div className="mono" style={{ fontSize: 12, color: "var(--text-3)", marginLeft: "auto" }}>
-          {formatRangeLine(r)}
+          {formatRangeLine(r, distUnit)}
         </div>
       </div>
 
@@ -89,7 +94,7 @@ export function CommandRange({ view, trips, onEditTrips }: {
                 <span className="mono" style={{ fontSize: 12, flex: 1, overflow: "hidden",
                   textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.name}</span>
                 <span className="mono" style={{ fontSize: 11, color: "var(--text-4)" }}>
-                  {t.miles.toFixed(1)} mi
+                  {fmtDist(t.miles, distUnit)}
                 </span>
                 <Chip tone={VERDICT_TONE[v]}>{VERDICT_LABEL[v]}</Chip>
               </div>

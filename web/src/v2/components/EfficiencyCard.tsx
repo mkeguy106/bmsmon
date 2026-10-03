@@ -4,6 +4,7 @@
 import type { EfficiencySummary, BandStatus } from "../model/efficiency";
 import type { LastKnownRef } from "../model/baseView";
 import { Chip, LastKnownNote } from "./Atoms";
+import { distLabel, fmtDist, perDist, toDist, type DistUnit } from "../../units";
 
 const STATUS_LABEL: Record<BandStatus, string> = {
   below: "below band", inside: "in band", above: "above band",
@@ -24,8 +25,8 @@ function Cell({ label, value }: { label: string; value: string }) {
 
 const mi = (n: number) => (n < 10 ? n.toFixed(1) : String(Math.round(n)));
 
-export function EfficiencyCard({ summary, live, charging, lastKnown = null }: {
-  summary: EfficiencySummary; live: boolean; charging: boolean;
+export function EfficiencyCard({ summary, live, charging, distUnit, lastKnown = null }: {
+  summary: EfficiencySummary; live: boolean; charging: boolean; distUnit: DistUnit;
   /** A last-known pack inside the usable energy behind the projection (baseView). */
   lastKnown?: LastKnownRef | null;
 }) {
@@ -53,7 +54,9 @@ export function EfficiencyCard({ summary, live, charging, lastKnown = null }: {
   const bandChip = band && status
     ? (seed
         ? <Chip tone="var(--text-4)">vs seed est.</Chip>
-        : <Chip tone={STATUS_TONE[status]}>{STATUS_LABEL[status]} · {Math.round(band.lo)}–{Math.round(band.hi)}</Chip>)
+        : <Chip tone={STATUS_TONE[status]}>
+            {STATUS_LABEL[status]} · {Math.round(perDist(band.lo, distUnit))}–{Math.round(perDist(band.hi, distUnit))}
+          </Chip>)
     : null;
 
   return (
@@ -62,14 +65,14 @@ export function EfficiencyCard({ summary, live, charging, lastKnown = null }: {
 
       <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
         <span className="mono" style={{ fontSize: 30, fontWeight: 700, color: "var(--text)", lineHeight: 1 }}>
-          {Math.round(costPerMile)}
+          {Math.round(perDist(costPerMile, distUnit))}
         </span>
-        <span className="mono" style={{ fontSize: 13, color: "var(--text-3)" }}>Wh / mi</span>
+        <span className="mono" style={{ fontSize: 13, color: "var(--text-3)" }}>Wh / {distLabel(distUnit)}</span>
         {bandChip}
       </div>
 
       <div style={{ display: "flex", flexWrap: "wrap", gap: 20 }}>
-        <Cell label="DRIVEN" value={`${activeMiles.toFixed(1)} mi`} />
+        <Cell label="DRIVEN" value={fmtDist(activeMiles, distUnit)} />
         <Cell label="USED" value={`${Math.round(wh)} Wh`} />
         <Cell label="DRAINED" value={drainedPct != null ? `${Math.round(drainedPct)}%` : "—"} />
       </div>
@@ -80,8 +83,10 @@ export function EfficiencyCard({ summary, live, charging, lastKnown = null }: {
         </div>
       ) : milesAtTodayRate != null && (
         <div className="mono" style={{ fontSize: 13, color: "var(--text-2)" }}>
-          ~<span style={{ color: "var(--text)", fontWeight: 600 }}>{mi(milesAtTodayRate)} mi</span> left at today’s rate
-          {milesAtUsualRate != null && <> · ~{mi(milesAtUsualRate)} at your usual</>}
+          ~<span style={{ color: "var(--text)", fontWeight: 600 }}>
+            {mi(toDist(milesAtTodayRate, distUnit))} {distLabel(distUnit)}
+          </span> left at today’s rate
+          {milesAtUsualRate != null && <> · ~{mi(toDist(milesAtUsualRate, distUnit))} at your usual</>}
           {lastKnown && (
             <div style={{ fontSize: 11, color: "var(--warn)", marginTop: 4 }}>
               <LastKnownNote lk={lastKnown} /> — it may be lower now

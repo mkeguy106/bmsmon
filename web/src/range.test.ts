@@ -51,6 +51,10 @@ describe("formatRangeLine", () => {
     expect(formatRangeLine({ milesLo: 1.5, milesHi: 2.4, activeHLo: 0.4, activeHHi: 0.6, wallHLo: 34.2, wallHHi: 42.1 }))
       .toBe("~1.5–2.4 mi · ~0–1h use · ~34–42h");
   });
+  it("converts only the distance to km", () => {
+    expect(formatRangeLine({ milesLo: 37.33, milesHi: 49.78, activeHLo: 8.96, activeHHi: 12.8, wallHLo: 119.47, wallHHi: 215.04 }, "km"))
+      .toBe("~60–80 km · ~9–13h use · ~5–9 days");
+  });
 });
 
 describe("selectRangeParams", () => {

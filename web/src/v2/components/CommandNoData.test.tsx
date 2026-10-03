@@ -18,14 +18,14 @@ describe("Command with a pack lacking capacity", () => {
   const view = baseView(b, { rangeParams: new Map(), tempConfig: null });
 
   it("range card shows the no-data state and no mileage figure", () => {
-    const html = renderToStaticMarkup(<CommandRange view={view} trips={[]} onEditTrips={() => {}} />);
+    const html = renderToStaticMarkup(<CommandRange view={view} trips={[]} onEditTrips={() => {}} distUnit="mi" />);
     expect(html).toContain("No capacity reading from this base yet");
     expect(html).not.toContain("miles");
   });
 
   it("stage shows no runtime figure", () => {
     const html = renderToStaticMarkup(
-      <CommandStage base={b} view={view} tempF={false} mobile={false} drivenToday={SUMMARY} />);
+      <CommandStage base={b} view={view} tempF={false} distUnit="mi" mobile={false} drivenToday={SUMMARY} />);
     expect(html).toContain("EST. RUNTIME");
     expect(html).not.toMatch(/~\d+–\d+h/);
   });
