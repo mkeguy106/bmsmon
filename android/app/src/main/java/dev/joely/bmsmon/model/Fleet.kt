@@ -49,8 +49,9 @@ data class StageInputs(
     val groups: List<BatteryGroup>,
     /**
      * SOC at/below which a reachable pack seizes the stage (safety override), or null to disable.
-     * The ViewModel sets this to the highest enabled capacity-alert threshold when the "pull low
-     * packs to stage" setting and alerts are both on.
+     * The engine fills it from [StageConfig.seizeThreshold] — pushed by the ViewModel, or rebuilt
+     * from the persisted settings by the headless restore plan — which is [seizeThresholdFor]: the
+     * highest enabled capacity-alert threshold when alerts and "Pull low packs to stage" are both on.
      */
     val seizeThreshold: Int? = null,
 )

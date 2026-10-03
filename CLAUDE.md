@@ -664,12 +664,12 @@ physical pages and read **~2.2× low** (183.6 MB estimated vs 403.7 MB actual). 
 and `Battery saver` now call it, so the two pages can never disagree.
 
 **Dev-workflow gotcha, and here it is a real-world one: `adb install -r` stops the app and nothing
-relaunches it.** Since 2026-10-02 the `MY_PACKAGE_REPLACED` receiver restores the *foreground
-service* headlessly after an install, but not the Activity — the `am start` step below stays
-mandatory. The phone *is* the wheelchair's battery monitor, so an install that leaves the
-process dead is downtime, not a dev inconvenience — during this build the chair's monitoring sat
-dead until it was manually restarted. Always follow an install with
-`adb shell am start -n dev.joely.bmsmon/.MainActivity` and confirm with
+relaunches it.** Since 2026-10-02 the `MY_PACKAGE_REPLACED` receiver is designed to restore the
+*foreground service* headlessly after an install (not yet verified on-device), but never the
+Activity — the `am start` step below stays mandatory. The phone *is* the wheelchair's battery
+monitor, so an install that leaves the process dead is downtime, not a dev inconvenience — during
+this build the chair's monitoring sat dead until it was manually restarted. Always follow an
+install with `adb shell am start -n dev.joely.bmsmon/.MainActivity` and confirm with
 `adb shell 'ps -A | grep bmsmon'`. Note that a `monkey` launcher intent
 (`adb shell monkey -p dev.joely.bmsmon -c android.intent.category.LAUNCHER 1`) reports
 `Events injected: 1` but does **not** start this app on this device.
@@ -749,24 +749,25 @@ dedup.
 time, a low pack that isn't on the stage used to be invisible — a pack could drain to damage
 unseen. So the engine's decision step (`engineDecision()`, run by `MonitorEngine.reevaluate()` on
 **every** BLE frame and reachability change — it used to run only on stage-pack events, which
-silenced every notification whenever the stage was dark, BLE-14) evaluates **every reachable pack**
-against the ladder and fires a **per-pack** headless notification, deduped **per address**
-(`AlertNotifier` keys
-`lastByAddr`/`idByAddr` by address, ids from `NOTIF_CAP_BASE`; per-pack charge-hold latch). The
-pure `reconcileFleetNotifications()` (`model/Alerts.kt`) does the fan-out dedup: notify the fresh
-crossings, cancel recovered/charging/vanished packs. A second low pack is never masked by the one
-on stage. (Temperature notifications stay stage-worst-driven.) Only packs that are actually showing
-a notification are ever cancelled (BLE-28).
+silenced every notification whenever the stage was dark, BLE-14) evaluates **every alert-driving
+pack** (the freshness `decisionView()`: this session's LIVE or STALE readings, never the restored
+seed or a silent pack) against the ladder and fires a **per-pack** headless notification, deduped
+**per address** (`AlertNotifier` keys `lastByAddr`/`idByAddr` by address, ids from
+`NOTIF_CAP_BASE`; per-pack charge-hold latch). The pure `reconcileFleetNotifications()`
+(`model/Alerts.kt`) does the fan-out dedup: notify the fresh crossings, cancel
+recovered/charging/vanished packs. A second low pack is never masked by the one on stage.
+(Temperature notifications stay stage-worst-driven.) Only packs that are actually showing a
+notification are ever cancelled (BLE-28).
 
 **Low pack seizes the stage (safety override).** `resolveStage()` (`model/Fleet.kt`) has a
-pre-emptive branch — before the manual-pin check — that stages the base of the **lowest reachable
-pack at/below the seize threshold**, over the active chair AND a manual pin (daily-driver breaks
-ties). The seize threshold is `seizeThresholdFor()` (`model/StageControl.kt`, shared by the
-ViewModel and the headless restore) = the **highest enabled capacity threshold** (default ladder
-top = 30%) when both `alertsOn` and the new `seizeLowToStage` setting are on (else null). Charging
-doesn't block the seize (the flash is still charge-suppressed). On recovery the branch yields and
-normal pin/auto resolution takes back over.
-`Settings › Alerts` gains a **"Pull low packs to stage"** toggle (default ON) gating only the
+pre-emptive branch — before the manual-pin check — that stages the base of the **lowest
+alert-driving pack at/below the seize threshold** (the engine resolves on `decisionView()`), over
+the active chair AND a manual pin (daily-driver breaks ties). The seize threshold is
+`seizeThresholdFor()` (`model/StageControl.kt`, shared by the ViewModel and the headless restore) =
+the **highest enabled capacity threshold** (default ladder top = 30%) when both `alertsOn` and the
+new `seizeLowToStage` setting are on (else null). Charging doesn't block the seize (the flash is
+still charge-suppressed). On recovery the branch yields and normal pin/auto resolution takes back
+over. `Settings › Alerts` gains a **"Pull low packs to stage"** toggle (default ON) gating only the
 visual seize — fleet-wide notifications fire regardless. Only roster members can seize, and a stage
 target left with no members falls back to the daily driver (then the first populated base) instead
 of a blank stage (UI-29). The rule itself — threshold, charging-doesn't-block, lowest-wins,
@@ -943,20 +944,27 @@ alert) rather than a misleading 0%.
 
 **Freshness model (UI-16 / UI-23 / BLE-18, 2026-10-02).** One definition of "is this reading
 live?", in `model/Freshness.kt`. The engine stamps `BatteryStatus.lastFrameAtElapsedMs`
-(`elapsedRealtime`, never persisted) and `frameIntervalMs` on every **parsed** frame;
-`freshness()` = LIVE while age ≤ poll interval + 9 s (two missed polls), STALE beyond that, and
-DISCONNECTED when unreachable or silent > 60 s. The restored seed has no stamp, so it is never
-LIVE: it renders as DISCONNECTED (no %) until the first frame. **Alert rule:** this session's
+(`elapsedRealtime`, never persisted) and `frameIntervalMs` on every **parsed** frame; `freshness()`
+= LIVE while age ≤ poll interval + 10 s (two missed polls plus the round-trip of the poll that
+answers), STALE beyond that, and DISCONNECTED when unreachable or silent > 60 s (engine-side:
+≤ 60 s, plus up to one 10 s tick when no BLE event arrives). The restored seed has no stamp, so it is
+never LIVE: it renders as DISCONNECTED (no %) until the first frame. **Alert rule:** this session's
 readings drive alerts, the seize and stage activity (LIVE, or STALE with a known age — a STALE
-reading can only *hold* an alert its own LIVE frame raised); the seed and DISCONNECTED packs never
-do (`decisionView()`). STALE stage packs render muted with "UPDATED Ns AGO" (the ring keeps the
-accent hue at 45 % alpha and the number and age use `text2` — the dark theme's `segEmpty` is lighter
-than `text3`, so a grey fill read inverted; the stage header's activity reads `decisionView()`, and
-REGEN shows only for a LIVE pack); All Batteries and Detail dim every non-LIVE row with "Updated … /
-Out of range · seen … / Last seen … / Last known", monitoring off included. A frame that never
-decodes is a poll miss (drops at 5 like a timeout), and a link that drops between polls fails the
-next poll at once (`linkLost`; a non-success status write = link error, except BUSY = miss). The
-ViewModel advances its UI clock only when a rendered freshness label changes (1 s check).
+reading mostly *holds* an alert its own LIVE frame raised, though one ≤ 60 s old can raise a first
+notification or the seize once the 30 s charge latch expires, which is accepted as erring toward
+alerting); the seed and DISCONNECTED packs never do (`decisionView()`). STALE stage packs render
+muted with "UPDATED Ns AGO" (the ring keeps the accent hue at 45 % alpha and the number and age use
+`text2` — the dark theme's `segEmpty` is lighter than `text3`, so a grey fill read inverted; the
+stage header's activity reads `decisionView()`, and REGEN shows only for a LIVE pack); All
+Batteries and Detail dim every non-LIVE row with "Updated … / Connecting… / Out of range · seen … /
+Last seen … / Last known" ("Disconnected" first for a pack the user disconnected), monitoring off
+included; the All Batteries "Reachable" filter uses the same LIVE-and-not-disconnected test as the
+row. A frame that never decodes — a parser throw included — is a poll miss (drops at 5 like a
+timeout, keeps the normal cadence, and is still logged as `decode_fail`), and a link that drops
+between polls fails the next poll at once (`linkLost`; a non-success status write = link error,
+except BUSY = miss). The ViewModel's UI clock (`nowElapsedMs`) advances on every engine emission;
+its 1 s freshness ticker (foreground only) publishes only when a rendered label, the charge hold or
+an ack set changes.
 
 **No demo data (removed).** The old offline "demo" telemetry (`demoFor()`, `UiState.demo`,
 `tickDemo` drift loop) was removed — we're past needing it. When monitoring is off, the app keeps
@@ -969,25 +977,31 @@ the same way — they add the pack(s) to the `disabled` set and call `engine.set
 which cancels the staged worker so its GATT closes; the engine keeps running. Each disconnected
 row shows a **reconnect (link) icon**, and the All Batteries header toggles **Disconnect all ⇄
 Reconnect all**. "Disconnect all" is therefore distinct from *stopping monitoring* (the
-foreground-service Stop), which tears the engine down entirely.
+foreground-service Stop), which tears the engine down entirely. A frame or connect already in
+flight when a pack is disconnected is ignored by the engine (`onPoll`/`onReachable` check the
+disabled set inside their state update), so the pack can't flash back to connected — or drive an
+alert or the seize — while its worker tears down.
 
 **Low-battery alerts (configurable ladder + critical tier).** `ALERT_THRESHOLDS`
 (BatteryViewModel.kt) is the full selectable 5% ladder **95%→5%**; `DEFAULT_THRESHOLDS`
 (`30/25/20/15/10/5`) is what a fresh install enables (high marks default OFF). The **critical**
 tier (red / faster pulse) is user-configurable via `criticalThreshold` (`UiState` +
 `DEFAULT_CRITICAL_THRESHOLD = 15`), replacing the old hardcoded `≤15`. The Alerts settings page
-shows the full ladder (chips ≤ critical tint red), a single-select **Critical level** picker, and
-a **Reset to defaults** button. `stageAlert()` resolves the in-app flash from the lowest pack on
+shows the full ladder (chips ≤ critical tint red), a single-select **Critical level** picker, and a
+**Reset to defaults** button. `stageAlert()` resolves the in-app flash from the lowest pack on
 stage; charging suppresses the flash; acknowledged thresholds silence until SOC drops to the next
-level, and **re-arm** (UI-15): pruned to the still-crossed rungs on every live reading, cleared when
-the stage target changes or the stage starts charging. A pack inside its regen window does not count
-as "charging" for that re-arm: production data showed 86 of 531 regen samples (16 %) carry BMS
-`state=Charging`, so regen braking used to re-flash an acknowledged rung about 30 s later, mid-drive.
-The flash-suppression latch is unchanged. ACKNOWLEDGE acks the alert the overlay displayed, never
-one re-derived at tap time (UI-25), and an ACKNOWLEDGE that lands after the stage changed is ignored
-(`StageAlert.target`). The **highest enabled** ladder rung doubles as the stage-seize threshold
-(see "Low pack seizes the stage" above), and headless notifications are **fleet-wide/per-pack**
-(see "Capacity alerts are fleet-wide") — the ladder is the single source of truth for all three.
+level, and **re-arm** (UI-15): a rung stays acknowledged while the stage's lowest alert-driving
+pack reads below rung + `ACK_REARM_MARGIN_PCT` (2 %), and acks clear when the stage target changes
+or the stage starts charging. The margin exists because BMS SOC is an integer percent: a 1 % regen
+uptick at a rung boundary would otherwise clear the ack, and the next downtick would re-flash the
+rung mid-drive. A pack inside its regen window does not count as "charging" for that re-arm either:
+production data showed 86 of 531 regen samples (16 %) carry BMS `state=Charging`, so regen braking
+would re-flash an acknowledged rung about 30 s later, mid-drive. The flash-suppression latch is
+unchanged. ACKNOWLEDGE acks the alert the overlay displayed, never one re-derived at tap time
+(UI-25), and an ACKNOWLEDGE that lands after the stage changed is ignored (`StageAlert.target`).
+The **highest enabled** ladder rung doubles as the stage-seize threshold (see "Low pack seizes the
+stage" above), and headless notifications are **fleet-wide/per-pack** (see "Capacity alerts are
+fleet-wide") — the ladder is the single source of truth for all three.
 
 **GPS telemetry (cloud upload).** When cloud sync is enrolled, the app captures the phone's
 location (`location/LocationSource.kt`, fused provider) and attaches `lat`/`lon`/`gps_accuracy_m`

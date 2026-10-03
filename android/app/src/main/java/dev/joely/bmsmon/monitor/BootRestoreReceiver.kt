@@ -19,6 +19,11 @@ import kotlinx.coroutines.withTimeoutOrNull
  * was on and BLE is still granted ([shouldRestoreMonitoring]). It never relaunches the Activity.
  * BOOT_COMPLETED and MY_PACKAGE_REPLACED are documented exemptions from the background
  * FGS-start restriction. Never throws: a failed restore must not crash the process at boot.
+ *
+ * The receiver's own settings read duplicates the one inside [MonitorEngine.restoreFromPersisted]
+ * on purpose: deciding here, before [MonitoringService.startRestore], means a boot or update with
+ * monitoring off never promotes the service at all — no brief foreground notification for a
+ * service that would only tear itself down again.
  */
 class BootRestoreReceiver : BroadcastReceiver() {
 
