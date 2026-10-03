@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  outingWh, drainedPct, baseBand, bandStatus, efficiencySummary, MIN_OUTING_MI,
+  outingWh, drainedPct, baseBand, bandStatus, efficiencySummary, projectionLive, MIN_OUTING_MI,
 } from "./efficiency";
 import type { TrackPoint } from "../track";
 import type { RangeParams } from "../../range";
@@ -168,7 +168,7 @@ describe("Journey with a pack that reports no capacity", () => {
     const pts = [0, 15, 30].map((s) => p({ t: s * S, power_w: -240, current_a: -20 }));
     return { view, eff: efficiencySummary({
       points: pts, activeMiles: 1, packParams: view.packParams, usableWh: view.usableWh,
-      charging: view.charging, live: view.livePacks.length > 0, // as JourneyView
+      charging: view.charging, live: projectionLive(true, view),
     }) };
   };
   it("no-data: no usable energy, no projection, no last-known note", () => {
@@ -184,6 +184,14 @@ describe("Journey with a pack that reports no capacity", () => {
     expect(view.livePacks).toHaveLength(0);
     expect(eff.milesAtTodayRate).toBeNull();
     expect(eff.milesAtUsualRate).toBeNull();
+  });
+  it("projectionLive: needs a live window and a live pack", () => {
+    const off = project(55, 55, ["A", "B"]).view;
+    const on = project(55, 55).view;
+    expect(projectionLive(true, off)).toBe(false);
+    expect(projectionLive(true, on)).toBe(true);
+    expect(projectionLive(false, on)).toBe(false);
+    expect(projectionLive(true, null)).toBe(false);
   });
   it("both packs reporting still projects", () => {
     const { eff } = project(55, 55);

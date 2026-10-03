@@ -9,6 +9,7 @@
 import type { TrackPoint } from "../track";
 import { DISCHARGE_EPS } from "./journey";
 import type { RangeBand, RangeParams } from "../../range";
+import type { BaseView } from "./baseView";
 
 /** Learner's own outing gate — below this the per-mile cost is noise. */
 export const MIN_OUTING_MI = 0.5;
@@ -110,3 +111,8 @@ export function efficiencySummary(input: EfficiencyInput): EfficiencySummary {
       ? remWh / usualMid : null,
   };
 }
+
+/** Whether Journey may project miles left: the window must be live AND at least one pack in
+ *  the base live, so an offline base shows no projection (matching Command). */
+export const projectionLive = (windowIsLive: boolean, view: Pick<BaseView, "livePacks"> | null): boolean =>
+  windowIsLive && (view?.livePacks.length ?? 0) > 0;
