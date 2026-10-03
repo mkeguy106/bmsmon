@@ -659,8 +659,8 @@ dead until it was manually restarted. Always follow an install with
 carries the server's `X-Bmsmon-Api` marker header. Traefik answers its own unmarked `404` whenever
 `bmsmon-api` is starting, unhealthy or stopped (every deploy, every autoheal restart, any DB
 outage); that used to read as "server rejects this batch" and erased the outbox ~200 rows per POST.
-Now every 4xx other than 401/403 that is not a marked 400/413/422 (so every unmarked 4xx, and a
-marked 404/408/429), every 3xx (the upload client is built with `followRedirects(false)` +
+Now every 4xx other than 401/403 that is not a marked 400/413/422 (so every unmarked 4xx, and e.g.
+a marked 404/408/429), every 3xx (the upload client is built with `followRedirects(false)` +
 `followSslRedirects(false)` in `uploadHttpClient()`, so a redirect to a login page can never come
 back as a 2xx "accept") and every 5xx is Transient; 401/403 are AuthFailed and hold the rows whether
 or not the marker is present. Poison then passes a circuit breaker (`decideUpload`,
@@ -682,18 +682,24 @@ rollup (finalize, stop, startup orphan sweep, CSV backfill) stream id-keyset pag
 folds (`PeakPooler`, `RollupAccumulator`) that reproduce the old list results — rollups bit for
 bit (data-class equality against frozen copies of the old code), fits to the tolerances
 `HealthEquivalenceTest` pins (1e-9 on slope and intercept, 1e-5 on R²), scatter points
-identically. What stays bounded on these paths is the **Java heap** (O(bins + sessions + points)
-plus one page, the V–I stride walk capped at `scatterPointCap()` = 2 × `SCATTER_MAX_POINTS`, i.e.
-at most 1,399 points, ~700 typical); each aggregate is still an N-row SQLite sort in *native*
-memory (roughly 20–25 MB transient for a daily-driver pack), so do not describe them as bins-sized
-or sort-free. SQL aggregates could not do the rollup: energy needs each row's successor (`LEAD`),
+identically. What stays bounded on these paths is the **Java heap**: History/Review hold
+O(bins + sessions + points) and the Timeline O(buckets), each plus one page, with the V–I stride
+walk capped at `scatterPointCap()` = 2 × `SCATTER_MAX_POINTS` (1,400 points; ~700 typical); a
+rollup holds one page plus ~12 B per discharge row (the `RollupAccumulator` buffers behind the exact
+p95/mean and the resistance fit). Each aggregate is still an N-row SQLite sort in *native* memory
+(roughly 20–25 MB transient for a daily-driver pack), so do not describe them as bins-sized or
+sort-free. SQL aggregates could not do the rollup: energy needs each row's successor (`LEAD`),
 and Room 2.6.1's parser has no window-function grammar (minSdk 26's SQLite 3.18 predates them
 anyway). Sessions are capped at 24 h (`MAX_SESSION_MS`, inclusive). Startup prunes BEFORE the orphan
-sweep, each stub is Throwable-guarded (logged + deleted on failure), and the writer loop catches
-Throwable, so no single bad row or stub can crash-loop launch. The loaders behind History, Review
-and Timeline run off Main (IO for the reads, Default for the residual math); the timeline pager and
-the V–I stride walk honor cancellation (`ensureActive`), while the rollup pager deliberately runs to
-completion (a finalize should finish, not cancel half-way); and `loadHistory`
+sweep, each stub is Throwable-guarded (logged + deleted on failure; the loop is the pure, tested
+`sweepOrphanedStubs`), and the writer loop catches Throwable, so no single bad row or stub can
+crash-loop launch. The writer's failure log is rate-limited (`FailureLogThrottle`: the first
+failure of a burst with its stack, then at most one count line per minute) so a persistent DB fault
+cannot flood logcat and evict the motion instrumentation, and the writer's and the sweep's log calls
+are themselves guarded. The loaders behind History, Review and Timeline run off Main (IO for the
+reads, Default for the residual math); the timeline pager and the V–I stride walk honor cancellation
+(`ensureActive`), while the rollup pager deliberately runs to completion (a finalize should finish,
+not cancel half-way); and `loadHistory`
 (`ui/history/HistoryLoad.kt`) turns any Throwable into a rendered "failed" state instead of an
 exception escaping `produceState` — which would kill the process and, with it, the foreground
 service and BLE monitoring. The DAO SQL is shared with JVM tests as `const val`s and executed
