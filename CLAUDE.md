@@ -978,9 +978,12 @@ mirror) + `GET /web/alert-config` (the read-only capacity-seize mirror), plus ad
 `TempOverlay`/`BatteryProfilePanel`) re-evaluates the same zone ladder read-only. The **capacity
 seize threshold** rides the same `POST /api/v1/config` body (optional flat `seize_soc`/`alerts_on`
 fields on `TempConfigBody`) into the device-level `device_alert_config` table (latest-wins); the
-WebUI reads it via `GET /web/alert-config` and `web/src/stage.ts` `selectStageItems` seizes its
-main stage for the lowest fresh pack `≤ (alerts_on ? seize_soc ?? 30 : ∅)` — over pins and
-auto-selection, with a **"LOW"** marker (`MainStage.tsx`), no audible alarm. Schema is
+WebUI reads it via `GET /web/alert-config` and seizes its main stage for the lowest fresh pack
+`≤ (alerts_on ? seize_soc ?? 30 : ∅)` — over pins and auto-selection, with a **"LOW"** marker,
+no audible alarm: v2 (`/`) via `useV2Configs` + `web/src/v2/model/stageBase.ts`
+`selectStageBase` (Command stage, Journey and the Fleet Health hero; LOW chip in
+`CommandStage.tsx`), v1 (`/v1/`) via `web/src/stage.ts` `selectStageItems` (`MainStage.tsx`).
+Only the seize is synced — v2's capacity ALERT ladder is still the fixed 30…5 / critical 15. Schema is
 idempotent SQL in `server/app/db/schema.sql` (`CREATE TABLE IF NOT EXISTS` + `ALTER TABLE ... ADD
 COLUMN IF NOT EXISTS`) run on pool creation — so **schema changes apply automatically on container
 start; there is no separate migration step**.
@@ -1102,8 +1105,8 @@ reading too** — `PACKS READY`, `NEED RECHARGE` and `FLEET CAPACITY` each footn
 their figure is stale ("incl. N offline · last known", from `readyStale`/`needRechargeStale`/
 `staleCounted`), so being away from the spares no longer reads as 0 ready / 0% capacity. The
 hero card's heading follows the base's real status instead of a hardcoded "In use now"),
-**Alerts** (capacity ladder + temp zones + cell imbalance, `localStorage`
-acknowledge), **Settings** (units/map trail/theme segmented toggles), **History** (per-base
+**Alerts** (capacity ladder + temp zones + cell imbalance; in-memory acknowledge that
+re-arms when the condition worsens and is forgotten when it clears — see below), **Settings** (units/map trail/theme segmented toggles), **History** (per-base
 capacity-fade/cell-imbalance/temperature trend charts with A/B breakdown, a charge-session log, and
 editable per-base notes, backed by `GET /web/trends`, `GET /web/charge-sessions`, and the
 **WebUI's first write path** `GET`/`POST /web/notes`), and **Journey** (GPS trip visualization —
@@ -1189,6 +1192,36 @@ revoke — a port of v1's `AdminDevices`, reusing the admin `/web/devices` + `/w
 endpoints) lives as a **Devices section inside Settings** (`DevicesPanel.tsx`), not a separate nav
 entry — so there is no longer any "SOON" item. Roadmap/spec:
 `docs/superpowers/specs/2026-07-12-webui-v2-roadmap.md`.
+
+**v2 stage selection, alert acks and the guest page's connection state (2026-10-02 review,
+WEB-12/13/17/20/25, XC-1/XC-2).** One pure `selectStageBase()` (`web/src/v2/model/stageBase.ts`),
+owned once by the v2 App through `useStageBase()` and shared by Command, Journey and the Fleet
+Health hero, replaces the old hardcoded `DAILY_DRIVER_BASE` staging. Ladder, first match wins:
+**(1) seize** — a fresh pack ≤ the synced seize threshold (`/web/alert-config`) stages its base
+with a LOW chip, overriding the pin as on Android and v1; **(2) pin** — a fleet-rail tap,
+persisted in `localStorage["bmsmon-v2-stage-pin"]`, outranks the base in use for 30 min
+(android `PIN_HOLD_MS`; PINNED chip + AUTO to release); **(3) in use** — deepest draw wins;
+**(4) hold** — the newest discharge seen this session within 15 min; **(5) parked** — stay on
+the previous base while it still reports; **(6) default** — the daily driver if it reports,
+else the reporting base with the newest sample, so a cold load away from home opens on the
+chair rather than on the daily driver sitting offline at home. Android's "charging base takes
+over" rung is not ported (same as `share.py`). v2 alert acks are `{id → rank}`: ids are per
+condition (`cap:<addr>`, `temp:<addr>:<side>`, `cell:<addr>`); an ack holds while the rank stays
+at or below the acked rank, re-arms on a worse one (next capacity rung, worse temperature zone,
+cell warning → critical), and is pruned when the condition clears on a pack that is still
+reporting — a pack that has merely gone stale keeps its ack, so a BLE flap can't re-nag. The
+**guest page** polls single-flight (`web/share/src/poll.ts` `createFeedPoller`), aborts each
+request at 8 s (`FETCH_TIMEOUT_MS`), and derives everything it claims from `guestView()`: fix
+staleness is measured against the server's clock advanced by client time since the last
+success, so a fix ages while polls fail; **CONNECTION LOST · last update Xm ago** (red dot,
+grey marker, dimmed dock) after 2 failed polls, or 1 failure with no success for 15 s — never
+on a tab returning from the background with no failure. With the server's 48 h `last` lookback,
+after midnight the page shows yesterday's position as **LAST KNOWN · 10h ago** instead of
+"Waiting for GPS…"; "Point me there" distinguishes "No recent location from the chair" from
+"Locating you…" and labels a non-live target "last known · Xm ago". Journey's RANGE mode is
+clamped client-side (`clampTrackWindow`, `web/src/v2/model/journey.ts`) to `/web/track`'s span cap
+of 31 d + 1 h, keeping the most recent days and saying **LAST 31 DAYS SHOWN** instead of
+rendering a rejected request as a blank map.
 
 ### Read-only API keys (`/api/v1/groups`, desktop widgets)
 
@@ -1290,7 +1323,7 @@ BLE range (at home) a background pack held the newest row ~18–30% of the time 
 the dock to an idle spare — **99% CAP, dead FLOW bar** — every few polls (replayed against
 75 min of prod: wrong base on 17.6% of polls, 114 flips; after the fix 0 and 0).
 `resolve_active_group()` now mirrors the ladder the Android stage (`resolveStage`) and the
-WebUI (`selectStageItems`) already use: **(1)** a base discharging right now
+v2 WebUI (`selectStageBase`) use: **(1)** a base discharging right now
 (`DISCHARGE_EPS` 0.1 A, deepest draw wins — the server has no daily-driver notion),
 **(2)** else the base that discharged most recently within `ACTIVE_HOLD_MS` (15 min,
 = android `DEFAULT_STAGE_HOLD_MIN`) via `queries.recent_discharge_by_address()` — a
