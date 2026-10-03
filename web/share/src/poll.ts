@@ -38,13 +38,30 @@ export function connectionLost(h: PollHealth, clientNow: number): boolean {
 
 export type BadgeTone = "ok" | "warn" | "lost";
 
+/** Guest-page age: whole seconds under a minute ("18 s ago"), then the shared relAgo. The
+ *  shared one says "just now" under 45 s, which reads as a contradiction beside CONNECTION
+ *  LOST — and v1 depends on it, so the guest page keeps its own short-range format. */
+export function ageLabel(ms: number, now: number): string {
+  const s = Math.max(0, Math.round((now - ms) / 1000));
+  return s < 60 ? `${s} s ago` : relAgo(ms, now);
+}
+
+export interface GuestBadge {
+  tone: BadgeTone;
+  /** The state ("LIVE", "CONNECTION LOST", …). The page announces ONLY this to screen
+   *  readers, so a ticking age is not re-read every second. */
+  state: string;
+  /** Shown after the state ("last update 18 s ago", "10h ago"); null when there is none. */
+  detail: string | null;
+}
+
 export interface GuestView {
   /** Server-clock "now" estimate — the reference for every age shown on the page. */
   serverNow: number;
   lost: boolean;
   /** Grey, un-pulsed chair marker: the fix is old OR we can no longer reach the server. */
   markerStale: boolean;
-  badge: { tone: BadgeTone; text: string };
+  badge: GuestBadge;
   /** "last known · 10h ago" beside the Point-me-there distance whenever the target isn't live. */
   targetNote: string | null;
 }
@@ -56,12 +73,13 @@ export function guestView(
   const serverNow = serverNowEstimate(feedNow, h.lastOkClientMs, clientNow);
   const lost = connectionLost(h, clientNow);
   const fixStale = isStale(last, serverNow);
-  const age = last ? relAgo(last.t, serverNow) : null;
-  const badge: GuestView["badge"] = lost
-    ? { tone: "lost", text: `CONNECTION LOST · last update ${relAgo(h.lastOkClientMs ?? clientNow, clientNow)}` }
-    : last == null ? { tone: "warn", text: "NO RECENT LOCATION" }
-    : fixStale ? { tone: "warn", text: `LAST KNOWN · ${age}` }
-    : { tone: "ok", text: "LIVE" };
+  const age = last ? ageLabel(last.t, serverNow) : null;
+  const badge: GuestBadge = lost
+    ? { tone: "lost", state: "CONNECTION LOST",
+        detail: h.lastOkClientMs == null ? null : `last update ${ageLabel(h.lastOkClientMs, clientNow)}` }
+    : last == null ? { tone: "warn", state: "NO RECENT LOCATION", detail: null }
+    : fixStale ? { tone: "warn", state: "LAST KNOWN", detail: age }
+    : { tone: "ok", state: "LIVE", detail: null };
   const markerStale = lost || fixStale;
   return { serverNow, lost, markerStale, badge, targetNote: markerStale && age ? `last known · ${age}` : null };
 }

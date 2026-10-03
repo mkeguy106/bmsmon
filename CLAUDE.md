@@ -1213,9 +1213,12 @@ reporting — a pack that has merely gone stale keeps its ack, so a BLE flap can
 **guest page** polls single-flight (`web/share/src/poll.ts` `createFeedPoller`), aborts each
 request at 8 s (`FETCH_TIMEOUT_MS`), and derives everything it claims from `guestView()`: fix
 staleness is measured against the server's clock advanced by client time since the last
-success, so a fix ages while polls fail; **CONNECTION LOST · last update Xm ago** (red dot,
+success, so a fix ages while polls fail; **CONNECTION LOST · last update 18 s ago** (red dot,
 grey marker, dimmed dock) after 2 failed polls, or 1 failure with no success for 15 s — never
-on a tab returning from the background with no failure. With the server's 48 h `last` lookback,
+on a tab returning from the background with no failure. Guest-page ages read in seconds under
+a minute, then minutes (`ageLabel`; the shared `relAgo`'s "just now" would contradict CONNECTION
+LOST), and only the state word is the badge's `role="status"` live region, so a screen reader
+announces the change, not the ticking age. With the server's 48 h `last` lookback,
 after midnight the page shows yesterday's position as **LAST KNOWN · 10h ago** instead of
 "Waiting for GPS…"; "Point me there" distinguishes "No recent location from the chair" from
 "Locating you…" and labels a non-live target "last known · Xm ago". Journey's RANGE mode is

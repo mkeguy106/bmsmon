@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { FULL_REFRESH_MS, type Feed, type FeedFix, type FeedResult } from "./feed";
 import {
-  INITIAL_HEALTH, LOST_AFTER_MS, connectionLost, createFeedPoller, guestView, serverNowEstimate,
-  type PollHealth, type PollOk, type PollerDeps,
+  INITIAL_HEALTH, LOST_AFTER_MS, ageLabel, connectionLost, createFeedPoller, guestView,
+  serverNowEstimate, type PollHealth, type PollOk, type PollerDeps,
 } from "./poll";
 
 const fix = (t: number): FeedFix => ({ t, lat: 43.04, lon: -87.9 });
@@ -46,7 +46,7 @@ describe("guestView", () => {
 
   it("LIVE with a fresh fix and a healthy link", () => {
     const v = guestView(fix(990_000), 1_000_000, ok(0), 0);
-    expect(v.badge).toEqual({ tone: "ok", text: "LIVE" });
+    expect(v.badge).toEqual({ tone: "ok", state: "LIVE", detail: null });
     expect(v.markerStale).toBe(false);
     expect(v.targetNote).toBeNull();
   });
@@ -57,7 +57,7 @@ describe("guestView", () => {
     const failing: PollHealth = { lastOkClientMs: 0, fails: 2 };
     const v = guestView(fix(990_000), 1_000_000, failing, 3 * 60_000);
     expect(v.lost).toBe(true);
-    expect(v.badge).toEqual({ tone: "lost", text: "CONNECTION LOST · last update 3m ago" });
+    expect(v.badge).toEqual({ tone: "lost", state: "CONNECTION LOST", detail: "last update 3m ago" });
     expect(v.markerStale).toBe(true);
     expect(v.serverNow).toBe(1_180_000);
     expect(v.targetNote).toBe("last known · 3m ago");
@@ -67,7 +67,7 @@ describe("guestView", () => {
     // No failure recorded (e.g. polls slow but answering): staleness still advances.
     const v = guestView(fix(990_000), 1_000_000, ok(0), 131_000);
     expect(v.lost).toBe(false);
-    expect(v.badge).toEqual({ tone: "warn", text: "LAST KNOWN · 2m ago" });
+    expect(v.badge).toEqual({ tone: "warn", state: "LAST KNOWN", detail: "2m ago" });
     expect(v.markerStale).toBe(true);
   });
 
@@ -76,15 +76,43 @@ describe("guestView", () => {
   it("shows yesterday's fix as LAST KNOWN with its age", () => {
     const tenHours = 10 * 3_600_000;
     const v = guestView(fix(1_000_000 - tenHours), 1_000_000, ok(0), 0);
-    expect(v.badge).toEqual({ tone: "warn", text: "LAST KNOWN · 10h ago" });
+    expect(v.badge).toEqual({ tone: "warn", state: "LAST KNOWN", detail: "10h ago" });
     expect(v.markerStale).toBe(true);
     expect(v.targetNote).toBe("last known · 10h ago");
   });
 
+  // Final review: the shared relAgo says "just now" under 45 s, so the badge used to read
+  // "CONNECTION LOST · last update just now" for the first ~30 s of every real outage.
+  it("gives a lost link's age in seconds under a minute, never \"just now\"", () => {
+    const failing: PollHealth = { lastOkClientMs: 0, fails: 2 };
+    const v = guestView(fix(990_000), 1_000_000, failing, 18_000);
+    expect(v.badge).toEqual({ tone: "lost", state: "CONNECTION LOST", detail: "last update 18 s ago" });
+    // Same formatter for the Point-me-there note: the fix was 10 s old when the link dropped.
+    expect(v.targetNote).toBe("last known · 28 s ago");
+  });
+
+  it("says plain CONNECTION LOST when no poll has ever succeeded", () => {
+    const v = guestView(fix(990_000), 1_000_000, { lastOkClientMs: null, fails: 2 }, 18_000);
+    expect(v.badge).toEqual({ tone: "lost", state: "CONNECTION LOST", detail: null });
+  });
+
   it("says NO RECENT LOCATION when the lookback holds no fix at all", () => {
     const v = guestView(null, 1_000_000, ok(0), 0);
-    expect(v.badge).toEqual({ tone: "warn", text: "NO RECENT LOCATION" });
+    expect(v.badge).toEqual({ tone: "warn", state: "NO RECENT LOCATION", detail: null });
     expect(v.targetNote).toBeNull();
+  });
+});
+
+describe("ageLabel", () => {
+  it("counts seconds under a minute, then hands over to relAgo's minutes/hours/days", () => {
+    expect(ageLabel(0, 0)).toBe("0 s ago");
+    expect(ageLabel(0, 18_000)).toBe("18 s ago");
+    expect(ageLabel(0, 59_400)).toBe("59 s ago");
+    expect(ageLabel(0, 60_000)).toBe("1m ago");
+    expect(ageLabel(0, 3 * 3_600_000)).toBe("3h ago");
+  });
+  it("never runs negative on a clock step", () => {
+    expect(ageLabel(5_000, 0)).toBe("0 s ago");
   });
 });
 

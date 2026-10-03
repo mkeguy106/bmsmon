@@ -134,13 +134,17 @@ export default function App() {
           cursorIndex={Math.max(0, points.length - 1)} theme={theme}
           live={live} liveStale={view.markerStale} fitKey={token} metric="power"
           emptyText={NO_FIX_TEXT} fill guest={guest} />
-        <span className="mono" role="status" style={{ position: "absolute", top: 12, right: 12,
+        <span className="mono" style={{ position: "absolute", top: 12, right: 12,
           zIndex: 1000, display: "flex", alignItems: "center", gap: 6, padding: "6px 10px",
           borderRadius: 8, background: "rgba(9,9,11,.72)", color: "#e4e4e7", fontSize: 11,
           letterSpacing: 1 }}>
-          <span style={{ width: 8, height: 8, borderRadius: "50%", background: BADGE_DOT[view.badge.tone],
+          <span aria-hidden style={{ width: 8, height: 8, borderRadius: "50%", background: BADGE_DOT[view.badge.tone],
             ...(view.badge.tone === "ok" && { boxShadow: "0 0 0 3px rgba(34,197,94,.2)" }) }} />
-          {view.badge.text}
+          {/* Only the state is a live region: the age beside it ticks every second through
+              an outage, and a screen reader would otherwise re-read the badge each time.
+              The age stays readable, just not announced. */}
+          <span role="status">{view.badge.state}</span>
+          {view.badge.detail && <span>· {view.badge.detail}</span>}
         </span>
         <div style={{ position: "absolute", bottom: 12, left: 12, zIndex: 1000,
           display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-start" }}>
