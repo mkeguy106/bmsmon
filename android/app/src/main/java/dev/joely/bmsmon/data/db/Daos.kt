@@ -38,7 +38,7 @@ data class RollupRow(
 
 /** Raw V-on-I regression moments for one pack's rows in one integer-SOC bin (DATA-15). [bin] null
  *  groups rows with no SOC — kept so the scatter's global fit (all bins pooled) covers exactly the
- *  rows the old list analysis used. Column names match IV_MOMENTS_BY_SOC_BIN_SQL (Task 8). */
+ *  rows the old list analysis used. Fields match the column aliases in IV_MOMENTS_BY_SOC_BIN_SQL. */
 data class IvBinMoments(
     val bin: Int?,
     val n: Long,

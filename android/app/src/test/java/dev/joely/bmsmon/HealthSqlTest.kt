@@ -17,6 +17,7 @@ import dev.joely.bmsmon.data.stridedScatter
 import java.sql.ResultSet
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -42,6 +43,45 @@ class HealthSqlTest {
         val a = randomPackSamples(seed = 11, rows = rowsA, address = "A", firstSession = 1)
         val b = randomPackSamples(seed = 12, rows = rowsA / 2, address = "B", firstSession = 10_000)
         (a + b).sortedBy { it.tsMs }.forEach { db.insert(it) }
+        return a
+    }
+
+    /** Pack A's V–I cloud as History builds it: step from the SQL moments, then the [rowAfterSql] walk. */
+    private fun sqlStrideWalk(db: SqlTestDb, rowAfterSql: String = IV_ROW_AFTER_SQL) = healthInputsFrom(
+        db.query(IV_MOMENTS_BY_SOC_BIN_SQL, mapOf("address" to "A"), ::ivMoments),
+        emptyList(),
+    ) { afterTs, afterId, skip ->
+        db.query(
+            rowAfterSql,
+            mapOf("address" to "A", "afterTs" to afterTs, "afterId" to afterId, "skip" to skip),
+            ::ivPoint,
+        ).firstOrNull()
+    }.scatter
+
+    /** An I/V telemetry row whose point is unique to [k] (exact in Float), so a mismatch names its row. */
+    private fun ivSample(address: String, ts: Long, k: Int) = SampleEntity(
+        address = address, tsMs = ts, sessionId = 1, state = "X", soc = 50f,
+        currentA = -(1f + k % 37), powerW = 10f, voltageV = 13f + k / 4096f,
+        tempC = 25f, mosfetTempC = 26, soh = 100, fullChargeAh = 105f, remainingAh = 50f, cycles = 40,
+        cellMinV = 3.3f, cellMaxV = 3.31f, regen = false, linkEvent = null,
+    )
+
+    /**
+     * Pack A inserted in id order with runs of equal tsMs (4 per stamp), then a backward clock step
+     * back into the middle of that span (3 per stamp), so later ids tie with and sort among earlier
+     * timestamps. Link rows sit inside the runs and pack B interleaves, as in the live table.
+     * Returns A's rows, in id order, with the ids SQLite assigned.
+     */
+    private fun tiedAndSteppedBack(db: SqlTestDb, before: Int, after: Int): List<SampleEntity> {
+        val t0 = 1_700_000_000_000L
+        val a = ArrayList<SampleEntity>(before + after)
+        for (k in 0 until before + after) {
+            val stamp = if (k < before) k / 4 else before / 8 + (k - before) / 3
+            val ts = t0 + stamp * 1_500L
+            val row = if (k % 50 == 49) linkSample("A", ts, 1, "Connected") else ivSample("A", ts, k)
+            a += row.copy(id = db.insert(row))
+            if (k % 3 == 0) db.insert(ivSample("B", ts, k))
+        }
         return a
     }
 
@@ -93,17 +133,28 @@ class HealthSqlTest {
         for (n in listOf(0, 1, 2, 699, 700, 1_399, 1_400, 2_099, 5_000)) {
             SqlTestDb().use { db ->
                 val a = seeded(db, n)
-                val inputs = healthInputsFrom(
-                    db.query(IV_MOMENTS_BY_SOC_BIN_SQL, mapOf("address" to "A"), ::ivMoments),
-                    emptyList(),
-                ) { afterTs, afterId, skip ->
-                    db.query(
-                        IV_ROW_AFTER_SQL,
-                        mapOf("address" to "A", "afterTs" to afterTs, "afterId" to afterId, "skip" to skip),
-                        ::ivPoint,
-                    ).firstOrNull()
-                }
-                assertEquals("n=$n", stridedScatter(a), inputs.scatter)
+                assertEquals("n=$n", stridedScatter(a), sqlStrideWalk(db))
+            }
+        }
+    }
+
+    // The keyset's tie-break: rows sharing a tsMs are walked in id order, and after a backward clock
+    // step later ids sort among earlier timestamps. The SQL walk must pick exactly what the list
+    // stride picks from the rows sorted by (tsMs, id) — the order the index is walked in. Sizes
+    // cover step 1, 2 and 4, against runs of 3 and 4 equal stamps.
+    @Test fun strideWalkBreaksTimestampTiesById() {
+        val noTieBreak = IV_ROW_AFTER_SQL.replace("(tsMs > :afterTs OR id > :afterId)", "tsMs > :afterTs")
+        for ((before, after) in listOf(300 to 200, 1_000 to 800, 2_000 to 1_500)) {
+            SqlTestDb().use { db ->
+                val a = tiedAndSteppedBack(db, before, after)
+                val byTsThenId = a.sortedWith(compareBy({ it.tsMs }, { it.id }))
+                val label = "rows=${a.size}"
+                assertEquals(label, stridedScatter(byTsThenId), sqlStrideWalk(db))
+                // The fixture must exercise both: id order is not (tsMs, id) order here, and the
+                // walk depends on the tie-break (without it, the rest of each equal-stamp run is skipped).
+                assertNotEquals(label, stridedScatter(a), stridedScatter(byTsThenId))
+                assertNotEquals("the tie-break clause must be present to drop", IV_ROW_AFTER_SQL, noTieBreak)
+                assertNotEquals(label, stridedScatter(byTsThenId), sqlStrideWalk(db, noTieBreak))
             }
         }
     }
@@ -121,8 +172,8 @@ class HealthSqlTest {
         }
     }
 
-    // Review Focus 3: the writer keeps inserting while History walks, so the moments' row count
-    // can be stale. The walk must still terminate, bounded by the exact point cap.
+    // The writer keeps inserting while History walks, so the moments' row count can be stale. The
+    // walk must still terminate, bounded by the exact point cap.
     @Test fun strideWalkStopsAtTheCapEvenIfRowsKeepArriving() {
         var id = 0L
         val pts = stridePoints(step = 3) { _, _, _ -> id++; IvPoint(id, id, -1f, 13f) }

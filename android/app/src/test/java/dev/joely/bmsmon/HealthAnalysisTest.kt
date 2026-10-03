@@ -4,6 +4,8 @@ import dev.joely.bmsmon.data.Verdict
 import dev.joely.bmsmon.data.cellImbalance
 import dev.joely.bmsmon.data.effectiveResistance
 import dev.joely.bmsmon.data.peakPool
+import dev.joely.bmsmon.data.scatterPointCap
+import dev.joely.bmsmon.data.scatterStep
 import dev.joely.bmsmon.data.verdictFor
 import dev.joely.bmsmon.data.viScatter
 import dev.joely.bmsmon.data.db.SampleEntity
@@ -152,5 +154,26 @@ class HealthAnalysisTest {
     @Test fun packHealthScatterPresentForLoadedPack() {
         val samples = bin(80, 6f, 13.33f, 30f)
         assertNotNull(viScatter(samples, 6f))
+    }
+
+    // --- V–I scatter stride ---
+
+    /** The cloud takes every row until twice the 700-point target, then every 2nd, 3rd… */
+    @Test fun scatterStepIsOneUntilTwiceTheTarget() {
+        assertEquals(1, scatterStep(0))
+        assertEquals(1, scatterStep(1))
+        assertEquals(1, scatterStep(1_399))
+        assertEquals(2, scatterStep(1_400))
+    }
+
+    /** Rows 0, step, 2·step… of n rows are ⌈n / step⌉ points — never more than the stride walk's cap. */
+    @Test fun strideOutputNeverExceedsThePointCap() {
+        val sizes = (0L..200_000L).asSequence() + sequenceOf(800_000L, 1_000_000L, 123_456_789L, 1_000_000_000L)
+        for (n in sizes) {
+            val step = scatterStep(n)
+            val points = (n + step - 1) / step
+            assertTrue("n=$n step=$step points=$points", points <= scatterPointCap())
+        }
+        assertEquals(1_400, scatterPointCap())
     }
 }
