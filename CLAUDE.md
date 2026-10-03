@@ -1119,7 +1119,8 @@ The cloud backend lives in `server/` (FastAPI + asyncpg + **Postgres 16**) and t
 batches to `POST /api/v1/ingest` (gzipped) + threshold config to `POST /api/v1/config`; the WebUI
 reads `GET /web/fleet` + a `/ws` live feed + `GET /web/temp-config` (the read-only temperature
 mirror) + `GET /web/alert-config` (the read-only capacity-seize mirror) + `GET /web/track` (GPS
-history, viewer-gated and span-bounded — see "Server access control & request hardening"), plus
+history, viewer-gated and span-bounded — see "Server access control & request hardening") +
+`GET /web/map-config` (the runtime CARTO basemap key — see "CARTO basemap key"), plus
 admin-gated
 `GET /web/samples`, `GET /web/devices`, `POST /web/enroll-codes`,
 `DELETE /web/devices/{id}` — which **revokes** the device, review SEC-27/WEB-21). The temperature
@@ -1346,6 +1347,23 @@ endpoints) lives as a **Devices section inside Settings** (`DevicesPanel.tsx`), 
 entry — so there is no longer any "SOON" item. Roadmap/spec:
 `docs/superpowers/specs/2026-07-12-webui-v2-roadmap.md`.
 
+**CARTO basemap key (2026-10-03).** CARTO answers keyless raster tile requests with "API KEY
+REQUIRED" placeholders, so the Journey map and the guest share page need a key. The repo and
+the GHCR image are public, so the key is **runtime-only**: it comes from `BMSMON_CARTO_KEY` in
+the bmsmon stack's environment on the NAS (optionally a stack-local `map.env`), and is never
+committed and never baked into the image or the Vite builds (no `VITE_*` env; the build cannot
+know it). `Settings.carto_key` (`server/app/config.py`) strips whitespace and quotes and
+accepts only 8–128 of `[A-Za-z0-9_-]`; anything else becomes null with one startup warning
+that names the variable and the reason, never the value. Browsers fetch it from two
+`Cache-Control: no-store` endpoints, both returning `{"carto_key": "<key>" | null}`:
+`GET /web/map-config` (viewer-gated; v2 Journey reads it once per page session via
+`useCartoKey`) and `GET /share/{token}/map-config` (the feed's token gate — see Location
+sharing). `JourneyMap`'s `tileKey` prop appends `?key=` (`tileUrl` in
+`web/src/v2/basemap.ts`) and re-points the existing tile layer with `setUrl` when the key lands
+after the map exists. No key, or a failed fetch, means placeholder tiles and nothing else. The
+key is necessarily visible to a browser that loads the tiles; the point is keeping it out of
+public source and artefacts and handing it only to viewers and live share links.
+
 **v2 stage selection, alert acks, the guest page's connection state and the Journey RANGE clamp
 (2026-10-02 review, WEB-12/13/17/20/25, XC-1/XC-2).** One pure `selectStageBase()`
 (`web/src/v2/model/stageBase.ts`), owned once by the v2 App through `useStageBase()` and shared
@@ -1530,7 +1548,9 @@ page; unknown/REVOKED → identical bare 404) and `GET /share/{token}/feed` (tod
 fleet GPS via `q.gps_track_all`, fields t/lat/lon ONLY — never battery data; day window
 clamped server-side in the container TZ; 410 when expired; updates
 last_access/access_count; no-store + no-referrer on every response incl. errors; per-IP
-`share_limiter` 150/min). Admin CRUD on the Authentik zone: `POST/GET /web/shares`,
+`share_limiter` 150/min), and `GET /share/{token}/map-config` (the guest map's CARTO basemap
+key — see "CARTO basemap key"; same token gate, limiter and headers as the feed, but not a
+view, so it never touches last_access/access_count). Admin CRUD on the Authentik zone: `POST/GET /web/shares`,
 `DELETE /web/shares/{id}` (require_admin — a share grants unauthenticated access, same
 trust class as enroll codes; listing keeps ended shares 7 days). WebUI: Journey toolbar
 ↗ opens `ShareDialog` (name + 1h/1d/1w → native share sheet, else clipboard);
