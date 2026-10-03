@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -21,13 +22,39 @@ LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 _LOG_HANDLER_NAME = "bmsmon"
 
 
+# Timer-polled routes whose SUCCESSES carry no diagnostic value: Docker's healthcheck and the
+# uptime monitor, the desktop widgets, and the guest share feed (every 4 s per guest). Their
+# 2xx/3xx lines filled the 5 MB docker log cap in about a day and rotated away the lines that
+# matter. Errors on these routes, and every other route, are still logged.
+_QUIET_PATHS = frozenset({"/api/v1/health", "/api/v1/health/detail", "/api/v1/groups"})
+_QUIET_SHARE_FEED = re.compile(r"^/share/[^/]+/feed$")
+
+
+class QuietAccessLogFilter(logging.Filter):
+    """Drops uvicorn access lines for successful timer polls (see _QUIET_PATHS)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if not isinstance(args, tuple) or len(args) < 5:
+            return True
+        status = args[4]
+        if not isinstance(status, int) or status >= 400:
+            return True
+        path = str(args[2]).split("?", 1)[0]
+        return not (path in _QUIET_PATHS or _QUIET_SHARE_FEED.match(path))
+
+
 def configure_logging() -> None:
     """SRV-21/C3: give the `app` logger hierarchy its own INFO handler. Under uvicorn the
     root logger has no handlers and sits at WARNING, so `logger.info` lines (rollup, GPS
     scrub) were discarded and warnings printed bare via logging.lastResort. Idempotent
     (create_app runs once per test). propagate stays True so pytest's caplog, which hooks
     the root logger, still sees app records; uvicorn attaches no root handler, so lines
-    are not printed twice in prod."""
+    are not printed twice in prod. Also installs QuietAccessLogFilter on uvicorn.access
+    (uvicorn configures that logger before it imports the app; dictConfig keeps filters)."""
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, QuietAccessLogFilter) for f in access.filters):
+        access.addFilter(QuietAccessLogFilter())
     log = logging.getLogger("app")
     log.setLevel(logging.INFO)
     if any(h.get_name() == _LOG_HANDLER_NAME for h in log.handlers):
