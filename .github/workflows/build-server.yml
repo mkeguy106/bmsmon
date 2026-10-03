@@ -8,7 +8,8 @@ name: build-server
 #
 # :latest (what the NAS pulls) therefore only ever names an image whose source passed both suites
 # and which itself booted, migrated an empty database and served the UI shells. Every main build
-# stays addressable as :<full sha> -- the deploy/rollback handle (CLAUDE.md "Production deploy").
+# that runs stays addressable as :<full sha> -- the deploy/rollback handle (CLAUDE.md "Production
+# deploy"). An in-progress run is never cancelled; a queued run may be superseded by a newer push.
 # .github/scripts/check_workflows.py pins these invariants and runs first in test-server.
 on:
   push:
@@ -18,9 +19,10 @@ on:
     paths: ["server/**", "web/**", ".github/workflows/build-server.yml"]
   workflow_dispatch:
 
-# One run per ref at a time. On main a run is never cancelled mid-publish, and serializing is what
-# keeps :latest monotonic -- an older run can never promote after a newer one. Elsewhere the newest
-# push wins.
+# One run per ref at a time. On main an in-progress run is never cancelled (a queued run may be
+# superseded by a newer push, and that commit is then never built), and serializing is what keeps
+# :latest monotonic -- an older run can never promote after a newer one. Elsewhere the newest push
+# wins.
 concurrency:
   group: build-server-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}

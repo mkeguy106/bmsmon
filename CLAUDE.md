@@ -1372,17 +1372,22 @@ renders as DISCONNECTED — useful for testing that state deliberately).
 | `smoke` | `main`, after build | `.github/scripts/smoke-image.sh`: boots that exact image against an empty Postgres — `schema.sql` must apply from scratch, `/api/v1/health` must answer, `/` and `/v1/` must serve their shells, `tools.api_key_admin` must be in the image |
 | `promote` | `main`, after smoke | `docker buildx imagetools create` points `:latest` at the same manifest (no rebuild) and verifies the two digests match |
 
-Paths: `server/**`, `web/**`, `.github/workflows/build-server.yml`. Runs are serialized per ref and
-never cancelled on `main`, which keeps `:latest` monotonic; a failed run leaves `:latest` where it
-was, and a failed smoke leaves an orphan `:<sha>` that nothing deploys. (Re-running an *old* main
-run's `promote` would move `:latest` backwards — never use that as a rollback; see "Production
-deploy".) `.github/scripts/check_workflows.py` — first step of `test-server`, locally
+Paths: `server/**`, `web/**`, `.github/workflows/build-server.yml`. Runs are serialized per ref; on
+`main` an in-progress run is never cancelled, but a queued run may be superseded by a newer push
+(that commit then gets no `:<sha>`). Serializing keeps `:latest` monotonic. A failed run leaves
+`:latest` where it was, and a failed smoke leaves an orphan `:<sha>` that nothing deploys — except
+when `promote`'s digest check fails: `imagetools create` has already run by then, so `:latest` may
+have moved without the proof that it is byte-identical to `:<sha>`. Then deploy by `:<sha>` (see
+"Production deploy") and, once the cause is fixed, re-run `promote` only for the newest `main` sha
+whose smoke passed. (Re-running an *old* main run's `promote` would move `:latest` backwards —
+never use that as a rollback; see "Production deploy".)
+
+`.github/scripts/check_workflows.py` — first step of `test-server`, locally
 `python3 .github/scripts/check_workflows.py` — fails if an edit re-opens the gap: `:latest` named
 outside `promote`, `build` not needing both test jobs, a publish job whose `if` is not exactly the
-main-only expression, any `continue-on-error`, `promote` pointing `:latest` at anything but the run's
-own `github.sha`, an action not pinned to a full SHA, a cancellable `main` run, or
-`DOCKER_BUILD_RECORD_UPLOAD` back on. Watch a run with `gh run watch` or
-the Actions tab.
+main-only expression, any `continue-on-error`, `promote` pointing `:latest` at anything but the
+run's own `github.sha`, an action not pinned to a full SHA, a cancellable `main` run, or
+`DOCKER_BUILD_RECORD_UPLOAD` back on. Watch a run with `gh run watch` or the Actions tab.
 
 Run what CI runs, locally (dev Postgres up; containers give CI's Python 3.12 / Node 20 / UTC):
 
@@ -1398,9 +1403,9 @@ docker build -t bmsmon-server:smoke -f server/Dockerfile . && bash .github/scrip
 The repo-root `.dockerignore` keeps a local build from copying host `web/node_modules`/`dist` over
 the image's own `npm ci` output.
 
-The job sets `DOCKER_BUILD_RECORD_UPLOAD: false`. Without it `docker/build-push-action@v6` uploads a
-~63 KB `<owner>~<repo>~XXXXXX.dockerbuild` build record as an Actions artifact on **every** run;
-nothing ever reads them and 54 (3.2 MB) had accumulated by 2026-08-03.
+The `build` job sets `DOCKER_BUILD_RECORD_UPLOAD: false`. Without it `docker/build-push-action@v6`
+uploads a ~63 KB `<owner>~<repo>~XXXXXX.dockerbuild` build record as an Actions artifact on
+**every** run; nothing ever reads them and 54 (3.2 MB) had accumulated by 2026-08-03.
 
 ### Storage hygiene — the GHCR "untagged" footgun
 
