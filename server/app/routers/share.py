@@ -84,7 +84,13 @@ TRACK_CACHE_TTL_S = 10.0
 # stays empty until the chair moves, and a carer opening the link at 08:00 used to get
 # "Waiting for GPS…". 48 h covers any overnight park. The trail itself stays today-only.
 LAST_FIX_LOOKBACK_MS = 48 * 3600 * 1000
-_LAST_FIX_CACHE_KEY = "last_fix"  # fleet-wide, one key, on the trail's TTL
+# The lookback runs only while today's trail is empty, and a fix stamped today lands in
+# that trail (whose head then IS `last`, no lookup), so the cached answer stays right far
+# longer than the trail's 10 s: cache it for 5 min. Honest cost: a late outbox drain of
+# last night's fixes can leave the marker up to 5 min behind them, and a fix can outlive
+# the 48 h window by as much. Both are acceptable for a parked chair.
+LAST_FIX_CACHE_TTL_S = 300.0
+_LAST_FIX_CACHE_KEY = "last_fix"  # fleet-wide, one key
 TRAIL_BUCKET_MS = 15_000          # gps_track_all's bucket width: `t` is a bucket start
 
 
@@ -241,8 +247,8 @@ async def share_feed(token: str, request: Request, since: str | None = None,
             state.share_track_cache.put(from_ms, points)
         # `last` comes from the FULL data, never the `since` slice below. Today's trail
         # head IS the newest fix in the 48 h window when one exists (no extra query);
-        # otherwise ask the bounded per-pack lookup, cached like the trail. Cached as a
-        # 1-tuple so "no fix in 48 h" (None) is a cache hit too.
+        # otherwise ask the bounded per-pack lookup, cached for LAST_FIX_CACHE_TTL_S.
+        # Cached as a 1-tuple so "no fix in 48 h" (None) is a cache hit too.
         if points:
             last = _marker(points[-1]["t"], points[-1]["lat"], points[-1]["lon"])
         else:

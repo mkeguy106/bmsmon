@@ -166,11 +166,12 @@ def create_app() -> FastAPI:
     app.state.bus = LiveBus()
     # Process-local perf state (single worker, SRV-8; app-scoped like the limiters so
     # each test app starts fresh). See routers/share.py for the TTL/interval rationale.
-    from app.routers.share import TOUCH_INTERVAL_S, TRACK_CACHE_TTL_S
+    from app.routers.share import LAST_FIX_CACHE_TTL_S, TOUCH_INTERVAL_S, TRACK_CACHE_TTL_S
     app.state.share_track_cache = TtlCache(ttl_s=TRACK_CACHE_TTL_S)
     app.state.share_discharge_cache = TtlCache(ttl_s=TRACK_CACHE_TTL_S)
-    # C5: the share marker's 48 h last-fix lookback, used only while today's trail is empty.
-    app.state.share_last_fix_cache = TtlCache(ttl_s=TRACK_CACHE_TTL_S)
+    # C5: the share marker's 48 h last-fix lookback, used only while today's trail is
+    # empty; its own 5 min TTL (see LAST_FIX_CACHE_TTL_S for why that is safe).
+    app.state.share_last_fix_cache = TtlCache(ttl_s=LAST_FIX_CACHE_TTL_S)
     # Last base the guest dock resolved to — rung 3 of the share ladder ("parked: stay
     # put"). Memory only: on restart the dock falls back to the discharge hold/freshest
     # sample, which is exactly the cold-start behaviour the ladder is written for.

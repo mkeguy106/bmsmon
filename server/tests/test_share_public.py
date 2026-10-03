@@ -5,9 +5,10 @@ from httpx import ASGITransport, AsyncClient
 
 from app.auth.enroll import hash_code
 from app.db import queries as q
+from app.caching import TtlCache
 from app.routers.share import (
-    ACTIVE_HOLD_MS, LAST_FIX_LOOKBACK_MS, STATUS_STALE_MS, day_window_ms, pick_guest_status,
-    share_status,
+    ACTIVE_HOLD_MS, LAST_FIX_CACHE_TTL_S, LAST_FIX_LOOKBACK_MS, STATUS_STALE_MS,
+    TRACK_CACHE_TTL_S, day_window_ms, pick_guest_status, share_status,
 )
 
 DEV = "00000000-0000-0000-0000-000000000002"
@@ -501,9 +502,11 @@ async def test_feed_last_lookback_skips_coarse_fixes(app, client):
 
 async def test_feed_last_is_t_lat_lon_and_matches_todays_trail_head(app, client):
     now_ms = int(time.time() * 1000)
+    day_start = day_window_ms(datetime.now(timezone.utc))[0]
     async with app.state.pool.acquire() as conn:
         await _lookback_fixture(conn, "tok-head", now_ms)
-        await _seed_fix(conn, now_ms - 1_000, 43.0, -87.9)
+        # never before local midnight, or in the day's first second it misses today's trail
+        await _seed_fix(conn, max(now_ms - 1_000, day_start), 43.0, -87.9)
     body = (await client.get("/share/tok-head/feed")).json()
     head = body["points"][-1]
     assert body["last"] == {"t": head["t"], "lat": head["lat"], "lon": head["lon"]}
@@ -521,6 +524,28 @@ async def test_feed_last_lookback_is_cached_like_the_trail(app, client):
     assert (await client.get("/share/tok-lcache/feed")).json()["last"] == first  # cache hit
     app.state.share_last_fix_cache.clear()  # TTL lapse
     assert (await client.get("/share/tok-lcache/feed")).json()["last"]["lat"] == 43.5
+
+
+async def test_feed_last_lookback_has_its_own_five_minute_cache(app, client):
+    # The fallback only runs while today's trail is empty, and any fix stamped today lands
+    # in that trail instead, so it can hold its answer far longer than the trail's 10 s.
+    assert app.state.share_track_cache.ttl_s == TRACK_CACHE_TTL_S == 10.0
+    assert app.state.share_last_fix_cache.ttl_s == LAST_FIX_CACHE_TTL_S == 300.0
+    clock = [0.0]
+    app.state.share_track_cache = TtlCache(TRACK_CACHE_TTL_S, clock=lambda: clock[0])
+    app.state.share_last_fix_cache = TtlCache(LAST_FIX_CACHE_TTL_S, clock=lambda: clock[0])
+    now_ms = int(time.time() * 1000)
+    last_night = day_window_ms(datetime.now(timezone.utc))[0] - 600_000
+    async with app.state.pool.acquire() as conn:
+        await _lookback_fixture(conn, "tok-l5min", now_ms)
+        await _seed_fix(conn, last_night, 43.0, -87.9)
+    first = (await client.get("/share/tok-l5min/feed")).json()["last"]
+    async with app.state.pool.acquire() as conn:  # a late drain of last night's fixes
+        await _seed_fix(conn, last_night + 300_000, 43.5, -87.5)
+    clock[0] = TRACK_CACHE_TTL_S + 1  # the trail cache has lapsed, the fallback has not
+    assert (await client.get("/share/tok-l5min/feed")).json()["last"] == first
+    clock[0] = LAST_FIX_CACHE_TTL_S
+    assert (await client.get("/share/tok-l5min/feed")).json()["last"]["lat"] == 43.5
 
 
 async def test_feed_last_lookback_ignores_since_slicing(app, client):
