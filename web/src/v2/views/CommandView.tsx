@@ -12,14 +12,17 @@ import type { V2View } from "../nav";
 import type { FleetData } from "../useFleetData";
 import type { StageBase } from "../useStageBase";
 import { useNow } from "../../useNow";
+import type { TempConfig } from "../../temp";
+import { baseView } from "../model/baseView";
 
 /**
  * The Command view: the 3-column mission-control grid (fleet rail · stage +
  * range · aside). Accepts the live fleet `data` as a PROP — the v2 App owns the
  * single live store and passes it in, so this view never opens a second store.
  */
-export function CommandView({ data, stage, mobile, onOpen, tempF }: {
+export function CommandView({ data, stage, mobile, onOpen, tempF, tempConfig }: {
   data: FleetData; stage: StageBase; mobile: boolean; onOpen: (v: V2View) => void; tempF: boolean;
+  tempConfig: TempConfig | null;
 }) {
   // Which base occupies the stage is decided ONCE, in App (useStageBase): seize, pin,
   // in-use, hold, parked, daily driver. A rail tap pins.
@@ -43,6 +46,10 @@ export function CommandView({ data, stage, mobile, onOpen, tempF }: {
   const todayPoints = useMemo(() => cleanTrack(rawTodayPoints), [rawTodayPoints]);
   const todaySummary = useMemo(
     () => tripSummary(todayPoints, cumulativeMiles(todayPoints)), [todayPoints]);
+  // What the stage and range card show about the staged base: one pure view-model (T2.1).
+  const view = useMemo(
+    () => (staged ? baseView(staged, { rangeParams: data.rangeParams, tempConfig }) : null),
+    [staged, data.rangeParams, tempConfig]);
 
   // Minimal Phase-1 trip editor: a single prompt adds one trip; a blank entry
   // clears them all. Rich editing lands with the Journey view later.
@@ -62,7 +69,7 @@ export function CommandView({ data, stage, mobile, onOpen, tempF }: {
 
   // Before the first snapshot the fleet is unknown — show CONNECTING rather than
   // an empty grid (mirrors v1 App.tsx).
-  if (!staged) {
+  if (!staged || !view) {
     return (
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10,
         padding: "96px 0", color: "var(--text-3)" }}>
@@ -82,9 +89,9 @@ export function CommandView({ data, stage, mobile, onOpen, tempF }: {
         <CommandFleetRail bases={bases} stageBaseId={staged.id} onStage={pinBase} />
       </div>
       <div style={{ order: mobile ? 1 : 0, minWidth: 0, display: "flex", flexDirection: "column", gap: 16 }}>
-        <CommandStage base={staged} reason={reason} onClearPin={clearPin} rangeParams={data.rangeParams}
+        <CommandStage base={staged} view={view} reason={reason} onClearPin={clearPin}
           tempF={tempF} mobile={mobile} drivenToday={todaySummary} />
-        <CommandRange base={staged} rangeParams={data.rangeParams} trips={trips} onEditTrips={onEditTrips} />
+        <CommandRange view={view} trips={trips} onEditTrips={onEditTrips} />
       </div>
       <div style={{ order: mobile ? 4 : 0, minWidth: 0 }}>
         <CommandAside bases={bases} onOpen={onOpen} todayPoints={todayPoints} />

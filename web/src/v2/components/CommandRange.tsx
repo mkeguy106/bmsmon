@@ -1,8 +1,9 @@
-import type { Base } from "../fleet";
-import { isCharging } from "../fleet";
-import { estimatePackRange, minRange, formatRangeLine, SEED_RANGE_PARAMS, type PackRange, type RangeParams } from "../../range";
+import type { ReactNode } from "react";
+import type { BaseView } from "../model/baseView";
+import { formatRangeLine } from "../../range";
 import type { Trip, TripVerdict } from "../trips";
 import { classifyTrip } from "../trips";
+import { Ago } from "../../components/Ago";
 import { Chip } from "./Atoms";
 
 const VERDICT_TONE: Record<TripVerdict, string> = {
@@ -16,16 +17,10 @@ function milesText(lo: number, hi: number): string {
   return hi < 10 ? `${lo.toFixed(1)}–${hi.toFixed(1)}` : `${Math.round(lo)}–${Math.round(hi)}`;
 }
 
-export function CommandRange({ base, rangeParams, trips, onEditTrips }: {
-  base: Base; rangeParams: Map<string, RangeParams>; trips: Trip[]; onEditTrips: () => void;
+/** "Can you make it?": the staged base's range, bounded by its weaker pack (baseView). */
+export function CommandRange({ view, trips, onEditTrips }: {
+  view: BaseView; trips: Trip[]; onEditTrips: () => void;
 }) {
-  const live = base.packs.filter((p) => p.connected);
-  const anyCharging = live.some((p) => isCharging(p.item));
-  const ranges: PackRange[] = live
-    .map((p) => estimatePackRange(isCharging(p.item), p.item.remaining_ah,
-      rangeParams.get(p.item.address) ?? SEED_RANGE_PARAMS))
-    .filter((r): r is PackRange => r != null);
-
   const header = (
     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
       <div className="eyebrow">Range · can you make it?</div>
@@ -42,18 +37,26 @@ export function CommandRange({ base, rangeParams, trips, onEditTrips }: {
     </div>
   );
 
-  if (anyCharging || ranges.length === 0) {
+  // Every empty case says what it is (WEB-19): it used to read "Charging" for all of them.
+  const range = view.range;
+  if (range.kind !== "estimate") {
+    const body: ReactNode =
+      range.kind === "charging" ? "Charging — see recharge plan"
+        : range.kind === "offline"
+          ? (range.lastSeenMs != null
+              ? <>Base offline — last seen <Ago tsMs={range.lastSeenMs} /></>
+              : "Base offline")
+          : "No capacity reading from this base yet";
     return (
       <div className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         {header}
-        <div className="mono" style={{ fontSize: 13, color: "var(--text-4)", padding: "12px 0" }}>
-          Charging — see recharge plan
-        </div>
+        <div className="mono" style={{ fontSize: 13, color: "var(--text-4)", padding: "12px 0" }}>{body}</div>
       </div>
     );
   }
 
-  const r = minRange(ranges);
+  const r = range.range;
+  const lk = range.lastKnown;
   const typical = Math.round((r.milesLo + r.milesHi) / 2);
 
   return (
@@ -70,6 +73,12 @@ export function CommandRange({ base, rangeParams, trips, onEditTrips }: {
           {formatRangeLine(r)}
         </div>
       </div>
+
+      {lk && (
+        <div className="mono" style={{ fontSize: 11, color: "var(--warn)" }}>
+          Includes pack {lk.letter}'s last-known reading (last seen <Ago tsMs={lk.tsMs} />) — it may be lower now.
+        </div>
+      )}
 
       {trips.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
