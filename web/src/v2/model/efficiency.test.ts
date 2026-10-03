@@ -162,13 +162,13 @@ describe("Journey with a pack that reports no capacity", () => {
     address, group_id: "2012", alias: `2012 · ${address}`, ts_ms: 1_000,
     soc: 60, remaining_ah: ah, current_a: -5, power_w: -64, temp_c: 22, regen: false,
   } as FleetItem);
-  const project = (a: number | null, b: number | null) => {
-    const view = baseView(groupBases([it2("A", a), it2("B", b)], new Set())[0],
+  const project = (a: number | null, b: number | null, stale: string[] = []) => {
+    const view = baseView(groupBases([it2("A", a), it2("B", b)], new Set(stale))[0],
       { rangeParams: new Map(), tempConfig: null });
     const pts = [0, 15, 30].map((s) => p({ t: s * S, power_w: -240, current_a: -20 }));
     return { view, eff: efficiencySummary({
       points: pts, activeMiles: 1, packParams: view.packParams, usableWh: view.usableWh,
-      charging: view.charging, live: true,
+      charging: view.charging, live: view.livePacks.length > 0, // as JourneyView
     }) };
   };
   it("no-data: no usable energy, no projection, no last-known note", () => {
@@ -176,6 +176,12 @@ describe("Journey with a pack that reports no capacity", () => {
     expect(view.range.kind).toBe("no-data");
     expect(view.usableWh).toBeNull();
     expect(view.usableLastKnown).toBeNull();
+    expect(eff.milesAtTodayRate).toBeNull();
+    expect(eff.milesAtUsualRate).toBeNull();
+  });
+  it("no live pack: no projection, matching Command's offline state", () => {
+    const { view, eff } = project(55, 55, ["A", "B"]);
+    expect(view.livePacks).toHaveLength(0);
     expect(eff.milesAtTodayRate).toBeNull();
     expect(eff.milesAtUsualRate).toBeNull();
   });

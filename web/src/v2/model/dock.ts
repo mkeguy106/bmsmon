@@ -16,24 +16,20 @@ export interface DockCap {
 
 /** Pair capacity: the weaker pack ends the trip; per-pack detail keeps A/B visible. The bound
  *  runs over live AND last-known SOC, the same rule as the base view-model (WEB-14): a pack
- *  that dropped off BLE is still in the circuit, so leaving it out read optimistic. At a tie
- *  the live pack is the bound, so the flag is only raised when it matters. */
+ *  that dropped off BLE is still in the circuit, so leaving it out read optimistic. The flag is
+ *  raised whenever any pack is not live (as baseView does): it may have dropped below the
+ *  live minimum since. */
 export function dockCapacity(packs: BasePack[]): DockCap {
-  let weakest: BasePack | null = null;
-  for (const p of packs) {
-    const soc = p.item.soc;
-    if (soc == null || !Number.isFinite(soc)) continue;
-    const w = weakest?.item.soc;
-    if (weakest == null || w == null || soc < w || (soc === w && p.connected && !weakest.connected)) weakest = p;
-  }
-  const rawMin = weakest?.item.soc ?? null;
+  // Any pack without a SOC could be the weaker one, so there is no bound: CAP reads "—".
+  const known = packs.every((p) => p.item.soc != null && Number.isFinite(p.item.soc));
+  const rawMin = known && packs.length > 0 ? Math.min(...packs.map((p) => p.item.soc!)) : null;
   const pct = rawMin != null ? Math.round(rawMin) : null;
   const detail = packs.length > 1
     ? packs.map((p) => `${p.letter}${p.item.soc != null ? Math.round(p.item.soc) : "—"}`).join("·")
     : "";
   // Band from the RAW min soc (pre-rounding) so CAP and socColor agree at boundaries.
   const band = rawMin == null || rawMin > 30 ? "ok" : rawMin > 15 ? "warn" : "crit";
-  return { pct, detail, band, lastKnown: weakest != null && !weakest.connected };
+  return { pct, detail, band, lastKnown: rawMin != null && packs.some((p) => !p.connected) };
 }
 
 /** One flow line: direction from the summed pair current, magnitude vs the 600 W full scale. */

@@ -34,9 +34,9 @@ describe("dockCapacity", () => {
     expect(c.pct).toBe(30);
     expect(c.band).toBe("ok");
   });
-  it("a pack with no reading doesn't drive pct but still shows in detail with a dash", () => {
+  it("a pack with no SOC reading leaves CAP unbounded: dash, never the other pack number", () => {
     const c = dockCapacity([pack("A", { soc: 69 }), pack("B", { soc: null }, false)]);
-    expect(c.pct).toBe(69);
+    expect(c.pct).toBeNull();
     expect(c.detail).toBe("A69·B—");
     expect(c.lastKnown).toBe(false);
   });
@@ -44,8 +44,14 @@ describe("dockCapacity", () => {
     const c = dockCapacity([pack("A", { soc: 14 }, false), pack("B", { soc: 55 })]);
     expect(c).toEqual({ pct: 14, detail: "A14·B55", band: "crit", lastKnown: true });
   });
-  it("at a tie the live pack is the bound, so nothing is flagged", () => {
-    expect(dockCapacity([pack("A", { soc: 40 }, false), pack("B", { soc: 40 })]).lastKnown).toBe(false);
+  it("any non-live pack raises the flag, even at a tie or when it is not the weakest", () => {
+    expect(dockCapacity([pack("A", { soc: 40 }, false), pack("B", { soc: 40 })]).lastKnown).toBe(true);
+    const c = dockCapacity([pack("A", { soc: 60 }, false), pack("B", { soc: 30 })]);
+    expect(c.pct).toBe(30);
+    expect(c.lastKnown).toBe(true);
+  });
+  it("all packs live: no flag", () => {
+    expect(dockCapacity([pack("A", { soc: 60 }), pack("B", { soc: 30 })]).lastKnown).toBe(false);
   });
   it("single pack: no detail suffix", () => {
     expect(dockCapacity([pack("A", { soc: 42 })]).detail).toBe("");

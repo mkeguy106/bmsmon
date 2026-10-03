@@ -231,7 +231,9 @@ export function JourneyView({ data, base, theme, unit: _unit, mobile, mapMetric 
   const eff = useMemo(() => efficiencySummary({
     points, activeMiles: summary.activeMiles,
     packParams: view?.packParams ?? [], usableWh: view?.usableWh ?? null,
-    charging, live: isLive,
+    charging,
+    // No live pack: no projection, matching Command's offline state.
+    live: isLive && (view?.livePacks.length ?? 0) > 0,
   }), [points, summary.activeMiles, view, charging, isLive]);
 
   const mapHeight = 480;
