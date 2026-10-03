@@ -7,6 +7,7 @@ import type { FleetData } from "../useFleetData";
 import { useTrack } from "../useTrack";
 import {
   haversineMi, classifySegment, cumulativeMiles, detectHotspots, energySeries, tripSummary,
+  clampTrackWindow,
   type SegKind,
 } from "../model/journey";
 import { cleanTrack } from "../model/cleanTrack";
@@ -145,15 +146,17 @@ export function JourneyView({ data, base, theme, unit: _unit, mobile, mapMetric 
   };
 
   // ── Resolve the [fromMs, toMs) window from the persisted date state. ──
-  const [fromMs, toMs] = useMemo<[number, number]>(() => {
+  // Clamped to the server's /web/track span cap (31 d + 1 h) so a long RANGE never 400s
+  // into an empty map; `rangeClamped` drives the toolbar hint.
+  const { fromMs, toMs, clamped: rangeClamped } = useMemo(() => {
     if (st.dateMode === "range") {
       const f = dayBounds(st.from) ?? dayBounds(todayStr())!;
       const t = dayBounds(st.to) ?? dayBounds(todayStr())!;
       // Guard reversed ranges: use the earlier start and the later next.
-      return [Math.min(f.start, t.start), Math.max(f.next, t.next)];
+      return clampTrackWindow(Math.min(f.start, t.start), Math.max(f.next, t.next));
     }
     const b = dayBounds(st.day) ?? dayBounds(todayStr())!;
-    return [b.start, b.next];
+    return { fromMs: b.start, toMs: b.next, clamped: false };
   }, [st.dateMode, st.day, st.from, st.to]);
 
   // ── Base = the staged base (App's useStageBase), so riding on 2016 shows 2016's trail
@@ -262,6 +265,12 @@ export function JourneyView({ data, base, theme, unit: _unit, mobile, mapMetric 
         <Segmented<DateMode>
           options={[{ value: "day", label: "DAY" }, { value: "range", label: "RANGE" }]}
           value={st.dateMode} onChange={(v) => set({ dateMode: v })} />
+        {st.dateMode === "range" && rangeClamped && (
+          <span className="mono" style={{ color: "var(--text-3)", fontSize: 11, letterSpacing: 1 }}
+            title="One request covers at most 31 days">
+            LAST 31 DAYS SHOWN
+          </span>
+        )}
         <button aria-label="Share live location" title="Share live location"
           style={stepBtnStyle()} onClick={() => setShareOpen(true)}>↗</button>
         {!mobile && isLive && (

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   haversineMi, classifySegment, dischargeColor, cumulativeMiles,
   detectHotspots, energySeries, tripSummary, mergeBaseTracks,
+  clampTrackWindow, TRACK_MAX_SPAN_MS,
 } from "./journey";
 import type { TrackPoint, Track } from "../track";
 
@@ -100,5 +101,29 @@ describe("energySeries", () => {
     const pts = [p({ current_a: 0, lon: -87.9 }), p({ current_a: 0, lon: -87.8 })];
     const es = energySeries(pts, cumulativeMiles(pts));
     expect(es[1].transit).toBe(true);
+  });
+});
+
+describe("clampTrackWindow", () => {
+  const DAY = 86_400_000;
+  const to = Date.UTC(2026, 10, 20); // arbitrary fixed instant
+  it("mirrors the server cap exactly (31 d + 1 h DST slack)", () => {
+    expect(TRACK_MAX_SPAN_MS).toBe(31 * DAY + 3_600_000);
+  });
+  it("leaves a single day alone", () => {
+    expect(clampTrackWindow(to - DAY, to)).toEqual({ fromMs: to - DAY, toMs: to, clamped: false });
+  });
+  it("leaves a 31-calendar-day range that spans a DST fall-back (31 d + 1 h) alone", () => {
+    const from = to - (31 * DAY + 3_600_000);
+    expect(clampTrackWindow(from, to)).toEqual({ fromMs: from, toMs: to, clamped: false });
+  });
+  it("clamps a 40-day range to the most recent 31 days, keeping the end", () => {
+    const r = clampTrackWindow(to - 40 * DAY, to);
+    expect(r).toEqual({ fromMs: to - 31 * DAY, toMs: to, clamped: true });
+    expect(r.toMs - r.fromMs).toBeLessThanOrEqual(TRACK_MAX_SPAN_MS);
+  });
+  it("never clamps an empty or reversed window", () => {
+    expect(clampTrackWindow(to, to).clamped).toBe(false);
+    expect(clampTrackWindow(to + DAY, to).clamped).toBe(false);
   });
 });
