@@ -443,7 +443,8 @@ class BmsRepository(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                // Only the link can land here now (poll() throws when it is gone — BLE-18).
+                // Only poll() itself lands here now (the link is gone or unusable — BLE-18); a
+                // parser throw is already a miss (decode).
                 Log.d(TAG, "poll $addr: ${e.message}")
                 PollOutcome.ERROR
             }

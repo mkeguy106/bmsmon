@@ -75,7 +75,8 @@ class EngineWiringTest {
     }
 
     @Test fun aDisabledPackIsNeverMarkedReachable() {
-        val onReachable = flat.substringAfter("private fun onReachable(").substringBefore("private suspend fun learnTail(")
+        val onReachable = flat.substringAfter("private fun onReachable(")
+            .substringBefore("private suspend fun learnTail(")
         assertTrue(onReachable.contains("up = reachable && !isDisabled(addr)"))
         assertTrue(onReachable.contains(".copy(reachable = up)"))
         assertFalse(onReachable.contains(".copy(reachable = reachable)"))
@@ -83,7 +84,8 @@ class EngineWiringTest {
 
     // M7: no CoroutineExceptionHandler on the engine scope — an unguarded import throw kills the process.
     @Test fun theLegacyCsvImportCannotCrashTheProcess() {
-        val body = flat.substringAfter("fun importLegacyCsvIfNeeded(").substringBefore("@Volatile private var gpsWanted")
+        val body = flat.substringAfter("fun importLegacyCsvIfNeeded(")
+            .substringBefore("@Volatile private var gpsWanted")
         assertTrue(body.contains("runCatching { repository.importCsvOnce("))
     }
 }
