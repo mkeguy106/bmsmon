@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getDevices, mintCode, revokeDevice } from "../api";
+import { revokeDeviceConfirm } from "../adminConfirm";
 import type { DeviceRow } from "../types";
 
 // WEB-10: distinguish "the SSO session is gone" (401/403 from the api helpers,
@@ -25,10 +26,14 @@ export function AdminDevices() {
     .then((r) => { setCode(r.code); setActionErr(null); })
     .catch((e) => setActionErr(errKind(e) === "auth" ? AUTH_MSG
       : "Couldn't mint an enroll code — check the connection and try again."));
-  const revoke = (id: string) => revokeDevice(id)
-    .then(() => { setActionErr(null); refresh(); })
-    .catch((e) => setActionErr(errKind(e) === "auth" ? AUTH_MSG
-      : "Couldn't revoke the device — check the connection and try again."));
+  // WEB-21: revoking the chair's phone stops all telemetry, so it is confirmed first.
+  const revoke = (d: DeviceRow) => {
+    if (!window.confirm(revokeDeviceConfirm(d, devices, Date.now()))) return;
+    revokeDevice(d.id)
+      .then(() => { setActionErr(null); refresh(); })
+      .catch((e) => setActionErr(errKind(e) === "auth" ? AUTH_MSG
+        : "Couldn't revoke the device — check the connection and try again."));
+  };
 
   // Encode { base, code } so the phone gets the server URL AND the one-time code in one scan.
   // qrcode is imported LAZILY here (its ~168 kB source otherwise lands in the shared chunk
@@ -90,7 +95,7 @@ export function AdminDevices() {
               <td style={{ padding: "8px 0" }}>{d.label ?? d.install_uuid}</td>
               <td className="mono">{d.last_seen_at ?? "—"}</td>
               <td style={{ textAlign: "right" }}>
-                {!d.revoked && <button onClick={() => revoke(d.id)}>Revoke</button>}
+                {!d.revoked && <button onClick={() => revoke(d)}>Revoke</button>}
               </td>
             </tr>
           ))}
