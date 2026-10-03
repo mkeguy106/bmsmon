@@ -20,18 +20,35 @@ WORKFLOWS = Path(__file__).resolve().parent.parent / "workflows"
 SHA_PINNED = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$")
 PATHS = ["server/**", "web/**", ".github/workflows/build-server.yml"]
 PUBLISH_JOBS = ("build", "smoke", "promote")
-MAIN_ONLY = ("github.event_name != 'pull_request'", "github.ref == 'refs/heads/main'")
 SHA_TAG = "ghcr.io/mkeguy106/bmsmon-server:${{ github.sha }}"
-# Compared for EXACT equality: a substring check on "refs/heads/main" also accepts the inverted
-# expression (`github.ref == ...`), which would cancel main runs mid-publish and let everything else
-# queue forever.
+# Both expressions are compared for EXACT equality. A substring check accepts edits that keep the
+# pieces but change the meaning: `&&` -> `||` (a branch push builds and promotes to :latest),
+# `always() && ...` (promote moves :latest after a failed smoke), or the inverted cancel expression
+# (which would cancel main runs mid-publish and let everything else queue forever).
+MAIN_ONLY_IF = "github.event_name != 'pull_request' && github.ref == 'refs/heads/main'"
 CANCEL_EXPR = "${{ github.ref != 'refs/heads/main' }}"
+WRAPPED = re.compile(r"\$\{\{\s*(.*?)\s*\}\}", re.S)
 
 
 def as_list(value) -> list:
     if value is None:
         return []
     return [value] if isinstance(value, str) else list(value)
+
+
+def bare_expr(value) -> str:
+    """A job-level `if:` may be written bare or wrapped in ${{ }}; both mean the same."""
+    text = str(value).strip()
+    m = WRAPPED.fullmatch(text)
+    return m.group(1) if m else text
+
+
+def has_key(node, key: str) -> bool:
+    if isinstance(node, dict):
+        return key in node or any(has_key(v, key) for v in node.values())
+    if isinstance(node, list):
+        return any(has_key(v, key) for v in node)
+    return False
 
 
 def pin_errors(docs: dict[str, dict]) -> list[str]:
@@ -69,8 +86,14 @@ def build_server_errors(doc: dict) -> list[str]:
     need(as_list(jobs["smoke"].get("needs")) == ["build"], "smoke must need build")
     need(as_list(jobs["promote"].get("needs")) == ["smoke"], "promote must need smoke")
     for name in PUBLISH_JOBS:
-        cond = str(jobs[name].get("if", ""))
-        need(all(c in cond for c in MAIN_ONLY), f"{name} must run only for main and never for a pull_request")
+        cond = bare_expr(jobs[name].get("if", ""))
+        need(cond == MAIN_ONLY_IF,
+             f"{name} must run only for main and never for a pull_request: its `if` must be exactly "
+             f"{MAIN_ONLY_IF!r}, got {cond!r}")
+    need(not has_key(doc, "continue-on-error"),
+         "continue-on-error is not allowed anywhere -- a failed test or smoke must stop the pipeline")
+    need(str((jobs["promote"].get("env") or {}).get("SHA")) == "${{ github.sha }}",
+         "promote must move :latest to the run's own commit (env SHA must be exactly ${{ github.sha }})")
     for name, job in jobs.items():
         if name != "promote":
             need(":latest" not in yaml.safe_dump(job), f"job {name} names :latest -- only promote may move it")

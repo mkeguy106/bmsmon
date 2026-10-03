@@ -1377,8 +1377,10 @@ was, and a failed smoke leaves an orphan `:<sha>` that nothing deploys. (Re-runn
 run's `promote` would move `:latest` backwards — never use that as a rollback; see "Production
 deploy".) `.github/scripts/check_workflows.py` — first step of `test-server`, locally
 `python3 .github/scripts/check_workflows.py` — fails if an edit re-opens the gap: `:latest` named
-outside `promote`, `build` not needing both test jobs, an action not pinned to a full SHA, a
-cancellable `main` run, or `DOCKER_BUILD_RECORD_UPLOAD` back on. Watch a run with `gh run watch` or
+outside `promote`, `build` not needing both test jobs, a publish job whose `if` is not exactly the
+main-only expression, any `continue-on-error`, `promote` pointing `:latest` at anything but the run's
+own `github.sha`, an action not pinned to a full SHA, a cancellable `main` run, or
+`DOCKER_BUILD_RECORD_UPLOAD` back on. Watch a run with `gh run watch` or
 the Actions tab.
 
 Run what CI runs, locally (dev Postgres up; containers give CI's Python 3.12 / Node 20 / UTC):
