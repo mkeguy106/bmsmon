@@ -28,15 +28,16 @@
 #   - it carries `latest` (what a plain deploy pulls);
 #   - it is younger than MIN_AGE_DAYS (default 30) -- one busy day has produced 12
 #     builds, more than KEEP, and none may vanish before anyone could deploy it;
-#   - it is the image of one of the newest PROTECT_DEPLOYS (default 3) `deploy/*` git
-#     tags -- the deploy procedure (CLAUDE.md "Production deploy") tags each deployed
-#     commit, so the running image and its rollback targets survive however many
-#     builds land after them;
+#   - it is the image of one of the newest PROTECT_DEPLOYS (default 3) distinct commits
+#     named by well-formed `deploy/YYYYMMDDTHHMMZ` git tags -- the deploy procedure
+#     (CLAUDE.md "Production deploy") tags each deployed commit, so the running image and
+#     its rollback targets survive however many builds land after them;
 #   - it carries a tag listed in PROTECT_TAGS (space-separated manual pins).
-# It refuses to prune at all if nothing carries `latest`, and a REAL run also refuses when
-# the newest `deploy/*` tag matches no image version (the registry cannot know what the NAS
-# runs, so without that tag the prune would be blind; a dry run only warns). It re-resolves
-# every survivor and each child it references (before exiting a dry run, after real deletes).
+# It refuses to prune at all if nothing carries `latest` or if any well-formed deploy tag
+# cannot be resolved to a full commit sha, and a REAL run also refuses when the newest deploy
+# tag matches no image version (the registry cannot know what the NAS runs, so without that
+# tag the prune would be blind; a dry run only warns). It re-resolves every survivor and each
+# child it references (before exiting a dry run, after real deletes).
 #
 # Usage:
 #   DRY_RUN=1 .github/scripts/prune-ghcr.sh     # report only (default)
@@ -66,21 +67,35 @@ ALL="$(gh api "/users/$OWNER/packages/container/$PKG/versions" --paginate \
 TAGGED="$(jq -c '[.[] | select(.tags | length > 0)]'  <<<"$ALL")"
 UNTAGGED="$(jq -c '[.[] | select(.tags | length == 0)]' <<<"$ALL")"
 
-# Deploy markers -> commit shas (CI tags every image with its full commit sha). A lightweight
-# tag points straight at the commit; an annotated one at a tag object that points at it. Names
-# are deploy/YYYYMMDDTHHMMZ, so reverse name order is newest first.
+# Deploy markers -> commit shas (CI tags every image with its full commit sha). Only well-formed
+# deploy/YYYYMMDDTHHMMZ refs count: their names sort chronologically, so reverse name order is
+# newest first, and a stray deploy/* ref can never take a protection slot. A lightweight tag
+# points straight at the commit; an annotated one at a tag object that points at it. A tag that
+# cannot be read, or does not resolve to a full commit sha, aborts the prune -- carrying on would
+# silently leave a deployed image unprotected. Duplicates (a redeploy of the same commit) collapse
+# BEFORE the newest PROTECT_DEPLOYS are taken, so a redeploy never evicts a rollback target.
+# (The `exit 1`s leave the pipeline's subshell; pipefail fails the assignment and set -e stops the
+# script. They must be explicit: errexit is not inherited inside a command substitution.)
 DEPLOY_SHAS=""
 if (( PROTECT_DEPLOYS > 0 )); then
   DEPLOY_SHAS="$(gh api "/repos/$OWNER/$REPO/git/matching-refs/tags/deploy/" --paginate \
-      --jq '.[] | "\(.ref) \(.object.type) \(.object.sha)"' \
-    | LC_ALL=C sort -r | sed -n "1,${PROTECT_DEPLOYS}p" \
-    | while read -r _ref type sha; do
-        if [[ "$type" == "tag" ]]; then
-          gh api "/repos/$OWNER/$REPO/git/tags/$sha" --jq .object.sha
-        else
-          echo "$sha"
-        fi
-      done)"
+      --jq '.[] | select(.ref | test("^refs/tags/deploy/[0-9]{8}T[0-9]{4}Z$"))
+                | "\(.ref) \(.object.type) \(.object.sha)"' \
+    | LC_ALL=C sort -r \
+    | while read -r ref type sha; do
+        case "$type" in
+          commit) ;;
+          tag)
+            sha="$(gh api "/repos/$OWNER/$REPO/git/tags/$sha" \
+                     --jq 'if .object.type == "commit" then .object.sha else "(a \(.object.type), not a commit)" end')" \
+              || { echo "!! cannot read annotated deploy tag $ref -- aborting" >&2; exit 1; } ;;
+          *) echo "!! deploy tag $ref points at a $type, not a commit -- aborting" >&2; exit 1 ;;
+        esac
+        [[ "$sha" =~ ^[0-9a-f]{40}$ ]] \
+          || { echo "!! deploy tag $ref does not resolve to a full commit sha (got '$sha') -- aborting" >&2; exit 1; }
+        echo "$sha"
+      done \
+    | awk -v max="$PROTECT_DEPLOYS" '!seen[$0]++ && ++n <= max')"
 fi
 NEWEST_DEPLOY_SHA="$(head -n1 <<<"$DEPLOY_SHAS")"   # the running image, by the deploy procedure's record
 # shellcheck disable=SC2086  # word-splitting the two whitespace-separated lists is the point

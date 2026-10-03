@@ -1423,11 +1423,14 @@ resolve. What survives is decided by the pure `.github/scripts/prune-select.jq`,
 `test-prune-select.sh` — which the prune job runs first, so a regression fails before anything is
 deleted: the newest `KEEP` (default 10) tagged versions, whatever carries `latest`, anything younger
 than `MIN_AGE_DAYS` (30 — one day in July produced 12 builds, more than `KEEP`), and the images of
-the newest `PROTECT_DEPLOYS` (3) `deploy/*` git tags, i.e. the running image and its rollback
-targets however many builds have landed since (see "Production deploy"). It refuses to prune at all
-if nothing carries `latest`, and a real (non-dry) run also refuses when the newest `deploy/*` tag
-matches no image version — the registry cannot know what the NAS runs, so that tag is the only
-record and pruning without it would be blind. It re-resolves every survivor and its children
+the newest `PROTECT_DEPLOYS` (3) distinct commits named by well-formed `deploy/YYYYMMDDTHHMMZ` git
+tags, i.e. the running image and its rollback targets however many builds have landed since (see
+"Production deploy"). Any other `deploy/*` ref is ignored, so a stray tag cannot take a slot, and a
+redeploy of the same commit counts once, so it cannot evict a rollback target. It refuses to prune
+at all if nothing carries `latest` or if a well-formed deploy tag does not resolve to a full commit
+sha, and a real (non-dry) run also refuses when the newest deploy tag matches no image version — the
+registry cannot know what the NAS runs, so that tag is the only record and pruning without it would
+be blind. It re-resolves every survivor and its children
 (before a dry run exits, after real deletes). Ad-hoc pins: the `protect` dispatch input
 (space-separated image tags).
 
@@ -1464,8 +1467,8 @@ curl -fsS https://bmsmon.covert.life/api/v1/health   # expect {"status":"ok"}
 
 **Record every deploy as a git tag** — `deploy/<UTC timestamp>` on the commit that went live. The
 tags are the deploy history (`git tag -l 'deploy/*'`), and `prune-ghcr.sh` never deletes the images
-of the newest three, so the running image and its rollback targets survive any number of later
-builds. Images built since 2026-10 carry `org.opencontainers.image.revision`, so read the sha off the
+of the newest three deployed commits, so the running image and its rollback targets survive any
+number of later builds. Images built since 2026-10 carry `org.opencontainers.image.revision`, so read the sha off the
 running container instead of guessing what `:latest` was at pull time. Run it from the repo root; it
 is wrapped in `bash -c` so it works from fish too, and it stops with an error if the container has no
 such label (an image older than that) rather than tagging a guess:
