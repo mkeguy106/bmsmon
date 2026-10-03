@@ -654,6 +654,55 @@ dead until it was manually restarted. Always follow an install with
 (`adb shell monkey -p dev.joely.bmsmon -c android.intent.category.LAUNCHER 1`) reports
 `Events injected: 1` but does **not** start this app on this device.
 
+**Upload failure semantics (2026-10-02 review, DATA-14).** `classifyPost(code, fromApi)`
+(`cloud/PostResult.kt`) never deletes on a status code alone: Poison is only a 400/413/422 that
+carries the server's `X-Bmsmon-Api` marker header. Traefik answers its own unmarked `404` whenever
+`bmsmon-api` is starting, unhealthy or stopped (every deploy, every autoheal restart, any DB
+outage); that used to read as "server rejects this batch" and erased the outbox ~200 rows per POST.
+Now every unmarked 4xx, every other 4xx, every 3xx (the upload client is built with
+`followRedirects(false)` + `followSslRedirects(false)` in `uploadHttpClient()`, so a redirect to a
+login page can never come back as a 2xx "accept") and every 5xx is Transient; 401/403 hold the rows
+whether or not the marker is present. Poison then passes a circuit breaker (`decideUpload`,
+`cloud/UploadDecision.kt`, pure): the first Poison after a 2xx is skipped, any further Poison before
+the next 2xx is held and backed off — genuine poison is one bad batch; a run of rejects is a server
+problem. Ingest, the historical import and the config push each have their own breaker; it lives in
+memory, so a restart re-arms one skip per stream. The config push also has its own retry gate
+(1 s doubling to 60 s, reset on a 2xx or a skip), so a held config is not re-POSTed on every loop
+pass. **Deploy order is load-bearing: the server's marker ships before this APK**, or a genuine app
+4xx would be held forever.
+
+**Bounded history reads (DATA-15/16).** Nothing reads a pack's or a session's samples as a list.
+History/Review take per-SOC-bin V/I moments and per-session cell Δ from SQL aggregates and the
+V–I cloud from an exact keyset+OFFSET row stride (`stridePoints`); the timeline and every session
+rollup (finalize, stop, startup orphan sweep, CSV backfill) stream id-keyset pages through pure
+folds (`PeakPooler`, `RollupAccumulator`) that reproduce the old list results — rollups bit for
+bit (data-class equality against frozen copies of the old code), fits to the tolerances
+`HealthEquivalenceTest` pins (1e-9 on slope and intercept, 1e-5 on R²), scatter points
+identically. What stays bounded is the **Java heap** (O(bins + sessions + ~700 points) plus one
+page); each aggregate is still an N-row SQLite sort in *native* memory (roughly 20–25 MB transient
+for a daily-driver pack), so do not describe them as bins-sized or sort-free. SQL aggregates could
+not do the rollup: energy needs each row's successor (`LEAD`), and Room 2.6.1's parser has no
+window-function grammar (minSdk 26's SQLite 3.18 predates them anyway). Sessions are capped at 24 h
+(`MAX_SESSION_MS`, inclusive). Startup prunes BEFORE the orphan sweep, each stub is
+Throwable-guarded (logged + deleted on failure), and the writer loop catches Throwable, so no
+single bad row or stub can crash-loop launch. The loaders behind History, Review and Timeline run
+off Main (IO for the reads, Default for the residual math), both paging loops honor cancellation
+(`ensureActive`), and `loadHistory` (`ui/history/HistoryLoad.kt`) turns any Throwable into a
+rendered "failed" state instead of an exception escaping `produceState` — which would kill the
+process and, with it, the foreground service and BLE monitoring. The DAO SQL is shared with JVM
+tests as `const val`s and executed against the checked-in Room schema via xerial sqlite-jdbc
+(`SqlTestDb`, test-only) — keep new history queries on that pattern, and never reintroduce a
+`SELECT *` over a pack or a session.
+
+**Settings file failures (DATA-21).** `bms_settings` has a `ReplaceFileCorruptionHandler`
+(`data/DataStoreSafety.kt`): a corrupt file becomes defaults — **monitoring off, not enrolled**,
+default roster and alert ladder — instead of a crash loop on every start. The reset is total:
+afterwards monitoring stays off until the user opens the app, re-enables it and re-enrolls (it is
+logged at error level, and nothing else surfaces it). One-shot `load()` falls back to defaults on
+an IOException; the reporter's long-lived `persisted` flow retries with capped backoff instead,
+keeping its last snapshot (emitting defaults there would complete the flow and freeze "cloud off"
+until the next restart).
+
 **Alerts (capacity + temperature):** the stage flashes a `DangerOverlay` that *names* the alert
 type (`BATTERY CAPACITY` / `TEMPERATURE`) and fires headless notifications via `AlertNotifier`
 (critical channel = sound+vibration). Pure logic in `model/Alerts.kt` (SOC bands; a threshold of
