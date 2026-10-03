@@ -134,9 +134,9 @@ export function createFeedPoller(d: PollerDeps): FeedPoller {
   const tick = () => {
     if (stopped || inFlight) return;
     inFlight = true;
+    const startedMs = d.now();
     const held = d.seam();
-    const seam = held != null && d.now() - lastFullMs < FULL_REFRESH_MS ? held : null;
-    if (seam == null) lastFullMs = d.now();
+    const seam = held != null && startedMs - lastFullMs < FULL_REFRESH_MS ? held : null;
     d.fetchFeed(seam ?? undefined)
       .then((r) => {
         if (stopped) return;
@@ -148,7 +148,10 @@ export function createFeedPoller(d: PollerDeps): FeedPoller {
           d.onOk({ feed: r.feed, replace: rolled, seam, health: next });
           health = next;
           dayStart = r.feed.day_start;
+          // Stamped only once a full refresh has LANDED: a failed one must not push the
+          // next heal back a whole FULL_REFRESH_MS.
           if (rolled) lastFullMs = 0;
+          else if (seam == null) lastFullMs = startedMs;
         } else if (r.kind === "error") {
           fail();
         } else {

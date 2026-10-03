@@ -252,6 +252,33 @@ describe("createFeedPoller", () => {
     expect(t.fetchFeed.mock.calls[2][0]).toBeUndefined();
   });
 
+  // Final review: lastFullMs used to be stamped when a full request STARTED, so a failed
+  // full refresh pushed the next heal back a whole FULL_REFRESH_MS.
+  it("retries a failed full refresh on the next tick instead of waiting a full period", async () => {
+    const t = harness();
+    t.poller.tick();
+    t.last().resolve({ kind: "ok", feed: feed() });
+    await flush();
+    t.setSeam(985_000);
+
+    t.setClock(1_000_000 + FULL_REFRESH_MS);
+    t.poller.tick();
+    expect(t.fetchFeed.mock.calls[1][0]).toBeUndefined();
+    t.last().resolve({ kind: "error" });
+    await flush();
+
+    t.setClock(1_004_000 + FULL_REFRESH_MS);
+    t.poller.tick();
+    expect(t.fetchFeed.mock.calls[2][0]).toBeUndefined();
+    t.last().resolve({ kind: "ok", feed: feed() });
+    await flush();
+
+    // Healed: back to incremental polls from the seam.
+    t.setClock(1_008_000 + FULL_REFRESH_MS);
+    t.poller.tick();
+    expect(t.fetchFeed.mock.calls[3][0]).toBe(985_000);
+  });
+
   // Review focus: midnight with the page open. The day window moved, so the trail must be
   // REPLACED (not spliced) and the very next poll must be a full one.
   it("replaces the trail and forces a full fetch after midnight", async () => {
