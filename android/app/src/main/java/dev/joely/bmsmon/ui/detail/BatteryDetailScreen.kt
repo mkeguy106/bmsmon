@@ -111,8 +111,7 @@ fun BatteryDetailScreen(state: UiState, sessions: List<SessionEntity>, onBack: (
                 ) {
                     // One condensed "Telemetry" card instead of three (SOC / Power / Temperature).
                     Section(
-                        if (live) "Telemetry · live"
-                        else "Telemetry · ${freshnessLabel(fresh, state.monitoring) ?: "live"}",
+                        freshnessLabel(fresh, state.monitoring)?.let { "Telemetry · $it" } ?: "Telemetry · live",
                     ) {
                         KeyVal("SOC", "${tele.soc.roundToInt()} %", mono = true)
                         KeyVal("SOH", "${tele.soh} %", mono = true)

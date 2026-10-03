@@ -182,7 +182,11 @@ private fun StageRingBox(item: StageItem, c: dev.joely.bmsmon.ui.theme.BmColors)
             // than a real-looking 0% that would imply a flat battery. Stale keeps the SOC, muted.
             soc = if (item.connected) b.soc else 0f,
             powerW = if (live) b.powerW else 0f,
-            accent = if (live) Bm.accent else c.text3,
+            // Muted by alpha, not by text3: in the dark theme text3 (#777) is DARKER than segEmpty
+            // (#D6D6D6), which would draw a stale low SOC as a mostly-full ring. The accent hue keeps
+            // fill and empty apart in both themes. A disconnected ring has soc = 0, so its colour
+            // never draws.
+            accent = if (live) Bm.accent else if (stale) Bm.accent.copy(alpha = 0.45f) else c.text3,
             power = if (live) Bm.power else c.text3,
             segEmpty = c.segEmpty,
             innerTrack = c.innerTrack,
@@ -197,7 +201,9 @@ private fun StageRingBox(item: StageItem, c: dev.joely.bmsmon.ui.theme.BmColors)
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     "${b.soc.roundToInt()}%",
-                    color = if (live) Bm.accent else c.text3,
+                    // Stale stays legible in both themes (text2, not text3): readability is a safety
+                    // property on this chair-mounted display.
+                    color = if (live) Bm.accent else c.text2,
                     fontFamily = MonoFont,
                     fontSize = 40.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -206,7 +212,7 @@ private fun StageRingBox(item: StageItem, c: dev.joely.bmsmon.ui.theme.BmColors)
                 if (stale && age != null) {
                     Text(
                         "UPDATED ${formatAge(age)} AGO",
-                        color = c.text3,
+                        color = c.text2,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.SemiBold,
                         letterSpacing = 1.sp,

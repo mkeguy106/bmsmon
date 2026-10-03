@@ -98,6 +98,20 @@ class StageFreshnessTest {
         assertTrue(mixed.stageRegen)
     }
 
+    @Test fun stalePackInRegenAddrsIsNotARegenStageItem() {
+        // StageItem.regen is the ring's flag; it must agree with the header's stageRegen.
+        val single = state(stale(60f, 15_000L), live(61f)).copy(
+            stageTarget = StageTarget.Single(stage[0]), regenAddrs = setOf(stage[0]),
+        )
+        assertFalse(single.stageItems().single().regen)
+        assertFalse(single.stageRegen)
+        val liveSingle = state(live(60f), live(61f)).copy(
+            stageTarget = StageTarget.Single(stage[0]), regenAddrs = setOf(stage[0]),
+        )
+        assertTrue(liveSingle.stageItems().single().regen)
+        assertTrue(liveSingle.stageRegen)
+    }
+
     @Test fun seedPackInRegenAddrsDoesNotLightTheRegenHeader() {
         assertFalse(state(seed(60f), seed(61f)).copy(regenAddrs = setOf(stage[0])).stageRegen)
     }

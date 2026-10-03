@@ -254,7 +254,7 @@ data class UiState(
             val connected = f.drivesAlerts()   // implies reachable + telemetry
             val tel = status?.telemetry?.copy(name = tg.name)
                 ?: Telemetry(tg.name, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
-            val regenFlag = connected && tg.address in regenAddrs
+            val regenFlag = f is Freshness.Live && tg.address in regenAddrs   // same rule as stageRegen
             // The ETA is computed by the engine (once per poll — the exact value that is uploaded)
             // and carried on BatteryStatus; the stage only displays it.
             val eta = if (connected) status?.etaFullMin else null
