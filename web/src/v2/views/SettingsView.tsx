@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useV2Settings } from "../useV2Settings";
+import type { V2Settings } from "../settings";
 import { Segmented } from "../components/Segmented";
 import { DevicesPanel } from "../components/DevicesPanel";
 import { SharesPanel } from "../components/SharesPanel";
@@ -29,8 +29,11 @@ function AboutRow({ text }: { text: string }) {
   return <div style={{ fontSize: 12, color: "var(--text-3)" }}>{text}</div>;
 }
 
-export function SettingsView() {
-  const [settings, patch] = useV2Settings();
+/** Settings edits the App's single settings instance (passed in), so a change applies
+ *  everywhere at once and nothing can write a stale copy back over it (WEB-16). */
+export function SettingsView({ settings, patch }: {
+  settings: V2Settings; patch: (p: Partial<V2Settings>) => void;
+}) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 480, margin: "0 auto" }}>

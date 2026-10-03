@@ -95,7 +95,7 @@ export default function App() {
     ) :
     view === "history" ? <HistoryView data={data} unit={settings.tempUnitPref} mobile={mobile} /> :
     view === "alerts" ? <AlertsView alerts={alerts} acked={acked} onAck={ack} /> :
-    <SettingsView />;
+    <SettingsView settings={settings} patch={patch} />;
 
   const journeyMobile = mobile && view === "journey";
 
