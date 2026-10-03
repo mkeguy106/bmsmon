@@ -672,8 +672,9 @@ physical pages and read **~2.2× low** (183.6 MB estimated vs 403.7 MB actual). 
 and `Battery saver` now call it, so the two pages can never disagree.
 
 **Dev-workflow gotcha, and here it is a real-world one: `adb install -r` stops the app and nothing
-relaunches it.** Since 2026-10-02 the `MY_PACKAGE_REPLACED` receiver is designed to restore the
-*foreground service* headlessly after an install (not yet verified on-device), but never the
+relaunches it.** Since 2026-10-02 the `MY_PACKAGE_REPLACED` receiver restores the
+*foreground service* headlessly after an install (**VERIFIED on-device 2026-10-03**: about 8 s
+after `adb install -r`, before any `am start`, the service was already back), but never the
 Activity — the `am start` step below stays mandatory. The phone *is* the wheelchair's battery
 monitor, so an install that leaves the process dead is downtime, not a dev inconvenience — during
 this build the chair's monitoring sat dead until it was manually restarted. Always follow an
@@ -681,6 +682,13 @@ install with `adb shell am start -n dev.joely.bmsmon/.MainActivity` and confirm 
 `adb shell 'ps -A | grep bmsmon'`. Note that a `monkey` launcher intent
 (`adb shell monkey -p dev.joely.bmsmon -c android.intent.category.LAUNCHER 1`) reports
 `Events injected: 1` but does **not** start this app on this device.
+
+**ADB authorization lapses after ~7 days unused.** Android revokes the debug authorization; USB then
+shows "unauthorized" and wireless TLS fails with `CERTIFICATE_UNKNOWN`. Recover with Developer
+options → Wireless debugging → "Pair device with pairing code", then
+`adb pair <ip>:<pairing-port> <code>` (`adb mdns services` shows the pairing port), then
+`adb connect`. Restarting the adb server while the USB "Allow" dialog is open invalidates that
+dialog.
 
 **Upload failure semantics (2026-10-02 review, DATA-14).** `classifyPost(code, fromApi)`
 (`cloud/PostResult.kt`) never deletes on a status code alone: Poison is only a 400/413/422 that
@@ -792,7 +800,8 @@ SOC ring on the stage (toggle + L/R position in settings), plus a `TEMP` stat ti
 **Cloud config push (one-way):** when temp thresholds change (and cloud sync is on), the phone
 uploads the profile's threshold config — signed + gzipped like telemetry, durable/latest-wins — to
 `POST /api/v1/config`; the WebUI mirrors it read-only. Telemetry uploads are **gzip-compressed**
-(`Content-Encoding: gzip`; server decompresses before the JWT body-hash verify) and **batched**:
+(`Content-Encoding: gzip`; the server verifies the JWT's signature and claims first, and only then
+reads and decompresses the body to check its `bh` hash) and **batched**:
 the uploader flushes only at ≥`MIN_BATCH` (20) queued rows or a `FLUSH_AGE_MS` (15 s)-old head,
 then drains to empty (`shouldFlush()` in `TelemetryReporter.kt`) — never per-sample POSTs, which
 paid ~470 B of JWT/header overhead each and defeated gzip on tiny bodies (~9× bandwidth combined
@@ -1109,7 +1118,9 @@ The cloud backend lives in `server/` (FastAPI + asyncpg + **Postgres 16**) and t
 `web/` (React + Vite). The phone (`android/`) enrolls a device and uploads signed telemetry
 batches to `POST /api/v1/ingest` (gzipped) + threshold config to `POST /api/v1/config`; the WebUI
 reads `GET /web/fleet` + a `/ws` live feed + `GET /web/temp-config` (the read-only temperature
-mirror) + `GET /web/alert-config` (the read-only capacity-seize mirror), plus admin-gated
+mirror) + `GET /web/alert-config` (the read-only capacity-seize mirror) + `GET /web/track` (GPS
+history, viewer-gated and span-bounded — see "Server access control & request hardening"), plus
+admin-gated
 `GET /web/samples`, `GET /web/devices`, `POST /web/enroll-codes`,
 `DELETE /web/devices/{id}` — which **revokes** the device, review SEC-27/WEB-21). The temperature
 config lives in the `device_temp_config` table
@@ -1509,7 +1520,9 @@ sha256 stored in `location_shares`, so the database cannot give the link back �
 creation). Traefik has a
 third zone — `PathPrefix(/share/)`, priority 100, `bmsmon-header` + `bmsmon-proxy-secret`
 (no Authentik; the proxy secret is there ONLY so the rate limiter can trust XFF for
-per-IP keying — `/share` endpoints never read identity headers) — and the guest page is
+per-IP keying — `/share` endpoints never read identity headers, and Traefik blanks any
+client-supplied `X-Authentik-*` headers on this zone and on `/api/`, so the secret never travels
+with forged identity) — and the guest page is
 a **third Vite build** (`web/share/`, `vite.config.share.ts`, `base:"/share/"`) so its
 assets stay inside the public zone. Server: `app/routers/share.py` —
 `GET /share/{token}` (active → guest shell; expired → friendly "ask for a new link"
@@ -1564,8 +1577,10 @@ DB cost stays flat as the poll rate rises (a 15 s GPS bucket can't be fresher th
 built bundle: first poll 27 KB, every later poll **469 B**. Three details are load-bearing:
 `since` is the client's newest bucket **START, not one past it** (that bucket is still
 filling and its averages keep moving, so it is re-sent and replaced — the same seam rule
-`useTrack`/`appendTrack` use); **`last` is computed from the FULL trail before slicing**,
-or a no-news poll would blank the live chair marker; and the response carries `day_start`
+`useTrack`/`appendTrack` use); **`last` is the newest fix within a bounded 48 h lookback
+(`LAST_FIX_LOOKBACK_MS`), not the newest point of the today-only trail** (since 2026-10, review
+WEB-20; see the amendment below) and is never computed from the sliced trail, or a no-news poll
+would blank the live chair marker; and the response carries `day_start`
 so a session open across midnight replaces instead of appending. Garbage/stale `since`
 degrades to a full response (`parse_since`) — a share link must never 4xx on a stray query
 param. The guest page accumulates `TrackPoint[]` and splices with the existing tested
@@ -1700,9 +1715,22 @@ Production is `bmsmon.covert.life` on the QNAP NAS **`ddnas02`** (SSH: `ssh joel
 the **`~/qnap-nas-docker`** infra repo — see **`~/qnap-nas-docker/CLAUDE.md`** for NAS conventions
 (docker path, `${CONFDIR}`, the `--env-file ../.env` requirement, Traefik/Authentik). The bmsmon
 stack is `~/qnap-nas-docker/bmsmon/docker-compose.yml`: `bmsmon-api`
-(`image: ghcr.io/mkeguy106/bmsmon-server:latest`) + `bmsmon-db` (Postgres, data at
+(`image: ghcr.io/mkeguy106/bmsmon-server:${BMSMON_TAG:-latest}`) + `bmsmon-db` (Postgres, data at
 `${CONFDIR}/bmsmon/database`). Traefik splits routing: `/api/` → device-JWT auth (no Authentik);
-everything else → Authentik SSO.
+`/share/` → public, token-gated; everything else → Authentik SSO. Since 2026-10 (review T1.6/T1.7)
+the proxy secret is injected on the `/api/` router too (per-client rate limits), client-supplied
+`X-Authentik-*` headers are blanked on `/api/` and `/share/`, `bmsmon-db` sits only on a private
+`--internal` `bmsmon-internal` network (no egress, unreachable from the proxy network), and both
+services get stack-local secrets and explicit `environment:` entries instead of the NAS master
+`.env` (which compose still reads for interpolation via `--env-file`).
+
+**Backups.** A nightly `pg_dump` (07:40 UTC; first dump 230 MB of a 4.2 GB DB in 39 s) lands in
+`/share/Media/1_backups/bmsmon/`, is checked daily by the NAS `check_bmsmon` monitor (alarm path
+proven end to end through Uptime Kuma to a push notification), and is restore-drilled monthly into
+a throwaway Postgres (first drill 99 s, 12 tables OK) — see `~/qnap-nas-docker/CLAUDE.md` for the
+job, retention and drill. The phone keeps only
+14 days, so these dumps are the only copy of the calibration basis, trends, charge history and the
+location record.
 
 **Deploying a new server build — by tag, never by surprise.** CI moves `:latest` only after the test
 jobs and the image boot-smoke pass (see "Image build"), so `:latest` is always the newest *tested*
@@ -1748,6 +1776,39 @@ git tag "$TAG" "$SHA" && git push origin "$TAG"
 ```
 
 (A `deploy/*` tag push triggers no workflow: `build-server` filters on branches only.)
+
+**Rollback = pin the previous deploy's sha, persistently.** Find it from the well-formed deploy tags
+only, taking the newest commit that differs from the one now live (the same rules the GHCR prune
+uses):
+
+```bash
+bash -c '
+set -euo pipefail
+git fetch --tags
+cur=$(git rev-list -n1 "$(git tag -l "deploy/*" | grep -E "^deploy/[0-9]{8}T[0-9]{4}Z$" | sort | tail -1)")
+prev=$(for t in $(git tag -l "deploy/*" | grep -E "^deploy/[0-9]{8}T[0-9]{4}Z$" | sort -r); do c=$(git rev-list -n1 "$t"); [ "$c" != "$cur" ] && { echo "$c"; break; }; done)
+echo "rollback to $prev"'
+```
+
+Its image survives pruning (see "Storage hygiene"). Add `BMSMON_TAG=<full 40-char sha>` to the NAS's
+`/share/bsv/docker-compose/.env` — the file compose interpolates via `--env-file` — then run the
+same pull + `up -d --no-deps bmsmon-api` and record the rollback as a deploy tag too. Pin it in that
+file, not on one command line: the deploy runner re-runs `down` + `up -d` whenever the bmsmon
+compose file changes, and a one-off pin would silently fall back to the cached `:latest`, i.e. the
+build you rolled back from. To un-pin, delete the line once the fix has passed CI and deploy
+`:latest` again.
+
+**Deploy record.** 2026-10-03: Tier-1 review program deployed. Server `1cbb522` went out by `:latest`
+at 16:09Z after CI test, build, smoke and promote all passed (tags `deploy/20261003T1609Z`, plus the
+backfilled `deploy/20260825T1130Z` -> `7cec11c`, the previous prod and rollback target). Verified:
+`X-Bmsmon-Api: 1` on every response, `/web` gated by Authentik, ingest 200 under per-sample
+validation, the widget feed free of GPS fields, and per-client `/api/` rate limits (one client got
+190x 401 then 70x 429 while another still got 401). Infra (qnap-nas-docker `cd3ddcb`) went out at
+15:58Z: private DB network, stack-local secrets, watchtower opt-out, blanked `X-Authentik-*`
+headers, nightly dump + monthly drill, and Uptime Kuma monitors for api/db/backup. The APK from
+`1cbb522` was installed 14:50Z. Still owed: a browser sign-out/in of Authentik so the admin pages
+pick up the owner-only admin group, and a browser confirmation that WebSocket live updates pass the
+Origin check.
 
 On startup the new container re-runs `schema.sql`, so additive columns/tables land automatically.
 If the nightly dump is holding `samples`, startup waits for it (retrying for up to ~5 min),
