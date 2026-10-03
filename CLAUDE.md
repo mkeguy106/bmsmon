@@ -716,10 +716,15 @@ and never touches the poison breaker. On the ingest stream only, the pure `stepH
 same head that ALSO span `FAULT_MIN_SPAN_MS` (5 min, on `elapsedRealtime`) the batch limit halves
 (`ceil(n/2)`); at one row it skips that row's OUTBOX copy only (the sample stays in Room `samples`
 when logging is on), logs id/seq/size (never the payload), and bumps the persisted
-`server_fault_skips` counter that `Settings › Cloud sync` shows once it is above 0.
-Transient/AuthFailed responses neither reset nor advance a streak; a changed head resets it but
-keeps the limit; a 2xx doubles the limit back to 200. State is in memory, so a restart starts over
-at a full batch. The import and config streams are unchanged.
+`server_fault_skips` counter that `Settings › Cloud sync` shows once it is above 0. **At most one
+skip per 2xx** (`skipsSinceOk`, the poison breaker's rule): a second trip at one row before any 2xx
+holds and backs off instead, so a server that faults on everything costs one sample, then holds
+until fixed, while a genuine bad row is still isolated because bisection's clean halves are 2xxs
+that re-arm it. Every trip needs a fresh full span. After a skip the next head goes alone (limit 1)
+and only 2xxs double it back to 200. Transient/AuthFailed responses neither reset nor advance a
+streak; a changed head resets it but keeps the limit and the breaker. State is in memory, so a
+restart starts over at a full batch with one skip re-armed. The import and config streams are
+unchanged.
 
 **Bounded history reads (DATA-15/16).** On the History/Review/Timeline and session-rollup paths
 nothing reads a pack's or a session's samples as a list. The engine's windowed reads —

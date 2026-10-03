@@ -59,7 +59,7 @@ internal const val FAULT_MIN_SPAN_MS = 5 * 60_000L
 
 internal enum class HeadFaultAction {
     NONE,
-    /** The batch is down to one row and it still faults: delete that one OUTBOX row and move on. */
+    /** The batch is down to one row and it still faults, first time since a 2xx: delete that one OUTBOX row. */
     SKIP_HEAD_ROW,
 }
 
@@ -67,12 +67,14 @@ internal enum class HeadFaultAction {
  * The ingest stream's fault bisection (DATA-22). [headId] is the outbox id the current streak is
  * about; [limit] is the batch size the uploader peeks (never above BATCH); [streak] counts marked
  * faults on that head at the current size, the first of which came at [firstFaultAtMs].
+ * [skipsSinceOk] is the one-skip breaker: rows skipped since the last 2xx (a head change keeps it).
  */
 internal data class HeadFaultState(
     val headId: Long?,
     val limit: Int,
     val streak: Int,
     val firstFaultAtMs: Long?,
+    val skipsSinceOk: Int = 0,
 )
 
 /**
@@ -81,12 +83,17 @@ internal data class HeadFaultState(
  * batch forever while every later sample waited behind it.
  *
  * - A changed [headId] (the last batch was accepted, skipped or evicted) starts a fresh streak but
- *   KEEPS the limit, so the bisection carries on past the half that was accepted.
- * - [PostResult.Ok] clears the streak and doubles the limit back toward [maxBatch].
+ *   KEEPS the limit and the breaker, so the bisection carries on past the half that was accepted.
+ * - [PostResult.Ok] clears the streak, re-arms the breaker and doubles the limit toward [maxBatch].
  * - [PostResult.ServerFault] extends the streak. Once it holds [FAULT_STREAK] faults spanning
- *   [FAULT_MIN_SPAN_MS], a batch of [sentSize] > 1 is halved (rounded up) with a fresh streak, and a
- *   batch of one row is skipped ([HeadFaultAction.SKIP_HEAD_ROW]); the skip resets everything to a
- *   full batch.
+ *   [FAULT_MIN_SPAN_MS] the streak trips, and every trip clears the streak, so the next one needs a
+ *   fresh full span. A batch of [sentSize] > 1 is halved (rounded up). A batch of one row is skipped
+ *   ([HeadFaultAction.SKIP_HEAD_ROW]) only if no row was skipped since the last 2xx; otherwise it is
+ *   held and backed off. Either way the limit stays at 1: the next head goes alone, and only 2xxs
+ *   double it back. This is the poison breaker's rule (only the FIRST skip after a 2xx): a genuine
+ *   bad row is still isolated, since bisection's clean halves are 2xxs that re-arm the breaker,
+ *   while a server that faults on everything costs one sample, then holds until it is fixed. The
+ *   state lives in the loop's memory, so a process restart re-arms one skip.
  * - Anything else (Transient, AuthFailed, Poison) leaves the state alone: an outage neither resets
  *   nor advances a streak. [classifyPost] guarantees outages never arrive here as a ServerFault.
  *
@@ -100,20 +107,22 @@ internal fun stepHeadFault(
     nowMs: Long,
     maxBatch: Int,
 ): Pair<HeadFaultState, HeadFaultAction> {
-    val cur = if (headId != s.headId) HeadFaultState(headId, s.limit, streak = 0, firstFaultAtMs = null) else s
+    val cur = if (headId != s.headId) s.copy(headId = headId, streak = 0, firstFaultAtMs = null) else s
     return when (result) {
-        PostResult.Ok ->
-            cur.copy(limit = minOf(maxBatch, cur.limit * 2), streak = 0, firstFaultAtMs = null) to HeadFaultAction.NONE
+        PostResult.Ok -> cur.copy(
+            limit = minOf(maxBatch, cur.limit * 2), streak = 0, firstFaultAtMs = null, skipsSinceOk = 0,
+        ) to HeadFaultAction.NONE
         PostResult.ServerFault -> {
             val streak = cur.streak + 1
             val first = cur.firstFaultAtMs ?: nowMs
+            if (streak < FAULT_STREAK || nowMs - first < FAULT_MIN_SPAN_MS) {
+                return cur.copy(streak = streak, firstFaultAtMs = first) to HeadFaultAction.NONE
+            }
+            val tripped = cur.copy(streak = 0, firstFaultAtMs = null)
             when {
-                streak < FAULT_STREAK || nowMs - first < FAULT_MIN_SPAN_MS ->
-                    cur.copy(streak = streak, firstFaultAtMs = first) to HeadFaultAction.NONE
-                sentSize > 1 ->
-                    cur.copy(limit = (sentSize + 1) / 2, streak = 0, firstFaultAtMs = null) to HeadFaultAction.NONE
-                else ->
-                    HeadFaultState(headId, maxBatch, streak = 0, firstFaultAtMs = null) to HeadFaultAction.SKIP_HEAD_ROW
+                sentSize > 1 -> tripped.copy(limit = (sentSize + 1) / 2) to HeadFaultAction.NONE
+                cur.skipsSinceOk == 0 -> tripped.copy(limit = 1, skipsSinceOk = 1) to HeadFaultAction.SKIP_HEAD_ROW
+                else -> tripped.copy(limit = 1) to HeadFaultAction.NONE   // breaker open: hold this row
             }
         }
         PostResult.Transient, PostResult.AuthFailed, PostResult.Poison -> cur to HeadFaultAction.NONE

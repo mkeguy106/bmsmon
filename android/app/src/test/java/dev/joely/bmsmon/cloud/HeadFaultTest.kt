@@ -9,7 +9,8 @@ import org.junit.Test
  * DATA-22: a server bug that crashes (marked 500) on one specific sample must not block the ingest
  * queue forever, and an outage must never be mistaken for one. [stepHeadFault] narrows the head
  * batch only after [FAULT_STREAK] marked faults that also span [FAULT_MIN_SPAN_MS], and skips a
- * single outbox row only once the batch is down to that one row.
+ * single outbox row only once the batch is down to that one row — and at most one row since the
+ * last 2xx, so a server that faults on everything costs one sample, then holds.
  */
 class HeadFaultTest {
 
@@ -84,10 +85,8 @@ class HeadFaultTest {
             assertTrue("bounded", t < 24 * 60 * min)
         }
         assertEquals(listOf(200, 100, 50, 25, 13, 7, 4, 2, 1), sizes)
-        // The skip resets everything: full batch, fresh streak.
-        assertEquals(max, s.limit)
-        assertEquals(0, s.streak)
-        assertNull(s.firstFaultAtMs)
+        // A fresh streak, the breaker spent, and the next head goes alone until a 2xx.
+        assertEquals(HeadFaultState(headId = 7, limit = 1, streak = 0, firstFaultAtMs = null, skipsSinceOk = 1), s)
     }
 
     @Test fun noSkipAtOneRowBeforeTheSpan() {
@@ -98,13 +97,95 @@ class HeadFaultTest {
         assertEquals(HeadFaultAction.SKIP_HEAD_ROW, action)
     }
 
-    @Test fun afterASkipTheNextHeadStartsAFreshStreakAtFullBatch() {
+    /** A state that has just skipped head 1 (four faults over 5 min at one row, breaker armed). */
+    private fun justSkipped(): HeadFaultState {
         val s = fresh(limit = 1).faults(head = 1, sent = 1, times = listOf(0, 2 * min, 4 * min))
         val (afterSkip, action) = s.step(head = 1, sent = 1, r = PostResult.ServerFault, at = 5 * min)
         assertEquals(HeadFaultAction.SKIP_HEAD_ROW, action)
-        val (next, a2) = afterSkip.step(head = 2, sent = 200, r = PostResult.ServerFault, at = 6 * min)
-        assertEquals(HeadFaultAction.NONE, a2)
-        assertEquals(HeadFaultState(headId = 2, limit = 200, streak = 1, firstFaultAtMs = 6 * min), next)
+        return afterSkip
+    }
+
+    @Test fun afterASkipTheNextHeadStartsAFreshStreakAtLimitOne() {
+        val (next, action) = justSkipped().step(head = 2, sent = 1, r = PostResult.ServerFault, at = 6 * min)
+        assertEquals(HeadFaultAction.NONE, action)
+        assertEquals(
+            HeadFaultState(headId = 2, limit = 1, streak = 1, firstFaultAtMs = 6 * min, skipsSinceOk = 1),
+            next,
+        )
+    }
+
+    // Controller test 3: after a skip the next head is sent alone, and 2xxs double it back to 200.
+    @Test fun afterASkipTheNextHeadIsSentAloneAndOksDoubleItBackTo200() {
+        var s = justSkipped()
+        assertEquals(1, s.limit)
+        val limits = mutableListOf<Int>()
+        for (head in 2L..10L) {
+            val (next, action) = s.step(head = head, sent = s.limit, r = PostResult.Ok, at = 6 * min + head * sec)
+            assertEquals(HeadFaultAction.NONE, action)
+            assertEquals(0, next.skipsSinceOk)
+            limits += next.limit
+            s = next
+        }
+        assertEquals(listOf(2, 4, 8, 16, 32, 64, 128, 200, 200), limits)
+    }
+
+    // --- the one-skip breaker ---
+
+    // Controller test 1: a server that faults on EVERY request (a bug unrelated to the rows) costs
+    // exactly one sample, then holds — through as many further full trip spans as it takes.
+    @Test fun aServerThatFaultsOnEverythingCostsOneSampleThenHolds() {
+        var s = fresh()
+        var head = 1L
+        var t = 0L
+        var skips = 0
+        var holds = 0
+        repeat(24 * 60) {   // a day, one POST a minute
+            val (next, action) = s.step(head = head, sent = minOf(max, s.limit), r = PostResult.ServerFault, at = t)
+            if (action == HeadFaultAction.SKIP_HEAD_ROW) {
+                skips++
+                head++   // the uploader deleted the head row
+            } else if (skips > 0 && next.streak == 0) {
+                holds++  // a full trip span at one row, with the breaker spent
+                assertEquals(1, next.limit)
+            }
+            s = next
+            t += min
+        }
+        assertEquals(1, skips)
+        assertTrue("held through many further trip spans, saw $holds", holds >= 10)
+        assertEquals(2L, s.headId)
+        assertEquals(1, s.skipsSinceOk)
+    }
+
+    @Test fun aHeldTripRequiresAFreshFullSpanBeforeTheNextEvaluation() {
+        // Breaker spent: the trip on head 2 holds and clears the streak, so the next three faults
+        // and the next 5 min both have to accrue again — the hold can't re-fire on every response.
+        val armed = justSkipped().faults(head = 2, sent = 1, times = listOf(6 * min, 7 * min, 8 * min))
+        val (held, action) = armed.step(head = 2, sent = 1, r = PostResult.ServerFault, at = 11 * min)
+        assertEquals(HeadFaultAction.NONE, action)
+        assertEquals(
+            HeadFaultState(headId = 2, limit = 1, streak = 0, firstFaultAtMs = null, skipsSinceOk = 1),
+            held,
+        )
+    }
+
+    @Test fun aHeadChangeDoesNotReArmTheSkip() {
+        val (moved, _) = justSkipped().step(head = 9, sent = 1, r = PostResult.Transient, at = 6 * min)
+        assertEquals(1, moved.skipsSinceOk)
+    }
+
+    // Controller test 2: a 2xx re-arms the skip, so a later poison row can still be isolated.
+    @Test fun anOkReArmsTheSkipForALaterPoisonRow() {
+        val (ok, _) = justSkipped().step(head = 2, sent = 1, r = PostResult.Ok, at = 6 * min)
+        assertEquals(HeadFaultState(headId = 2, limit = 2, streak = 0, firstFaultAtMs = null, skipsSinceOk = 0), ok)
+        // A later poison head: bisect 2 -> 1, then skip it.
+        val a = ok.faults(head = 3, sent = 2, times = listOf(10 * min, 12 * min, 14 * min))
+        val (halved, a1) = a.step(head = 3, sent = 2, r = PostResult.ServerFault, at = 15 * min)
+        assertEquals(HeadFaultAction.NONE, a1)
+        assertEquals(1, halved.limit)
+        val b = halved.faults(head = 3, sent = 1, times = listOf(16 * min, 18 * min, 20 * min))
+        val (_, a2) = b.step(head = 3, sent = 1, r = PostResult.ServerFault, at = 21 * min)
+        assertEquals(HeadFaultAction.SKIP_HEAD_ROW, a2)
     }
 
     // --- recovery ---
@@ -179,20 +260,21 @@ class HeadFaultTest {
 
     // --- end to end over a queue: only the bad row is ever skipped ---
 
+    private class Run(val accepted: Set<Long>, val skipped: List<Long>, val queue: List<Long>)
+
     /**
      * Drive the machine over a simulated outbox the way the upload loop does: peek
      * min(BATCH, limit) rows, a batch containing any bad id gets a marked 500, a clean one is
-     * accepted; one POST a minute. Returns the skipped ids, after asserting every good row was
-     * accepted and the queue drained.
+     * accepted; one POST a minute, until the queue drains or [maxPosts] POSTs.
      */
-    private fun drain(total: Int, bad: Set<Long>): List<Long> {
+    private fun simulate(total: Int, bad: Set<Long>, maxPosts: Int): Run {
         val queue = ArrayDeque((1L..total.toLong()).toList())
         val accepted = mutableSetOf<Long>()
         val skipped = mutableListOf<Long>()
         var s = fresh()
         var t = 0L
         var posts = 0
-        while (queue.isNotEmpty()) {
+        while (queue.isNotEmpty() && posts++ < maxPosts) {
             val sent = queue.take(minOf(max, s.limit))
             val r = if (sent.any { it in bad }) PostResult.ServerFault else PostResult.Ok
             val (next, action) = stepHeadFault(s, sent.first(), sent.size, r, t, max)
@@ -202,10 +284,16 @@ class HeadFaultTest {
             }
             s = next
             t += min
-            assertTrue("bounded", ++posts < 10_000)
         }
-        assertEquals((1L..total.toLong()).toSet() - bad, accepted)
-        return skipped
+        return Run(accepted, skipped, queue.toList())
+    }
+
+    /** [simulate] to an empty queue; asserts every good row was accepted. Returns the skipped ids. */
+    private fun drain(total: Int, bad: Set<Long>): List<Long> {
+        val run = simulate(total, bad, maxPosts = 10_000)
+        assertTrue("drained", run.queue.isEmpty())
+        assertEquals((1L..total.toLong()).toSet() - bad, run.accepted)
+        return run.skipped
     }
 
     @Test fun onlyTheFaultingRowIsSkipped() {
@@ -214,8 +302,19 @@ class HeadFaultTest {
         }
     }
 
-    @Test fun twoFaultingRowsAreEachSkippedAndNothingElse() {
-        assertEquals(listOf(40L, 41L), drain(total = 500, bad = setOf(40L, 41L)))
+    @Test fun twoSeparatedFaultingRowsAreEachSkippedAndNothingElse() {
+        // A clean row between them is sent alone after the first skip; its 2xx re-arms the breaker.
         assertEquals(listOf(3L, 180L), drain(total = 500, bad = setOf(3L, 180L)))
+        assertEquals(listOf(40L, 42L), drain(total = 500, bad = setOf(40L, 42L)))
+    }
+
+    @Test fun adjacentFaultingRowsSkipTheFirstAndHoldTheSecond() {
+        // No 2xx between them, so the breaker holds the second — exactly as a server faulting on
+        // everything would look — until the server is fixed. Nothing behind it is lost.
+        val run = simulate(total = 500, bad = setOf(40L, 41L), maxPosts = 3 * 24 * 60)
+        assertEquals(listOf(40L), run.skipped)
+        assertEquals((1L..39L).toSet(), run.accepted)
+        assertEquals(41L, run.queue.first())
+        assertEquals(500 - 40, run.queue.size)
     }
 }
