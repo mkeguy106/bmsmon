@@ -1200,11 +1200,13 @@ Health hero, replaces the old hardcoded `DAILY_DRIVER_BASE` staging. Ladder, fir
 **(1) seize** — a fresh pack ≤ the synced seize threshold (`/web/alert-config`) stages its base
 with a LOW chip, overriding the pin as on Android and v1; **(2) pin** — a fleet-rail tap,
 persisted in `localStorage["bmsmon-v2-stage-pin"]`, outranks the base in use for 30 min
-(android `PIN_HOLD_MS`; PINNED chip + AUTO to release); **(3) in use** — deepest draw wins;
-**(4) hold** — the newest discharge seen this session within 15 min; **(5) parked** — stay on
-the previous base while it still reports; **(6) default** — the daily driver if it reports,
-else the reporting base with the newest sample, so a cold load away from home opens on the
-chair rather than on the daily driver sitting offline at home. Android's "charging base takes
+(android `PIN_HOLD_MS`; PINNED chip + AUTO to release; a pin dated 30 min or more ahead of the
+clock has expired too); **(3) in use** — deepest draw wins; **(4) hold** — the newest discharge
+seen this session within 15 min; **(5) parked** — stay on the previous base while it still
+reports; **(6) default** — the daily driver if it reports, else the reporting base with the
+newest sample, so a cold load away from home opens on the chair rather than on the daily driver
+sitting offline at home; with nothing reporting (phone offline), the base with the newest
+sample at all, stale included, and the daily driver only when there is no sample to go on. Android's "charging base takes
 over" rung is not ported (same as `share.py`). v2 alert acks are `{id → rank}`: ids are per
 condition (`cap:<addr>`, `temp:<addr>:<side>`, `cell:<addr>`); an ack holds while the rank stays
 at or below the acked rank, re-arms on a worse one (next capacity rung, worse temperature zone,

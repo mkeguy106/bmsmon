@@ -10,7 +10,8 @@
 //              pack draining toward damage can never sit hidden off-stage.
 //   2. PIN     a rail pin made less than PIN_HOLD_MS ago (android PIN_HOLD_MS): tapping a
 //              spare shows it even while the chair is in use, and a forgotten pin can't
-//              hide the chair for more than 30 minutes.
+//              hide the chair for more than 30 minutes. A pin dated PIN_HOLD_MS or more
+//              AHEAD of the clock (the clock stepped back since the tap) has expired too.
 //   3. IN USE  a base with a fresh pack discharging; deepest draw wins (share.py), the
 //              daily driver breaks exact ties.
 //   4. HOLD    the base whose newest discharge (seen this session) is within
@@ -18,11 +19,13 @@
 //              Not gated on freshness (android: "idle OR briefly out of BLE range").
 //   5. PARKED  the base this page staged last time, while ≥1 of its packs is fresh
 //              (android "everything idle → leave the stage where it is"; share rung 3).
-//   6. DEFAULT the daily driver if ≥1 of its packs is fresh; else the fresh base with the
-//              newest sample (the phone polls its own stage base fastest, so away from home
-//              that is the chair, not a spare left on the charger); else the daily driver;
-//              else the first base. Rung 5 then holds the choice, so "newest" can't
-//              flip-flop the way v1's freshest-pack fallback does (XC-2's 17.6%).
+//   6. DEFAULT the daily driver if ≥1 of its packs is fresh; else the base with the newest
+//              sample — among fresh packs, or, with none fresh (cold load, phone offline
+//              mid-outing), across every pack, stale included. The phone polls its own
+//              stage base fastest, so away from home that is the chair, not a spare left on
+//              the charger. The daily driver only when no pack has a sample time at all.
+//              Rung 5 then holds the choice, so "newest" can't flip-flop the way v1's
+//              freshest-pack fallback does (XC-2's 17.6%).
 // android's "a charging base may take over" rung is deliberately NOT ported, same as
 // share.py: the spares live on chargers, so it would hand the stage straight to them.
 import type { Base } from "../fleet";
@@ -49,7 +52,6 @@ export interface StageInputs {
   /** The base this page staged on its previous evaluation, or null. */
   sticky: string | null;
   nowMs: number;
-  dailyDriverId?: string;
 }
 
 /** C6, exactly as v1: alerts off → no seize; otherwise the pushed value, 30 when absent. */
@@ -58,14 +60,27 @@ export function seizeThresholdFrom(cfg: { seize_soc: number | null; alerts_on: b
 }
 
 const isFresh = (b: Base): boolean => b.packs.some((p) => p.connected);
+const dd = DAILY_DRIVER_BASE;
+/** Deterministic tie-break: the daily driver first, then base id. */
+const before = (a: string, b: string): boolean =>
+  (a === dd) !== (b === dd) ? a === dd : a.localeCompare(b) < 0;
+
+/** The base holding the newest sample (fresh packs only, or every pack); ties → before. */
+function newestBase(bases: Base[], freshOnly: boolean): string | null {
+  let newest: { id: string; ts: number } | null = null;
+  for (const b of bases) {
+    for (const p of b.packs) {
+      const ts = p.item.ts_ms;
+      if ((freshOnly && !p.connected) || !Number.isFinite(ts)) continue;
+      if (!newest || ts > newest.ts || (ts === newest.ts && before(b.id, newest.id))) newest = { id: b.id, ts };
+    }
+  }
+  return newest?.id ?? null;
+}
 
 export function selectStageBase(i: StageInputs): StageSelection | null {
   if (i.bases.length === 0) return null;
-  const dd = i.dailyDriverId ?? DAILY_DRIVER_BASE;
   const byId = new Map(i.bases.map((b) => [b.id, b] as const));
-  // Deterministic tie-break: the daily driver first, then base id.
-  const before = (a: string, b: string): boolean =>
-    (a === dd) !== (b === dd) ? a === dd : a.localeCompare(b) < 0;
 
   // 1. SEIZE
   if (i.seizeThreshold != null) {
@@ -80,8 +95,8 @@ export function selectStageBase(i: StageInputs): StageSelection | null {
     if (lead) return { baseId: lead.id, reason: "seize" };
   }
 
-  // 2. PIN
-  if (i.pin && byId.has(i.pin.baseId) && i.nowMs - i.pin.atMs < PIN_HOLD_MS) {
+  // 2. PIN — expires both ways, so a future-dated pin can't hold the stage forever.
+  if (i.pin && byId.has(i.pin.baseId) && Math.abs(i.nowMs - i.pin.atMs) < PIN_HOLD_MS) {
     return { baseId: i.pin.baseId, reason: "pin" };
   }
 
@@ -111,15 +126,8 @@ export function selectStageBase(i: StageInputs): StageSelection | null {
   // 6. DEFAULT
   const ddBase = byId.get(dd);
   if (ddBase && isFresh(ddBase)) return { baseId: dd, reason: "default" };
-  let newest: { id: string; ts: number } | null = null;
-  for (const b of i.bases) {
-    for (const p of b.packs) {
-      if (!p.connected) continue;
-      const ts = p.item.ts_ms;
-      if (!newest || ts > newest.ts || (ts === newest.ts && before(b.id, newest.id))) newest = { id: b.id, ts };
-    }
-  }
-  if (newest) return { baseId: newest.id, reason: "default" };
+  const newest = newestBase(i.bases, true) ?? newestBase(i.bases, false);
+  if (newest) return { baseId: newest, reason: "default" };
   return { baseId: ddBase ? dd : i.bases[0].id, reason: "default" };
 }
 

@@ -56,8 +56,10 @@ describe("selectStageBase", () => {
   });
 
   it("ignores a stale low pack and a null threshold", () => {
-    expect(run(fleet({ "2023A": { soc: 5 } }), { stale: ["2023A"] })!.reason).not.toBe("seize");
-    expect(run(fleet({ "2023A": { soc: 5 } }), { seizeThreshold: null })!.reason).not.toBe("seize");
+    expect(run(fleet({ "2023A": { soc: 5 } }), { stale: ["2023A"] }))
+      .toEqual({ baseId: "2012", reason: "default" });
+    expect(run(fleet({ "2023A": { soc: 5 } }), { seizeThreshold: null }))
+      .toEqual({ baseId: "2012", reason: "default" });
   });
 
   it("breaks an exact seize tie toward the daily driver", () => {
@@ -80,8 +82,23 @@ describe("selectStageBase", () => {
       .toEqual({ baseId: "2012", reason: "in-use" });
   });
 
+  // Final review: a pin dated AHEAD of the clock (it stepped back since the tap) used to
+  // have a negative age, which is always "< PIN_HOLD_MS" — so it never expired.
+  it("expires a future-dated pin once it is PIN_HOLD_MS ahead of the clock", () => {
+    const items = fleet({ "2012A": { current_a: -5 } });
+    expect(run(items, { pin: { baseId: "2023", atMs: NOW + PIN_HOLD_MS - 1 } }))
+      .toEqual({ baseId: "2023", reason: "pin" });
+    expect(run(items, { pin: { baseId: "2023", atMs: NOW + PIN_HOLD_MS } }))
+      .toEqual({ baseId: "2012", reason: "in-use" });
+  });
+
   it("ignores a pin for a base that no longer exists", () => {
     expect(run(fleet(), { pin: { baseId: "1999", atMs: NOW } })).toEqual({ baseId: "2012", reason: "default" });
+  });
+
+  it("a stale pack's last discharging sample does not put its base in use", () => {
+    expect(run(fleet({ "2016A": { current_a: -9 } }), { stale: ["2016A"] }))
+      .toEqual({ baseId: "2012", reason: "default" });
   });
 
   it("deepest draw wins when two bases discharge", () => {
@@ -100,6 +117,15 @@ describe("selectStageBase", () => {
   it("keeps holding while the held base's packs drop out of range (shows it disconnected)", () => {
     const sel = run(fleet(), { stale: ["2016A", "2016B"], lastDischargeMs: new Map([["2016", NOW - 60_000]]) });
     expect(sel).toEqual({ baseId: "2016", reason: "hold" });
+  });
+
+  it("ranks in use over hold over parked", () => {
+    const hold = new Map([["2016", NOW - 60_000]]);
+    expect(run(fleet({ "2023A": { current_a: -4 } }), { lastDischargeMs: hold, sticky: "2024" }))
+      .toEqual({ baseId: "2023", reason: "in-use" });
+    expect(run(fleet(), { lastDischargeMs: hold, sticky: "2024" }))
+      .toEqual({ baseId: "2016", reason: "hold" });
+    expect(run(fleet(), { sticky: "2024" })).toEqual({ baseId: "2024", reason: "parked" });
   });
 
   it("stays parked on the previous base while it is still reporting", () => {
@@ -122,8 +148,20 @@ describe("selectStageBase", () => {
     expect(run(items, { stale: ["2012A", "2012B"] })).toEqual({ baseId: "2023", reason: "default" });
   });
 
-  it("falls back to the daily driver when nothing at all is reporting", () => {
-    expect(run(fleet(), { stale: fleet().map((i) => i.address) }))
+  // Controller ruling (final review): the phone polls its own stage base fastest, so with
+  // nothing reporting the newest sample is still the best guess at the chair — e.g. the
+  // phone went offline mid-outing on 2016 while 2012 sat on the charger at home.
+  it("with nothing reporting, stages the base with the newest sample, stale included", () => {
+    // The spares last reported when the chair left home 3 h ago; 2016 until 20 min ago.
+    const items = fleet().map((i) =>
+      ({ ...i, ts_ms: i.group_id === "2016" ? NOW - 20 * 60_000 : NOW - 3 * 3_600_000 }));
+    expect(run(items, { stale: items.map((i) => i.address) }))
+      .toEqual({ baseId: "2016", reason: "default" });
+  });
+
+  it("falls back to the daily driver only when no pack has a sample time at all", () => {
+    const items = fleet().map((i) => ({ ...i, ts_ms: Number.NaN }));
+    expect(run(items, { stale: items.map((i) => i.address) }))
       .toEqual({ baseId: "2012", reason: "default" });
   });
 });
