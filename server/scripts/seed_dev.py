@@ -1,17 +1,22 @@
 """Seed the dev Postgres with a realistic 4-pack fleet for a WebUI smoke test.
 
-TRUNCATES devices/batteries/samples — dev DB only (the hardcoded localhost DSN
-guards against ever running this at prod). See CLAUDE.md "WebUI smoke test".
+TRUNCATES devices/batteries/samples — dev DB only. It seeds the database the server would
+use (DATABASE_URL, default the local `bmsmon` dev DB), so a private per-worktree database
+works, and it refuses any DATABASE_URL whose host is not this machine, so it can never
+reach prod. See CLAUDE.md "WebUI smoke test".
 """
 import asyncio, math, sys, time, uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 import asyncpg
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # server/ for app.*
+from app.config import settings
 from app.db import queries as q
 
-DB = "postgresql://bmsmon:bmsmon@localhost:5432/bmsmon"
+DB = settings.database_url  # DATABASE_URL, else postgresql://bmsmon:bmsmon@localhost:5432/bmsmon
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 DEV = str(uuid.uuid4())
 PACKS = [
     ("C8:47:80:15:67:44", "R-12100BNNA70-A02214", "2012 · A", "2012"),
@@ -22,6 +27,11 @@ PACKS = [
 
 
 async def main():
+    host = urlparse(DB).hostname or ""
+    if host not in LOCAL_HOSTS:
+        # Host only: the DSN may carry a password.
+        sys.exit(f"seed_dev: refusing DATABASE_URL host {host!r}; this script TRUNCATEs "
+                 f"tables, so it only runs against a local dev DB ({', '.join(sorted(LOCAL_HOSTS))}).")
     conn = await asyncpg.connect(DB)
     # Disposable dev DB: clear residue from test runs so the fleet is clean.
     for t in ("samples", "batteries", "devices"):

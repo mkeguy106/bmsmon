@@ -1629,8 +1629,8 @@ deps are pinned in `server/requirements-dev.lock`; CI runs the suite on Python 3
 may be newer) — "Image build" has the exact CI-equivalent command.
 
 **WebUI smoke test (Playwright, local):** seed the dev DB with a synthetic 4-pack fleet
-(`server/.venv/bin/python server/scripts/seed_dev.py` — TRUNCATES the dev DB, never point it at
-prod), run the API with the built-in local identity (`BMSMON_DEV_TRUST_HEADERS=1
+(`server/.venv/bin/python server/scripts/seed_dev.py` — TRUNCATES the database in `DATABASE_URL`,
+default the local `bmsmon` dev DB, and refuses any non-local host), run the API with the built-in local identity (`BMSMON_DEV_TRUST_HEADERS=1
 server/.venv/bin/uvicorn app.main:app --port 8000` — dev-trust refuses non-local DATABASE_URLs, and
 without it /web/* 401s and the /ws close-after-accept loop starves the REST fallback; dev-trust is also what lets /ws accept the Vite dev server's http://localhost:5173 Origin), start
 `npx vite dev --port 5173` in `web/`, then `node scripts/smoke.mjs` (from `web/`). It screenshots
