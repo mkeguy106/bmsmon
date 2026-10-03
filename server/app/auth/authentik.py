@@ -24,7 +24,10 @@ class AuthUser:
 
 
 def _split_groups(v: str) -> list[str]:
-    return [g.strip() for g in v.replace("|", ",").split(",") if g.strip()]
+    """X-Authentik-Groups as the outpost sends it: names joined with "|". Split on "|"
+    ONLY: a group name may itself contain a comma, and splitting on it would turn
+    "Friends, <admin group>" into membership of the admin group."""
+    return [g.strip() for g in v.split("|") if g.strip()]
 
 
 # DB hosts that identify a local dev environment (see dev_trust_active). "db" is the

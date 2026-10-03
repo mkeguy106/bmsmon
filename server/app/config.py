@@ -15,15 +15,17 @@ class Settings:
     # /web/* and /ws (auth/authentik.py authorize) instead of trusting that the Authentik
     # application binding is right; it had none until 2026-08-23. Exact, case-sensitive
     # match against X-Authentik-Groups; an empty value matches nobody.
+    # Surrounding whitespace is stripped from both values, so a stray space or newline in
+    # the stack .env cannot lock everyone out.
     # Viewers may read the dashboard: live + historical GPS.
     viewer_group: str = os.environ.get(
         "BMSMON_VIEWER_GROUP", "Covert.Life - Full App Access - User Group"
-    )
+    ).strip()
     # Admins may mint share links / API keys / enroll codes and revoke devices. OWNER ONLY,
     # never the household access group (SEC-20). An admin also counts as a viewer.
     admin_group: str = os.environ.get(
         "BMSMON_ADMIN_GROUP", "Covert.Life - bmsmon - Admin Group"
-    )
+    ).strip()
     # Optional shared secret between the reverse proxy (Traefik) and the app. When set, every
     # /web/* request and the /ws handshake must carry an X-Bmsmon-Proxy-Secret header exactly
     # matching this value BEFORE any X-Authentik-* identity header is trusted — defense in depth

@@ -168,3 +168,10 @@ async def test_track_auth_is_checked_before_the_span(client):
     r = await client.get("/web/track",
                          params={"address": A, "from_ms": 0, "to_ms": 4_000_000_000_000})
     assert r.status_code == 401
+
+
+async def test_track_membership_is_checked_before_the_span(client):
+    # A non-member learns nothing from the span check either: 403, never the 400.
+    r = await client.get("/web/track", headers=OUTSIDER_H,
+                         params={"address": A, "from_ms": 0, "to_ms": 4_000_000_000_000})
+    assert r.status_code == 403

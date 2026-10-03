@@ -1211,12 +1211,13 @@ Enforced in the app itself (not delegated to Traefik/Authentik) and pinned by te
   `Covert.Life - Full App Access - User Group`). Admin routes (`/web/samples`, devices,
   enroll codes, shares, API keys) need `BMSMON_ADMIN_GROUP` (default
   `Covert.Life - bmsmon - Admin Group`, owner only), and an admin also counts as a viewer.
-  Matching is exact and case-sensitive against the pipe-separated `X-Authentik-Groups`,
-  and an empty setting matches nobody. A non-member gets 403 (`/ws` accepts, then closes
-  with **4403**); no identity stays 401/4401. Denials are logged at WARNING, once per user
-  per 5 min. Dev-trust's synthetic user is in both groups unless `BMSMON_DEV_GROUPS`
-  overrides it. Tests build headers from `server/tests/identities.py`; never hardcode a
-  group spelling in a test.
+  Matching is exact and case-sensitive against `X-Authentik-Groups`, which is split on
+  `|` only (a group name may contain a comma). An empty setting matches nobody, and
+  surrounding whitespace in either setting is ignored. A non-member gets 403 (`/ws`
+  accepts, then closes with **4403**); no identity stays 401/4401. Non-member denials are
+  logged at WARNING, once per user per 5 min. Dev-trust's synthetic user is in both
+  groups unless `BMSMON_DEV_GROUPS` overrides it. Tests build headers from
+  `server/tests/identities.py`; never hardcode a group spelling in a test.
 - **`/web/track` span ≤ 31 days + 1 h** (`TRACK_MAX_SPAN_MS`). A wider span gets a 400,
   not a clamp, so a map is never silently truncated; out-of-range timestamps get a 422.
   The legitimate callers send one local day (≤ 25 h), the live day's incremental tail,
