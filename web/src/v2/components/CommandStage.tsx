@@ -123,7 +123,8 @@ export function CommandStage({ base, reason = null, onClearPin, rangeParams, tem
       )}
 
       <div className="card" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        {/* Wraps: with PINNED + AUTO (or LOW) the row is wider than a 390 px phone. */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", rowGap: 6 }}>
           <div className="eyebrow">Main stage</div>
           <span className="mono" style={{ fontSize: 15, fontWeight: 600 }}>Base {base.id}</span>
           <Chip tone={STATUS_COLOR[base.status]}>{STATUS_TAG[base.status]}</Chip>
@@ -137,8 +138,8 @@ export function CommandStage({ base, reason = null, onClearPin, rangeParams, tem
               <Chip>PINNED</Chip>
               <button type="button" className="mono" onClick={onClearPin}
                 title="Return to automatic selection (the base in use)"
-                style={{ fontSize: 10, letterSpacing: ".08em", padding: "2px 6px", borderRadius: 5,
-                  border: "1px solid var(--border-strong)", background: "transparent",
+                style={{ fontSize: 10, letterSpacing: ".08em", padding: "4px 10px", minHeight: 24,
+                  borderRadius: 5, border: "1px solid var(--border-strong)", background: "transparent",
                   color: "var(--text-2)", cursor: "pointer" }}>
                 AUTO
               </button>
