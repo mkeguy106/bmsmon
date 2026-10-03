@@ -25,13 +25,30 @@ class PostResultTest {
         assertEquals(PostResult.Transient, classifyPost(null, fromApi = false))
     }
 
-    @Test fun serverErrorsAndThrottlingAreTransient() {
+    @Test fun throttlingIsTransient() {
         for (m in both) {
-            assertEquals(PostResult.Transient, classifyPost(500, m))
-            assertEquals(PostResult.Transient, classifyPost(502, m))
-            assertEquals(PostResult.Transient, classifyPost(503, m))
             assertEquals(PostResult.Transient, classifyPost(408, m))  // request timeout
             assertEquals(PostResult.Transient, classifyPost(429, m))  // throttled
+        }
+    }
+
+    // DATA-22: Traefik's own 502/503/504 (and a 500 from anything in front of the app) carry no
+    // marker — an outage, never a fault in the rows, so they stay Transient exactly as before.
+    @Test fun unmarkedServerErrorsAreTransient() {
+        for (code in listOf(500, 502, 503, 504)) {
+            assertEquals("code $code", PostResult.Transient, classifyPost(code, fromApi = false))
+        }
+    }
+
+    // A marked 503 is the server's contract for "the database is unavailable" (Retry-After) — an
+    // outage, so it must never feed the fault bisection.
+    @Test fun aMarkedFiveOhThreeIsTransient() {
+        assertEquals(PostResult.Transient, classifyPost(503, fromApi = true))
+    }
+
+    @Test fun markedServerErrorsOtherThanFiveOhThreeAreServerFaults() {
+        for (code in listOf(500, 501, 502, 504, 599)) {
+            assertEquals("code $code", PostResult.ServerFault, classifyPost(code, fromApi = true))
         }
     }
 

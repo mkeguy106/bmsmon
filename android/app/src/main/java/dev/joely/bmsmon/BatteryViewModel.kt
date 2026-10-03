@@ -211,6 +211,8 @@ data class UiState(
     val cloudLastUploadMs: Long = 0,
     val cloudUploadKbps: Float = 0f,
     val cloudAuthFailed: Boolean = false,
+    /** Samples the uploader skipped because the server kept crashing on them (DATA-22), all time. */
+    val cloudServerFaultSkips: Long = 0L,
     val importDone: Boolean = false,
     val importTotal: Int = 0,
     val importSent: Int = 0,
@@ -689,6 +691,11 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     enqueueTempConfig(_state.value.stageProfile().id)
                 }
             }
+        }
+        // The uploader can skip a sample at any time while this VM is alive, so mirror the
+        // persisted count live rather than reading it once at load.
+        viewModelScope.launch {
+            store.serverFaultSkips.collect { n -> _state.update { it.copy(cloudServerFaultSkips = n) } }
         }
         startFreshnessTicker()
     }

@@ -31,8 +31,16 @@ import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import dev.joely.bmsmon.UiState
 import dev.joely.bmsmon.ui.CloudActions
 import dev.joely.bmsmon.ui.theme.AlertCritical
+import dev.joely.bmsmon.ui.theme.AlertWarn
 import dev.joely.bmsmon.ui.theme.Bm
 import org.json.JSONObject
+
+/** The Cloud sync status line for DATA-22 skips — null (no line at all) until at least one. */
+internal fun serverFaultSkipsLine(skipped: Long): String? = when {
+    skipped <= 0L -> null
+    skipped == 1L -> "1 sample the server could not store was skipped"
+    else -> "$skipped samples the server could not store were skipped"
+}
 
 @Composable
 internal fun ColumnScope.CloudSyncContent(
@@ -69,6 +77,9 @@ internal fun ColumnScope.CloudSyncContent(
                     fontSize = 12.sp,
                     modifier = Modifier.padding(top = 4.dp),
                 )
+            }
+            serverFaultSkipsLine(state.cloudServerFaultSkips)?.let { line ->
+                Text(line, color = AlertWarn, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
             }
             Text(
                 if (!state.importDone) "Importing history…" else "History imported",

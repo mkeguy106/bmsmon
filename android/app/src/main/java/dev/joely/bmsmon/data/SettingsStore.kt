@@ -22,6 +22,7 @@ import dev.joely.bmsmon.model.Telemetry
 import dev.joely.bmsmon.model.TempThresholds
 import androidx.datastore.preferences.core.Preferences
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import java.io.IOException
@@ -144,6 +145,7 @@ class SettingsStore(private val context: Context) {
         val TEMP_GAUGE_SIDE = stringPreferencesKey("temp_gauge_side")
         val CLOUD_SYNC_ALERTS = booleanPreferencesKey("cloud_sync_alerts")
         val PENDING_TEMP_CONFIG = stringPreferencesKey("pending_temp_config")
+        val SERVER_FAULT_SKIPS = longPreferencesKey("server_fault_skips")
     }
 
     suspend fun load(): Persisted =
@@ -160,6 +162,16 @@ class SettingsStore(private val context: Context) {
      */
     val persisted: Flow<Persisted> =
         context.dataStore.data.retryOnIoError(onError = ::logReadFailure).map(::decode)
+
+    /**
+     * Live count of samples the uploader skipped because the server kept crashing on them (DATA-22),
+     * for the Cloud sync page. Maps this one key, so the page does not re-decode the whole settings
+     * blob on every unrelated write.
+     */
+    val serverFaultSkips: Flow<Long> =
+        context.dataStore.data.retryOnIoError(onError = ::logReadFailure)
+            .map { it[K.SERVER_FAULT_SKIPS] ?: 0L }
+            .distinctUntilChanged()
 
     private fun decode(p: Preferences): Persisted {
         return Persisted(
@@ -282,6 +294,9 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { it[K.PENDING_TEMP_CONFIG] = json }.let {}
     suspend fun clearPendingTempConfig() =
         context.dataStore.edit { it.remove(K.PENDING_TEMP_CONFIG) }.let {}
+    /** One more sample skipped for a persistent server fault (DATA-22) — read-modify-write in one edit. */
+    suspend fun incrementServerFaultSkips() =
+        context.dataStore.edit { it[K.SERVER_FAULT_SKIPS] = (it[K.SERVER_FAULT_SKIPS] ?: 0L) + 1 }.let {}
 
     suspend fun installUuid(): String {
         val existing = context.dataStore.data.first()[K.INSTALL_UUID]

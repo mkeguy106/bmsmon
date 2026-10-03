@@ -298,6 +298,9 @@ class TelemetryReporter(
         // 60 s) on its own clock, so a held config can never throttle sample uploads.
         var configBackoff = 1000L
         var configRetryAt = 0L   // SystemClock.elapsedRealtime(): monotonic, a wall-clock step can't strand it
+        // The ingest stream's server-fault bisection (DATA-22, see stepHeadFault). Memory only: a
+        // process restart resets it to a full batch and a fresh streak, which errs toward patience.
+        var headFault = HeadFaultState(headId = null, limit = BATCH, streak = 0, firstFaultAtMs = null)
         while (true) {
             try {
                 // Hot path (DATA-7): read the flow-fed snapshot — no per-iteration Persisted decode.
@@ -358,7 +361,7 @@ class TelemetryReporter(
                     continue
                 }
                 draining = true
-                val rows = db.outbox().peek(BATCH)
+                val rows = db.outbox().peek(minOf(BATCH, headFault.limit))
                 if (rows.isEmpty()) {
                     delay(1500)
                     continue
@@ -369,6 +372,18 @@ class TelemetryReporter(
                 val body = CloudJson.encodeBatch(seq, rows.map { it.payload })
                 val wire = gzip(body)
                 val result = postSigned(CloudConfig(base).ingestUrl, p.deviceId, body, wire)
+                val (nextFault, faultAction) = stepHeadFault(
+                    headFault, rows.first().id, rows.size, result, SystemClock.elapsedRealtime(), BATCH,
+                )
+                if (nextFault.limit < headFault.limit) {
+                    Log.w(
+                        TAG,
+                        "upload: batch seq=$seq (from outbox id ${rows.first().id}, ${rows.size} rows) drew server " +
+                            "faults for $FAULT_STREAK+ tries over ${FAULT_MIN_SPAN_MS / 60_000}+ min — " +
+                            "narrowing the batch to ${nextFault.limit} rows",
+                    )
+                }
+                headFault = nextFault
                 val d = decideUpload(result, ingestPoisonSkips, authFailed)
                 ingestPoisonSkips = d.poisonSkipsSinceOk
                 authFailed = d.authFailed
@@ -414,7 +429,27 @@ class TelemetryReporter(
                         delay(backoff)
                         backoff = (backoff * 2).coerceAtMost(60_000L)
                     }
-                    BatchStep.BACK_OFF -> {
+                    BatchStep.BACK_OFF -> if (faultAction == HeadFaultAction.SKIP_HEAD_ROW) {
+                        // DATA-22: this one sample has made the server crash (marked 5xx) for 5+
+                        // minutes at batch size 1 — skip its OUTBOX row so it can't block every later
+                        // sample. Log identity and size only, never the payload. When logging is on
+                        // the sample still lives in the Room samples table.
+                        val head = rows.first()
+                        Log.w(
+                            TAG,
+                            "upload: server keeps faulting on one sample — skipping outbox id=${head.id} " +
+                                "(seq=$seq, ${head.payload.toByteArray().size} bytes)",
+                        )
+                        db.outbox().deleteUpTo(head.id)   // the head is the lowest id: exactly this row
+                        settings.incrementServerFaultSkips()
+                        val remaining = db.outbox().count()
+                        if (remaining == 0) draining = false
+                        onStatus?.invoke(
+                            remaining.toLong(), lastUploadMs,
+                            uploadRate.kbps(System.currentTimeMillis()), authFailed,
+                        )
+                        backoff = 1000L
+                    } else {
                         if (result == PostResult.Poison) {
                             Log.w(TAG, "upload: batch seq=$seq rejected again with no 2xx since the last skip — holding it (poison breaker open)")
                         }

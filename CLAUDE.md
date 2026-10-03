@@ -698,15 +698,28 @@ outage); that used to read as "server rejects this batch" and erased the outbox 
 Now every 4xx other than 401/403 that is not a marked 400/413/422 (so every unmarked 4xx, and e.g.
 a marked 404/408/429), every 3xx (the upload client is built with `followRedirects(false)` +
 `followSslRedirects(false)` in `uploadHttpClient()`, so a redirect to a login page can never come
-back as a 2xx "accept") and every 5xx is Transient; 401/403 are AuthFailed and hold the rows whether
-or not the marker is present. Poison then passes a circuit breaker (`decideUpload`,
-`cloud/UploadDecision.kt`, pure): the first Poison after a 2xx is skipped, any further Poison before
-the next 2xx is held and backed off — genuine poison is one bad batch; a run of rejects is a server
-problem. Ingest, the historical import and the config push each have their own breaker; it lives in
-memory, so a restart re-arms one skip per stream. The config push also has its own retry gate
-(1 s doubling to 60 s, reset on a 2xx or a skip), so a held config is not re-POSTed on every loop
-pass. **Deploy order is load-bearing: the server's marker ships before this APK**, or a genuine app
-4xx would be held forever.
+back as a 2xx "accept") and every 5xx except a marked non-503 one (below) is Transient; 401/403 are
+AuthFailed and hold the rows whether or not the marker is present. Poison then passes a circuit
+breaker (`decideUpload`, `cloud/UploadDecision.kt`, pure): the first Poison after a 2xx is skipped,
+any further Poison before the next 2xx is held and backed off — genuine poison is one bad batch; a
+run of rejects is a server problem. Ingest, the historical import and the config push each have
+their own breaker; it lives in memory, so a restart re-arms one skip per stream. The config push
+also has its own retry gate (1 s doubling to 60 s, reset on a 2xx or a skip), so a held config is
+not re-POSTed on every loop pass. **Deploy order is load-bearing: the server's marker ships before
+this APK**, or a genuine app 4xx would be held forever.
+
+**A sample that crashes the server can't block the queue forever (DATA-22).** Only a *marked* 5xx
+other than 503 is a `ServerFault` (a marked 503 + `Retry-After` is the server's "database
+unavailable", and an unmarked 5xx is Traefik — both stay Transient). It backs off like a Transient
+and never touches the poison breaker. On the ingest stream only, the pure `stepHeadFault`
+(`cloud/UploadDecision.kt`) bisects the head batch: after `FAULT_STREAK` (4) marked faults on the
+same head that ALSO span `FAULT_MIN_SPAN_MS` (5 min, on `elapsedRealtime`) the batch limit halves
+(`ceil(n/2)`); at one row it skips that row's OUTBOX copy only (the sample stays in Room `samples`
+when logging is on), logs id/seq/size (never the payload), and bumps the persisted
+`server_fault_skips` counter that `Settings › Cloud sync` shows once it is above 0.
+Transient/AuthFailed responses neither reset nor advance a streak; a changed head resets it but
+keeps the limit; a 2xx doubles the limit back to 200. State is in memory, so a restart starts over
+at a full batch. The import and config streams are unchanged.
 
 **Bounded history reads (DATA-15/16).** On the History/Review/Timeline and session-rollup paths
 nothing reads a pack's or a session's samples as a list. The engine's windowed reads —
