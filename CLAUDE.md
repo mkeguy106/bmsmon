@@ -1387,6 +1387,15 @@ lowering it would roughly triple upload requests (battery + mobile data) and wal
 deliberate batching win. Net: guest lag ~11 s → ~8 s average, ~35 s → ~17 s worst. Spec:
 `docs/superpowers/specs/2026-08-02-share-feed-incremental-polling-design.md`.
 
+**2026-10 — the marker survives midnight (C5/WEB-20).** `last` is now `{t, lat, lon}` of
+the newest accuracy-gated fix in the last 48 h (`LAST_FIX_LOOKBACK_MS`), independent of
+the today-only trail. When today's trail has points, `last` is its head (no extra query).
+Otherwise it comes from `q.latest_gps_fix`, a per-pack LATERAL `ORDER BY ts DESC LIMIT 1`
+driven from `batteries` (never a month-to-date scan; ~24 ms worst case measured), cached
+on the trail's 10 s TTL. Before this, the overnight GNSS hold meant a carer opening the
+link in the morning got "Waiting for GPS…" until the chair moved. `t` is the fix's 15 s
+bucket start, like the trail.
+
 **Local dev/test:** `docker compose -f server/docker-compose.dev.yml up -d` brings up a Postgres on
 `localhost:5432` (user/pw/db all `bmsmon`, matching the default `DATABASE_URL`). Run server tests
 with the venv: `cd server && .venv/bin/python -m pytest` (bare `python` lacks the deps).

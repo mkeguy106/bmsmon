@@ -2,8 +2,9 @@
 these are reachable by anyone holding a share URL (capability link). Security model:
 192-bit tokens (secrets.token_urlsafe(24)), only sha256 stored, unknown/revoked are an
 indistinguishable bare 404, expired gets a human page, every response is
-no-store/no-referrer, and a per-IP rate limiter throttles scanning. Guests only ever
-see today's GPS trail — never battery fields (see queries.gps_track_all)."""
+no-store/no-referrer, and a per-IP rate limiter throttles scanning. Guests see today's
+GPS trail plus one "where is it now" marker (the newest fix within LAST_FIX_LOOKBACK_MS),
+and never battery fields beyond the minimal dock status (see queries.gps_track_all)."""
 
 import os
 import time
@@ -78,6 +79,19 @@ _DISCHARGE_CACHE_KEY = "recent_discharge"  # fleet-wide, so one key (see TRACK_C
 # but the trail is append-only within a day, so a <=10 s-stale tail is fine — and a new
 # day means a new from_ms, so the cache can never serve yesterday's trail past midnight.
 TRACK_CACHE_TTL_S = 10.0
+# C5/WEB-20: the marker (`last`) is the newest fix within this lookback, NOT just today's.
+# GNSS is held off overnight by the motion gate, so after local midnight today's trail
+# stays empty until the chair moves, and a carer opening the link at 08:00 used to get
+# "Waiting for GPS…". 48 h covers any overnight park. The trail itself stays today-only.
+LAST_FIX_LOOKBACK_MS = 48 * 3600 * 1000
+_LAST_FIX_CACHE_KEY = "last_fix"  # fleet-wide, one key, on the trail's TTL
+TRAIL_BUCKET_MS = 15_000          # gps_track_all's bucket width: `t` is a bucket start
+
+
+def _marker(t_ms: int, lat, lon) -> dict:
+    """The feed's `last` shape (C5): exactly {t, lat, lon}."""
+    return {"t": int(t_ms), "lat": lat, "lon": lon}
+
 # last_access/access_count exist for the owner's Settings list ("last opened", "x N") —
 # purely informational. Nothing security-relevant reads them (revocation checks
 # revoked_at, expiry checks expires_at), so throttling the touch UPDATE to once per
@@ -225,6 +239,21 @@ async def share_feed(token: str, request: Request, since: str | None = None,
                        "power_w": _f(r["power_w"]), "current_a": _f(r["current_a"])}
                       for r in rows]
             state.share_track_cache.put(from_ms, points)
+        # `last` comes from the FULL data, never the `since` slice below. Today's trail
+        # head IS the newest fix in the 48 h window when one exists (no extra query);
+        # otherwise ask the bounded per-pack lookup, cached like the trail. Cached as a
+        # 1-tuple so "no fix in 48 h" (None) is a cache hit too.
+        if points:
+            last = _marker(points[-1]["t"], points[-1]["lat"], points[-1]["lon"])
+        else:
+            cached = state.share_last_fix_cache.get(_LAST_FIX_CACHE_KEY)
+            if cached is None:
+                fix = await q.latest_gps_fix(conn, now_ms - LAST_FIX_LOOKBACK_MS, now_ms + 1)
+                cached = (None if fix is None else _marker(
+                    (int(fix["ts_ms"]) // TRAIL_BUCKET_MS) * TRAIL_BUCKET_MS,
+                    fix["lat"], fix["lon"]),)
+                state.share_last_fix_cache.put(_LAST_FIX_CACHE_KEY, cached)
+            last = cached[0]
         if last_discharge is None:
             last_discharge = await q.recent_discharge_by_address(
                 conn, now_ms - ACTIVE_HOLD_MS, DISCHARGE_EPS)
@@ -243,9 +272,9 @@ async def share_feed(token: str, request: Request, since: str | None = None,
     cut = parse_since(since, from_ms)
     trail = points if cut is None else [p for p in points if p["t"] >= cut]
     return JSONResponse(
-        # `last` comes from the FULL trail, never the slice: a poll with no new buckets
-        # must not blank the guest's live chair marker.
-        {"points": trail, "last": points[-1] if points else None,
+        # `last` was computed above from the FULL data, never the slice: a poll with no
+        # new buckets must not blank the guest's live chair marker.
+        {"points": trail, "last": last,
          "expires_at": share["expires_at"], "now": now_ms, "day_start": from_ms,
          "owner": settings.share_owner, "status": status},
         headers=_SEC_HEADERS)
