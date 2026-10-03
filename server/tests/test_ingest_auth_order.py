@@ -11,6 +11,7 @@ import pytest
 
 from app.auth.device_jwt import JtiCache, JwtError, verify_body, verify_token
 from app.db import queries as q
+from app.middleware import API_MARKER_HEADER, API_MARKER_VALUE
 from app.ratelimit import INGEST_MAX_PER_MIN, INGEST_WINDOW_S, RateLimiter
 from app.routers import api_device
 from tests.test_ingest_jwt import _enroll_device, _keypair, _payload, _token
@@ -51,6 +52,10 @@ async def test_strangers_never_get_their_body_read(app, client, body_reads):
         _auth(_token(priv, str(uuid.uuid4()), body)),        # unknown device
         _auth(_token(wrong_key, device_id, body)),           # forged signature
         _auth(_token(priv, device_id, body, exp_in=-3600)),  # expired
+        # uuid.UUID() accepts these spellings but asyncpg's uuid codec does not: they
+        # used to reach get_device and escape as a pre-auth 500.
+        _auth(_token(wrong_key, "{" + device_id + "}", body)),
+        _auth(_token(wrong_key, "urn:uuid:" + device_id, body)),
     ]
     for path in ENDPOINTS:
         for headers in bad:
@@ -146,7 +151,14 @@ async def test_device_budget_counts_only_authenticated_requests(app, client, bod
     r = await client.post("/api/v1/config", content=body,
                           headers=_auth(_token(priv, device_id, body)))
     assert r.status_code == 429      # ingest + config share one per-device budget
-    assert len(body_reads) == 2      # the 429 was decided before reading the body
+    assert r.headers.get(API_MARKER_HEADER) == API_MARKER_VALUE  # C1: the phone retries it
+    # Other spellings of the same UUID are the same device, so they share its bucket.
+    for alias in (device_id.upper(), device_id.replace("-", ""), "{" + device_id + "}",
+                  "urn:uuid:" + device_id):
+        r = await client.post("/api/v1/ingest", content=body,
+                              headers=_auth(_token(priv, alias, body)))
+        assert r.status_code == 429, alias
+    assert len(body_reads) == 2      # every 429 was decided before reading the body
     priv2, spki2 = _keypair()
     async with app.state.pool.acquire() as conn:
         device2 = str(await q.create_device(conn, "inst-second", spki2, "dev2"))

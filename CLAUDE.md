@@ -1237,7 +1237,9 @@ Enforced in the app itself (not delegated to Traefik/Authentik) and pinned by te
   (`ingest_limiter`, `INGEST_MAX_PER_MIN` = 3000/min, shared by ingest + config) is keyed
   per **device after the signature verifies**, never per IP, so nobody without the device
   key can spend it. A serial outbox drain tops out around 10–16 POST/s, well under it.
-  Also fixed: a non-string `sub` (pre-auth) or `aud` used to escape as a 500.
+  The `sub` is canonicalised once (`str(uuid.UUID(...))`), so every spelling of a device's
+  UUID shares one budget. Also fixed: a non-string or `{braced}`/`urn:uuid:` `sub`
+  (pre-auth), or a non-string `aud`, used to escape as a 500.
 
 ### Read-only API keys (`/api/v1/groups`, desktop widgets)
 

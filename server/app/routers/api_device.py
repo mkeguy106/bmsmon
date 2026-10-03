@@ -109,8 +109,10 @@ async def _authenticate(request: Request, pool) -> tuple[str, dict]:
         raise HTTPException(401, "missing bearer")
     token = auth[7:]
     try:
-        device_id = unverified_sub(token)
-        uuid.UUID(device_id)
+        # Canonicalise once: uuid.UUID() also accepts {braced}, urn:uuid:, uppercase and
+        # unhyphenated spellings. asyncpg rejects the first two (a pre-auth 500), and the
+        # rest would each get their own budget bucket. Everything below uses this form.
+        device_id = str(uuid.UUID(unverified_sub(token)))
     except (JwtError, ValueError, TypeError, AttributeError):
         # AttributeError: a non-string sub (e.g. 123) used to escape as a pre-auth 500.
         raise HTTPException(401, "bad token")
