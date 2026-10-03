@@ -89,6 +89,28 @@ internal const val IV_ROW_AFTER_SQL =
         "AND linkEvent IS NULL AND currentA IS NOT NULL AND voltageV IS NOT NULL " +
         "ORDER BY tsMs ASC, id ASC LIMIT 1 OFFSET :skip"
 
+/** Row count and time span of one session (incl. link rows) — fixes the timeline bucket geometry. */
+data class SessionSpan(val n: Long, val startMs: Long?, val endMs: Long?)
+
+/** Lean timeline projection (DATA-15): link flag + the four pooled columns. */
+data class TimelineRow(
+    val id: Long,
+    val tsMs: Long,
+    val isLink: Boolean,
+    val currentA: Float?,
+    val powerW: Float?,
+    val voltageV: Float?,
+    val soc: Float?,
+)
+
+internal const val SESSION_SPAN_SQL =
+    "SELECT COUNT(*) AS n, MIN(tsMs) AS startMs, MAX(tsMs) AS endMs FROM samples WHERE sessionId = :sessionId"
+
+/** One keyset page of a session's rows, link events included, in id order (index seek, no sort). */
+internal const val TIMELINE_PAGE_SQL =
+    "SELECT id, tsMs, linkEvent IS NOT NULL AS isLink, currentA, powerW, voltageV, soc " +
+        "FROM samples WHERE sessionId = :sessionId AND id > :afterId ORDER BY id ASC LIMIT :limit"
+
 /** One keyset page of a session's telemetry rows, in id order (DATA-16). index_samples_sessionId is
  *  (sessionId, rowid), so this is a pure index range seek with no sort (RollupSqlTest pins it). */
 internal const val ROLLUP_PAGE_SQL =
@@ -101,8 +123,12 @@ interface SampleDao {
     @Insert suspend fun insert(sample: SampleEntity): Long
     @Insert suspend fun insertAll(samples: List<SampleEntity>)
 
-    @Query("SELECT * FROM samples WHERE sessionId = :sessionId ORDER BY tsMs ASC")
-    suspend fun forSession(sessionId: Long): List<SampleEntity>
+    @Query(SESSION_SPAN_SQL)
+    suspend fun sessionSpan(sessionId: Long): SessionSpan
+
+    /** Blocking — the timeline pager calls it in a loop on IO. Never call on Main. */
+    @Query(TIMELINE_PAGE_SQL)
+    fun timelinePage(sessionId: Long, afterId: Long, limit: Int): List<TimelineRow>
 
     /** Blocking — the rollup pager calls it in a loop on the IO writer; never call on Main. */
     @Query(ROLLUP_PAGE_SQL)

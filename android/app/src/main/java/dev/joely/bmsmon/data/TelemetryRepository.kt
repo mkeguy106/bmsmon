@@ -27,6 +27,9 @@ private const val TAG = "TelemetryRepository"
 /** Rows per rollup page (DATA-16): ~1000 lean rows ≈ 150–200 KB, the only rows ever held. */
 private const val ROLLUP_PAGE = 1_000
 
+/** Rows per timeline page (DATA-15). */
+private const val TIMELINE_PAGE = 2_000
+
 /**
  * Single facade for telemetry persistence (replaces TelemetryLogger). Writes are serialized through
  * an unlimited channel consumed by one coroutine, so callers (the BLE poll loop) never block and DB
@@ -242,8 +245,13 @@ class TelemetryRepository(private val db: BmsDatabase) {
     suspend fun rangeRows(address: String, sinceMs: Long): List<RangeRowColumns> =
         db.samples().rangeRowsSince(address, sinceMs)
 
-    /** All rows (telemetry + link events) for one session, oldest first — for the timeline pooler. */
-    suspend fun samplesForSession(sessionId: Long): List<SampleEntity> = db.samples().forSession(sessionId)
+    /** One session's peak-pooled timeline, streamed in bounded pages on IO (DATA-15) — replaces the
+     *  whole-session load (a multi-day legacy session is hundreds of thousands of full rows). */
+    suspend fun timeline(sessionId: Long): List<TimelineBucket> = withContext(Dispatchers.IO) {
+        poolTimeline(db.samples().sessionSpan(sessionId), TIMELINE_PAGE) { afterId, limit ->
+            db.samples().timelinePage(sessionId, afterId, limit)
+        }
+    }
 
     /** One session's rollups by id (for the timeline drill-down header/summary). */
     suspend fun session(sessionId: Long): SessionEntity? = db.sessions().byId(sessionId)

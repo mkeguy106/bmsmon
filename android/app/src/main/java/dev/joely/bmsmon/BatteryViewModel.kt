@@ -12,7 +12,6 @@ import dev.joely.bmsmon.data.PackHealth
 import dev.joely.bmsmon.data.SettingsStore
 import dev.joely.bmsmon.data.buildPackHealth
 import dev.joely.bmsmon.data.formatDbSizeMb
-import dev.joely.bmsmon.data.peakPool
 import dev.joely.bmsmon.ble.profile.BatteryProfile
 import dev.joely.bmsmon.ble.profile.ProfileRegistry
 import dev.joely.bmsmon.cloud.CloudJson
@@ -581,11 +580,12 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             .map { loadPackHealth(it.address) }
             .filter { it.sessionCount > 0 }
 
-    /** Load one session's rollups + peak-pooled timeline buckets for the drill-down. */
+    /** Load one session's rollups + peak-pooled timeline buckets for the drill-down. Main-safe: the
+     *  timeline streams in bounded pages on IO (DATA-15) instead of loading the whole session. */
     suspend fun loadTimeline(sessionId: Long): Triple<String, dev.joely.bmsmon.data.db.SessionEntity, List<dev.joely.bmsmon.data.TimelineBucket>>? {
         val session = engine.history.session(sessionId) ?: return null
         val alias = _state.value.roster.batteryAt(session.address)?.alias ?: session.address
-        val buckets = peakPool(engine.history.samplesForSession(sessionId))
+        val buckets = engine.history.timeline(sessionId)
         return Triple(alias, session, buckets)
     }
 

@@ -5,6 +5,8 @@ import dev.joely.bmsmon.data.db.IvBinMoments
 import dev.joely.bmsmon.data.db.IvPoint
 import dev.joely.bmsmon.data.db.SampleEntity
 import dev.joely.bmsmon.data.db.SessionEntity
+import dev.joely.bmsmon.data.db.SessionSpan
+import dev.joely.bmsmon.data.db.TimelineRow
 import kotlin.math.roundToInt
 
 /**
@@ -339,43 +341,70 @@ fun healthInputsFrom(
 ): HealthInputs = HealthInputs(bins, cells, stridePoints(scatterStep(bins.sumOf { it.n }), fetch = fetchStride))
 
 /**
- * Peak-pool a session's raw [samples] into ~[buckets] time buckets so transient spikes survive
+ * Peak-pool a session's rows into ~[TIMELINE_BUCKETS] time buckets so transient spikes survive
  * downsampling: discharge & regen power are **max-pooled**, voltage is **min-pooled** (the deepest
  * sag is kept), SOC takes the last value, and a bucket is flagged [TimelineBucket.link] if any BLE
  * link event fell in it. Never stride-samples — that would drop the spikes that matter.
+ *
+ * Streaming form (DATA-15): the bucket geometry is fixed up front from the session's row count and
+ * time span (one aggregate query) and rows are folded one at a time in bounded pages, so opening a
+ * multi-day legacy session no longer materializes it. Rows outside [startMs, endMs] — an open
+ * session still growing, or a stepped-back clock — clamp into the edge buckets. "Last SOC" follows
+ * feed order (production: id order, equal to time order unless the clock stepped back).
  */
-fun peakPool(samples: List<SampleEntity>, buckets: Int = TIMELINE_BUCKETS): List<TimelineBucket> {
-    if (samples.isEmpty()) return emptyList()
-    val startMs = samples.first().tsMs
-    val endMs = samples.last().tsMs
-    val span = (endMs - startMs).coerceAtLeast(1L)
-    val n = buckets.coerceIn(1, maxOf(1, samples.size))
+class PeakPooler(private val startMs: Long, endMs: Long, rowCount: Long, buckets: Int = TIMELINE_BUCKETS) {
+    private val span = (endMs - startMs).coerceAtLeast(1L)
+    private val n = buckets.coerceIn(1, rowCount.coerceIn(1L, Int.MAX_VALUE.toLong()).toInt())
+    private val dis = FloatArray(n)
+    private val reg = FloatArray(n)
+    private val minV = arrayOfNulls<Float>(n)
+    private val socLast = arrayOfNulls<Float>(n)
+    private val link = BooleanArray(n)
+    private val used = BooleanArray(n)
 
-    val dis = FloatArray(n)
-    val reg = FloatArray(n)
-    val minV = arrayOfNulls<Float>(n)
-    val soc = arrayOfNulls<Float>(n)
-    val link = BooleanArray(n)
-    val used = BooleanArray(n)
-    val ts = LongArray(n) { startMs + (span * it) / n }
-
-    for (s in samples) {
-        val b = (((s.tsMs - startMs) * n) / span).toInt().coerceIn(0, n - 1)
+    fun add(tsMs: Long, isLink: Boolean, currentA: Float?, powerW: Float?, voltageV: Float?, soc: Float?) {
+        val b = (((tsMs - startMs) * n) / span).toInt().coerceIn(0, n - 1)
         used[b] = true
-        if (s.linkEvent != null) { link[b] = true; continue }
-        val cur = s.currentA ?: 0f
-        val pw = s.powerW ?: 0f                 // magnitude (V·|I|)
+        if (isLink) {
+            link[b] = true
+            return
+        }
+        val cur = currentA ?: 0f
+        val pw = powerW ?: 0f                 // magnitude (V·|I|)
         if (cur < -DISCHARGE_EPS) { if (pw > dis[b]) dis[b] = pw }
         else if (cur > DISCHARGE_EPS) { if (pw > reg[b]) reg[b] = pw }
-        s.voltageV?.let { v -> if (minV[b] == null || v < minV[b]!!) minV[b] = v }
-        s.soc?.let { soc[b] = it }
+        voltageV?.let { v -> val m = minV[b]; if (m == null || v < m) minV[b] = v }
+        soc?.let { socLast[b] = it }
     }
-    val out = ArrayList<TimelineBucket>(n)
-    for (b in 0 until n) {
-        if (!used[b]) continue
-        out.add(TimelineBucket(ts[b], dis[b], reg[b], minV[b], soc[b], link[b]))
+
+    fun buckets(): List<TimelineBucket> {
+        val out = ArrayList<TimelineBucket>(n)
+        for (b in 0 until n) {
+            if (!used[b]) continue
+            out.add(TimelineBucket(startMs + (span * b) / n, dis[b], reg[b], minV[b], socLast[b], link[b]))
+        }
+        return out
     }
-    return out
+}
+
+/** Stream one session through a [PeakPooler] in [pageSize]-row keyset pages ([fetch] = `SampleDao.timelinePage`). */
+fun poolTimeline(span: SessionSpan, pageSize: Int, fetch: (afterId: Long, limit: Int) -> List<TimelineRow>): List<TimelineBucket> {
+    val start = span.startMs
+    val end = span.endMs
+    if (span.n == 0L || start == null || end == null) return emptyList()
+    val pool = PeakPooler(start, end, span.n)
+    forEachKeysetPage(pageSize, fetch, TimelineRow::id) { r ->
+        pool.add(r.tsMs, r.isLink, r.currentA, r.powerW, r.voltageV, r.soc)
+    }
+    return pool.buckets()
+}
+
+/** List-input form of [PeakPooler] over a time-ordered sample list. */
+fun peakPool(samples: List<SampleEntity>, buckets: Int = TIMELINE_BUCKETS): List<TimelineBucket> {
+    if (samples.isEmpty()) return emptyList()
+    val pool = PeakPooler(samples.first().tsMs, samples.last().tsMs, samples.size.toLong(), buckets)
+    for (s in samples) pool.add(s.tsMs, s.linkEvent != null, s.currentA, s.powerW, s.voltageV, s.soc)
+    return pool.buckets()
 }
 
 /** Everything History needs from a pack's samples, in O(bins + sessions + points) memory (DATA-15). */

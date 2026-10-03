@@ -5,6 +5,7 @@ import dev.joely.bmsmon.data.BIN_MIN_MOHM
 import dev.joely.bmsmon.data.BIN_MIN_R2
 import dev.joely.bmsmon.data.BIN_MIN_SPREAD_A
 import dev.joely.bmsmon.data.CellImbalance
+import dev.joely.bmsmon.data.DISCHARGE_EPS
 import dev.joely.bmsmon.data.DUTY_PEAK_W
 import dev.joely.bmsmon.data.PackHealth
 import dev.joely.bmsmon.data.PackResistance
@@ -12,6 +13,8 @@ import dev.joely.bmsmon.data.SCATTER_MAX_POINTS
 import dev.joely.bmsmon.data.ScatterPoint
 import dev.joely.bmsmon.data.SessionRollup
 import dev.joely.bmsmon.data.SocBinResistance
+import dev.joely.bmsmon.data.TIMELINE_BUCKETS
+import dev.joely.bmsmon.data.TimelineBucket
 import dev.joely.bmsmon.data.ViScatter
 import dev.joely.bmsmon.data.db.SampleEntity
 import dev.joely.bmsmon.data.db.SessionEntity
@@ -201,6 +204,41 @@ internal fun randomPackSamples(seed: Long, rows: Int, address: String = "A", fir
             cellMinV = cellMin, cellMaxV = cellMin?.let { it + rnd.nextFloat() * 0.02f },
             regen = false, linkEvent = null,
         )
+    }
+    return out
+}
+
+/** The whole-list peak-pool exactly as it stood before the streaming rewrite (DATA-15). */
+internal fun referencePeakPool(samples: List<SampleEntity>, buckets: Int = TIMELINE_BUCKETS): List<TimelineBucket> {
+    if (samples.isEmpty()) return emptyList()
+    val startMs = samples.first().tsMs
+    val endMs = samples.last().tsMs
+    val span = (endMs - startMs).coerceAtLeast(1L)
+    val n = buckets.coerceIn(1, maxOf(1, samples.size))
+
+    val dis = FloatArray(n)
+    val reg = FloatArray(n)
+    val minV = arrayOfNulls<Float>(n)
+    val soc = arrayOfNulls<Float>(n)
+    val link = BooleanArray(n)
+    val used = BooleanArray(n)
+    val ts = LongArray(n) { startMs + (span * it) / n }
+
+    for (s in samples) {
+        val b = (((s.tsMs - startMs) * n) / span).toInt().coerceIn(0, n - 1)
+        used[b] = true
+        if (s.linkEvent != null) { link[b] = true; continue }
+        val cur = s.currentA ?: 0f
+        val pw = s.powerW ?: 0f
+        if (cur < -DISCHARGE_EPS) { if (pw > dis[b]) dis[b] = pw }
+        else if (cur > DISCHARGE_EPS) { if (pw > reg[b]) reg[b] = pw }
+        s.voltageV?.let { v -> if (minV[b] == null || v < minV[b]!!) minV[b] = v }
+        s.soc?.let { soc[b] = it }
+    }
+    val out = ArrayList<TimelineBucket>(n)
+    for (b in 0 until n) {
+        if (!used[b]) continue
+        out.add(TimelineBucket(ts[b], dis[b], reg[b], minV[b], soc[b], link[b]))
     }
     return out
 }
