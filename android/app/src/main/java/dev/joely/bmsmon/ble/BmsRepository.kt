@@ -6,6 +6,7 @@ import android.util.Log
 import dev.joely.bmsmon.ble.profile.BatteryProfile
 import dev.joely.bmsmon.ble.profile.ProfileRegistry
 import dev.joely.bmsmon.ble.profile.RedodoBekenProfile
+import dev.joely.bmsmon.data.FailureLogThrottle
 import dev.joely.bmsmon.model.BmsTarget
 import dev.joely.bmsmon.model.Telemetry
 import kotlinx.coroutines.CancellationException
@@ -65,6 +66,14 @@ class BmsRepository(
 
     private var onPoll: (String, ByteArray, Telemetry?) -> Unit = { _, _, _ -> }
     private var onReachable: (String, Boolean) -> Unit = { _, _ -> }
+
+    // Rate limits for failure logs that can repeat on every frame (~100/min across the fleet): a
+    // callback that throws deterministically, or a frame shape the parser chokes on. Each logs its
+    // first failure in full, then at most one counted summary line a minute (FailureLogThrottle).
+    // That class is single-consumer and poll workers run concurrently, so each throttle is only
+    // touched under its own lock (see logRepeating).
+    private val callbackFailures = FailureLogThrottle()
+    private val parseFailures = FailureLogThrottle()
 
     // Current generation's event channel (workers → control loop, single reader). UNLIMITED:
     // trySend never suspends, so workers are never blocked by the loop's pace. External API only
@@ -136,6 +145,9 @@ class BmsRepository(
     /** Set which batteries are on the stage (persistent, fast poll). */
     fun setStage(addresses: Set<String>) {
         stageAddrs = addresses.map { it.uppercase() }.toSet()
+        // Written LAST (and read FIRST by the control loop): both are volatile, so a loop that sees
+        // `stageInitialized = true` is guaranteed to see the stage written before it — never the
+        // old empty set with the barrier already released.
         stageInitialized = true  // the launch stage is now known; the barrier can admit it
         wake()
     }
@@ -176,11 +188,33 @@ class BmsRepository(
         stagePriorityUntil = 0L
     }
 
-    /** Wake the CURRENT generation's control loop (external API paths only). */
-    /** BLE-22: one engine callback; a throw drops this event (logged) instead of the loop. */
+    /** BLE-22: one engine callback; a throw drops this event (logged, rate-limited) instead of the loop. */
     private inline fun safely(what: String, block: () -> Unit) =
-        isolateCallback({ e -> Log.e(TAG, "$what threw — event dropped", e) }, block)
+        isolateCallback({ e -> logRepeating(callbackFailures, "$what threw — event dropped", e, Log::e) }, block)
 
+    /**
+     * Log a failure that may repeat on every frame through [throttle]: the first of a burst with its
+     * stack trace, later ones as at most one counted summary line per minute (none in between).
+     */
+    private fun logRepeating(
+        throttle: FailureLogThrottle,
+        what: String,
+        e: Exception,
+        log: (String, String, Throwable?) -> Int,
+    ) {
+        when (val line = synchronized(throttle) { throttle.onFailure(now()) }) {
+            is FailureLogThrottle.Action.Full -> log(
+                TAG,
+                if (line.unreported == 0) what else "$what (${line.unreported} earlier failures went unreported)",
+                e,
+            )
+            is FailureLogThrottle.Action.Summary ->
+                log(TAG, "${line.count} more failures since the last report; latest: $what: $e", null)
+            FailureLogThrottle.Action.Suppress -> Unit
+        }
+    }
+
+    /** Wake the CURRENT generation's control loop (external API paths only). */
     private fun wake() { currentWake?.wake() }
 
     // ---- control loop: the only coroutine that mutates per-pack state ----
@@ -213,20 +247,26 @@ class BmsRepository(
 
                 // 2. Decide connects/disconnects for this tick.
                 val desired = allTargets.map { it.address }.toSet() - disabledAddrs
+                // Read stageInitialized FIRST, then the stage it vouches for: setStage writes them in
+                // the opposite order, so a released barrier always plans against the pushed stage.
+                // (Reading the stage first could pair the old empty set with initialized = true and
+                // admit background packs ahead of the stage for one tick.)
+                val initialized = stageInitialized
+                val stage = stageAddrs
                 // Launch barrier: while within the grace window and the stage isn't fully up yet,
                 // admit only stage packs. Releases the moment every stage pack is held (their poll
                 // loops are then already running) or the grace window expires — then normal rotation.
                 val stageFirst = launchBarrierHolds(
                     desired = desired,
-                    stage = stageAddrs,
+                    stage = stage,
                     held = held.keys,
-                    stageInitialized = stageInitialized,
+                    stageInitialized = initialized,
                     now = now,
                     priorityUntil = stagePriorityUntil,
                 )
                 val plan = planFleet(
                     desired      = desired,
-                    stage        = stageAddrs,
+                    stage        = stage,
                     held         = held.keys.toSet(),
                     connecting   = connecting.toSet(),
                     backoffUntil = backoffUntil,
@@ -245,7 +285,9 @@ class BmsRepository(
                     pollJobs.remove(drop.addr)?.cancel()
                     connecting -= drop.addr
                     held.remove(drop.addr)?.close()
-                    if (drop.reason == DropReason.Undesired) safely("onReachable ${drop.addr}") { onReachable(drop.addr, false) }
+                    if (drop.reason == DropReason.Undesired) {
+                        safely("onReachable ${drop.addr}") { onReachable(drop.addr, false) }
+                    }
                 }
 
                 // 4. Kick off connect attempts the planner requested.
@@ -349,7 +391,9 @@ class BmsRepository(
                         allTargets.firstOrNull { it.address == event.addr }?.name
                     ) ?: RedodoBekenProfile
                     backoffUntil[event.addr] = now + profile.backoff.delayFor(fc)
-                    if (fc >= profile.failThreshold) safely("onReachable ${event.addr}") { onReachable(event.addr, false) }
+                    if (fc >= profile.failThreshold) {
+                        safely("onReachable ${event.addr}") { onReachable(event.addr, false) }
+                    }
                 }
                 is LoopEvent.PollFrame -> safely("onPoll ${event.addr}") { onPoll(event.addr, event.raw, event.tel) }
                 is LoopEvent.PollDrop -> {
@@ -375,9 +419,10 @@ class BmsRepository(
      * consecutive misses before dropping; a hard error (link actually gone) drops immediately.
      *
      * The frame is parsed HERE, not on the control loop (UI-16): whether it decodes decides whether
-     * it resets the miss streak. An undecodable response is still delivered (tel = null) so the
-     * engine logs the decode_fail evidence, but it counts as a miss and keeps the normal cadence —
-     * the link answered, so the 0.5 s retry breather would only add load on a misbehaving module.
+     * it resets the miss streak. An undecodable response — a parser throw included ([decode]) — is
+     * still delivered (tel = null) so the engine logs the decode_fail evidence, but it counts as a
+     * miss and keeps the normal cadence ([missDelayMs]): the link answered, so the 0.5 s retry
+     * breather would only add load on a misbehaving module.
      */
     private suspend fun pollLoop(
         addr: String,
@@ -386,20 +431,19 @@ class BmsRepository(
         ch: Channel<LoopEvent>,
         wake: LoopWake,
     ) {
+        // One streak for every kind of miss (timeouts and undecodable frames, see pollAction).
         var consecutiveMisses = 0
         while (true) {
             var raw: ByteArray? = null
             var tel: Telemetry? = null
             val outcome = try {
                 raw = session.poll(POLL_TIMEOUT_MS)
-                tel = raw?.let { r ->
-                    val name = allTargets.firstOrNull { it.address == addr }?.name ?: addr
-                    BmsProtocol.parseTelemetry(r, name, profile.layout, profile.responseHeader)
-                }
+                tel = raw?.let { decode(addr, it, profile) }   // never throws: a throw is a miss
                 pollOutcome(gotFrame = raw != null, decoded = tel != null)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                // Only the link can land here now (poll() throws when it is gone — BLE-18).
                 Log.d(TAG, "poll $addr: ${e.message}")
                 PollOutcome.ERROR
             }
@@ -411,12 +455,11 @@ class BmsRepository(
                 }
                 PollAction.RETRY -> {
                     consecutiveMisses++
-                    if (outcome == PollOutcome.UNDECODABLE) {
-                        deliverFrame(addr, raw!!, null, ch, wake)
-                        delay(pollCadenceMs(addr, profile))
-                    } else {
-                        delay(POLL_RETRY_DELAY_MS)  // brief breather; keep the link open and re-poll
-                    }
+                    // An undecodable response is still handed over, for the engine's decode_fail log.
+                    if (outcome == PollOutcome.UNDECODABLE) deliverFrame(addr, raw!!, null, ch, wake)
+                    // Keep the link open and re-poll: a short breather after a timeout, the normal
+                    // cadence after an undecodable frame (never faster — see missDelayMs).
+                    delay(missDelayMs(outcome, pollCadenceMs(addr, profile)))
                 }
                 PollAction.DROP -> {
                     // The final undecodable frame is still logged before the link is dropped.
@@ -426,6 +469,20 @@ class BmsRepository(
                     return
                 }
             }
+        }
+    }
+
+    /**
+     * Parse one complete response for [addr]. A parser throw is an undecodable frame, not a dead
+     * link ([decodeOrNull]): logged here with the frame (rate-limited), then counted as a miss.
+     */
+    private fun decode(addr: String, raw: ByteArray, profile: BatteryProfile): Telemetry? {
+        val name = allTargets.firstOrNull { it.address == addr }?.name ?: addr
+        return decodeOrNull({ e ->
+            val hex = raw.joinToString(" ") { "%02X".format(it) }
+            logRepeating(parseFailures, "parser threw on a ${raw.size}-byte frame from $addr (a miss): $hex", e, Log::w)
+        }) {
+            BmsProtocol.parseTelemetry(raw, name, profile.layout, profile.responseHeader)
         }
     }
 
@@ -454,7 +511,6 @@ class BmsRepository(
         const val TAG = "BmsRepository"
         const val CONTROL_TICK_MS      = 1_000L
         const val POLL_TIMEOUT_MS      = 4_000L
-        const val POLL_RETRY_DELAY_MS  = 500L
         const val RECONNECT_BACKOFF_MS = 2_000L
         // Launch window during which the stage connects/polls before any background pack. Releases
         // early once the stage is fully connected; this is just the safety cap so an unreachable

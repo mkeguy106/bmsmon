@@ -145,19 +145,40 @@ class SessionStartOrderTest {
 
     // --- source guard: the real BmsRepository.start() is what the model's start(installed) says ---
 
-    @Test
-    fun `BmsRepository installs the disabled set before its control loop runs`() {
-        val src = listOf("src/main/java", "app/src/main/java")
+    private val repoSrc: String by lazy {
+        listOf("src/main/java", "app/src/main/java")
             .map { File(it, "dev/joely/bmsmon/ble/BmsRepository.kt") }
             .first { it.isFile }
             .readText()
             .replace(Regex("\\s+"), " ")
-        val start = src.substringAfter("fun start(").substringBefore("fun setStage(")
+    }
+
+    @Test
+    fun `BmsRepository installs the disabled set before its control loop runs`() {
+        val start = repoSrc.substringAfter("fun start(").substringBefore("fun setStage(")
         val wipe = start.indexOf("stop()")
         val install = start.indexOf("disabledAddrs = disabled.")
         val loop = start.indexOf("controlLoop(")
         assertTrue("start() must take the disabled set", start.contains("disabled: Set<String>,"))
         assertTrue("installed after stop() wipes it", wipe in 0 until install)
         assertTrue("installed before the loop is launched", install < loop)
+    }
+
+    // Both fields are volatile. setStage writes the stage, then stageInitialized; the loop must read
+    // them in the OPPOSITE order, or one tick can pair the old empty stage with initialized = true —
+    // and that releases the barrier for every background pack ahead of the stage.
+    @Test
+    fun `a released launch barrier always sees the stage that released it`() {
+        val setStage = repoSrc.substringAfter("fun setStage(").substringBefore("fun setTargets(")
+        assertTrue(
+            "setStage writes stageInitialized last",
+            setStage.indexOf("stageAddrs = ") in 0 until setStage.indexOf("stageInitialized = true"),
+        )
+        val tick = repoSrc.substringAfter("// 2. Decide connects/disconnects").substringBefore("// 3. Drop")
+        val readInitialized = tick.indexOf("val initialized = stageInitialized")
+        val readStage = tick.indexOf("val stage = stageAddrs")
+        assertTrue("the loop reads stageInitialized first", readInitialized in 0 until readStage)
+        assertTrue("…and plans on that one snapshot", tick.contains("stageInitialized = initialized,"))
+        assertFalse("no second read of the live field", tick.contains("stage = stageAddrs,"))
     }
 }
