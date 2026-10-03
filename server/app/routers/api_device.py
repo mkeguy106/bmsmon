@@ -9,15 +9,16 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
-from app.auth.device_jwt import JwtError, unverified_sub, verify_body, verify_token
+from app.auth.device_jwt import JwtError, skew_of, unverified_sub, verify_body, verify_token
 from app.auth.enroll import hash_code
 from app.config import settings
 from app.db import queries as q
 from app.db.pool import get_pool
 from app.models import (
     ConfigResponse, EnrollBody, EnrollResponse, IngestEnvelope, IngestResponse,
-    RangeConfigRow, SampleIn, TempConfigBody, validate_each,
+    RangeConfigRow, SampleIn, TempConfigBody, first_error, validate_each,
 )
+from app.observability import clean_user_agent
 from app.ratelimit import client_key
 
 router = APIRouter(prefix="/api/v1")
@@ -39,10 +40,39 @@ ADDRESS_MAX_LEN = 32
 # drain of a drifted client would otherwise log the same failure for every batch.
 REJECT_LOG_INTERVAL_S = 60.0
 
+# DATA-20: the machine-readable cause of a device-route 401. Values: missing_bearer,
+# bad_token, unknown_or_revoked_device, bad_signature, clock_skew, replay, body_mismatch.
+# Only clock_skew means "the clocks disagree"; the body's detail text is unchanged.
+AUTH_REASON_HEADER = "X-Bmsmon-Auth-Reason"
+
 
 def _may_log_reject(request: Request, device_id: str, kind: str) -> bool:
     """True at most once per device per `kind` per REJECT_LOG_INTERVAL_S (app.state.reject_log)."""
     return request.app.state.reject_log.should_touch((device_id, kind))
+
+
+def _deny(reason: str, detail: str) -> HTTPException:
+    return HTTPException(401, detail, headers={AUTH_REASON_HEADER: reason})
+
+
+def _note_auth_failure(request: Request, device_id: str, reason: str, message: str,
+                       skew_s: int | None) -> None:
+    """A KNOWN device failed auth: count it for /api/v1/health/detail and log it with the
+    skew and the app build, at most once per device per reason per REJECT_LOG_INTERVAL_S."""
+    request.app.state.auth_stats.record_failure(reason, skew_s)
+    if _may_log_reject(request, device_id, f"auth:{reason}"):
+        logger.warning(
+            "device auth failed for %s: %s (%s); skew %s; ua %r "
+            "(repeats of this reason for this device suppressed for %.0f s)",
+            device_id, reason, message, "n/a" if skew_s is None else f"{skew_s:+d} s",
+            clean_user_agent(request.headers.get("user-agent")), REJECT_LOG_INTERVAL_S)
+
+
+def _log_envelope_reject(request: Request, device_id: str, err: ValidationError) -> None:
+    if _may_log_reject(request, device_id, "envelope"):
+        logger.warning("%s: refused an invalid envelope from device %s with 422: %s "
+                       "(repeats for this device suppressed for %.0f s)",
+                       request.url.path, device_id, first_error(err), REJECT_LOG_INTERVAL_S)
 
 
 def _log_rejects(request: Request, device_id: str, kind: str,
@@ -125,11 +155,12 @@ async def _authenticate(request: Request, pool) -> tuple[str, dict]:
     Bearer -> device row -> ES256 signature + required claims + exp/iat/aud
     (device_jwt.verify_token) -> replay probe -> per-device budget. Only a request that
     passes all of it ever has its body read and gunzipped (_read_verified_body). Never
-    burns the jti; see device_jwt.verify_body. Returns (device_id, claims).
+    burns the jti; see device_jwt.verify_body. Returns (device_id, claims). Every 401 names
+    its cause in X-Bmsmon-Auth-Reason; failures of a KNOWN device are counted and logged.
     """
     auth = request.headers.get("authorization", "")
     if not auth.lower().startswith("bearer "):
-        raise HTTPException(401, "missing bearer")
+        raise _deny("missing_bearer", "missing bearer")
     token = auth[7:]
     try:
         # Canonicalise once: uuid.UUID() also accepts {braced}, urn:uuid:, uppercase and
@@ -138,17 +169,27 @@ async def _authenticate(request: Request, pool) -> tuple[str, dict]:
         device_id = str(uuid.UUID(unverified_sub(token)))
     except (JwtError, ValueError, TypeError, AttributeError):
         # AttributeError: a non-string sub (e.g. 123) used to escape as a pre-auth 500.
-        raise HTTPException(401, "bad token")
+        raise _deny("bad_token", "bad token")
     async with pool.acquire() as conn:
         dev = await q.get_device(conn, device_id)
-    if dev is None or dev["revoked"]:
-        raise HTTPException(401, "unknown or revoked device")
+    if dev is None:
+        # Anyone can mint a well-formed token for a random id: one line a minute, uncounted.
+        if _may_log_reject(request, "*", "auth:unknown_device"):
+            logger.warning("device auth failed: unknown device %s (further unknown-device "
+                           "failures suppressed for %.0f s)", device_id, REJECT_LOG_INTERVAL_S)
+        raise _deny("unknown_or_revoked_device", "unknown or revoked device")
+    if dev["revoked"]:
+        _note_auth_failure(request, device_id, "unknown_or_revoked_device", "device is revoked", None)
+        raise _deny("unknown_or_revoked_device", "unknown or revoked device")
     try:
         claims = verify_token(token, bytes(dev["public_key_spki"]))
-    except JwtError:
-        raise HTTPException(401, "bad signature")
+    except JwtError as e:
+        _note_auth_failure(request, device_id, e.reason, str(e), e.skew_s)
+        raise _deny(e.reason, "bad signature")
     if request.app.state.jti_cache.contains(claims["jti"]):
-        raise HTTPException(401, "bad signature")  # replay, refused before the body is read
+        # replay, refused before the body is read
+        _note_auth_failure(request, device_id, "replay", "jti already used", None)
+        raise _deny("replay", "bad signature")
     if not request.app.state.ingest_limiter.allow(device_id):
         # Throttled like the drop WARNINGs, so a retry storm can't flood the log.
         if _may_log_reject(request, device_id, "budget"):
@@ -159,14 +200,17 @@ async def _authenticate(request: Request, pool) -> tuple[str, dict]:
     return device_id, claims
 
 
-async def _read_verified_body(request: Request, claims: dict) -> bytes:
+async def _read_verified_body(request: Request, device_id: str, claims: dict) -> bytes:
     """SEC-18 stage 2: read + gunzip the capped body, bind it to the token (bh), and only
-    then burn the jti. Returns the decompressed plaintext."""
+    then burn the jti. Returns the decompressed plaintext. A fully verified request
+    records its clock skew (server_now - iat) for /api/v1/health/detail."""
     raw = await _read_body(request)
     try:
         verify_body(claims, raw, request.app.state.jti_cache)
-    except JwtError:
-        raise HTTPException(401, "bad signature")
+    except JwtError as e:
+        _note_auth_failure(request, device_id, e.reason, str(e), None)
+        raise _deny(e.reason, "bad signature")
+    request.app.state.auth_stats.record_ok(skew_of(claims))
     return raw
 
 
@@ -212,13 +256,14 @@ async def ingest(request: Request, pool=Depends(get_pool)):
     device_id, claims = await _authenticate(request, pool)
     # The device may gzip the body; it is read (capped) and decompressed only now, after
     # the token verified. The JWT's bh is over the decompressed plaintext.
-    raw = await _read_verified_body(request, claims)
+    raw = await _read_verified_body(request, device_id, claims)
     # C3/SRV-18: ONLY the envelope can 422. Each sample is validated on its own and
     # dropped if invalid; the phone deletes a 4xx'd batch, so one bad field must never
     # cost the other rows.
     try:
         env = IngestEnvelope.model_validate_json(raw)
-    except ValidationError:
+    except ValidationError as e:
+        _log_envelope_reject(request, device_id, e)
         raise HTTPException(422, "invalid body")
     parsed, rejects = validate_each(SampleIn, env.samples)
     if rejects:
@@ -280,10 +325,11 @@ async def config(request: Request, pool=Depends(get_pool)):
     ingest). The core thresholds are the envelope (422 if malformed); ranges[] rows are
     validated one by one and invalid rows dropped (C3)."""
     device_id, claims = await _authenticate(request, pool)
-    raw = await _read_verified_body(request, claims)
+    raw = await _read_verified_body(request, device_id, claims)
     try:
         cfg = TempConfigBody.model_validate_json(raw)
-    except ValidationError:
+    except ValidationError as e:
+        _log_envelope_reject(request, device_id, e)
         raise HTTPException(422, "invalid body")
     ranges, rejects = validate_each(RangeConfigRow, cfg.ranges or [])
     if rejects:

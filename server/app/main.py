@@ -214,6 +214,9 @@ def create_app() -> FastAPI:
     from app.live.bus import LiveBus
     from app.ratelimit import RateLimiter
     app.state.jti_cache = JtiCache()
+    # Device-auth outcomes of KNOWN devices (routers/api_device.py), for health/detail.
+    from app.observability import AuthStats
+    app.state.auth_stats = AuthStats()
     app.state.bus = LiveBus()
     # Process-local perf state (single worker, SRV-8; app-scoped like the limiters so
     # each test app starts fresh). See routers/share.py for the TTL/interval rationale.

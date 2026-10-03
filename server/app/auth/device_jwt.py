@@ -15,7 +15,31 @@ AUDIENCE = "bmsmon-api"
 
 
 class JwtError(Exception):
-    pass
+    """A device token was refused. `reason` is the machine-readable cause the API returns
+    in X-Bmsmon-Auth-Reason (routers/api_device.py). `skew_s` (server_now - iat, whole
+    seconds) is set only for clock_skew, i.e. only once the signature has verified."""
+
+    def __init__(self, message: str, reason: str = "bad_signature",
+                 skew_s: int | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.skew_s = skew_s
+
+
+def _skew_from_unverified(token: str) -> int | None:
+    """server_now - iat read from a token whose SIGNATURE PyJWT has already verified (it
+    checks the signature before any time claim): only the clocks disagree."""
+    try:
+        return skew_of(jwt.decode(token, options={"verify_signature": False}))
+    except Exception:
+        return None
+
+
+def skew_of(claims: dict) -> int:
+    """server_now - iat of a verified token, in whole seconds (positive: server ahead).
+    Integer arithmetic on purpose: PyJWT has already checked int(iat), and float() of a
+    huge integer iat would overflow, so this can never fail on an accepted token."""
+    return round(time.time()) - int(claims["iat"])
 
 
 def body_hash(body: bytes) -> str:
@@ -71,6 +95,8 @@ def verify_token(token: str, public_key_spki: bytes) -> dict:
                             options={"require": ["exp", "sub", "jti", "bh", "iat"],
                                      "verify_aud": False},
                             leeway=LEEWAY_SECONDS)
+    except (jwt.ExpiredSignatureError, jwt.ImmatureSignatureError) as e:
+        raise JwtError(str(e), "clock_skew", _skew_from_unverified(token)) from e
     except Exception as e:
         raise JwtError(str(e)) from e
     if not isinstance(claims["jti"], str) or not isinstance(claims["bh"], str):
@@ -91,9 +117,9 @@ def verify_body(claims: dict, body: bytes, jti_cache: JtiCache) -> None:
     bad gzip / 413 before this is called) must not consume the token, or a retry of the
     same request would be refused as a replay."""
     if claims["bh"] != body_hash(body):
-        raise JwtError("body hash mismatch")
+        raise JwtError("body hash mismatch", "body_mismatch")
     if jti_cache.seen(claims["jti"], int(claims["exp"]) + LEEWAY_SECONDS):
-        raise JwtError("replay")
+        raise JwtError("replay", "replay")
 
 
 def verify(token: str, public_key_spki: bytes, body: bytes, jti_cache: JtiCache) -> dict:

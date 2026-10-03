@@ -258,6 +258,14 @@ class ConfigResponse(OkResponse):
 M = TypeVar("M", bound=BaseModel)
 
 
+def first_error(e: ValidationError) -> str:
+    """'<loc>: <error type>' of a ValidationError's FIRST error. Location and type only,
+    NEVER the input value: device bodies carry GPS coordinates."""
+    first = e.errors()[0]
+    loc = ".".join(str(p) for p in first["loc"]) or "<item>"
+    return f"{loc}: {first['type']}"
+
+
 def validate_each(model: type[M], items: list[Any]) -> tuple[list[M], list[tuple[int, str]]]:
     """C3: validate list items one at a time. Returns (valid models, rejects), where each
     reject is (index, "<loc>: <error type>") of that item's FIRST pydantic error. The
@@ -268,9 +276,7 @@ def validate_each(model: type[M], items: list[Any]) -> tuple[list[M], list[tuple
         try:
             ok.append(model.model_validate(item))
         except ValidationError as e:
-            first = e.errors()[0]
-            loc = ".".join(str(p) for p in first["loc"]) or "<item>"
-            bad.append((i, f"{loc}: {first['type']}"))
+            bad.append((i, first_error(e)))
     return ok, bad
 
 
