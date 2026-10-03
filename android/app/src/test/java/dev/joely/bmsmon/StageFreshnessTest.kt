@@ -125,4 +125,20 @@ class StageFreshnessTest {
         val t = s.freshnessTick(nowMs = 1_000L, elapsedMs = nowE + 15_000L)
         assertEquals(setOf(15), t.acknowledgedThresholds)
     }
+
+    // The two ack clauses of the tick's "did anything rendered change" check, isolated: every
+    // freshness label holds and the hold is unchanged, so only the pruned ack set can make the tick
+    // publish. (A tap can leave an ack on a rung that stopped being crossed before the next prune.)
+
+    @Test fun tickPublishesACapAckPruneWithNoLabelChange() {
+        val s = state(live(80f), live(81f)).copy(acknowledgedThresholds = setOf(30))
+        val t = s.freshnessTick(nowMs = 1_000L, elapsedMs = nowE)
+        assertTrue(t.acknowledgedThresholds.isEmpty())
+    }
+
+    @Test fun tickPublishesATempAckPruneWithNoLabelChange() {
+        val s = state(live(80f), live(81f)).copy(acknowledgedTempKeys = setOf("temp:HOT:CRITICAL"))   // packs read 25 C
+        val t = s.freshnessTick(nowMs = 1_000L, elapsedMs = nowE)
+        assertTrue(t.acknowledgedTempKeys.isEmpty())
+    }
 }

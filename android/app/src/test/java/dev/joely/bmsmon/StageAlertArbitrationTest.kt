@@ -337,4 +337,57 @@ class StageAlertArbitrationTest {
         assertEquals(setOf(30), s.withStageDerivations(nowMs = 1_000L).acknowledgedThresholds)
         assertTrue(s.withStageDerivations(nowMs = 1_000L, prevTarget = prev).acknowledgedThresholds.isEmpty())
     }
+
+    // --- regen is not a charge: a burst mid-drive must not re-arm an acked rung ---
+    // Production data (last 30 days): 86 of 531 regen samples carry BMS state=Charging.
+
+    private val stageAddrs = DEFAULT_ROSTER.groupById("2012")!!.targets.map { it.address }.toSet()
+
+    @Test fun regenBurstReadingChargingKeepsTheCapAck() {
+        var s = stateAt(soc = 28f, tempC = 25f)
+        s = s.withAcknowledged(s.stageAlert())
+        val burst = s.copy(fleet = fleetAt("2012", 28f, 25f, charging = true), regenAddrs = stageAddrs)
+        assertEquals(setOf(30), burst.withCapAcksPruned(burst.stageTarget).acknowledgedThresholds)
+    }
+
+    @Test fun theSameChargingFrameWithoutRegenClearsTheCapAck() {
+        var s = stateAt(soc = 28f, tempC = 25f)
+        s = s.withAcknowledged(s.stageAlert())
+        val charge = s.copy(fleet = fleetAt("2012", 28f, 25f, charging = true), regenAddrs = emptySet())
+        assertTrue(charge.withCapAcksPruned(charge.stageTarget).acknowledgedThresholds.isEmpty())
+    }
+
+    @Test fun regenBurstDoesNotReFlashAnAckedRungWhenItEnds() {
+        // The whole chain: the burst latches the charge hold (UI-9 suppression is unchanged) but
+        // keeps the ack; when the burst ends the pack is Discharging again and the rung stays quiet.
+        var s = stateAt(soc = 28f, tempC = 25f)
+        s = s.withAcknowledged(s.stageAlert())
+        s = s.copy(fleet = fleetAt("2012", 28f, 25f, charging = true), regenAddrs = stageAddrs)
+            .withStageDerivations(nowMs = 1_000L)
+        assertTrue(s.stageChargeHold)
+        assertEquals(setOf(30), s.acknowledgedThresholds)
+        s = s.copy(fleet = fleetAt("2012", 28f, 25f), regenAddrs = emptySet())
+            .withStageDerivations(nowMs = 2_000L)
+        assertFalse(s.stageChargeHold)
+        assertEquals(setOf(30), s.acknowledgedThresholds)
+        assertFalse(s.stageAlert().flashing)
+        assertTrue(s.stageAlert().present)
+    }
+
+    // --- UI-25: an ack for an alert shown on another stage is dropped ---
+
+    @Test fun ackLandingAfterTheStageChangedNeverAcksTheNewBase() {
+        val shown = stateAt(soc = 28f, tempC = 25f).stageAlert()
+        assertEquals(StageTarget.Base("2012"), shown.target)
+        // a seize/swap put base 2016 on the stage at the same rung before the tap landed
+        val swapped = stateAt(soc = 28f, tempC = 25f)
+            .copy(stageTarget = StageTarget.Base("2016"), fleet = fleetAt("2016", 28f, 25f))
+        assertSame(swapped, swapped.withAcknowledged(shown))
+        assertTrue(swapped.stageAlert().flashing)
+        // same for a temperature alert
+        val hot = stateAt(soc = 80f, tempC = 55f).stageAlert()
+        val hotSwapped = stateAt(soc = 80f, tempC = 55f)
+            .copy(stageTarget = StageTarget.Base("2016"), fleet = fleetAt("2016", 80f, 55f))
+        assertTrue(hotSwapped.withAcknowledged(hot).acknowledgedTempKeys.isEmpty())
+    }
 }

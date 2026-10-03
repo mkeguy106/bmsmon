@@ -104,14 +104,16 @@ private const val FRESHNESS_TICK_MS = 1_000L
 
 /**
  * The resolved low-battery alert for the current stage. [flashing] drives the screen wash;
- * [activeThreshold] is the most-severe crossed level; [ackEffective] are acks still in force.
+ * [activeThreshold] is the most-severe crossed level; [target] is the stage it was computed for,
+ * so an ACKNOWLEDGE that lands after the stage moved on can be recognised and dropped
+ * ([UiState.withAcknowledged]).
  */
 data class StageAlert(
     val flashing: Boolean,
     val critical: Boolean,
     val lowSoc: Int,
     val activeThreshold: Int?,
-    val ackEffective: Set<Int>,
+    val target: StageTarget,
     val kind: AlertKind = AlertKind.CAPACITY,
     val headline: String = "BATTERY CAPACITY",
     val detail: String = "",
@@ -288,7 +290,7 @@ data class UiState(
      * flashes; a charging low pack suppresses it; acks only count while still crossed.
      */
     fun stageAlert(): StageAlert {
-        val none = StageAlert(false, false, 100, null, emptySet())
+        val none = StageAlert(false, false, 100, null, stageTarget)
         if (!monitoring) return none
         val packs = stagePacks()
         if (packs.isEmpty()) return none
@@ -333,7 +335,7 @@ data class UiState(
             }
             return StageAlert(
                 flashing = tempFlashing, critical = true,
-                lowSoc = tel.soc.roundToInt(), activeThreshold = null, ackEffective = emptySet(),
+                lowSoc = tel.soc.roundToInt(), activeThreshold = null, target = stageTarget,
                 kind = AlertKind.TEMPERATURE, headline = "TEMPERATURE", detail = detail,
                 tempAckKey = tempAckKey, tempActive = true, present = true,
             )
@@ -341,7 +343,7 @@ data class UiState(
 
         return StageAlert(
             flashing = capFlashing, critical = capEval.critical, lowSoc = capEval.lowSoc,
-            activeThreshold = capEval.activeThreshold, ackEffective = capAck,
+            activeThreshold = capEval.activeThreshold, target = stageTarget,
             kind = AlertKind.CAPACITY, headline = "BATTERY CAPACITY",
             detail = "LOW BATTERY · ${capEval.lowSoc}% · BELOW ${capEval.activeThreshold ?: 0}%",
             present = capEval.activeThreshold != null && !suppressed,
@@ -388,9 +390,16 @@ data class UiState(
     }
 
     /** The capacity evaluation of the stage's alert-driving [packs] against the user's ladder —
-     *  the single definition behind both [stageAlert] and [withCapAcksPruned]. */
-    private fun capacityEval(packs: List<Pair<String, Telemetry>>) = evalStageAlert(
-        packs.map { PackSoc(it.second.soc, it.second.state == BatteryState.Charging) },
+     *  the single definition behind both [stageAlert] and [withCapAcksPruned]. A pack in
+     *  [regenAddrs] still reads `Charging` here by default (the flash suppression keeps UI-9's
+     *  rule); [withCapAcksPruned] passes `countRegenAsCharging = false` (see there). */
+    private fun capacityEval(
+        packs: List<Pair<String, Telemetry>>,
+        countRegenAsCharging: Boolean = true,
+    ) = evalStageAlert(
+        packs.map { (addr, t) ->
+            PackSoc(t.soc, t.state == BatteryState.Charging && (countRegenAsCharging || addr !in regenAddrs))
+        },
         AlertConfig(alertsOn, enabledThresholds, criticalThreshold),
     )
 
@@ -421,7 +430,12 @@ data class UiState(
      * their only attention signal.
      *  - the stage target changed from [prevTarget] (seize, swap, pin) -> clear: an ack belongs to
      *    the base it was given on;
-     *  - the stage's lowest alert-driving pack is charging -> clear: that episode is over;
+     *  - the stage's lowest alert-driving pack is charging -> clear: that episode is over. A regen
+     *    burst is NOT a charge: the BMS reports state=Charging on 86 of 531 regen samples (16 %,
+     *    last 30 days of production data), so a pack in [regenAddrs] does not count as charging
+     *    here — otherwise a burst mid-drive would clear the ack and the rung would re-flash ~30 s
+     *    later, in the middle of the outing. (The flash suppression and the charge hold still treat
+     *    that state as charging, exactly as before.)
      *  - otherwise, with at least one alert-driving pack, keep only the rungs still crossed, so a
      *    recovery re-arms the next crossing.
      * Like the temperature acks, the judging reading must be alert-driving ([stagePacks]): if none
@@ -434,14 +448,17 @@ data class UiState(
         if (stageTarget != prevTarget) return copy(acknowledgedThresholds = emptySet())
         val packs = stagePacks()
         if (packs.isEmpty()) return this
-        val eval = capacityEval(packs)
+        val eval = capacityEval(packs, countRegenAsCharging = false)
         val kept = if (eval.charging) emptySet() else acknowledgedThresholds intersect eval.crossed
         return if (kept == acknowledgedThresholds) this else copy(acknowledgedThresholds = kept)
     }
 
     /** Acknowledge exactly the alert the overlay DISPLAYED (UI-25) — never one re-derived at tap
-     *  time, which could silence a rung or temperature key the user never saw. */
+     *  time, which could silence a rung or temperature key the user never saw. An alert shown on
+     *  another stage than the current one (a seize or swap landed between the render and the tap)
+     *  is dropped: an ack belongs to the base it was given on. */
     fun withAcknowledged(shown: StageAlert): UiState = when {
+        shown.target != stageTarget -> this
         shown.kind == AlertKind.TEMPERATURE && shown.tempAckKey != null ->
             copy(acknowledgedTempKeys = acknowledgedTempKeys + shown.tempAckKey)
         shown.kind == AlertKind.CAPACITY && shown.activeThreshold != null ->
