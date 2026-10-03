@@ -6,8 +6,8 @@ import type { FleetItem } from "./types";
  *  server/app/routers/api_widget.py. */
 export const STALE_MS = 90_000;
 
-/** Stale: no telemetry for STALE_MS, or the phone reported the BLE link down after its newest
- *  telemetry (store.ts keeps link_event only while it is newer than that telemetry). */
+/** Stale: no telemetry for STALE_MS, or the phone reported the BLE link down at or after its
+ *  newest telemetry (store.ts keeps link_event only while it is not older than that telemetry). */
 export function isPackStale(i: FleetItem, nowMs: number): boolean {
   return nowMs - i.ts_ms > STALE_MS || i.link_event === "Disconnected";
 }

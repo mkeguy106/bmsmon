@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createStore } from "./store";
+import { isPackStale } from "./freshness";
 
 describe("store", () => {
   it("keeps the newest sample per address", () => {
@@ -75,6 +76,26 @@ describe("store", () => {
     expect(a.ts_ms).toBe(150);
     expect(a.link_event).toBe("Disconnected");
     expect(a.link_ts_ms).toBe(200);
+  });
+
+  // A reading and a Disconnected stamped the same millisecond: the tie goes to "gone",
+  // whichever of the two arrives first, so the pack never reads live off a tie.
+  it("a Disconnected at the same ms as a reading wins, in either arrival order", () => {
+    const first = createStore();
+    first.applySample({ address: "A", ts_ms: 100, soc: 60 });
+    first.applySample({ address: "A", ts_ms: 200, link_event: "Disconnected" });
+    first.applySample({ address: "A", ts_ms: 200, soc: 58 }); // same-ms reading lands after
+    expect(first.getFleet()["A"].soc).toBe(58);
+    expect(first.getFleet()["A"].link_event).toBe("Disconnected");
+    expect(isPackStale(first.getFleet()["A"], 200)).toBe(true);
+
+    const second = createStore();
+    second.applySample({ address: "A", ts_ms: 200, soc: 58 });
+    second.applySample({ address: "A", ts_ms: 200, link_event: "Disconnected" }); // same-ms event lands after
+    expect(second.getFleet()["A"].soc).toBe(58);
+    expect(second.getFleet()["A"].link_event).toBe("Disconnected");
+    expect(second.getFleet()["A"].link_ts_ms).toBe(200);
+    expect(isPackStale(second.getFleet()["A"], 200)).toBe(true);
   });
 
   it("drops a link event for a pack it has no telemetry for", () => {
