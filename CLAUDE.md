@@ -708,7 +708,11 @@ also has its own retry gate (1 s doubling to 60 s, reset on a 2xx or a skip), so
 not re-POSTed on every loop pass. **Deploy order is load-bearing: the server's marker ships before
 this APK**, or a genuine app 4xx would be held forever.
 
-**A sample that crashes the server can't block the queue forever (DATA-22).** Only a *marked* 5xx
+**One sample that crashes the server can't block the queue forever (DATA-22).** Precisely: one
+deterministic bad row is isolated and skipped per 2xx; two ADJACENT faulting rows, or a fault that hits
+every request, are held (backing off) rather than drained — patience over data loss. **Deploy order:
+the server's 503 classification ships before this APK**; against an older server a long DB outage
+with the API still up returns marked 500s and could cost one good sample. Only a *marked* 5xx
 other than 503 is a `ServerFault` (a marked 503 + `Retry-After` is the server's "database
 unavailable", and an unmarked 5xx is Traefik — both stay Transient). It backs off like a Transient
 and never touches the poison breaker. On the ingest stream only, the pure `stepHeadFault`

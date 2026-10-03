@@ -77,7 +77,14 @@ def is_db_unavailable(exc: BaseException) -> bool:
                         # marked 500 here would read as a deterministic fault and let the
                         # phone skip good rows while the DB is sick (DATA-22 review).
                         asyncpg.exceptions.InsufficientResourcesError,
-                        asyncpg.exceptions.ReadOnlySQLTransactionError)):
+                        asyncpg.exceptions.ReadOnlySQLTransactionError,
+                        # Class 58 (the server's own I/O / system errors), 28xxx (credentials
+                        # no longer accepted, e.g. mid password rotation) and 3D000 (database
+                        # gone): the DB is unusable for EVERY request, not for this sample.
+                        # XX000 (internal error) stays a 500.
+                        asyncpg.exceptions.PostgresSystemError,
+                        asyncpg.exceptions.InvalidAuthorizationSpecificationError,
+                        asyncpg.exceptions.InvalidCatalogNameError)):
         return True
     if isinstance(exc, asyncpg.exceptions.InterfaceError):
         msg = str(exc).lower()
