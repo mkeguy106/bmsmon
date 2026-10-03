@@ -133,6 +133,14 @@ data class BatteryStatus(
     /** Discharge-remaining estimate for the latest sample — engine-computed once per poll,
      *  same single-writer pattern as [etaFullMin]. Null while charging or with no capacity. */
     val range: PackRange? = null,
+    /** `SystemClock.elapsedRealtime()` of this pack's last PARSED frame this monitoring session;
+     *  null for a restored seed or a pack not heard from yet. Stamped only by MonitorEngine.onPoll
+     *  (UI-16) and never persisted, so nothing restored from settings can ever read LIVE. */
+    val lastFrameAtElapsedMs: Long? = null,
+    /** Poll cadence in force when that frame arrived (stage vs background) — the window
+     *  [freshness] judges it by, so a pack just promoted to the stage isn't called STALE before
+     *  its first fast poll. */
+    val frameIntervalMs: Long = SLOW_POLL_MS,
 )
 
 /**
