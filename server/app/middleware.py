@@ -12,6 +12,7 @@ import asyncpg
 from fastapi import HTTPException
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.websockets import WebSocket
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.config import settings
@@ -59,32 +60,50 @@ class ApiMarkerMiddleware:
 _CLOSED_MARKERS = ("pool is closed", "pool is closing", "pool is not initialized", "connection is closed")
 
 
+# Exceptions that mean "the database cannot be reached or cannot take this right now",
+# not "this request is broken". See is_db_unavailable for the per-class reasoning.
+_DB_UNAVAILABLE_CLASSES: tuple[type[BaseException], ...] = (
+    asyncpg.exceptions.PostgresConnectionError,
+    asyncpg.exceptions.TooManyConnectionsError,
+    # SQLSTATE class 57 (admin/crash shutdown, cannot connect now, query canceled) and
+    # 55P03 (a pg_dump holding a lock): all transient, so err toward a retry, never a
+    # skipped row.
+    asyncpg.exceptions.OperatorInterventionError,
+    asyncpg.exceptions.LockNotAvailableError,
+    # SQLSTATE class 53 (disk full, out of memory, too many connections) and 25006 (a
+    # read-only standby or a disk-full read-only fallback): the DB is up but cannot take
+    # writes. A marked 500 here would read as a deterministic fault and let the phone skip
+    # good rows while the DB is sick (DATA-22 review).
+    asyncpg.exceptions.InsufficientResourcesError,
+    asyncpg.exceptions.ReadOnlySQLTransactionError,
+    # Class 58 (the server's own I/O / system errors), 28xxx (credentials no longer
+    # accepted, e.g. mid password rotation) and 3D000 (database gone): the DB is unusable
+    # for EVERY request, not for this sample. XX000 (internal error) stays a 500.
+    asyncpg.exceptions.PostgresSystemError,
+    asyncpg.exceptions.InvalidAuthorizationSpecificationError,
+    asyncpg.exceptions.InvalidCatalogNameError,
+)
+
+# Every class db_error_handler is registered for. InterfaceError and OSError are only
+# SOMETIMES an outage (is_db_unavailable decides). asyncio.TimeoutError is the builtin
+# TimeoutError on 3.11+, an OSError subclass, so OSError covers it.
+DB_ERROR_HANDLED_TYPES: tuple[type[BaseException], ...] = (
+    *_DB_UNAVAILABLE_CLASSES, asyncpg.exceptions.InterfaceError, OSError)
+
+# The guest share page's token is in the URL: no response from that zone may be cached or
+# leak a Referer, error responses included. routers/share.py uses the same dict.
+SHARE_SEC_HEADERS = {"Referrer-Policy": "no-referrer", "Cache-Control": "no-store"}
+
+DB_UNAVAILABLE_LOG_INTERVAL_S = 10.0
+WS_INTERNAL_ERROR = 1011  # what uvicorn itself sent on an unhandled websocket error
+
+
 def is_db_unavailable(exc: BaseException) -> bool:
     """True when exc means the database cannot be reached right now (restart, refused
     connection, exhausted or closed pool, acquire timeout) rather than a bug. Such a
     failure is transient, so the phone must retry it instead of treating it as a
     deterministic fault."""
-    if isinstance(exc, (asyncpg.exceptions.PostgresConnectionError,
-                        asyncpg.exceptions.TooManyConnectionsError,
-                        # SQLSTATE class 57 (admin/crash shutdown, cannot connect now,
-                        # query canceled) and 55P03 (a pg_dump holding a lock): all
-                        # transient, so err toward a retry, never a skipped row.
-                        asyncpg.exceptions.OperatorInterventionError,
-                        asyncpg.exceptions.LockNotAvailableError,
-                        # SQLSTATE class 53 (disk full, out of memory, too many
-                        # connections) and 25006 (a read-only standby or a disk-full
-                        # read-only fallback): the DB is up but cannot take writes. A
-                        # marked 500 here would read as a deterministic fault and let the
-                        # phone skip good rows while the DB is sick (DATA-22 review).
-                        asyncpg.exceptions.InsufficientResourcesError,
-                        asyncpg.exceptions.ReadOnlySQLTransactionError,
-                        # Class 58 (the server's own I/O / system errors), 28xxx (credentials
-                        # no longer accepted, e.g. mid password rotation) and 3D000 (database
-                        # gone): the DB is unusable for EVERY request, not for this sample.
-                        # XX000 (internal error) stays a 500.
-                        asyncpg.exceptions.PostgresSystemError,
-                        asyncpg.exceptions.InvalidAuthorizationSpecificationError,
-                        asyncpg.exceptions.InvalidCatalogNameError)):
+    if isinstance(exc, _DB_UNAVAILABLE_CLASSES):
         return True
     if isinstance(exc, asyncpg.exceptions.InterfaceError):
         msg = str(exc).lower()
@@ -93,20 +112,63 @@ def is_db_unavailable(exc: BaseException) -> bool:
     return isinstance(exc, (OSError, asyncio.TimeoutError))
 
 
+def error_headers(path: str) -> dict[str, str]:
+    """Headers every error response built here carries: the C1 marker, plus the share
+    zone's no-store/no-referrer on /share/ paths."""
+    headers = {API_MARKER_HEADER: API_MARKER_VALUE}
+    if path.startswith("/share/"):
+        headers.update(SHARE_SEC_HEADERS)
+    return headers
+
+
+def _log_db_unavailable(conn, exc: BaseException) -> None:
+    """One WARNING per exception class per DB_UNAVAILABLE_LOG_INTERVAL_S, no traceback."""
+    name = type(exc).__name__
+    throttle = getattr(conn.app.state, "db_unavailable_log", None)
+    if throttle is None or throttle.should_touch(name):
+        logger.warning("database unavailable (%s) on %s; repeats of %s suppressed for %.0f s",
+                       name, conn.url.path, name, DB_UNAVAILABLE_LOG_INTERVAL_S)
+
+
+def _db_unavailable_response(path: str) -> JSONResponse:
+    return JSONResponse({"detail": "database unavailable"}, status_code=503,
+                        headers={**error_headers(path), "Retry-After": "30"})
+
+
+async def db_error_handler(conn, exc: Exception):
+    """ExceptionMiddleware handler for DB_ERROR_HANDLED_TYPES. Unlike the catch-all below,
+    a response from here is the END of the exception: Starlette does not re-raise it, so
+    uvicorn prints no traceback for an outage. An InterfaceError/OSError that is NOT an
+    outage is a crash: logged once WITH its traceback here, answered as a marked 500."""
+    path = conn.url.path
+    outage = is_db_unavailable(exc)
+    if outage:
+        _log_db_unavailable(conn, exc)
+    else:
+        logger.error("unhandled %s on %s", type(exc).__name__, path, exc_info=exc)
+    if isinstance(conn, WebSocket):
+        try:
+            await conn.close(code=WS_INTERNAL_ERROR)
+        except RuntimeError:
+            pass  # the socket is already closed
+        return None
+    if outage:
+        return _db_unavailable_response(path)
+    return PlainTextResponse("Internal Server Error", status_code=500, headers=error_headers(path))
+
+
 async def marked_internal_error(request, exc: Exception):
     """Catch-all handler. Starlette's ServerErrorMiddleware sits OUTSIDE every user
     middleware, so its default 500 never passes ApiMarkerMiddleware; this handler stamps
-    the marker itself. DB unavailability becomes a marked 503 + Retry-After (transient:
-    retry); anything else is a marked 500 (a crash) whose body matches Starlette's
-    default. The exception is still re-raised (and logged by uvicorn) after the response
-    is sent."""
-    headers = {API_MARKER_HEADER: API_MARKER_VALUE}
+    the marker itself. Outages normally never get here (db_error_handler answers them
+    inside the app); the branch stays as a backstop. Anything else is a marked 500 (a
+    crash) whose body matches Starlette's default, and the exception is re-raised after
+    the response (uvicorn logs it): crashes keep their traceback."""
     if is_db_unavailable(exc):
-        logger.warning("database unavailable (%s) on %s %s", type(exc).__name__,
-                       request.method, request.url.path)
-        return JSONResponse({"detail": "database unavailable"}, status_code=503,
-                            headers={**headers, "Retry-After": "30"})
-    return PlainTextResponse("Internal Server Error", status_code=500, headers=headers)
+        _log_db_unavailable(request, exc)
+        return _db_unavailable_response(request.url.path)
+    return PlainTextResponse("Internal Server Error", status_code=500,
+                             headers=error_headers(request.url.path))
 
 
 class BodySizeLimitMiddleware:

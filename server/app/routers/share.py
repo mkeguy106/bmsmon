@@ -17,11 +17,11 @@ from app.auth.enroll import hash_code
 from app.config import settings
 from app.db import queries as q
 from app.db.pool import get_pool
+from app.middleware import SHARE_SEC_HEADERS as _SEC_HEADERS
 from app.ratelimit import client_key
 
 router = APIRouter(prefix="/share")
 
-_SEC_HEADERS = {"Referrer-Policy": "no-referrer", "Cache-Control": "no-store"}
 
 _EXPIRED_HTML = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Share expired</title>

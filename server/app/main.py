@@ -163,10 +163,14 @@ def create_app() -> FastAPI:
     app = FastAPI(title="bmsmon", lifespan=lifespan)
     from starlette.middleware.gzip import GZipMiddleware
 
-    from app.middleware import (ApiMarkerMiddleware, BodySizeLimitMiddleware,
-                                marked_internal_error)
+    from app.middleware import (DB_ERROR_HANDLED_TYPES, DB_UNAVAILABLE_LOG_INTERVAL_S,
+                                ApiMarkerMiddleware, BodySizeLimitMiddleware,
+                                db_error_handler, marked_internal_error)
     # Unhandled exceptions -> a 500 that still carries the C1 marker (see the handler).
     app.add_exception_handler(Exception, marked_internal_error)
+    # DB outages are answered inside the app (no re-raise, so no uvicorn traceback).
+    for exc_type in DB_ERROR_HANDLED_TYPES:
+        app.add_exception_handler(exc_type, db_error_handler)
     # MIDDLEWARE ORDER: Starlette wraps in REVERSE order of add_middleware, so the LAST
     # call is the outermost layer. ApiMarkerMiddleware must stay last (outermost) so every
     # response below it — including middleware-generated ones — gets X-Bmsmon-Api.
@@ -199,6 +203,8 @@ def create_app() -> FastAPI:
     app.state.share_touch = TouchThrottle(interval_s=TOUCH_INTERVAL_S)
     # devices.last_seen_at write throttle (see routers/api_device.py).
     app.state.device_touch = TouchThrottle(interval_s=60.0)
+    # One "database unavailable" WARNING per exception class per interval (middleware.py).
+    app.state.db_unavailable_log = TouchThrottle(interval_s=DB_UNAVAILABLE_LOG_INTERVAL_S)
     # C3: invalid-sample/range-row WARNINGs, at most once per device per kind per interval.
     app.state.reject_log = TouchThrottle(interval_s=api_device.REJECT_LOG_INTERVAL_S)
     # SEC-4: per-IP limiter for the unauthenticated /api/v1/enroll (see app/ratelimit.py).
