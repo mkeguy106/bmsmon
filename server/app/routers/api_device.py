@@ -150,7 +150,11 @@ async def _authenticate(request: Request, pool) -> tuple[str, dict]:
     if request.app.state.jti_cache.contains(claims["jti"]):
         raise HTTPException(401, "bad signature")  # replay, refused before the body is read
     if not request.app.state.ingest_limiter.allow(device_id):
-        logger.warning("device upload budget exceeded for %s", device_id)
+        # Throttled like the drop WARNINGs, so a retry storm can't flood the log.
+        if _may_log_reject(request, device_id, "budget"):
+            logger.warning("device upload budget exceeded for %s "
+                           "(repeats for this device suppressed for %.0f s)",
+                           device_id, REJECT_LOG_INTERVAL_S)
         raise HTTPException(429, "too many requests; slow down")
     return device_id, claims
 

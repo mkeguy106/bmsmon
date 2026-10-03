@@ -3,6 +3,7 @@ the body is then bound to the token (bh) and only THEN is the jti burned, so a r
 whose body fails can be retried with the same token. Plus the per-device budget."""
 import gzip
 import json
+import logging
 import time
 import uuid
 
@@ -165,6 +166,35 @@ async def test_device_budget_counts_only_authenticated_requests(app, client, bod
     r = await client.post("/api/v1/ingest", content=body,
                           headers=_auth(_token(priv2, device2, body)))
     assert r.status_code == 200      # per DEVICE, not per IP (same client address)
+
+
+async def test_budget_warning_is_throttled_per_device(app, client, caplog):
+    # A retry storm against an exhausted budget must not flood the 5 MB prod log: one
+    # WARNING per device per REJECT_LOG_INTERVAL_S, through the same throttle as drops.
+    caplog.set_level(logging.WARNING, logger="app.routers.api_device")
+    app.state.ingest_limiter = RateLimiter(max_attempts=1, window_s=60)
+    body = json.dumps(_payload()).encode()
+
+    async def post(priv, device_id):
+        return await client.post("/api/v1/ingest", content=body,
+                                 headers=_auth(_token(priv, device_id, body)))
+
+    def lines(device_id):
+        return [r.getMessage() for r in caplog.records
+                if "budget exceeded" in r.getMessage() and device_id in r.getMessage()]
+
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    assert (await post(priv, device_id)).status_code == 200
+    for _ in range(4):
+        assert (await post(priv, device_id)).status_code == 429
+    assert len(lines(device_id)) == 1
+    priv2, spki2 = _keypair()
+    async with app.state.pool.acquire() as conn:
+        device2 = str(await q.create_device(conn, "inst-budget-2", spki2, "dev2"))
+    assert (await post(priv2, device2)).status_code == 200
+    assert (await post(priv2, device2)).status_code == 429
+    assert len(lines(device2)) == 1  # another device has its own window
 
 
 async def test_default_device_budget_never_throttles_an_outbox_drain(app):
