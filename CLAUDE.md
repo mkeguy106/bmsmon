@@ -1194,40 +1194,40 @@ endpoints) lives as a **Devices section inside Settings** (`DevicesPanel.tsx`), 
 entry — so there is no longer any "SOON" item. Roadmap/spec:
 `docs/superpowers/specs/2026-07-12-webui-v2-roadmap.md`.
 
-**v2 stage selection, alert acks and the guest page's connection state (2026-10-02 review,
-WEB-12/13/17/20/25, XC-1/XC-2).** One pure `selectStageBase()` (`web/src/v2/model/stageBase.ts`),
-owned once by the v2 App through `useStageBase()` and shared by Command, Journey and the Fleet
-Health hero, replaces the old hardcoded `DAILY_DRIVER_BASE` staging. Ladder, first match wins:
-**(1) seize** — a fresh pack ≤ the synced seize threshold (`/web/alert-config`) stages its base
-with a LOW chip, overriding the pin as on Android and v1; **(2) pin** — a fleet-rail tap,
-persisted in `localStorage["bmsmon-v2-stage-pin"]`, outranks the base in use for 30 min
-(android `PIN_HOLD_MS`; PINNED chip + AUTO to release; a pin dated 30 min or more ahead of the
-clock has expired too); **(3) in use** — deepest draw wins; **(4) hold** — the newest discharge
-seen this session within 15 min; **(5) parked** — stay on the previous base while it still
-reports; **(6) default** — the daily driver if it reports, else the reporting base with the
-newest sample, so a cold load away from home opens on the chair rather than on the daily driver
-sitting offline at home; with nothing reporting (phone offline), the base with the newest
-sample at all, stale included, and the daily driver only when there is no sample to go on. Android's "charging base takes
-over" rung is not ported (same as `share.py`). v2 alert acks are `{id → rank}`: ids are per
-condition (`cap:<addr>`, `temp:<addr>:<side>`, `cell:<addr>`); an ack holds while the rank stays
-at or below the acked rank, re-arms on a worse one (next capacity rung, worse temperature zone,
-cell warning → critical), and is pruned when the condition clears on a pack that is still
-reporting — a pack that has merely gone stale keeps its ack, so a BLE flap can't re-nag. The
-**guest page** polls single-flight (`web/share/src/poll.ts` `createFeedPoller`), aborts each
-request at 8 s (`FETCH_TIMEOUT_MS`), and derives everything it claims from `guestView()`: fix
-staleness is measured against the server's clock advanced by client time since the last
-success, so a fix ages while polls fail; **CONNECTION LOST · last update 18 s ago** (red dot,
-grey marker, dimmed dock) after 2 failed polls, or 1 failure with no success for 15 s — never
-on a tab returning from the background with no failure. Guest-page ages read in seconds under
-a minute, then minutes (`ageLabel`; the shared `relAgo`'s "just now" would contradict CONNECTION
-LOST), and only the state word is the badge's `role="status"` live region, so a screen reader
-announces the change, not the ticking age. With the server's 48 h `last` lookback,
-after midnight the page shows yesterday's position as **LAST KNOWN · 10h ago** instead of
-"Waiting for GPS…"; "Point me there" distinguishes "No recent location from the chair" from
-"Locating you…" and labels a non-live target "last known · Xm ago". Journey's RANGE mode is
-clamped client-side (`clampTrackWindow`, `web/src/v2/model/journey.ts`) to `/web/track`'s span cap
-of 31 d + 1 h, keeping the most recent days and saying **LAST 31 DAYS SHOWN** instead of
-rendering a rejected request as a blank map.
+**v2 stage selection, alert acks, the guest page's connection state and the Journey RANGE clamp
+(2026-10-02 review, WEB-12/13/17/20/25, XC-1/XC-2).** One pure `selectStageBase()`
+(`web/src/v2/model/stageBase.ts`), owned once by the v2 App through `useStageBase()` and shared
+by Command, Journey and the Fleet Health hero, replaces the old hardcoded `DAILY_DRIVER_BASE`
+staging. Ladder, first match wins: **(1) seize** — a fresh pack ≤ the synced seize threshold
+(`/web/alert-config`) stages its base with a LOW chip, overriding the pin as on Android and v1;
+**(2) pin** — a fleet-rail tap, persisted in `localStorage["bmsmon-v2-stage-pin"]`, outranks the
+base in use for 30 min (android `PIN_HOLD_MS`; PINNED chip + AUTO to release; a pin dated 30 min
+or more ahead of the clock has expired too); **(3) in use** — deepest draw wins; **(4) hold** —
+the newest discharge seen this session within 15 min; **(5) parked** — stay on the previous base
+while it still reports; **(6) default** — the daily driver if it reports, else the reporting
+base with the newest sample, so a cold load away from home opens on the chair rather than on the
+daily driver sitting offline at home; with nothing reporting (phone offline), the base with the
+newest sample at all, stale included, and the daily driver only when there is no sample to go
+on. Android's "charging base takes over" rung is not ported (same as `share.py`). v2 alert acks
+map `id → {rank, address}`: ids are per condition (`cap:<addr>`, `temp:<addr>:<side>`,
+`cell:<addr>`); an ack holds while the rank stays at or below the acked rank, re-arms on a worse
+one (next capacity rung, worse temperature zone, cell warning → critical), and is pruned when
+the condition clears on a pack that is still reporting — a pack that has merely gone stale keeps
+its ack, so a BLE flap can't re-nag. The **guest page** polls single-flight
+(`web/share/src/poll.ts` `createFeedPoller`), aborts each request at 8 s (`FETCH_TIMEOUT_MS`),
+and derives everything it claims from `guestView()`: fix staleness is measured against the
+server's clock advanced by client time since the last success, so a fix ages while polls fail;
+**CONNECTION LOST · last update 18 s ago** (red dot, grey marker, dimmed dock) after 2 failed
+polls, or 1 failure with no success for 15 s — never on a tab returning from the background with
+no failure. Guest-page ages read in seconds under a minute, then minutes (`ageLabel`; the shared
+`relAgo`'s "just now" would contradict CONNECTION LOST), and only the state word is the badge's
+`role="status"` live region, so a screen reader announces the change, not the ticking age. With
+the server's 48 h `last` lookback, after midnight the page shows yesterday's position as
+**LAST KNOWN · 10h ago** instead of "Waiting for GPS…"; "Point me there" distinguishes
+"No recent location from the chair" from "Locating you…" and labels a non-live target
+"last known · Xm ago". Journey's RANGE mode is clamped client-side (`clampTrackWindow`,
+`web/src/v2/model/journey.ts`) to `/web/track`'s span cap of 31 d + 1 h, keeping the most recent
+days and saying **LAST 31 DAYS SHOWN** instead of rendering a rejected request as a blank map.
 
 ### Read-only API keys (`/api/v1/groups`, desktop widgets)
 
