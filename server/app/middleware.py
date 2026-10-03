@@ -56,7 +56,7 @@ class ApiMarkerMiddleware:
         await self.app(scope, receive, send_marked)
 
 
-_CLOSED_MARKERS = ("pool is closed", "pool is closing", "connection is closed")
+_CLOSED_MARKERS = ("pool is closed", "pool is closing", "pool is not initialized", "connection is closed")
 
 
 def is_db_unavailable(exc: BaseException) -> bool:
@@ -65,8 +65,12 @@ def is_db_unavailable(exc: BaseException) -> bool:
     failure is transient, so the phone must retry it instead of treating it as a
     deterministic fault."""
     if isinstance(exc, (asyncpg.exceptions.PostgresConnectionError,
-                        asyncpg.exceptions.CannotConnectNowError,
-                        asyncpg.exceptions.TooManyConnectionsError)):
+                        asyncpg.exceptions.TooManyConnectionsError,
+                        # SQLSTATE class 57 (admin/crash shutdown, cannot connect now,
+                        # query canceled) and 55P03 (a pg_dump holding a lock): all
+                        # transient, so err toward a retry, never a skipped row.
+                        asyncpg.exceptions.OperatorInterventionError,
+                        asyncpg.exceptions.LockNotAvailableError)):
         return True
     if isinstance(exc, asyncpg.exceptions.InterfaceError):
         msg = str(exc).lower()

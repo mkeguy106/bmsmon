@@ -5,6 +5,7 @@ import asyncpg
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.config import settings
 from app.middleware import API_MARKER_HEADER, API_MARKER_VALUE, is_db_unavailable
 
 
@@ -13,6 +14,11 @@ from app.middleware import API_MARKER_HEADER, API_MARKER_VALUE, is_db_unavailabl
     asyncpg.exceptions.ConnectionDoesNotExistError("gone"),
     asyncpg.exceptions.TooManyConnectionsError("full"),
     asyncpg.exceptions.PostgresConnectionError("x"),
+    asyncpg.exceptions.AdminShutdownError("57P01"),
+    asyncpg.exceptions.CrashShutdownError("57P02"),
+    asyncpg.exceptions.QueryCanceledError("57014"),
+    asyncpg.exceptions.LockNotAvailableError("55P03"),
+    asyncpg.exceptions.InterfaceError("pool is not initialized"),
     asyncpg.exceptions.InterfaceError("pool is closed"),
     asyncpg.exceptions.InterfaceError("connection is closed"),
     ConnectionRefusedError(111, "refused"),
@@ -56,3 +62,12 @@ async def test_crash_is_marked_500(app):
     assert r.status_code == 500
     assert "Retry-After" not in r.headers
     assert r.headers[API_MARKER_HEADER] == API_MARKER_VALUE
+
+
+async def test_real_closed_pool_error_is_classified():
+    # Guards against asyncpg rewording its closed-pool message.
+    pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=1)
+    await pool.close()
+    with pytest.raises(asyncpg.exceptions.InterfaceError) as ei:
+        await pool.acquire()
+    assert is_db_unavailable(ei.value)
