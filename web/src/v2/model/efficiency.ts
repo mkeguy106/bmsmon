@@ -1,11 +1,14 @@
 // Journey efficiency: the viewed outing's real cost-per-mile, compared to the learned
 // whPerMile band, plus a live "how far will the remaining charge take me" projection.
-// Energy basis is BASE-TOTAL throughout — the merged base track (mergeBaseTracks) sums
-// pack power, so remaining Wh and the band are summed across the connected packs to match.
+// Energy basis is BASE-TOTAL throughout: the merged base track (mergeBaseTracks) sums pack
+// power, the band sums every pack's whPerMile, and the remaining energy is the base's usable
+// energy from the base view-model (baseView.usableWh: pack count × the weaker pack's
+// remaining Ah × nominal V). The pair is in series, so summing both packs' remaining Wh
+// overstated it (WEB-15).
 // Design: docs/superpowers/specs/2026-07-16-journey-efficiency-card-design.md
 import type { TrackPoint } from "../track";
 import { DISCHARGE_EPS } from "./journey";
-import { NOMINAL_PACK_V, type RangeBand, type RangeParams } from "../../range";
+import type { RangeBand, RangeParams } from "../../range";
 
 /** Learner's own outing gate — below this the per-mile cost is noise. */
 export const MIN_OUTING_MI = 0.5;
@@ -33,8 +36,8 @@ export function drainedPct(points: TrackPoint[]): number | null {
   return d > 0 ? d : null;
 }
 
-/** Sum each connected pack's whPerMile band → base-total band (same basis as the merged
- *  track's summed power). Invalid/non-positive bands are dropped; null if none survive. */
+/** Sum each pack's whPerMile band → base-total band (same basis as the merged track's
+ *  summed power). Invalid/non-positive bands are dropped; null if none survive. */
 export function baseBand(packParams: RangeParams[]): RangeBand | null {
   const bands = packParams
     .map((p) => p.whPerMile)
@@ -62,7 +65,7 @@ export interface EfficiencySummary {
   drainedPct: number | null;
   band: RangeBand | null;
   status: BandStatus | null;
-  /** Any connected pack still on the seed band → the comparison is a seed estimate. */
+  /** Any pack still on the seed band → the comparison is a seed estimate. */
   seed: boolean;
   /** Live-only projections from remaining charge (null on past days / while charging). */
   milesAtTodayRate: number | null;
@@ -72,14 +75,14 @@ export interface EfficiencySummary {
 export interface EfficiencyInput {
   points: TrackPoint[];        // cleaned, merged base track
   activeMiles: number;         // summary.activeMiles (chair-driven, excludes transit)
-  packParams: RangeParams[];   // one per connected pack
-  remainingAh: number[];       // connected packs' live remaining_ah (finite, > 0)
+  packParams: RangeParams[];   // one per pack in the base (baseView.packParams)
+  usableWh: number | null;     // usable base energy (baseView.usableWh); null = unknown
   charging: boolean;
   live: boolean;
 }
 
 export function efficiencySummary(input: EfficiencyInput): EfficiencySummary {
-  const { points, activeMiles, packParams, remainingAh, charging, live } = input;
+  const { points, activeMiles, packParams, usableWh, charging, live } = input;
 
   const wh = outingWh(points);
   const costPerMile = activeMiles >= MIN_OUTING_MI && wh > 0 ? wh / activeMiles : null;
@@ -87,12 +90,11 @@ export function efficiencySummary(input: EfficiencyInput): EfficiencySummary {
   const status = costPerMile != null && band != null ? bandStatus(costPerMile, band) : null;
   const seed = packParams.some((p) => p.learnedDays === 0);
 
-  // Base-total remaining Wh (sum of connected packs). Projection only live & discharging.
-  const baseRemWh = remainingAh
-    .filter((ah) => Number.isFinite(ah) && ah > 0)
-    .reduce((a, ah) => a + ah * NOMINAL_PACK_V, 0);
+  // Projection only live and not charging. Zero usable energy is real (an empty base
+  // projects 0 miles); unknown energy projects nothing.
+  const remWh = usableWh != null && Number.isFinite(usableWh) && usableWh >= 0 ? usableWh : null;
   const usualMid = band != null ? (band.lo + band.hi) / 2 : null;
-  const project = live && !charging && baseRemWh > 0;
+  const project = live && !charging && remWh != null;
 
   return {
     wh,
@@ -102,7 +104,9 @@ export function efficiencySummary(input: EfficiencyInput): EfficiencySummary {
     band,
     status,
     seed,
-    milesAtTodayRate: project && costPerMile != null && costPerMile > 0 ? baseRemWh / costPerMile : null,
-    milesAtUsualRate: project && usualMid != null && usualMid > 0 ? baseRemWh / usualMid : null,
+    milesAtTodayRate: project && remWh != null && costPerMile != null && costPerMile > 0
+      ? remWh / costPerMile : null,
+    milesAtUsualRate: project && remWh != null && usualMid != null && usualMid > 0
+      ? remWh / usualMid : null,
   };
 }

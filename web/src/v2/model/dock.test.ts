@@ -23,7 +23,7 @@ describe("socColor", () => {
 describe("dockCapacity", () => {
   it("pair pct is the weaker pack; detail lists both", () => {
     const c = dockCapacity([pack("A", { soc: 69 }), pack("B", { soc: 68 })]);
-    expect(c).toEqual({ pct: 68, detail: "A69·B68", band: "ok" });
+    expect(c).toEqual({ pct: 68, detail: "A69·B68", band: "ok", lastKnown: false });
   });
   it("bands: warn at <=30, crit at <=15", () => {
     expect(dockCapacity([pack("A", { soc: 24 })]).band).toBe("warn");
@@ -34,16 +34,29 @@ describe("dockCapacity", () => {
     expect(c.pct).toBe(30);
     expect(c.band).toBe("ok");
   });
-  it("disconnected packs don't drive pct but still show in detail with a dash", () => {
+  it("a pack with no reading doesn't drive pct but still shows in detail with a dash", () => {
     const c = dockCapacity([pack("A", { soc: 69 }), pack("B", { soc: null }, false)]);
     expect(c.pct).toBe(69);
     expect(c.detail).toBe("A69·B—");
+    expect(c.lastKnown).toBe(false);
+  });
+  it("a disconnected weaker pack bounds pct and is flagged (WEB-14)", () => {
+    const c = dockCapacity([pack("A", { soc: 14 }, false), pack("B", { soc: 55 })]);
+    expect(c).toEqual({ pct: 14, detail: "A14·B55", band: "crit", lastKnown: true });
+  });
+  it("at a tie the live pack is the bound, so nothing is flagged", () => {
+    expect(dockCapacity([pack("A", { soc: 40 }, false), pack("B", { soc: 40 })]).lastKnown).toBe(false);
   });
   it("single pack: no detail suffix", () => {
     expect(dockCapacity([pack("A", { soc: 42 })]).detail).toBe("");
   });
-  it("nothing reachable: pct null", () => {
-    expect(dockCapacity([pack("A", { soc: 69 }, false)]).pct).toBeNull();
+  it("a lone last-known pack still reads, flagged", () => {
+    const c = dockCapacity([pack("A", { soc: 69 }, false)]);
+    expect(c.pct).toBe(69);
+    expect(c.lastKnown).toBe(true);
+  });
+  it("no reading anywhere: pct null", () => {
+    expect(dockCapacity([pack("A", { soc: null }), pack("B", { soc: null }, false)]).pct).toBeNull();
   });
 });
 

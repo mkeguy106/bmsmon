@@ -2,7 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { TempUnit } from "../../temp";
 import { useLocalStorage } from "../../useLocalStorage";
-import { isCharging, type Base } from "../fleet";
+import type { Base } from "../fleet";
 import type { FleetData } from "../useFleetData";
 import { useTrack } from "../useTrack";
 import { useCartoKey } from "../useCartoKey";
@@ -19,7 +19,7 @@ import { JourneyMap } from "../components/JourneyMap";
 import { EnergyDistanceChart } from "../components/EnergyDistanceChart";
 import { EfficiencyCard } from "../components/EfficiencyCard";
 import { efficiencySummary } from "../model/efficiency";
-import { SEED_RANGE_PARAMS } from "../../range";
+import { baseView } from "../model/baseView";
 import { Ring } from "../components/Ring";
 import { Segmented } from "../components/Segmented";
 import { JourneyDock } from "../components/JourneyDock";
@@ -220,18 +220,19 @@ export function JourneyView({ data, base, theme, unit: _unit, mobile, mapMetric 
   const cur = hi != null ? points[hi] : undefined;
   const curKind: SegKind = hi != null ? segKinds[hi] ?? "idle" : "idle";
 
-  // ── Efficiency: this outing's real cost/mile vs the learned band (+ live projection). ──
-  const connected = base?.packs.filter((p) => p.connected) ?? [];
-  const anyCharging = connected.some((p) => isCharging(p.item));
+  // ── Efficiency: this outing's real cost/mile vs the learned band (+ live projection),
+  //    from the base view-model: usable energy is the series bound over live and
+  //    last-known packs (WEB-15), and the memo inputs are stable. Temperature isn't read
+  //    here, so no temperature config is passed. ──
+  const view = useMemo(
+    () => (base ? baseView(base, { rangeParams: data.rangeParams, tempConfig: null }) : null),
+    [base, data.rangeParams]);
+  const charging = view?.charging ?? false;
   const eff = useMemo(() => efficiencySummary({
     points, activeMiles: summary.activeMiles,
-    packParams: connected.map((p) => data.rangeParams.get(p.item.address) ?? SEED_RANGE_PARAMS),
-    remainingAh: connected
-      .map((p) => p.item.remaining_ah)
-      .filter((ah): ah is number => ah != null && Number.isFinite(ah) && ah > 0),
-    charging: anyCharging, live: isLive,
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [points, summary.activeMiles, connected, data.rangeParams, anyCharging, isLive]);
+    packParams: view?.packParams ?? [], usableWh: view?.usableWh ?? null,
+    charging, live: isLive,
+  }), [points, summary.activeMiles, view, charging, isLive]);
 
   const mapHeight = 480;
 
@@ -398,7 +399,8 @@ export function JourneyView({ data, base, theme, unit: _unit, mobile, mapMetric 
           {hasTrip ? (
             <>
               {st.dateMode === "day" ? (
-                <EfficiencyCard summary={eff} live={isLive} charging={anyCharging} />
+                <EfficiencyCard summary={eff} live={isLive} charging={charging}
+                  lastKnown={view?.usableLastKnown ?? null} />
               ) : (
                 <div className="card mono" style={{ fontSize: 12, color: "var(--text-4)" }}>
                   Select a single day to see efficiency.

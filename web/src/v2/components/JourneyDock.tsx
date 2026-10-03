@@ -54,8 +54,11 @@ export function JourneyDock({ summary, packs }: { summary: TripSummary; packs: B
         <div style={barStyle}>
           {cap.pct != null && <Fill frac={cap.pct / 100} background={CAP_FILL[cap.band]} />}
         </div>
-        <span style={valStyle}>
-          {cap.pct != null ? `${cap.pct}%` : "—"}
+        {/* "≤": the bound is a pack's last-known reading; still wired in series, it can only
+            have discharged since (WEB-14). */}
+        <span style={valStyle}
+          title={cap.lastKnown ? "Includes a pack's last-known reading: it may be lower now" : undefined}>
+          {cap.pct != null ? `${cap.lastKnown ? "≤" : ""}${cap.pct}%` : "—"}
           {cap.detail && <small style={{ color: "var(--text-3)", fontWeight: 400, fontSize: 10 }}> {cap.detail}</small>}
         </span>
       </div>

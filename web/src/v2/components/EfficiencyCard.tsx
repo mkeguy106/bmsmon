@@ -2,7 +2,8 @@
 // live (miles left at today's vs usual rate) and "this outing" on a past day (cost/mile vs
 // the learned whPerMile band). Pure inputs from model/efficiency.ts.
 import type { EfficiencySummary, BandStatus } from "../model/efficiency";
-import { Chip } from "./Atoms";
+import type { LastKnownRef } from "../model/baseView";
+import { Chip, LastKnownNote } from "./Atoms";
 
 const STATUS_LABEL: Record<BandStatus, string> = {
   below: "below band", inside: "in band", above: "above band",
@@ -23,8 +24,10 @@ function Cell({ label, value }: { label: string; value: string }) {
 
 const mi = (n: number) => (n < 10 ? n.toFixed(1) : String(Math.round(n)));
 
-export function EfficiencyCard({ summary, live, charging }: {
+export function EfficiencyCard({ summary, live, charging, lastKnown = null }: {
   summary: EfficiencySummary; live: boolean; charging: boolean;
+  /** A last-known pack inside the usable energy behind the projection (baseView). */
+  lastKnown?: LastKnownRef | null;
 }) {
   const { costPerMile, band, status, seed, drainedPct, wh, activeMiles,
     milesAtTodayRate, milesAtUsualRate } = summary;
@@ -79,6 +82,11 @@ export function EfficiencyCard({ summary, live, charging }: {
         <div className="mono" style={{ fontSize: 13, color: "var(--text-2)" }}>
           ~<span style={{ color: "var(--text)", fontWeight: 600 }}>{mi(milesAtTodayRate)} mi</span> left at today’s rate
           {milesAtUsualRate != null && <> · ~{mi(milesAtUsualRate)} at your usual</>}
+          {lastKnown && (
+            <div style={{ fontSize: 11, color: "var(--warn)", marginTop: 4 }}>
+              <LastKnownNote lk={lastKnown} /> — it may be lower now
+            </div>
+          )}
         </div>
       ))}
     </div>
