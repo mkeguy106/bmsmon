@@ -47,6 +47,50 @@ describe("baseView range", () => {
     expect(v.range.lastKnown).toBeNull();
   });
 
+  // Review fix round 1, Minor #1: intended. The stale pack's real charge is only bounded
+  // above by its last reading, so the shown bound is uncertain whichever pack sets the min.
+  it("names a stale pack in the bound even when a live pack sets the minimum", () => {
+    const v = baseView(base({ remaining_ah: 55, ts_ms: NOW - 3_600_000 }, { remaining_ah: 20 }, ["A"]), ctx());
+    if (v.range.kind !== "estimate") throw new Error(v.range.kind);
+    expect(v.range.range.milesHi).toBeCloseTo(seedMilesHi(20), 6);
+    expect(v.range.lastKnown).toEqual({ letter: "A", tsMs: NOW - 3_600_000 });
+    expect(v.usableLastKnown).toEqual({ letter: "A", tsMs: NOW - 3_600_000 });
+  });
+
+  // Review fix round 1, Important #2: range.ts returns no estimate for a bad band, which used
+  // to drop the weaker pack from the bound and show its partner's miles.
+  it("keeps a pack with invalid synced params in the bound, on the seed", () => {
+    const bad: RangeParams[] = [
+      { ...SEED_RANGE_PARAMS, whPerMile: { lo: 0, hi: 70 } },
+      { ...SEED_RANGE_PARAMS, whPerDay: { lo: 78, hi: NaN } },
+      { ...SEED_RANGE_PARAMS, activeW: { lo: -5, hi: 97.5 } },
+      { ...SEED_RANGE_PARAMS, whPerMile: { lo: 51, hi: Infinity } },
+    ];
+    for (const p of bad) {
+      const v = baseView(base({ remaining_ah: 10 }, { remaining_ah: 55 }), ctx({ rangeParams: new Map([["A", p]]) }));
+      if (v.range.kind !== "estimate") throw new Error(v.range.kind);
+      expect(v.range.range.milesHi).toBeCloseTo(seedMilesHi(10), 6);
+      expect(v.packParams[0]).toBe(SEED_RANGE_PARAMS);
+      expect(v.usableWh).toBeCloseTo(2 * 10 * 12.8, 6);
+    }
+  });
+
+  // Review fix round 1, Important #1: a pack with no usable capacity could be the weaker one,
+  // so the base has no bound. The reviewer's probe read 768 Wh / 7.5 mi here.
+  it("reads no-data when any pack lacks a usable capacity, live or last known", () => {
+    const cases: Array<[Partial<FleetItem>, Partial<FleetItem>, string[]]> = [
+      [{ remaining_ah: 30 }, { remaining_ah: null }, []],
+      [{ remaining_ah: 30 }, { remaining_ah: -3 }, []],
+      [{ remaining_ah: null }, { remaining_ah: 40 }, ["A"]],
+    ];
+    for (const [a, b, stale] of cases) {
+      const v = baseView(base(a, b, stale), ctx());
+      expect(v.range).toEqual({ kind: "no-data" });
+      expect(v.usableWh).toBeNull();
+      expect(v.usableLastKnown).toBeNull();
+    }
+  });
+
   it("reads offline when no pack is live, with the newest sample as last seen (WEB-19)", () => {
     const v = baseView(base({ ts_ms: NOW - 60_000 }, { ts_ms: NOW - 120_000 }, ["A", "B"]), ctx());
     expect(v.range).toEqual({ kind: "offline", lastSeenMs: NOW - 60_000 });
@@ -95,6 +139,23 @@ describe("baseView usable energy", () => {
     expect(v.usableWh).toBeCloseTo(768, 6);
     expect(v.usableLastKnown).toEqual({ letter: "A", tsMs: NOW - 200_000 });
     expect(baseView(base({ remaining_ah: null }, { remaining_ah: -3 }), ctx()).usableWh).toBeNull();
+  });
+
+  // Review fix round 1: with both packs live, the old Journey basis summed the packs that
+  // reported a capacity > 0. The series bound must never read higher than that.
+  it("never exceeds the old Journey sum when both packs are live", () => {
+    const values = [null, -3, NaN, 0, 14, 30, 55];
+    const oldSum = (...ahs: Array<number | null>) => ahs
+      .filter((ah): ah is number => ah != null && Number.isFinite(ah) && ah > 0)
+      .reduce((s, ah) => s + ah * 12.8, 0);
+    for (const a of values) {
+      for (const b of values) {
+        const wh = baseView(base({ remaining_ah: a }, { remaining_ah: b }), ctx()).usableWh;
+        const unknown = [a, b].some((ah) => ah == null || !Number.isFinite(ah) || ah < 0);
+        if (unknown) expect(wh, `${a}/${b}`).toBeNull();
+        else expect(wh!, `${a}/${b}`).toBeLessThanOrEqual(oldSum(a, b));
+      }
+    }
   });
 });
 

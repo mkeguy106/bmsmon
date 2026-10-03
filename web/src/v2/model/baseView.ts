@@ -12,6 +12,9 @@
 //   values. A pack that dropped off BLE is still wired in and still discharging, so its last
 //   reading is an upper bound on its charge; leaving it out made range and GO/NO-GO
 //   optimistic. When a last-known value is in the bound, the view names it.
+// - A pack with no usable capacity reading could be the weaker one, so the base has no
+//   bound at all: energy is unknown and range reads no-data. A bound from the packs that do
+//   report would be an overestimate with nothing to flag it.
 import type { Base } from "../fleet";
 import { baseLastSeenMs, isCharging } from "../fleet";
 import type { FleetItem } from "../../types";
@@ -38,7 +41,7 @@ export type RangeState =
   | { kind: "charging"; etaFullMin: number | null }
   /** No pack is live. */
   | { kind: "offline"; lastSeenMs: number | null }
-  /** Live, but no pack (live or last known) reports a usable remaining capacity. */
+  /** Live, but some pack (live or last known) reports no usable remaining capacity. */
   | { kind: "no-data" }
   | { kind: "estimate"; range: PackRange; lastKnown: LastKnownRef | null };
 
@@ -63,12 +66,13 @@ export interface BaseView {
   etaFullMin: number | null;
   range: RangeState;
   /** Usable base energy in Wh: pack count × the weaker pack's remaining Ah × nominal V, over
-   *  live and last-known readings (WEB-15: the sum overstated a series pair). Null when no
-   *  pack reports a usable remaining capacity. */
+   *  live and last-known readings (WEB-15: the sum overstated a series pair). Null when any
+   *  pack reports no usable remaining capacity, since that pack could be the weaker one. */
   usableWh: number | null;
   /** The last-known pack inside usableWh, if any. */
   usableLastKnown: LastKnownRef | null;
-  /** Range params for every pack, seed fallback, so the band matches usableWh's basis. */
+  /** Range params for every pack, seed fallback (missing or invalid synced params), so the
+   *  band matches usableWh's basis. */
   packParams: RangeParams[];
   /** The worst temperature zone (rank ≥ 1) over live packs, from the phone-synced
    *  thresholds and envelope (WEB-31). */
@@ -92,6 +96,15 @@ function remainingAh(i: FleetItem): number | null {
   return ah != null && Number.isFinite(ah) && ah >= 0 ? ah : null;
 }
 
+/** Synced params only when every band edge is finite and > 0, else the seed. range.ts gives
+ *  no estimate for a bad band, and a pack missing from the min could be the weaker one. */
+function validParams(p: RangeParams | undefined): RangeParams {
+  if (p == null) return SEED_RANGE_PARAMS;
+  const ok = [p.whPerDay, p.activeW, p.whPerMile].every((b) =>
+    b != null && Number.isFinite(b.lo) && Number.isFinite(b.hi) && b.lo > 0 && b.hi > 0);
+  return ok ? p : SEED_RANGE_PARAMS;
+}
+
 const ZERO_RANGE: PackRange = {
   milesLo: 0, milesHi: 0, activeHLo: 0, activeHHi: 0, wallHLo: 0, wallHHi: 0,
 };
@@ -99,7 +112,7 @@ const ZERO_RANGE: PackRange = {
 const ref = (p: PackView): LastKnownRef => ({ letter: p.letter, tsMs: p.item.ts_ms });
 
 export function baseView(base: Base, inputs: BaseViewInputs): BaseView {
-  const params = (i: FleetItem): RangeParams => inputs.rangeParams.get(i.address) ?? SEED_RANGE_PARAMS;
+  const params = (i: FleetItem): RangeParams => validParams(inputs.rangeParams.get(i.address));
   const packs: PackView[] = base.packs.map((p) => ({ item: p.item, letter: p.letter, live: p.connected }));
   const livePacks = packs.filter((p) => p.live);
 
@@ -111,31 +124,27 @@ export function baseView(base: Base, inputs: BaseViewInputs): BaseView {
     return e != null && Number.isFinite(e) && e > 0 ? Math.max(mx ?? 0, e) : mx;
   }, null);
 
-  // Usable energy: the weaker pack over every pack that reports a capacity.
-  const withAh = packs
-    .map((p) => ({ p, ah: remainingAh(p.item) }))
-    .filter((x): x is { p: PackView; ah: number } => x.ah != null);
-  const usableWh = withAh.length > 0
-    ? packs.length * Math.min(...withAh.map((x) => x.ah)) * NOMINAL_PACK_V : null;
-  const staleWithAh = withAh.find((x) => !x.p.live);
-  const usableLastKnown = staleWithAh ? ref(staleWithAh.p) : null;
+  // The weaker pack over EVERY pack, or no bound at all when any pack has no usable capacity.
+  const withAh = packs.map((p) => ({ p, ah: remainingAh(p.item) }));
+  const complete = withAh.length > 0 && withAh.every((x): x is { p: PackView; ah: number } => x.ah != null)
+    ? withAh : null;
+  const stale = packs.find((p) => !p.live);
+  const lastKnown = complete && stale ? ref(stale) : null;
 
-  // The range bound: the same packs, each through the shared range formula (range.ts).
-  const estimates = withAh
-    .map((x) => ({ p: x.p, r: x.ah === 0 ? ZERO_RANGE : estimatePackRange(false, x.ah, params(x.p.item)) }))
-    .filter((x): x is { p: PackView; r: PackRange } => x.r != null);
-  const staleEstimate = estimates.find((x) => !x.p.live);
+  const usableWh = complete ? packs.length * Math.min(...complete.map((x) => x.ah)) * NOMINAL_PACK_V : null;
+
+  // The range bound: every pack through the shared range formula (range.ts). With a usable
+  // capacity and validated params it always yields an estimate; a null would still read no-data.
+  const estimates = complete
+    ? complete.map((x) => x.ah === 0 ? ZERO_RANGE : estimatePackRange(false, x.ah, params(x.p.item)))
+    : null;
+  const bound = estimates && estimates.every((r): r is PackRange => r != null) ? minRange(estimates) : null;
 
   let range: RangeState;
   if (livePacks.length === 0) range = { kind: "offline", lastSeenMs: baseLastSeenMs(base) };
   else if (charging) range = { kind: "charging", etaFullMin };
-  else if (estimates.length === 0) range = { kind: "no-data" };
-  else {
-    range = {
-      kind: "estimate", range: minRange(estimates.map((x) => x.r)),
-      lastKnown: staleEstimate ? ref(staleEstimate.p) : null,
-    };
-  }
+  else if (bound == null) range = { kind: "no-data" };
+  else range = { kind: "estimate", range: bound, lastKnown };
 
   const thr = thresholdsFromConfig(inputs.tempConfig);
   const env = envelopeFromConfig(inputs.tempConfig);
@@ -153,7 +162,7 @@ export function baseView(base: Base, inputs: BaseViewInputs): BaseView {
   }
 
   return {
-    packs, livePacks, flowW, charging, etaFullMin, range, usableWh, usableLastKnown,
+    packs, livePacks, flowW, charging, etaFullMin, range, usableWh, usableLastKnown: lastKnown,
     packParams: packs.map((p) => params(p.item)), thermal,
   };
 }
