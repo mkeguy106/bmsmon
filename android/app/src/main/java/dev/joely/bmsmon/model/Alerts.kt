@@ -140,6 +140,7 @@ data class FleetNotify(
  * so two packs can hold two live low-battery notifications at once and a second low pack is never
  * masked by the first. A pack that has recovered/charged cancels; a pack that has dropped out of
  * [evals] entirely (unreachable / off BLE) also cancels — we alert on live data, not on absence.
+ * Only packs present in [last] (i.e. currently notified) are ever cancelled (BLE-28).
  */
 fun reconcileFleetNotifications(evals: Map<String, AlertEval>, last: Map<String, Int?>): FleetNotify {
     val newLast = mutableMapOf<String, Int?>()
@@ -149,10 +150,43 @@ fun reconcileFleetNotifications(evals: Map<String, AlertEval>, last: Map<String,
     for ((addr, eval) in evals) {
         val d = nextNotifyDecision(eval, last[addr])
         when {
-            d.cancel -> cancel += addr
+            // BLE-28: cancel only a pack that is actually showing a notification (has a baseline).
+            d.cancel -> if (addr in last) cancel += addr
             d.notify -> { notify += addr; newLast[addr] = d.newLastNotified }
             else -> newLast[addr] = d.newLastNotified  // same band → keep baseline, stay quiet
         }
     }
     return FleetNotify(newLast, cancel, notify)
+}
+
+/** Every alert-driving pack's own [AlertEval] plus the advanced per-pack charge latch. */
+data class FleetCapacity(val evals: Map<String, AlertEval>, val chargeAt: Map<String, Long>)
+
+/**
+ * Fleet-wide capacity evaluation (moved verbatim out of MonitorEngine.evaluateAlerts): every
+ * reachable pack in [fleet] — pass the freshness decision view, so seeds and silent packs are
+ * already unreachable — is evaluated against [cfg] on its own, with the per-pack charging
+ * hysteresis (UI-9) presented as `charging` so an Idle/Charging flap can't strobe notifications.
+ */
+fun fleetCapacityEvals(
+    fleet: Map<String, BatteryStatus>,
+    cfg: AlertConfig,
+    chargeAt: Map<String, Long>,
+    nowMs: Long,
+): FleetCapacity {
+    val nextCharge = chargeAt.toMutableMap()
+    val evals = fleet.mapNotNull { (addr, s) ->
+        val tel = s.telemetry?.takeIf { s.reachable } ?: return@mapNotNull null
+        val charging = tel.state == BatteryState.Charging
+        val hold = nextChargeHold(
+            charging = charging,
+            discharging = tel.state == BatteryState.Discharging,
+            lastChargingAt = chargeAt[addr] ?: 0L,
+            now = nowMs,
+        )
+        nextCharge[addr] = hold.lastChargingAt
+        val eval = evalStageAlert(listOf(PackSoc(tel.soc, charging)), cfg)
+        addr to (if (hold.holdActive && !eval.charging) eval.copy(charging = true) else eval)
+    }.toMap()
+    return FleetCapacity(evals, nextCharge)
 }
