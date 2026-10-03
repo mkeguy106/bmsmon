@@ -1,4 +1,5 @@
 import asyncio
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
@@ -33,12 +34,22 @@ def _norm_origin(origin: str) -> str:
     return origin.strip().rstrip("/").lower()
 
 
-def origin_allowed(origin: str | None) -> bool:
+def _origin_netloc(origin: str) -> str:
+    """host[:port] of an Origin, lowercased; "" when it has none or does not parse."""
+    try:
+        return urlsplit(_norm_origin(origin)).netloc
+    except ValueError:  # e.g. "http://[::1" (unterminated IPv6 literal)
+        return ""
+
+
+def origin_allowed(origin: str | None, host: str | None = None) -> bool:
     """SEC-19 cross-site WebSocket hijacking guard: is this handshake's Origin allowed?
 
     Prod: only settings.ws_allowed_origins (scheme + host + port, case-insensitive,
     trailing slash ignored); a missing Origin is refused, since every browser sends one.
-    Dev-trust: also DEV_ORIGINS and a missing Origin.
+    Dev-trust: also DEV_ORIGINS, a missing Origin, and a same-origin page, i.e. one whose
+    Origin host:port is the request's own `host` header (the built bundle served by the
+    local API, e.g. http://localhost:8000).
     """
     dev = dev_trust_active()
     if origin is None:
@@ -46,6 +57,8 @@ def origin_allowed(origin: str | None) -> bool:
     allowed = {_norm_origin(o) for o in settings.ws_allowed_origins}
     if dev:
         allowed.update(DEV_ORIGINS)
+        if host and _origin_netloc(origin) == host.strip().lower():
+            return True
     return _norm_origin(origin) in allowed
 
 
@@ -53,7 +66,7 @@ def origin_allowed(origin: str | None) -> bool:
 async def ws(sock: WebSocket):
     # SEC-19: Origin first, BEFORE accept(): a cross-site page gets no upgrade at all
     # (uvicorn answers a pre-accept close with an HTTP 403; the test client sees 4403).
-    if not origin_allowed(sock.headers.get("origin")):
+    if not origin_allowed(sock.headers.get("origin"), sock.headers.get("host")):
         await sock.close(code=WS_FORBIDDEN)
         return
     # Same gate as /web/* (authorize: identity + viewer group; Authentik headers, proxy

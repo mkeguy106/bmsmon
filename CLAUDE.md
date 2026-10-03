@@ -1228,7 +1228,9 @@ Enforced in the app itself (not delegated to Traefik/Authentik) and pinned by te
   socket is closed with 4403. Uvicorn turns a pre-accept close into an HTTP 403 handshake
   rejection. This blocks cross-site WebSocket hijacking from any same-site
   `*.covert.life` page (SEC-19). Dev-trust mode also allows `http://localhost:5173`,
-  `http://127.0.0.1:5173` and a missing Origin (the Vite proxy and the smoke test).
+  `http://127.0.0.1:5173` and a missing Origin (the Vite proxy and the smoke test), plus
+  a same-origin page whose Origin host matches the request's `Host` (the built bundle
+  served by the local API, e.g. `http://localhost:8000`).
 - **Device requests authenticate before their body is touched** (SEC-18). `_authenticate`
   runs first: bearer, device row, ES256 signature + required claims + exp/iat/aud
   (`device_jwt.verify_token`), replay probe, per-device budget. Only then is the body read

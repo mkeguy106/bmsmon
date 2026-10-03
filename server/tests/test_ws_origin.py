@@ -70,3 +70,23 @@ def test_dev_origins_refused_when_dev_trust_is_refused(set_setting):
     set_setting("database_url", "postgresql://bmsmon:pw@db-prod.internal.example:5432/bmsmon")
     assert not origin_allowed("http://localhost:5173")
     assert not origin_allowed(None)
+
+
+def test_dev_trust_allows_a_same_origin_page(set_setting):
+    # `vite build` output served by the local API itself (e.g. http://localhost:8000):
+    # the page's Origin is the API's own Host. The test client's Host is "testserver".
+    set_setting("dev_trust_headers", True)
+    with TestClient(create_app()) as tc:
+        with tc.websocket_connect("/ws", headers={"Origin": "http://testserver"}) as ws:
+            assert ws.receive_json()["type"] == "snapshot"
+        assert _refused_code(tc, {"Origin": "http://testserver.evil.example"}) == WS_FORBIDDEN
+    assert origin_allowed("http://LOCALHOST:8000", host="localhost:8000")
+    assert not origin_allowed("http://localhost:8001", host="localhost:8000")
+    assert not origin_allowed("null", host="")
+    assert not origin_allowed("http://[::1", host="[::1]")  # unparseable: refused, no 500
+
+
+def test_same_origin_is_not_enough_outside_dev():
+    with TestClient(create_app()) as tc:
+        assert _refused_code(tc, {**VIEWER_H, "Origin": "http://testserver"}) == WS_FORBIDDEN
+    assert not origin_allowed("http://localhost:8000", host="localhost:8000")
