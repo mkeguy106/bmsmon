@@ -70,6 +70,7 @@ import dev.joely.bmsmon.power.PowerMonitor
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -440,6 +441,21 @@ class MonitorEngine(
             packChargeAt = emptyMap()
             stageAddrs = emptySet()
             forceStagePush = true
+        }
+    }
+
+    /**
+     * Record a user Stop (BLE-30): persist `monitoring = false`. The boot / app-update restore
+     * (BLE-17) trusts that flag, so without this a reboot would silently undo the user's Stop and
+     * re-take every BLE link the Redodo app needs. Runs on the engine's process-lifetime scope so
+     * the write outlives the service that asks for it. UNDISPATCHED: the edit is handed to
+     * DataStore on the caller's thread before this returns, so it queues ahead of a later Start's
+     * `true` instead of racing it.
+     */
+    fun persistMonitoringOff() {
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            runCatching { settings.setMonitoring(false) }
+                .onFailure { Log.w(TAG, "persisting monitoring = false failed", it) }
         }
     }
 
