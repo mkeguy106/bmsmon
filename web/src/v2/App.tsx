@@ -63,7 +63,8 @@ export default function App() {
 
   const { tempConfig, alertConfig } = useV2Configs();
   // One stage selection for every view (WEB-12): seize → pin → in use → hold → parked →
-  // daily driver. Command, Journey and the Health hero all read this same answer.
+  // daily driver. Command, Journey and the Health hero all read this same answer. No seize
+  // until the seize config is known (seizeThresholdFrom(null) → null).
   const stage = useStageBase(data, seizeThresholdFrom(alertConfig));
   const alerts = useMemo(
     () => deriveAlerts(data.items, data.staleAddrs, tempConfig),

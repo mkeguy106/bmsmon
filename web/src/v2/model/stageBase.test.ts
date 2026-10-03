@@ -32,6 +32,12 @@ describe("seizeThresholdFrom (C6)", () => {
     expect(seizeThresholdFrom({ alerts_on: true, seize_soc: null })).toBe(30);
     expect(seizeThresholdFrom({ alerts_on: true, seize_soc: 0 })).toBe(0);
   });
+
+  // Final review: a seize staged on the default 30 before /web/alert-config answered could
+  // stick (PARKED) even when the phone's config turned out to have alerts off.
+  it("is off while the config is still unknown", () => {
+    expect(seizeThresholdFrom(null)).toBeNull();
+  });
 });
 
 describe("selectStageBase", () => {

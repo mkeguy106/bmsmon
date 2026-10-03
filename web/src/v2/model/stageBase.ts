@@ -54,8 +54,13 @@ export interface StageInputs {
   nowMs: number;
 }
 
-/** C6, exactly as v1: alerts off → no seize; otherwise the pushed value, 30 when absent. */
-export function seizeThresholdFrom(cfg: { seize_soc: number | null; alerts_on: boolean }): number | null {
+/** C6, exactly as v1: alerts off → no seize; otherwise the pushed value, 30 when absent.
+ *  A config not yet known (null) seizes nothing: a seize made on a guessed threshold could
+ *  stay PARKED on that base after the real config arrives with alerts off. */
+export function seizeThresholdFrom(
+  cfg: { seize_soc: number | null; alerts_on: boolean } | null,
+): number | null {
+  if (cfg == null) return null;
   return cfg.alerts_on === false ? null : (cfg.seize_soc ?? DEFAULT_SEIZE_SOC);
 }
 

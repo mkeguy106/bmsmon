@@ -982,7 +982,8 @@ WebUI reads it via `GET /web/alert-config` and seizes its main stage for the low
 `≤ (alerts_on ? seize_soc ?? 30 : ∅)` — over pins and auto-selection, with a **"LOW"** marker,
 no audible alarm: v2 (`/`) via `useV2Configs` + `web/src/v2/model/stageBase.ts`
 `selectStageBase` (Command stage, Journey and the Fleet Health hero; LOW chip in
-`CommandStage.tsx`), v1 (`/v1/`) via `web/src/stage.ts` `selectStageItems` (`MainStage.tsx`).
+`CommandStage.tsx`; no seize until the config's first answer, and the 30 default only if
+that fetch fails, so a guessed threshold can't leave the stage parked on a seized base), v1 (`/v1/`) via `web/src/stage.ts` `selectStageItems` (`MainStage.tsx`).
 Only the seize is synced — v2's capacity ALERT ladder is still the fixed 30…5 / critical 15. Schema is
 idempotent SQL in `server/app/db/schema.sql` (`CREATE TABLE IF NOT EXISTS` + `ALTER TABLE ... ADD
 COLUMN IF NOT EXISTS`) run on pool creation — so **schema changes apply automatically on container
