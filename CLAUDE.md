@@ -698,15 +698,37 @@ outage); that used to read as "server rejects this batch" and erased the outbox 
 Now every 4xx other than 401/403 that is not a marked 400/413/422 (so every unmarked 4xx, and e.g.
 a marked 404/408/429), every 3xx (the upload client is built with `followRedirects(false)` +
 `followSslRedirects(false)` in `uploadHttpClient()`, so a redirect to a login page can never come
-back as a 2xx "accept") and every 5xx is Transient; 401/403 are AuthFailed and hold the rows whether
-or not the marker is present. Poison then passes a circuit breaker (`decideUpload`,
-`cloud/UploadDecision.kt`, pure): the first Poison after a 2xx is skipped, any further Poison before
-the next 2xx is held and backed off — genuine poison is one bad batch; a run of rejects is a server
-problem. Ingest, the historical import and the config push each have their own breaker; it lives in
-memory, so a restart re-arms one skip per stream. The config push also has its own retry gate
-(1 s doubling to 60 s, reset on a 2xx or a skip), so a held config is not re-POSTed on every loop
-pass. **Deploy order is load-bearing: the server's marker ships before this APK**, or a genuine app
-4xx would be held forever.
+back as a 2xx "accept") and every 5xx except a marked non-503 one (below) is Transient; 401/403 are
+AuthFailed and hold the rows whether or not the marker is present. Poison then passes a circuit
+breaker (`decideUpload`, `cloud/UploadDecision.kt`, pure): the first Poison after a 2xx is skipped,
+any further Poison before the next 2xx is held and backed off — genuine poison is one bad batch; a
+run of rejects is a server problem. Ingest, the historical import and the config push each have
+their own breaker; it lives in memory, so a restart re-arms one skip per stream. The config push
+also has its own retry gate (1 s doubling to 60 s, reset on a 2xx or a skip), so a held config is
+not re-POSTed on every loop pass. **Deploy order is load-bearing: the server's marker ships before
+this APK**, or a genuine app 4xx would be held forever.
+
+**One sample that crashes the server can't block the queue forever (DATA-22).** Precisely: one
+deterministic bad row is isolated and skipped per 2xx; two ADJACENT faulting rows, or a fault that hits
+every request, are held (backing off) rather than drained — patience over data loss. **Deploy order:
+the server's 503 classification ships before this APK**; against an older server a long DB outage
+with the API still up returns marked 500s and could cost one good sample. Only a *marked* 5xx
+other than 503 is a `ServerFault` (a marked 503 + `Retry-After` is the server's "database
+unavailable", and an unmarked 5xx is Traefik — both stay Transient). It backs off like a Transient
+and never touches the poison breaker. On the ingest stream only, the pure `stepHeadFault`
+(`cloud/UploadDecision.kt`) bisects the head batch: after `FAULT_STREAK` (4) marked faults on the
+same head that ALSO span `FAULT_MIN_SPAN_MS` (5 min, on `elapsedRealtime`) the batch limit halves
+(`ceil(n/2)`); at one row it skips that row's OUTBOX copy only (the sample stays in Room `samples`
+when logging is on), logs id/seq/size (never the payload), and bumps the persisted
+`server_fault_skips` counter that `Settings › Cloud sync` shows once it is above 0. **At most one
+skip per 2xx** (`skipsSinceOk`, the poison breaker's rule): a second trip at one row before any 2xx
+holds and backs off instead, so a server that faults on everything costs one sample, then holds
+until fixed, while a genuine bad row is still isolated because bisection's clean halves are 2xxs
+that re-arm it. Every trip needs a fresh full span. After a skip the next head goes alone (limit 1)
+and only 2xxs double it back to 200. Transient/AuthFailed responses neither reset nor advance a
+streak; a changed head resets it but keeps the limit and the breaker. State is in memory, so a
+restart starts over at a full batch with one skip re-armed. The import and config streams are
+unchanged.
 
 **Bounded history reads (DATA-15/16).** On the History/Review/Timeline and session-rollup paths
 nothing reads a pack's or a session's samples as a list. The engine's windowed reads —
@@ -1415,6 +1437,8 @@ Enforced in the app itself (not delegated to Traefik/Authentik) and pinned by te
   static files and the WebSocket 101. Traefik's own 404/502 while `bmsmon-api` is down
   never carries it. That is how the phone tells "the app rejected this batch" from "the
   app isn't there" (DATA-14). Keep `ApiMarkerMiddleware` the last `add_middleware` call.
+  A marked `503` (+ `Retry-After: 30`) means the database is unavailable (transient, retry);
+  a marked `500` means a crash (`is_db_unavailable` in `app/middleware.py` decides which).
 - **One request-body cap for every route** (`BodySizeLimitMiddleware`,
   `BMSMON_MAX_BODY_BYTES`, default 1 MiB). A `Content-Length` over the cap gets a 413
   before the route, and any rate limiter, runs. Bodies without or lying about

@@ -71,6 +71,24 @@ class UploadDecisionTest {
         )
     }
 
+    // DATA-22: a marked 500 backs off like a Transient. It is not a reject of the rows (that is
+    // Poison's job), so it neither spends nor re-arms the poison skip, and says nothing about auth.
+    @Test fun aServerFaultBacksOffAndLeavesThePoisonBreakerAlone() {
+        assertEquals(
+            UploadDecision(BatchStep.BACK_OFF, poisonSkipsSinceOk = 1, authFailed = false),
+            decideUpload(PostResult.ServerFault, poisonSkipsSinceOk = 1, authFailed = false),
+        )
+        assertEquals(
+            UploadDecision(BatchStep.BACK_OFF, poisonSkipsSinceOk = 0, authFailed = true),
+            decideUpload(PostResult.ServerFault, poisonSkipsSinceOk = 0, authFailed = true),
+        )
+    }
+
+    @Test fun aServerFaultInBetweenDoesNotReArmThePoisonSkip() {
+        val s = steps(listOf(PostResult.Poison, PostResult.ServerFault, PostResult.Poison))
+        assertEquals(listOf(BatchStep.DELETE_POISON, BatchStep.BACK_OFF, BatchStep.BACK_OFF), s)
+    }
+
     @Test fun authFailedHoldsRowsAndRaisesTheBadge() {
         val d = decideUpload(PostResult.AuthFailed, poisonSkipsSinceOk = 1, authFailed = false)
         assertEquals(BatchStep.BACK_OFF_AUTH, d.step)

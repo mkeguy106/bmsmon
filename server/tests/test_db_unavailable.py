@@ -1,0 +1,80 @@
+"""A DB outage is a marked 503 (transient, retry); a real crash stays a marked 500."""
+import asyncio
+
+import asyncpg
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+from app.config import settings
+from app.middleware import API_MARKER_HEADER, API_MARKER_VALUE, is_db_unavailable
+
+
+@pytest.mark.parametrize("exc", [
+    asyncpg.exceptions.CannotConnectNowError("starting up"),
+    asyncpg.exceptions.ConnectionDoesNotExistError("gone"),
+    asyncpg.exceptions.TooManyConnectionsError("full"),
+    asyncpg.exceptions.PostgresConnectionError("x"),
+    asyncpg.exceptions.AdminShutdownError("57P01"),
+    asyncpg.exceptions.CrashShutdownError("57P02"),
+    asyncpg.exceptions.QueryCanceledError("57014"),
+    asyncpg.exceptions.LockNotAvailableError("55P03"),
+    asyncpg.exceptions.DiskFullError("53100"),
+    asyncpg.exceptions.OutOfMemoryError("53200"),
+    asyncpg.exceptions.InsufficientResourcesError("53000"),
+    asyncpg.exceptions.ReadOnlySQLTransactionError("25006"),
+    asyncpg.exceptions.PostgresIOError("58030"),
+    asyncpg.exceptions.InvalidPasswordError("28P01"),
+    asyncpg.exceptions.InvalidCatalogNameError("3D000"),
+    asyncpg.exceptions.InterfaceError("pool is not initialized"),
+    asyncpg.exceptions.InterfaceError("pool is closed"),
+    asyncpg.exceptions.InterfaceError("connection is closed"),
+    ConnectionRefusedError(111, "refused"),
+    OSError("unreachable"),
+    asyncio.TimeoutError(),
+])
+def test_classifier_true(exc):
+    assert is_db_unavailable(exc)
+
+
+@pytest.mark.parametrize("exc", [
+    ValueError("x"),
+    RuntimeError("boom"),
+    asyncpg.exceptions.InterfaceError("cannot use Connection.transaction() in a manually started transaction"),
+    asyncpg.exceptions.UniqueViolationError("dup"),
+])
+def test_classifier_false(exc):
+    assert not is_db_unavailable(exc)
+
+
+async def _get(app, exc):
+    async def boom():
+        raise exc
+
+    app.add_api_route("/api/v1/__test_dbdown", boom)
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://t") as c:
+        return await c.get("/api/v1/__test_dbdown")
+
+
+async def test_db_down_is_marked_503(app):
+    r = await _get(app, asyncpg.exceptions.CannotConnectNowError("starting up"))
+    assert r.status_code == 503
+    assert r.json() == {"detail": "database unavailable"}
+    assert r.headers["Retry-After"] == "30"
+    assert r.headers[API_MARKER_HEADER] == API_MARKER_VALUE
+
+
+async def test_crash_is_marked_500(app):
+    r = await _get(app, RuntimeError("boom"))
+    assert r.status_code == 500
+    assert "Retry-After" not in r.headers
+    assert r.headers[API_MARKER_HEADER] == API_MARKER_VALUE
+
+
+async def test_real_closed_pool_error_is_classified():
+    # Guards against asyncpg rewording its closed-pool message.
+    pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=1)
+    await pool.close()
+    with pytest.raises(asyncpg.exceptions.InterfaceError) as ei:
+        await pool.acquire()
+    assert is_db_unavailable(ei.value)
