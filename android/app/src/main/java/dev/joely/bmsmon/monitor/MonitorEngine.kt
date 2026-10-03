@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.SystemClock
 import android.util.Log
 import dev.joely.bmsmon.ble.BmsRepository
 import dev.joely.bmsmon.ble.hasBlePermissions
@@ -20,13 +21,17 @@ import dev.joely.bmsmon.data.db.BmsDatabase
 import dev.joely.bmsmon.model.AlertConfig
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.BatteryStatus
+import dev.joely.bmsmon.model.DEFAULT_GROUP_ID
 import dev.joely.bmsmon.model.DEFAULT_ROSTER
+import dev.joely.bmsmon.model.EngineDecision
 import dev.joely.bmsmon.model.PackRange
-import dev.joely.bmsmon.model.PackSoc
 import dev.joely.bmsmon.model.RangeParams
 import dev.joely.bmsmon.model.RangeRow
 import dev.joely.bmsmon.model.SEED_RANGE_PARAMS
 import dev.joely.bmsmon.model.SEED_TAIL_MIN
+import dev.joely.bmsmon.model.SLOW_POLL_MS
+import dev.joely.bmsmon.model.StageConfig
+import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.TodayUsage
 import dev.joely.bmsmon.model.TAIL_START_SOC
 import dev.joely.bmsmon.model.TempRank
@@ -34,12 +39,12 @@ import dev.joely.bmsmon.model.TempSide
 import dev.joely.bmsmon.model.TempThresholds
 import dev.joely.bmsmon.model.TempUnit
 import dev.joely.bmsmon.model.chargeSample
+import dev.joely.bmsmon.model.decisionView
+import dev.joely.bmsmon.model.engineDecision
 import dev.joely.bmsmon.model.estimateChargeMinutes
 import dev.joely.bmsmon.model.estimatePackRange
-import dev.joely.bmsmon.model.evalStageAlert
 import dev.joely.bmsmon.model.learnRangeParams
 import dev.joely.bmsmon.model.learnTailFold
-import dev.joely.bmsmon.model.nextChargeHold
 import dev.joely.bmsmon.model.formatDelta
 import dev.joely.bmsmon.model.todayUsage
 import dev.joely.bmsmon.model.tempMarginToCutoffC
@@ -53,6 +58,7 @@ import dev.joely.bmsmon.model.applyDisabled
 import dev.joely.bmsmon.model.groupActivity
 import dev.joely.bmsmon.model.groupOf
 import dev.joely.bmsmon.model.groupViews
+import dev.joely.bmsmon.model.pruneToRoster
 import dev.joely.bmsmon.model.MotionGate
 import dev.joely.bmsmon.model.MotionReading
 import dev.joely.bmsmon.model.foldMotion
@@ -62,6 +68,7 @@ import dev.joely.bmsmon.model.powerDecision
 import dev.joely.bmsmon.model.seedLowPower
 import dev.joely.bmsmon.power.PowerMonitor
 import java.io.File
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -97,6 +104,11 @@ data class MonitorState(
     val peakPowerW: Float = 0f,
     val peakCurrentA: Float = 0f,
     val gpsActive: Boolean = false,
+    // Stage (T1.2, 2026-10-02 review) — single writer: the engine. Resolved (low-pack seize
+    // included) on every BLE event, every config push and a 10 s tick, with or without a
+    // ViewModel; the VM pushes StageConfig and mirrors these two fields.
+    val stageTarget: StageTarget = StageTarget.Base(DEFAULT_GROUP_ID),
+    val stagePinned: Boolean = false,
     // Phone power policy (2026-07-25), single-writer: only the engine sets these. holdScreen gates
     // FLAG_KEEP_SCREEN_ON in the UI; gpsBalanced downgrades GPS during the low-battery window
     // (entered below 5%, held until 15%); lowPower is the hysteretic latch, fed back into
@@ -127,8 +139,9 @@ data class MonitorState(
  *
  * Telemetry processing that used to live in BatteryViewModel (regen detection, peak tracking,
  * per-sample logging, last-discharge tracking, connect/disconnect event logging) moved here so it
- * runs headless. Stage resolution and all settings/appearance state stay in the ViewModel, which
- * pushes the resolved stage down via [setStage].
+ * runs headless. Since T1.2 the engine also owns stage resolution (incl. the low-pack seize) — see
+ * [reevaluate]; settings/appearance state stays in the ViewModel, which pushes [StageConfig] down
+ * via [setStageConfig].
  */
 class MonitorEngine(
     private val appContext: Context,
@@ -138,6 +151,8 @@ class MonitorEngine(
     db: BmsDatabase,
     private val reporter: TelemetryReporter? = null,
     private val settings: SettingsStore,
+    /** Monotonic clock for frame freshness (UI-16). Injectable; the same clock the UI reads. */
+    private val elapsedNow: () -> Long = { SystemClock.elapsedRealtime() },
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -152,12 +167,28 @@ class MonitorEngine(
     private val _state = MutableStateFlow(MonitorState())
     val state: StateFlow<MonitorState> = _state.asStateFlow()
 
-    // Stage addresses + alert config, mirrored from the ViewModel so alerts can fire headless.
-    @Volatile private var stageAddrs: Set<String> = emptySet()
+    // Alert config, mirrored from the ViewModel (or the restore plan) so alerts fire headless.
     @Volatile private var alertConfig: AlertConfig? = null
     @Volatile private var tempAlertsEnabled: Boolean = true
     @Volatile private var tempThresholdsByProfile: Map<String, TempThresholds> = emptyMap()
     @Volatile private var tempUnit: TempUnit = TempUnit.F
+
+    // --- Stage ownership (T1.2). Synchronization: fields marked "lock" are read and written ONLY
+    // inside @Synchronized engine methods (reevaluate, seedStage, forceStage, markStageAuthoritative)
+    // or stop()'s synchronized(this) block — the same monitor as applyGpsGate/shutdownGps. The
+    // @Volatile ones are written from the main thread by setters that then call reevaluate().
+    @Volatile private var stageConfig: StageConfig = StageConfig()
+    @Volatile private var disabledAddrs: Set<String> = emptySet()
+    /** Resolved stage addresses (minus disabled), as last pushed to BLE. Written under the lock;
+     *  read lock-free in onPoll for the frame-cadence stamp (a stale read costs one frame's window). */
+    @Volatile private var stageAddrs: Set<String> = emptySet()
+    private var stageInitialized = false        // lock — false until seeded/forced/started
+    private var forceStagePush = true           // lock — push the BLE stage set on a session's first pass
+    private var persistStageJob: Job? = null    // lock
+    // Per-pack charging-suppression latch for the headless notifier (UI-9). Lock (BLE-20): it used
+    // to be a HashMap mutated from both the main and the control-loop thread.
+    private var packChargeAt: Map<String, Long> = emptyMap()
+    private var stageTickJob: Job? = null       // main thread only (start/stop), like rangeJob
     private val lastTailLearnAt = HashMap<String, Long>()
     // Last-uploaded GPS fix time per address (see isNewFixForPack). Upload path only — local Room
     // logging keeps attaching the full-precision fix to every sample.
@@ -242,7 +273,12 @@ class MonitorEngine(
         _state.update { st ->
             st.copy(
                 monitoring = true,
-                fleet = seed.mapValues { (_, s) -> s.copy(reachable = false) },
+                // A new session starts with NO session data (UI-16): the seed renders as
+                // last-known and can never read LIVE or drive an alert until its pack's first
+                // parsed frame. Removed packs are pruned so they can't return as ghosts (UI-29).
+                fleet = pruneToRoster(seed, roster).mapValues { (_, s) ->
+                    s.copy(reachable = false, lastFrameAtElapsedMs = null, frameIntervalMs = SLOW_POLL_MS)
+                },
                 regenAddrs = emptySet(),
                 lastDischargeAt = emptyMap(),
                 peakPowerW = 0f,
@@ -254,9 +290,14 @@ class MonitorEngine(
         ble.start(
             scope = scope,
             targets = roster.allTargets(),
-            onPoll = ::onPoll,
-            onReachable = ::onReachable,
+            // Every BLE event re-runs the decision step (BLE-14/UI-20) — never only stage-pack
+            // ones, so fleet-wide alerts and the seize keep working when the stage is dark.
+            onPoll = { addr, raw, t -> onPoll(addr, raw, t); reevaluate() },
+            onReachable = { addr, reachable -> onReachable(addr, reachable); reevaluate() },
         )
+        markStageAuthoritative()
+        reevaluate()       // resolve + push the launch stage (releases BmsRepository's launch barrier)
+        startStageTick()
         registerBtReceiver()  // BLE-10: BT off→on clears every backoff via kickAll
         startPowerLoop()  // phone power → screen-hold + GPS priority policy
         scope.launch {
@@ -289,9 +330,11 @@ class MonitorEngine(
         val plan = runCatching { settings.load() }.getOrNull()?.let(::restorePlan) ?: return false
         if (!hasBlePermissions(appContext)) return false
         if (_state.value.monitoring) return true  // raced with a normal start; leave it be
+        setRoster(plan.roster)           // the stage below resolves against the restored roster
+        seedStage(plan.stage)
+        setStageConfig(plan.stageConfig)
         start(plan.roster, plan.seed, plan.logging)
         setDisabled(plan.disabled)
-        setStage(plan.stageAddrs)
         setAlertConfig(plan.alertConfig)
         setTempAlertConfig(plan.tempAlertsEnabled, plan.tempThresholdsByProfile, plan.tempUnit)
         // Pause setting first, so the gate's first evaluation is already correct and GPS is never
@@ -301,10 +344,50 @@ class MonitorEngine(
         return true
     }
 
-    /** Roster edited while monitoring: update the live target set and group lookups. */
+    /** Roster edited (monitoring or not): update the target set and group lookups, prune removed
+     *  packs from the fleet so they can't linger as ghosts or seize the stage (UI-29), and
+     *  re-resolve — a target that lost every member falls back to the daily driver. */
     fun setRoster(roster: Roster) {
         this.roster = roster
-        ble.setTargets(roster.allTargets())
+        _state.update { st ->
+            st.copy(
+                fleet = pruneToRoster(st.fleet, roster),
+                regenAddrs = st.regenAddrs.filter { roster.batteryAt(it) != null }.toSet(),
+            )
+        }
+        if (_state.value.monitoring) ble.setTargets(roster.allTargets())
+        reevaluate()
+    }
+
+    /** Hand the engine its starting stage (the validated persisted lastStage). Ignored once the
+     *  engine has an authoritative stage — e.g. a headless restore already started it and the
+     *  Activity opens later: the VM must adopt the engine's stage, never reset it. */
+    @Synchronized
+    fun seedStage(target: StageTarget) {
+        if (stageInitialized) return
+        stageInitialized = true
+        _state.update { it.copy(stageTarget = target) }
+    }
+
+    /** An explicit user choice of stage outside pin semantics (a daily driver picked while not
+     *  monitoring). Re-resolved at once, so the seize and an active pin still win. */
+    @Synchronized
+    fun forceStage(target: StageTarget) {
+        stageInitialized = true
+        _state.update { it.copy(stageTarget = target) }
+        reevaluate()
+    }
+
+    /** Stage inputs from the ViewModel (pin, dynamic, hold, daily driver, seize threshold). */
+    fun setStageConfig(cfg: StageConfig) {
+        stageConfig = cfg
+        reevaluate()
+    }
+
+    @Synchronized
+    private fun markStageAuthoritative() {
+        stageInitialized = true
+        forceStagePush = true
     }
 
     /**
@@ -320,35 +403,38 @@ class MonitorEngine(
         stopPowerLoop()
         rangeJob?.cancel()
         rangeJob = null
+        stageTickJob?.cancel()
+        stageTickJob = null
         ble.stop()
         shutdownGps()
-        alertNotifier.clear()
-        stageAddrs = emptySet()
-        _state.update { st ->
-            MonitorState(
-                fleet = st.fleet.mapValues { (_, s) -> s.copy(reachable = false) },
-                cloudOutboxDepth = st.cloudOutboxDepth,
-                cloudLastUploadMs = st.cloudLastUploadMs,
-                cloudUploadKbps = st.cloudUploadKbps,
-                cloudAuthFailed = st.cloudAuthFailed,
-                rangeParamsByAddress = st.rangeParamsByAddress,
-            )
+        // One step under the engine lock (BLE-20): flip monitoring off and clear the notifier
+        // together, so a reevaluate() racing in from the control loop either finished before (and
+        // is cleared here) or starts after (reads monitoring = false and posts nothing).
+        synchronized(this) {
+            _state.update { st ->
+                MonitorState(
+                    fleet = st.fleet.mapValues { (_, s) -> s.copy(reachable = false) },
+                    stageTarget = st.stageTarget,
+                    stagePinned = st.stagePinned,
+                    cloudOutboxDepth = st.cloudOutboxDepth,
+                    cloudLastUploadMs = st.cloudLastUploadMs,
+                    cloudUploadKbps = st.cloudUploadKbps,
+                    cloudAuthFailed = st.cloudAuthFailed,
+                    rangeParamsByAddress = st.rangeParamsByAddress,
+                )
+            }
+            alertNotifier.clear()
+            packChargeAt = emptyMap()
+            stageAddrs = emptySet()
+            forceStagePush = true
         }
-    }
-
-    fun setStage(addresses: Set<String>) {
-        // Normalize once (UI-13d): everything downstream — stageAddrs comparisons AND the BLE
-        // layer — sees the same uppercased set instead of whatever casing the caller had.
-        val norm = addresses.map { it.uppercase() }.toSet()
-        stageAddrs = norm
-        ble.setStage(norm)
-        evaluateAlerts()
     }
 
     /** Disable packs: mark them unreachable in the state FIRST (synchronously — reachability has a
      *  single writer, so a just-disconnected pack can never flash back to "connected" while its
      *  worker tears down), then cancel their BLE workers. */
     fun setDisabled(addresses: Set<String>) {
+        disabledAddrs = addresses.map { it.uppercase() }.toSet()
         _state.update { st ->
             val (fleet, regen) = applyDisabled(st.fleet, st.regenAddrs, addresses)
             st.copy(fleet = fleet, regenAddrs = regen)
@@ -358,13 +444,14 @@ class MonitorEngine(
         // fire again while monitoring stays on. Re-evaluate here rather than wait for the range
         // loop's 5-minute tick.
         applyGpsGate(now())
+        reevaluate()   // the stage's BLE address set excludes disabled packs
     }
     fun kickAll() = ble.kickAll()
 
     /** Mirror the alert settings from the ViewModel; re-evaluate so changes take effect at once. */
     fun setAlertConfig(cfg: AlertConfig) {
         alertConfig = cfg
-        evaluateAlerts()
+        reevaluate()
     }
 
     /** Mirror the temperature-alert settings from the ViewModel. [unit] is the app-wide °C/°F
@@ -373,40 +460,92 @@ class MonitorEngine(
         tempAlertsEnabled = enabled
         tempThresholdsByProfile = thresholdsByProfile
         tempUnit = unit
-        evaluateAlerts()
+        reevaluate()
     }
 
-    // Per-pack charging-suppression latch for the headless notifier (UI-9) — same hysteresis as the
-    // in-app overlay, so an Idle/Charging flap at the charger can't strobe notifications either. Keyed
-    // by address now that notifications are fleet-wide (each low pack alerts independently).
-    private val packChargeAt = mutableMapOf<String, Long>()
-
-    /** Evaluate EVERY reachable pack against the alert config and drive per-pack headless
-     *  notifications, so a low pack that isn't on the stage still raises the alarm. */
-    private fun evaluateAlerts() {
-        if (!_state.value.monitoring) return
-        val fleet = _state.value.fleet
-        val label = stageAddrs.firstNotNullOfOrNull { roster.groupOf(it)?.id }
-        alertConfig?.let { cfg ->
-            val now = now()
-            val evals = fleet.mapNotNull { (addr, s) ->
-                val tel = s.telemetry?.takeIf { s.reachable } ?: return@mapNotNull null
-                val charging = tel.state == BatteryState.Charging
-                val hold = nextChargeHold(
-                    charging = charging,
-                    discharging = tel.state == BatteryState.Discharging,
-                    lastChargingAt = packChargeAt[addr] ?: 0L, now = now,
-                )
-                packChargeAt[addr] = hold.lastChargingAt
-                val eval = evalStageAlert(listOf(PackSoc(tel.soc, charging)), cfg)
-                // Present the latched hold as "charging" so the alert stays cancelled through an
-                // Idle/Charging flap instead of cancel/re-notify churn.
-                val held = if (hold.holdActive && !eval.charging) eval.copy(charging = true) else eval
-                addr to PackAlert(held, roster.batteryAt(addr)?.alias ?: tel.name)
-            }.toMap()
-            alertNotifier.updateFleet(evals)
+    /**
+     * The engine's decision step (T1.2 — BLE-14/UI-20, UI-29, UI-16): resolve the stage (low-pack
+     * seize included) and evaluate fleet-wide capacity + stage temperature alerts, via the pure
+     * [engineDecision]. Runs on EVERY BLE event (wired once in [start]), on every config push and
+     * on the [STAGE_TICK_MS] tick, so headless operation decides exactly like foreground operation.
+     *
+     * @Synchronized on the engine — the same monitor as [applyGpsGate]/[shutdownGps]: it is entered
+     * from the BLE control loop (IO), the ViewModel (main) and the tick (Default); the stage
+     * read-decide-act and AlertNotifier's HashMaps (BLE-20) must not interleave. Nothing it calls
+     * re-enters the engine from another thread or waits on one — [BmsRepository.setStage] only
+     * posts a wake and the lastStage write is launched — but it does make NotificationManager
+     * binder calls (notify / cancel / areNotificationsEnabled) while holding the lock. Those are
+     * bounded (milliseconds), the same trade [applyGpsGate] already makes for its GMS calls; a
+     * main-thread setter that arrives meanwhile waits that long.
+     */
+    @Synchronized
+    private fun reevaluate() {
+        val st = _state.value
+        val d = engineDecision(
+            roster = roster,
+            fleet = st.fleet,
+            nowElapsedMs = elapsedNow(),
+            nowMs = now(),
+            lastDischargeAt = st.lastDischargeAt,
+            stageCfg = stageConfig,
+            current = st.stageTarget,
+            disabled = disabledAddrs,
+            alertCfg = alertConfig,
+            chargeAt = packChargeAt,
+        )
+        if (stageInitialized) applyStage(st, d)
+        if (!st.monitoring) return
+        packChargeAt = d.chargeAt
+        d.capacity?.let { caps ->
+            alertNotifier.updateFleet(
+                caps.mapValues { (addr, eval) ->
+                    PackAlert(eval, roster.batteryAt(addr)?.alias ?: st.fleet[addr]?.telemetry?.name)
+                },
+            )
         }
-        evaluateTempAlerts(fleet, label)
+        evaluateTempAlerts(d.view, stageAddrs.firstNotNullOfOrNull { roster.groupOf(it)?.id })
+    }
+
+    /** Publish a resolved stage (lock held by [reevaluate]): mirror it into [MonitorState], persist
+     *  a changed target for the next (possibly headless) restore, and push the BLE stage set —
+     *  always on a session's first pass ([forceStagePush]) so BmsRepository's launch barrier is
+     *  released exactly as the ViewModel-driven setStage used to. */
+    private fun applyStage(st: MonitorState, d: EngineDecision) {
+        val target = d.stage.target
+        if (target != st.stageTarget || d.stage.pinned != st.stagePinned) {
+            _state.update { it.copy(stageTarget = target, stagePinned = d.stage.pinned) }
+        }
+        if (target != st.stageTarget) {
+            persistStageJob?.cancel()
+            persistStageJob = scope.launch {
+                runCatching { settings.setLastStage(target) }.onFailure {
+                    // A cancellation is this write being superseded by a newer target — not a failure.
+                    if (it !is CancellationException) {
+                        Log.w(TAG, "lastStage write failed; the next restore may use an older stage", it)
+                    }
+                }
+            }
+        }
+        if (st.monitoring && (forceStagePush || d.stageAddrs != stageAddrs)) {
+            forceStagePush = false
+            ble.setStage(d.stageAddrs)
+        }
+        stageAddrs = d.stageAddrs
+    }
+
+    /** Clock-driven re-resolution: pin and stage-hold expiry and the STALE_MAX_MS backstop happen
+     *  with no BLE event to trigger them. Frames already run [reevaluate]; this bounds the lag of
+     *  the purely time-driven transitions to [STAGE_TICK_MS], headless or not. */
+    private fun startStageTick() {
+        stageTickJob?.cancel()
+        stageTickJob = scope.launch {
+            while (isActive) {
+                delay(STAGE_TICK_MS)
+                // runCatching: no CoroutineExceptionHandler on this scope — a throw here would kill
+                // the process, and the foreground service with it.
+                runCatching { reevaluate() }.onFailure { Log.e(TAG, "stage tick failed", it) }
+            }
+        }
     }
 
     /** Worst reachable stage pack's temperature zone → headless temperature notification. */
@@ -654,6 +793,9 @@ class MonitorEngine(
         _state.value.fleet.filterValues { it.telemetry != null }.mapValues { it.value.telemetry!! }
 
     private fun onPoll(addr: String, raw: ByteArray, t: Telemetry?) {
+        // UI-29: a frame already in flight when its pack was removed from the roster must not
+        // re-add it to the fleet as a ghost (setRoster pruned it).
+        if (roster.batteryAt(addr) == null) return
         val now = now()
         if (t == null) {
             if (logging) repository.ingestRawOnly(addr, raw, "decode_fail", now)
@@ -676,9 +818,16 @@ class MonitorEngine(
             st0.rangeParamsByAddress[addr] ?: SEED_RANGE_PARAMS,
             st0.todayUsageByAddress[addr],
         )
+        val profile = ProfileRegistry.profileFor(roster.batteryAt(addr)?.advertisedName) ?: RedodoBekenProfile
+        // UI-16: stamp the parsed frame on the monotonic clock with the cadence it was polled at —
+        // the window freshness() judges it by. Decode failures returned above, so they never stamp.
+        val frameAt = elapsedNow()
+        val cadence = if (addr.uppercase() in stageAddrs) profile.stagePollMs else profile.slowPollMs
         _state.update { st ->
-            val fleet = st.fleet + (addr to (st.fleet[addr] ?: BatteryStatus())
-                .copy(telemetry = t, reachable = true, etaFullMin = etaFullMin, range = range))
+            val fleet = st.fleet + (addr to (st.fleet[addr] ?: BatteryStatus()).copy(
+                telemetry = t, reachable = true, etaFullMin = etaFullMin, range = range,
+                lastFrameAtElapsedMs = frameAt, frameIntervalMs = cadence,
+            ))
             var peakP = st.peakPowerW
             var peakC = st.peakCurrentA
             if (logging && t.current < -0.05f) {  // discharging — track peak draw
@@ -688,7 +837,8 @@ class MonitorEngine(
             st.copy(
                 fleet = fleet,
                 regenAddrs = if (regen) st.regenAddrs + addr else st.regenAddrs - addr,
-                lastDischargeAt = recomputeLastDischarge(fleet, st.lastDischargeAt, now),
+                // Decision view (UI-16): a carried seed can't stamp a base as "driving".
+                lastDischargeAt = recomputeLastDischarge(decisionView(fleet, frameAt), st.lastDischargeAt, now),
                 peakPowerW = peakP,
                 peakCurrentA = peakC,
             )
@@ -708,11 +858,9 @@ class MonitorEngine(
             motion?.activity, motion?.confidence, gate.still, motion?.atMs,
         )
         if (logging) {
-            val header = (ProfileRegistry.profileFor(roster.batteryAt(addr)?.advertisedName)
-                ?: RedodoBekenProfile).responseHeader
+            val header = profile.responseHeader
             repository.ingest(addr, t, raw, classifyFrame(raw, parsedOk = true, header), regen, now, fix)
         }
-        if (addr.uppercase() in stageAddrs) evaluateAlerts()
         // Tail learn fires at charger CUTOFF: this BMS never reports SOC 100 while Charging
         // (it caps at 99; 100 appears only after the state flips) — so the old "100 while
         // Charging" trigger never fired and every pack sat on the seed. The Charging→other
@@ -734,19 +882,27 @@ class MonitorEngine(
     private fun onReachable(addr: String, reachable: Boolean) {
         val was = _state.value.fleet[addr]?.reachable == true
         _state.update { st ->
-            val fleet = st.fleet + (addr to (st.fleet[addr] ?: BatteryStatus()).copy(reachable = reachable))
-            st.copy(
-                fleet = fleet,
-                regenAddrs = if (reachable) st.regenAddrs else st.regenAddrs - addr,
-                lastDischargeAt = recomputeLastDischarge(fleet, st.lastDischargeAt, now()),
-            )
+            if (roster.batteryAt(addr) == null) {
+                // UI-29: a removed pack's final link-down must not keep it in the fleet. A frame
+                // in flight while setRoster pruned it can still have re-added it after the prune,
+                // so REMOVE it here rather than merely skipping (that would leave the ghost
+                // reading "reachable" — counted as connected and persisted with the snapshot).
+                st.copy(fleet = st.fleet - addr, regenAddrs = st.regenAddrs - addr)
+            } else {
+                val fleet = st.fleet + (addr to (st.fleet[addr] ?: BatteryStatus()).copy(reachable = reachable))
+                st.copy(
+                    fleet = fleet,
+                    regenAddrs = if (reachable) st.regenAddrs else st.regenAddrs - addr,
+                    lastDischargeAt = recomputeLastDischarge(decisionView(fleet, elapsedNow()), st.lastDischargeAt, now()),
+                )
+            }
         }
         if (reachable != was) {
             val ts = now()
             if (logging) repository.logLink(addr, reachable, ts)
             reporter?.reportLink(addr, roster.batteryAt(addr)?.alias, roster.groupOf(addr)?.id, reachable, ts)
         }
-        if (addr.uppercase() in stageAddrs) evaluateAlerts()
+        // Stage + alert evaluation runs right after this returns — see the BLE wiring in start().
     }
 
     /** Fold the just-completed charge's observed 98->100 tail into the per-pack EMA and persist it.
@@ -837,5 +993,7 @@ class MonitorEngine(
 
     private companion object {
         const val TAG = "MonitorEngine"
+        /** Period of the engine's clock-driven stage re-resolution (see [startStageTick]). */
+        const val STAGE_TICK_MS = 10_000L
     }
 }

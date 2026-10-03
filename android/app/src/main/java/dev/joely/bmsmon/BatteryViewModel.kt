@@ -42,10 +42,9 @@ import dev.joely.bmsmon.model.DEFAULT_GROUP_ID
 import dev.joely.bmsmon.model.DEFAULT_ROSTER
 import dev.joely.bmsmon.model.DEFAULT_STAGE_HOLD_MIN
 import dev.joely.bmsmon.model.GroupActivity
-import dev.joely.bmsmon.model.PIN_HOLD_MS
 import dev.joely.bmsmon.model.PackSoc
 import dev.joely.bmsmon.model.Roster
-import dev.joely.bmsmon.model.StageInputs
+import dev.joely.bmsmon.model.StageConfig
 import dev.joely.bmsmon.model.StageItem
 import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.Telemetry
@@ -62,12 +61,11 @@ import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.model.removeBattery
 import dev.joely.bmsmon.model.renameBattery
 import dev.joely.bmsmon.model.renameGroup
-import dev.joely.bmsmon.model.resolveStage
+import dev.joely.bmsmon.model.seizeThresholdFor
 import dev.joely.bmsmon.model.targetFor
 import dev.joely.bmsmon.ui.theme.DefaultAccent
 import dev.joely.bmsmon.ui.theme.DefaultPower
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -156,7 +154,7 @@ data class UiState(
     val tempThresholdsByProfile: Map<String, TempThresholds> = emptyMap(),
     val acknowledgedTempKeys: Set<String> = emptySet(),
     // Charging-suppression hysteresis (UI-9): when the stage's lowest pack last read Charging,
-    // and whether the latched hold is active (advanced in refresh() via withChargeHold).
+    // and whether the latched hold is active (advanced on every engine emission via withChargeHold).
     val stageChargeLastAt: Long = 0,
     val stageChargeHold: Boolean = false,
     val showTempGauge: Boolean = true,
@@ -203,10 +201,9 @@ data class UiState(
         get() = roster.groupById(dailyDriverId) ?: BatteryGroup(dailyDriverId, dailyDriverId, emptyList())
     val stageGroupId: String? get() = (stageTarget as? StageTarget.Base)?.groupId
 
-    /** SOC at/below which a reachable pack seizes the stage on the phone, or null when disabled
-     *  (alerts off, the seize toggle off, or no thresholds enabled). */
-    val seizeThreshold: Int? get() =
-        if (alertsOn && seizeLowToStage && enabledThresholds.isNotEmpty()) enabledThresholds.max() else null
+    /** SOC at/below which a reachable pack seizes the stage, or null when disabled. Shared rule
+     *  with the headless restore (T1.2) — see seizeThresholdFor. */
+    val seizeThreshold: Int? get() = seizeThresholdFor(alertsOn, seizeLowToStage, enabledThresholds)
 
     /** Highest enabled capacity threshold, pushed to the cloud so the WebUI drives its own low-pack
      *  stage seize (defaults to 30 when the ladder is empty, matching the web fallback). */
@@ -479,15 +476,28 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     fleet = p.lastTelemetry.mapValues { (_, tel) -> BatteryStatus(telemetry = tel, reachable = false) },
                 )
             }
+            // T1.2: the engine owns the stage. Give it the roster it resolves against, the restored
+            // lastStage as a starting point (ignored if a headless restore already started it), and
+            // the inputs — then adopt whatever stage it holds. The restored stage is read before
+            // any engine call: the mirror below runs inline on Main.immediate and overwrites it.
+            val restoredStage = _state.value.stageTarget
+            engine.setRoster(_state.value.roster)
+            engine.seedStage(restoredStage)
+            pushStageConfig()
+            engine.state.value.let { es ->
+                _state.update { it.copy(stageTarget = es.stageTarget, pinned = es.stagePinned) }
+            }
             // Resume monitoring if it was on before the app was killed/restarted.
             if (p.monitoring && hasBlePermissions(getApplication())) startMonitoring()
             updateSensor()
         }
         // Mirror the engine's state into the UI while we're alive — the engine is the single
-        // source of truth for the fleet (reachability included) and the cloud upload status; the
-        // VM never mutates the fleet itself. While monitoring is off the engine keeps the
-        // last-known fleet marked unreachable, so packs render dimmed as DISCONNECTED (no demo
-        // data); on a fresh launch (engine fleet empty) the VM's persisted seed is kept instead.
+        // source of truth for the fleet (reachability included), the stage (T1.2) and the cloud
+        // upload status; the VM never mutates the fleet or resolves the stage itself. While
+        // monitoring is off the engine keeps the last-known fleet marked unreachable, so packs
+        // render dimmed as DISCONNECTED (no demo data); on a fresh launch (engine fleet empty) the
+        // VM's persisted seed is kept instead. (The old 30 s re-resolve ticker is gone: the
+        // engine's own STAGE_TICK_MS tick expires pins and holds, headless or not.)
         viewModelScope.launch {
             engine.state.collect { es ->
                 _state.update { s ->
@@ -498,6 +508,8 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                         cloudLastUploadMs = es.cloudLastUploadMs,
                         cloudUploadKbps = es.cloudUploadKbps,
                         cloudAuthFailed = es.cloudAuthFailed,
+                        stageTarget = es.stageTarget,
+                        pinned = es.stagePinned,
                     )
                     if (es.monitoring) {
                         mirrored.copy(
@@ -514,8 +526,8 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                         mirrored.copy(fleet = s.fleet.mapValues { (_, st) -> st.copy(reachable = false) })
                     }
                 }
+                applyStageDerivations()
                 if (es.monitoring) {
-                    refresh()
                     val now = clockMs()
                     if (now - lastTeleSaveAt > TELE_SAVE_INTERVAL_MS) {
                         lastTeleSaveAt = now
@@ -529,13 +541,6 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     lastPushedRangeParams = strippedNew
                     enqueueTempConfig(_state.value.stageProfile().id)
                 }
-            }
-        }
-        // Periodic re-resolve so sticky/pin holds can expire even with no new samples.
-        viewModelScope.launch {
-            while (true) {
-                delay(30_000)
-                if (_state.value.monitoring) refresh()
             }
         }
     }
@@ -676,12 +681,15 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setDailyDriver(id: String) {
         val g = _state.value.roster.groupById(id) ?: return
+        val monitoring = _state.value.monitoring
         _state.update {
-            if (it.monitoring) it.copy(dailyDriverId = g.id)
-            else it.copy(dailyDriverId = g.id, stageTarget = StageTarget.Base(g.id), filterBaseId = g.id)
+            if (monitoring) it.copy(dailyDriverId = g.id) else it.copy(dailyDriverId = g.id, filterBaseId = g.id)
         }
         viewModelScope.launch { store.setDailyDriver(g.id) }
-        refresh()
+        pushStageConfig()
+        // Not monitoring: choosing a daily driver also puts it on the stage (unchanged behaviour) —
+        // the engine owns the stage now, so ask it.
+        if (!monitoring) engine.forceStage(StageTarget.Base(g.id))
     }
 
     // --- roster editing ---
@@ -689,8 +697,9 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(roster = transform(it.roster)) }
         val r = _state.value.roster
         viewModelScope.launch { store.setRoster(r) }
-        if (_state.value.monitoring) engine.setRoster(r)
-        refresh()
+        // Always, not only while monitoring (UI-29): the engine prunes removed packs from its fleet
+        // and re-resolves the stage, falling back to the daily driver if the target lost every member.
+        engine.setRoster(r)
     }
 
     fun addBattery(address: String, advertisedName: String) =
@@ -701,18 +710,13 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { st ->
             val ms = st.manualStage
             val newManualStage = if (ms is StageTarget.Single && ms.address.uppercase() == a) null else ms
-            val tgt = st.stageTarget
-            val newStageTarget = if (tgt is StageTarget.Single && tgt.address.uppercase() == a)
-                StageTarget.Base(st.dailyDriverId) else tgt
-            st.copy(
-                disabled = st.disabled - a,
-                fleet = st.fleet - a,
-                manualStage = newManualStage,
-                stageTarget = newStageTarget,
-            )
+            // No stageTarget write here any more: the engine re-resolves after setRoster and falls
+            // back to the daily driver when the target has no members left (UI-29).
+            st.copy(disabled = st.disabled - a, fleet = st.fleet - a, manualStage = newManualStage)
         }
         engine.setDisabled(_state.value.disabled)
         persistDisabled()
+        pushStageConfig()
         updateRoster { it.removeBattery(a) }
     }
 
@@ -749,20 +753,20 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { store.setFilterBase(id) }
     }
 
-    // --- stage control ---
+    // --- stage control (inputs only — the engine resolves, T1.2) ---
     fun pinStage(target: StageTarget) {
         _state.update { it.copy(manualStage = target, manualPinnedAt = clockMs()) }
-        refresh()
+        pushStageConfig()
     }
     fun setDynamicStage(enabled: Boolean) {
         _state.update { it.copy(dynamicStage = enabled) }
         viewModelScope.launch { store.setDynamicStage(enabled) }
-        refresh()
+        pushStageConfig()
     }
     fun setStageHold(minutes: Int) {
         _state.update { it.copy(stageHoldMinutes = minutes) }
         viewModelScope.launch { store.setStageHold(minutes) }
-        refresh()
+        pushStageConfig()
     }
 
     // --- per-battery / all disconnect ---
@@ -776,7 +780,6 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         // writer) before tearing the worker down; we only mirror the result.
         engine.setDisabled(_state.value.disabled)
         persistDisabled()
-        refresh()
     }
     fun reconnectBattery(address: String) {
         val a = address.uppercase()
@@ -784,7 +787,6 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         engine.setDisabled(_state.value.disabled)
         persistDisabled()
         engine.kickAll()
-        refresh()
     }
     /** Drop the BLE link to every pack (closing each GATT) but keep the engine running, so each
      *  row shows DISCONNECTED with a reconnect icon — distinct from stopping monitoring entirely. */
@@ -794,7 +796,6 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         // As in disconnectBattery: the engine marks them unreachable, the VM only mirrors.
         engine.setDisabled(_state.value.disabled)
         persistDisabled()
-        refresh()
     }
 
     /** Re-enable every pack the user had disconnected and kick an immediate retry. */
@@ -803,15 +804,16 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         engine.setDisabled(emptySet())
         persistDisabled()
         engine.kickAll()
-        refresh()
     }
 
     // --- fleet monitoring (delegated to the process-lifetime engine + foreground service) ---
     fun startMonitoring() {
+        // Stage inputs first: start() resolves the launch stage from them (seeded with the restored
+        // lastStage in init) and pushes it to BLE (T1.2).
+        pushStageConfig()
         // Seed the engine with the current roster + last-known readings (shown dimmed until live).
         engine.start(roster = _state.value.roster, seed = _state.value.fleet, loggingEnabled = _state.value.logging)
         engine.setDisabled(_state.value.disabled)
-        engine.setStage(currentStageAddrs())
         pushAlertConfig()
         pushTempConfig()
         // Pause-while-parked before the intent, so the gate's first evaluation is already correct.
@@ -940,6 +942,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { store.setAlertsOn(enabled) }
         pushAlertConfig()
         enqueueCapacityConfig()
+        pushStageConfig()
     }
     fun toggleThreshold(t: Int) {
         _state.update {
@@ -949,6 +952,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { store.setThresholds(_state.value.enabledThresholds) }
         pushAlertConfig()
         enqueueCapacityConfig()
+        pushStageConfig()
     }
     fun setCriticalThreshold(t: Int) {
         // Auto-arm: choosing a critical level also enables that threshold, so it can't silently
@@ -960,12 +964,14 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         }
         pushAlertConfig()
         enqueueCapacityConfig()
+        pushStageConfig()
     }
-    /** Toggle the low-pack stage seize (phone-side visual override). Alerts still fire fleet-wide
-     *  when off; refresh() picks up the change on its next tick (engine update / timer). */
+    /** Toggle the low-pack stage seize (phone-side visual override); the engine re-resolves at once.
+     *  Fleet-wide notifications fire regardless. */
     fun setSeizeLowToStage(enabled: Boolean) {
         _state.update { it.copy(seizeLowToStage = enabled) }
         viewModelScope.launch { store.setSeizeLowToStage(enabled) }
+        pushStageConfig()
     }
     /** Restore every alert setting (toggle, thresholds, critical level, seize) to its default. */
     fun resetAlertsToDefaults() {
@@ -986,6 +992,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         }
         pushAlertConfig()
         enqueueCapacityConfig()
+        pushStageConfig()
     }
     fun setKeepScreenOn(enabled: Boolean) {
         _state.update { it.copy(keepScreenOn = enabled) }
@@ -1107,35 +1114,27 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun currentStageAddrs(): Set<String> =
-        _state.value.stageTarget.addresses(_state.value.roster) - _state.value.disabled
+    /** Stage inputs → engine (T1.2). Call after ANY change to pin / dynamic / hold / daily driver /
+     *  alert ladder / seize toggle: the engine re-resolves at once and the mirror carries it back. */
+    private fun pushStageConfig() {
+        val s = _state.value
+        engine.setStageConfig(
+            StageConfig(
+                dailyDriverId = s.dailyDriverId,
+                dynamicEnabled = s.dynamicStage,
+                manualStage = s.manualStage,
+                manualPinnedAt = s.manualPinnedAt,
+                holdMs = s.stageHoldMinutes * 60_000L,
+                seizeThreshold = s.seizeThreshold,
+            ),
+        )
+    }
 
-    /** Re-resolve the stage; if its battery set changed, tell the engine. (lastDischargeAt is
-     *  maintained by the engine and mirrored into UiState — we only read it here.) */
-    private fun refresh() {
+    /** VM-owned alert state advanced off the mirrored stage on every engine emission: the
+     *  charging-suppression latch (UI-9) and the temperature ack re-arm. */
+    private fun applyStageDerivations() {
         val now = clockMs()
-        val before = currentStageAddrs()
-        val prevTarget = _state.value.stageTarget
-        _state.update { st ->
-            // lastDischargeAt is maintained by the engine (mirrored into UiState); pass the roster's
-            // current groups so stage resolution works against the dynamic roster.
-            val resolved = resolveStage(
-                StageInputs(st.fleet, st.dailyDriverId, st.dynamicStage, st.manualStage,
-                    st.manualPinnedAt, st.lastDischargeAt, st.stageHoldMinutes * 60_000L, st.stageTarget, now,
-                    st.roster.groupViews(), seizeThreshold = st.seizeThreshold),
-            )
-            val isPinned = st.manualStage != null && resolved == st.manualStage &&
-                (!st.dynamicStage || now - st.manualPinnedAt < PIN_HOLD_MS)
-            // Re-arm temp acks whenever the stage's worst pack has recovered below CRITICAL, so
-            // a recurring condition flashes again (refresh runs on every engine update + timer);
-            // advance the charging-suppression latch (UI-9) off the same fresh stage.
-            st.copy(stageTarget = resolved, pinned = isPinned).withChargeHold(now).withTempAcksPruned()
-        }
-        // Persist the resolved stage whenever it changes, so the next launch restores + prioritizes it.
-        val newTarget = _state.value.stageTarget
-        if (newTarget != prevTarget) viewModelScope.launch { store.setLastStage(newTarget) }
-        val after = currentStageAddrs()
-        if (after != before && _state.value.monitoring) engine.setStage(after)
+        _state.update { it.withChargeHold(now).withTempAcksPruned() }
     }
 
     override fun onCleared() {
