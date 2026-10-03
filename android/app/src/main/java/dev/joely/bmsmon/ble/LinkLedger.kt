@@ -137,6 +137,18 @@ class LinkLedger<S : Any> {
         return held.remove(addr)?.session
     }
 
+    /**
+     * [addr] left the roster (removed, not merely disabled): [drop] it, and also forget its failure
+     * count, backoff and garbage streak, which [drop] keeps — so no per-address state outlives the
+     * pack, and a pack re-added later starts from scratch. Returns the held session to close.
+     */
+    fun forget(addr: String): S? {
+        failCount.remove(addr)
+        backoff.remove(addr)
+        garbageDrops.remove(addr)
+        return drop(addr)
+    }
+
     /** Retry everything now: clear every backoff, failure count and garbage streak. */
     fun kick() {
         backoff.clear()

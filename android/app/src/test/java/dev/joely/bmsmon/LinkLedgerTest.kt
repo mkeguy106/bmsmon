@@ -187,6 +187,43 @@ class LinkLedgerTest {
         assertEquals(RECONNECT_BACKOFF_MS, ledger.backoffSnapshot()[a])   // streak cleared too
     }
 
+    // A pack removed from the roster must not leave per-address state behind: re-added, it starts
+    // from scratch. drop() alone keeps the counters (a disabled pack's backoff still applies).
+    @Test fun aForgottenPackStartsFromScratch() {
+        val ledger = LinkLedger<String>()
+        val id = hold(ledger)
+        ledger.pollFrame(a, id, decoded = false)
+        ledger.pollDropped(a, id, spec, now = 0L)                       // garbage streak 1
+        repeat(2) { ledger.connectFailed(a, ledger.beginConnect(a), spec, failThreshold = 3, now = 0L) }
+        val inFlight = ledger.beginConnect(a)
+        assertEquals(setOf(a), ledger.connectingAddrs)
+        assertTrue(ledger.backoffSnapshot().isNotEmpty())
+
+        assertNull(ledger.forget(a))                                    // nothing held to close
+        assertTrue(ledger.backoffSnapshot().isEmpty())
+        assertTrue(ledger.connectingAddrs.isEmpty())
+        // The attempt that was in flight is stale now, like after a drop.
+        assertEquals(ConnectVerdict.STALE, ledger.connectSucceeded(a, inFlight, "late", wanted = true, now = 1L))
+
+        // Re-added: its next failure is the first, not the third (which would report it unreachable)…
+        assertEquals(false, ledger.connectFailed(a, ledger.beginConnect(a), spec, failThreshold = 3, now = 0L))
+        assertEquals(5_000L, ledger.backoffSnapshot()[a])
+        // …and its garbage streak is gone: a silent drop gets the short delay, not the escalated one.
+        val next = hold(ledger)
+        ledger.pollDropped(a, next, spec, now = 0L)
+        assertEquals(RECONNECT_BACKOFF_MS, ledger.backoffSnapshot()[a])
+    }
+
+    @Test fun forgettingAHeldPackHandsBackItsSessionAndStalesItsEvents() {
+        val ledger = LinkLedger<String>()
+        val id = hold(ledger, "s")
+        assertEquals("s", ledger.forget(a))
+        assertTrue(ledger.heldSessions().isEmpty())
+        assertFalse(ledger.pollFrame(a, id, decoded = true))
+        assertNull(ledger.pollDropped(a, id, spec, now = 0L))
+        assertTrue(ledger.backoffSnapshot().isEmpty())                 // a stale drop writes no backoff
+    }
+
     @Test fun reconnectDelayIsShortUntilAGarbageDrop() {
         assertEquals(RECONNECT_BACKOFF_MS, reconnectDelayMs(0, spec))
         assertEquals(5_000L, reconnectDelayMs(1, spec))
