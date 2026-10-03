@@ -269,8 +269,8 @@ an incident, restore what the **user chose**, not the platform default.
 
 **Legacy CLI.** `bmsmon.py` is the original diagnostic tool, frozen since 2026-06-27 and deliberately
 not ported forward (review XC-5). The protocol reference is the Android app's `ble/BmsProtocol.kt`
-(`expectedStatusResponseLen`, header realignment, plausibility guard, `isSafeStatusFrame`); the CLI
-has none of those fixes. Use it for a quick look, not as ground truth, and don't model new work on it.
+(`expectedStatusResponseLen`, header realignment, plausibility guard); the CLI has none of the
+response-handling fixes. Use it for a quick look, not as ground truth, and don't model new work on it.
 
 Single-file script (`bmsmon.py`) with no packaging. Only external dependency is `bleak`.
 
@@ -982,8 +982,8 @@ batches to `POST /api/v1/ingest` (gzipped) + threshold config to `POST /api/v1/c
 reads `GET /web/fleet` + a `/ws` live feed + `GET /web/temp-config` (the read-only temperature
 mirror) + `GET /web/alert-config` (the read-only capacity-seize mirror), plus admin-gated
 `GET /web/samples`, `GET /web/devices`, `POST /web/enroll-codes`,
-`DELETE /web/devices/{id}` — which **revokes** the device; no un-revoke or delete path exists yet,
-review SEC-27/WEB-21). The temperature config lives in the `device_temp_config` table
+`DELETE /web/devices/{id}` — which **revokes** the device, review SEC-27/WEB-21). The temperature
+config lives in the `device_temp_config` table
 (per device+profile, latest-wins); the WebUI mirror (`web/src/temp.ts` + `TempGauge`/`TempBanner`/
 `TempOverlay`/`BatteryProfilePanel`) re-evaluates the same zone ladder read-only. The **capacity
 seize threshold** rides the same `POST /api/v1/config` body (optional flat `seize_soc`/`alerts_on`
