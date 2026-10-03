@@ -70,11 +70,23 @@ Real = Annotated[float, AfterValidator(_require_real)]
 Text = Annotated[str, AfterValidator(_strip_nul)]
 
 
+def _reject_nul(v: str) -> str:
+    # Postgres text cannot hold U+0000 (asyncpg refuses to encode it: a 500). A NUL in a
+    # browser- or enroll-supplied string is never legitimate, so these inputs reject it with
+    # a 422. Device telemetry strips it instead (TextOrNone): the phone deletes a 4xx'd batch.
+    if "\x00" in v:
+        raise ValueError("must not contain NUL characters")
+    return v
+
+
+NulFreeStr = Annotated[str, AfterValidator(_reject_nul)]
+
+
 class EnrollBody(BaseModel):
-    code: str
-    install_uuid: str
-    public_key_spki_b64: str
-    device_label: str | None = None
+    code: NulFreeStr
+    install_uuid: NulFreeStr
+    public_key_spki_b64: NulFreeStr
+    device_label: NulFreeStr | None = None
 
 
 class EnrollResponse(BaseModel):
@@ -215,8 +227,8 @@ class TempConfigBody(BaseModel):
 
 
 class NoteBody(BaseModel):
-    base_id: str
-    body: str
+    base_id: NulFreeStr
+    body: NulFreeStr
 
     @field_validator("body")
     @classmethod
@@ -268,7 +280,7 @@ class MintCodeResponse(BaseModel):
 
 
 class ApiKeyCreateBody(BaseModel):
-    name: str
+    name: NulFreeStr
 
     @field_validator("name")
     @classmethod
@@ -286,7 +298,7 @@ class ApiKeyCreateResponse(BaseModel):
 
 
 class ShareCreateBody(BaseModel):
-    name: str
+    name: NulFreeStr
     duration: str  # "1h" | "1d" | "1w"
 
     @field_validator("name")

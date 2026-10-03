@@ -2,9 +2,11 @@ import asyncio
 import json
 import secrets
 import time
+from typing import Annotated
+from uuid import UUID
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from fastapi.responses import JSONResponse
 
 from app.auth.authentik import AuthUser, current_user, require_admin
@@ -14,6 +16,7 @@ from app.charge_sessions import detect_charge_sessions
 from app.config import settings
 from app.db import queries as q
 from app.db.pool import get_pool
+from app.routers.api_device import ADDRESS_MAX_LEN
 from app.models import (ApiKeyCreateBody, ApiKeyCreateResponse, MintCodeResponse, NoteBody,
                         OkResponse, ShareCreateBody, ShareCreateResponse)
 from app.util import jsonable
@@ -30,6 +33,15 @@ TRACK_MAX_SPAN_MS = 31 * 86_400_000 + 3_600_000
 # Plausible epoch-ms ceiling (2100-01-01 UTC, same bound as SampleIn._clip_motion_at):
 # keeps to_timestamp() inside Postgres' range, so garbage params are a 422, never a 500.
 _EPOCH_MS_MAX = 4_102_444_800_000
+
+# Query params that name a pack follow the ingest address rule (api_device._address_ok):
+# 1..ADDRESS_MAX_LEN printable non-space ASCII. Nothing else can name a stored pack, and a
+# NUL would reach Postgres as an unencodable parameter (a 500), so anything else is a 422.
+Address = Annotated[str, Query(min_length=1, max_length=ADDRESS_MAX_LEN, pattern=r"^[!-~]+$")]
+# Epoch-ms window params, bounded so to_timestamp()/fromtimestamp() can never overflow.
+EpochMs = Annotated[int, Query(ge=0, le=_EPOCH_MS_MAX)]
+# A UUID in a path: malformed ids are a 422 instead of a Postgres cast error (a 500).
+PathUuid = Annotated[UUID, Path()]
 
 
 def _f(v):
@@ -94,7 +106,7 @@ async def history(hours: int = Query(24, ge=1, le=168),
 
 
 @router.get("/trends")
-async def trends(address: str, from_ms: int = Query(...), to_ms: int = Query(...),
+async def trends(address: Address, from_ms: EpochMs, to_ms: EpochMs,
                  user: AuthUser = Depends(current_user), pool=Depends(get_pool)):
     """Read-only adaptive-bucket per-pack SOH / cell-spread / temperature trend series."""
     bucket = q.trend_bucket_ms(max(1, to_ms - from_ms))
@@ -110,7 +122,7 @@ async def trends(address: str, from_ms: int = Query(...), to_ms: int = Query(...
 
 
 @router.get("/charge-sessions")
-async def charge_sessions(address: str, days: int = Query(30, ge=1, le=365),
+async def charge_sessions(address: Address, days: int = Query(30, ge=1, le=365),
                           user: AuthUser = Depends(current_user), pool=Depends(get_pool)):
     """Read-only detected charge sessions (full CC->CV runs) for a pack."""
     since_ms = int(time.time() * 1000) - days * 86_400_000
@@ -122,9 +134,7 @@ async def charge_sessions(address: str, days: int = Query(30, ge=1, le=365),
 
 
 @router.get("/track")
-async def track(address: str,
-                from_ms: int = Query(..., ge=0, le=_EPOCH_MS_MAX),
-                to_ms: int = Query(..., ge=0, le=_EPOCH_MS_MAX),
+async def track(address: Address, from_ms: EpochMs, to_ms: EpochMs,
                 user: AuthUser = Depends(current_user), pool=Depends(get_pool)):
     """Read-only 15-second-bucketed per-pack GPS + discharge series for the Journey map.
     Span-bounded (TRACK_MAX_SPAN_MS); a reversed range is simply empty."""
@@ -153,7 +163,7 @@ async def post_note(body: NoteBody, user: AuthUser = Depends(current_user), pool
 
 
 @router.get("/samples")
-async def samples(address: str, from_ms: int = Query(...), to_ms: int = Query(...),
+async def samples(address: Address, from_ms: EpochMs, to_ms: EpochMs,
                   user: AuthUser = Depends(require_admin), pool=Depends(get_pool)):
     """Admin-only: full sample history includes GPS coordinates.
 
@@ -188,10 +198,10 @@ async def mint_code(user: AuthUser = Depends(require_admin), pool=Depends(get_po
 
 
 @router.delete("/devices/{device_id}")
-async def revoke(device_id: str, user: AuthUser = Depends(require_admin), pool=Depends(get_pool)):
+async def revoke(device_id: PathUuid, user: AuthUser = Depends(require_admin), pool=Depends(get_pool)):
     async with pool.acquire() as conn:
         await q.revoke_device(conn, device_id)
-    return {"revoked": device_id}
+    return {"revoked": str(device_id)}
 
 
 _SHARE_DURATION_MS = {"1h": 3_600_000, "1d": 86_400_000, "1w": 7 * 86_400_000}
@@ -251,8 +261,8 @@ async def list_api_keys(user: AuthUser = Depends(require_admin), pool=Depends(ge
 
 
 @router.delete("/api-keys/{key_id}")
-async def revoke_api_key(key_id: str, user: AuthUser = Depends(require_admin),
+async def revoke_api_key(key_id: PathUuid, user: AuthUser = Depends(require_admin),
                          pool=Depends(get_pool)):
     async with pool.acquire() as conn:
         ok = await q.revoke_api_key(conn, key_id)
-    return {"revoked": key_id if ok else None}
+    return {"revoked": str(key_id) if ok else None}
