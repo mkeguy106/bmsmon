@@ -1,0 +1,21 @@
+# Build-context hygiene (review XC-6). CI builds from a clean checkout and is unaffected; this
+# stops a LOCAL `docker build -f server/Dockerfile .` from copying host artifacts over the image's
+# own `npm ci` output (Dockerfile: COPY web/ ./) and from shipping hundreds of MB of context.
+.git
+.github
+.claude
+.superpowers
+android
+docs
+scratchpad
+screenshots
+**/__pycache__
+**/*.pyc
+server/.venv
+server/.pytest_cache
+server/build
+server/*.egg-info
+web/node_modules
+web/dist
+web/smoke-shots
+web/tsconfig.tsbuildinfo

@@ -1,13 +1,106 @@
 name: build-server
+# Test -> build -> smoke -> promote (architecture review 2026-10-02, SEC-16).
+#
+#   test-server, test-web  every branch push touching the paths below (and fork PRs): the gate
+#   build                  main only, after BOTH test jobs: builds the image, pushes ONLY :<sha>
+#   smoke                  main only: boots that exact image against an empty Postgres
+#   promote                main only, after the smoke: points :latest at the same manifest
+#
+# :latest (what the NAS pulls) therefore only ever names an image whose source passed both suites
+# and which itself booted, migrated an empty database and served the UI shells. Every main build
+# that runs stays addressable as :<full sha> -- the deploy/rollback handle (CLAUDE.md "Production
+# deploy"). An in-progress run is never cancelled; a queued run may be superseded by a newer push.
+# .github/scripts/check_workflows.py pins these invariants and runs first in test-server.
 on:
   push:
-    branches: [main, master]
+    branches: ["**"]
+    paths: ["server/**", "web/**", ".github/workflows/build-server.yml"]
+  pull_request:
     paths: ["server/**", "web/**", ".github/workflows/build-server.yml"]
   workflow_dispatch:
 
+# One run per ref at a time. On main an in-progress run is never cancelled (a queued run may be
+# superseded by a newer push, and that commit is then never built), and serializing is what keeps
+# :latest monotonic -- an older run can never promote after a newer one. Elsewhere the newest push
+# wins.
+concurrency:
+  group: build-server-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# Read-only token by default; only build and promote are granted packages: write.
+permissions:
+  contents: read
+
 jobs:
-  build:
+  test-server:
+    # A same-repo PR is already covered by its branch's push run; only fork PRs need their own.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        # Prod's DB image (bmsmon-db runs postgres:16-alpine). The suite builds its schema at app
+        # startup (schema.sql) and TRUNCATEs between tests, so an empty database is all it needs.
+        # A floating tag is acceptable only because this job holds a read-only token.
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: bmsmon
+          POSTGRES_PASSWORD: bmsmon
+          POSTGRES_DB: bmsmon
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U bmsmon -d bmsmon"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      # = the default in server/app/config.py, spelled out so the dependency is visible.
+      DATABASE_URL: postgresql://bmsmon:bmsmon@localhost:5432/bmsmon
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12" # = the image's python:3.12-slim runtime
+          cache: pip
+          cache-dependency-path: |
+            server/requirements.lock
+            server/requirements-dev.lock
+      - name: Install pinned runtime + test dependencies
+        run: pip install -r server/requirements.lock -r server/requirements-dev.lock
+      - name: Publish-pipeline invariants
+        run: python .github/scripts/check_workflows.py
+      - name: Server tests (real Postgres 16)
+        working-directory: server
+        run: python -m pytest -q
+
+  test-web:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    env:
+      # playwright is a local-only smoke-test devDependency; never pull its browsers in CI.
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "20" # = the image's node:20-alpine build stage
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - name: Typecheck (tsconfig covers v2 + v1 under src/ and the guest page under share/)
+        run: npx tsc --noEmit -p .
+      - name: Unit tests
+        run: npx vitest run
+
+  build:
+    needs: [test-server, test-web]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       packages: write
@@ -25,11 +118,74 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+      - name: Build and push the commit-addressed image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: server/Dockerfile
           push: true
-          tags: |
-            ghcr.io/mkeguy106/bmsmon-server:latest
-            ghcr.io/mkeguy106/bmsmon-server:${{ github.sha }}
+          # The immutable commit tag only. The moving tag is promote's job, after the smoke.
+          tags: ghcr.io/mkeguy106/bmsmon-server:${{ github.sha }}
+          # Lets `docker inspect bmsmon-api` on the NAS name the commit that is running.
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+  smoke:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # No packages: write here -- the package is public, so pulling needs no credentials, and this
+    # job runs a third-party service image.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: bmsmon
+          POSTGRES_PASSWORD: bmsmon
+          POSTGRES_DB: bmsmon
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U bmsmon -d bmsmon"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Boot the pushed image against an empty Postgres
+        run: bash .github/scripts/smoke-image.sh "ghcr.io/mkeguy106/bmsmon-server:${{ github.sha }}"
+
+  promote:
+    needs: smoke
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/mkeguy106/bmsmon-server
+      SHA: ${{ github.sha }}
+    steps:
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Point :latest at the smoked image (same manifest, no rebuild)
+        run: docker buildx imagetools create --tag "$IMAGE:latest" "$IMAGE:$SHA"
+      - name: Verify :latest and :<sha> are byte-identical
+        run: |
+          set -euo pipefail
+          tok="$(curl -fsS "https://ghcr.io/token?scope=repository:mkeguy106/bmsmon-server:pull&service=ghcr.io" | jq -r .token)"
+          digest() {
+            curl -fsSI -H "Authorization: Bearer $tok" \
+              -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json" \
+              "https://ghcr.io/v2/mkeguy106/bmsmon-server/manifests/$1" \
+              | tr -d '\r' | awk -F': ' 'tolower($1) == "docker-content-digest" {print $2}'
+          }
+          want="$(digest "$SHA")"; got="$(digest latest)"
+          echo ":$SHA -> $want"; echo ":latest -> $got"
+          [[ -n "$want" && "$want" == "$got" ]]

@@ -1,7 +1,8 @@
 # bmsmon Android app
 
 Kotlin / Jetpack Compose front-end for the Redodo/LiTime BLE BMS protocol — the GUI
-companion to the `bmsmon.py` reference tool one directory up. Monitors a **fleet of LiFePO4
+companion to the legacy `bmsmon.py` CLI one directory up (this app's `ble/BmsProtocol.kt` is now the
+protocol reference). Monitors a **fleet of LiFePO4
 packs** (tested with 8, e.g. a power-wheelchair multi-battery setup) live over Bluetooth, with
 optional cloud upload.
 

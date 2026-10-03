@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""bmsmon - BLE Battery Monitor for Redodo/LiTime/PowerQueen LiFePO4 batteries."""
+"""bmsmon - BLE Battery Monitor for Redodo/LiTime/PowerQueen LiFePO4 batteries.
+
+LEGACY diagnostic CLI, frozen since 2026-06-27. It completes a status read at >=80 bytes and does
+not realign to the 01 93 55 AA header, so a fragmented or truncated 0x13 response can decode wrong
+(or raise struct.error at 93-95 bytes). The protocol reference is the Android app's
+android/app/src/main/java/dev/joely/bmsmon/ble/BmsProtocol.kt. Use this for a quick look only.
+"""
 
 import argparse
 import asyncio

@@ -69,7 +69,7 @@ If the BMS enters shutdown (0x60 or unknown command side effect):
 
 - **Service**: `0000FFE0-0000-1000-8000-00805f9b34fb`
 - **FFE1** (notify): BMS responses (UART RX from BMS MCU)
-- **FFE2** (write-no-response): Commands to BMS (UART TX to BMS MCU)
+- **FFE2** (write, with or without response — the Android app uses Write Request like the official app; the legacy `bmsmon.py` uses Write Command): Commands to BMS (UART TX to BMS MCU)
 - **FFE3** (notify/write): AT command interface for the Beken BLE module itself (not BMS data)
 - **Battery Service** (0x180F): Present but returns 0% always — non-functional placeholder
 - **TI OAD** (`f000ffc0-0451-4000-b000-000000000000`): Firmware update service, not used
@@ -176,8 +176,10 @@ Findings — these are the **reference behavior** to model the Android app's BLE
   `00 00 04 01 16 55 AA 1A` (`0x16` firmware), plus standard CCCD notification-enable writes.
   **No `0x60`, no `0x0A–0x0D`, no unknown opcodes.** Confirms the protocol is correct AND that
   our read-only app does exactly what the official app does — we are not stressing the BMS in any
-  way Redodo doesn't. (Only diff: Redodo uses ATT Write Request *with* response; we use Write
-  Command *without*. Functionally equivalent.)
+  way Redodo doesn't. (Write type: Redodo uses ATT Write Request *with* response, and so does the
+  Android app — `writeWithResponse = true` in `ble/profile/Profiles.kt` → `WRITE_TYPE_DEFAULT`. Only
+  the legacy `bmsmon.py` CLI sends Write Command *without* response (`response=False`); the module
+  accepts both.)
 - **Flaky GATT establishment is normal and is solved by patient retry, then hold.** Marginal packs
   failed to establish (connect, then GATT drops ~0.1–0.3 s later — the `GATT_CONN_FAILED_ESTABLISHMENT`
   / status-133 signature) and were retried with spacing until they stuck (one pack took ~8 tries
@@ -265,11 +267,16 @@ an incident, restore what the **user chose**, not the platform default.
 
 ## Architecture
 
+**Legacy CLI.** `bmsmon.py` is the original diagnostic tool, frozen since 2026-06-27 and deliberately
+not ported forward (review XC-5). The protocol reference is the Android app's `ble/BmsProtocol.kt`
+(`expectedStatusResponseLen`, header realignment, plausibility guard); the CLI has none of the
+response-handling fixes. Use it for a quick look, not as ground truth, and don't model new work on it.
+
 Single-file script (`bmsmon.py`) with no packaging. Only external dependency is `bleak`.
 
 Key flow: `main()` → `scan_batteries()` or `query_battery(address)` → `parse_telemetry(data)` → `print_telemetry(dict)` or JSON output.
 
-- `query_battery()`: Finds device via BleakScanner, connects with BleakClient, subscribes to FFE1 notifications, writes QUERY_STATUS to FFE2, collects response fragments until ≥80 bytes
+- `query_battery()`: Finds device via BleakScanner, connects with BleakClient, subscribes to FFE1 notifications, writes QUERY_STATUS to FFE2 (Write Command), collects response fragments until ≥80 bytes — **the old BLE-1 defect, left in place only because the CLI is legacy**: a full 0x13 response is ~105 bytes, so this can return early with a truncated buffer, and `parse_telemetry()` raises `struct.error` on a 93–95-byte one. The Android app completes on the frame's own length (`expectedStatusResponseLen`) and realigns to `01 93 55 AA`.
 - `parse_telemetry()`: Decodes raw bytes into a dict using struct unpacking at fixed offsets (little-endian)
 - `is_compatible()`: Filters BLE scan results by `KNOWN_PREFIXES` tuple
 - No tests, no linting, no packaging — run directly with `python3 bmsmon.py`
@@ -382,7 +389,7 @@ re-enabling airplane mode),
 gnss **143 mAh ≈ 22 mA**, wifi 108 mAh ≈ 16.5 mA, GPU 57.3, bluetooth **19.3 mAh ≈ 3 mA**, TPU 18.4.
 The trigger was finding the phone net-discharging at **−174 mA while sitting on its wireless
 charger** at 11% SOC, ~3 h from dead. Pure logic in `model/BatterySaver.kt` — `lockRefreshRate` /
-`lockBrightness` / `gpsParked` / `gpsShouldRun`, no Android imports, 15 unit tests in
+`lockBrightness` / `gpsParked` / `gpsShouldRun`, no Android imports, unit-tested in
 `BatterySaverTest.kt`, same pure-and-total shape as `PowerPolicy`:
 
 - **Lower refresh rate on lock** — default **ON**. `preferredRefreshRate = LOCK_REFRESH_HZ` (60f)
@@ -613,7 +620,8 @@ ignored and `vm.startMonitoring()` stays unconditional: neither permission may e
 monitoring. `Settings › Battery saver` carries a **read-only**
 line, "Motion sensing active" / "Motion sensing unavailable — GPS won't pause", so a denied
 permission cannot silently disable the saving while the toggle still reads on. *(Its two states have
-not yet been confirmed on-device — an owed verification, not a completed one.)*
+not yet been confirmed on-device — an owed verification, not a completed one; tracked in
+`docs/checkins/NEXT.md`.)*
 
 **The Activity Transition API was measured and rejected**, reversing the recommendation an earlier
 revision of the design carried. Armed with transitions at 13:18 on 2026-08-07 (standby bucket 10,
@@ -627,13 +635,13 @@ nothing supports preferring transitions, and the periodic stream is demonstrably
 2026-08-09 rework above** — the first night of motion telemetry showed the saving was not partial
 but **zero** (the gate never closed), the staleness window was the wrong knob entirely, and
 silence-as-stillness replaced it. AR's true power cost remains unmeasured (its revert condition
-stands), and the wire-cost measurement is still owed.
+stands), and the wire-cost measurement is still owed — both tracked in `docs/checkins/NEXT.md`.
 
 **No server or WebUI change was required** for either half of this: every GPS read path already
-filters `lat IS NOT NULL AND lon IS NOT NULL` (`server/app/db/queries.py:539`, `:623`),
+filters `lat IS NOT NULL AND lon IS NOT NULL` (`queries.track_series`, `queries.gps_track_all`),
 `lat`/`lon`/`gps_accuracy_m` have always been nullable (the phone already uploads null coordinates
 whenever GPS is off or no fix is cached), the live marker already greys at 120 s to "last known +
-age", and the server suite passes unchanged (185 tests). Gaps were already first-class on the web
+age", and the server suite passed unchanged at the time. Gaps were already first-class on the web
 side.
 
 **Android's own Battery Saver is deliberately not relied on.** Read off the device (`dumpsys power`,
@@ -927,14 +935,12 @@ open items from 2026-07-15 are closed; every constant held except one reseed and
   finish-hour histogram at each check-in and reopen if sessions start finishing 08:00–23:59 from a
   low start SOC.
 
-**Next check (~2026-09).** Open: re-verify whPerMile as outing days accumulate, now on the
-corrected current-sign basis. Added 2026-08-10: decide the **AR power-cost** keep/revert
-(protocol + day-0 baseline: `docs/ar-power-cost-protocol.md`; 2026-08-10 is the first comparable
-day, since it is the first full day the GPS pause actually worked); measure the **motion-column
-wire cost** (real gzipped batch delta; documented fallback is populating the fields only on the
-staged base's rows); and **re-quantify the GNSS-off duty and saving under the silence-as-stillness
-gate** — the recorded ≈15 mA figure was measured for the discharge-only era's 68.4% duty, and the
-new gate holds GNSS off through whole parked nights, so the real saving should be larger.
+**Next check — re-dated 2026-10-16 (slipped from ~2026-09); tracked with due dates in
+`docs/checkins/NEXT.md`.**
+That file is the single list of open check-in items — AR power-cost keep/revert, motion-column wire
+cost, GNSS-off duty re-quantification under the silence-as-stillness gate, whPerMile re-verify on the
+current-sign basis, and the charge finish-hour histogram. Add new items there, not here; write each
+pass up as a dated `docs/calibration-checkin-YYYY-MM-DD.md` and fold constant changes into this file.
 
 Garbage-frame guard: `parseTelemetry` realigns to the `01 93 55 AA` status header (BLE
 notification fragments can prepend stale bytes, which previously decoded as soc=0/37.6 V and
@@ -1074,6 +1080,9 @@ end, so it is the low end that sets the headline upper mileage.
 
 ## Development
 
+The commands below drive the **legacy** `bmsmon.py` CLI (see Architecture) — fine for a quick look at
+a pack, not ground truth. The one-at-a-time rule in "BLE Connection Notes" still applies.
+
 ```bash
 # Dependencies (Arch/CachyOS)
 sudo pacman -S python-bleak
@@ -1102,7 +1111,8 @@ batches to `POST /api/v1/ingest` (gzipped) + threshold config to `POST /api/v1/c
 reads `GET /web/fleet` + a `/ws` live feed + `GET /web/temp-config` (the read-only temperature
 mirror) + `GET /web/alert-config` (the read-only capacity-seize mirror), plus admin-gated
 `GET /web/samples`, `GET /web/devices`, `POST /web/enroll-codes`,
-`DELETE /web/devices/{id}`). The temperature config lives in the `device_temp_config` table
+`DELETE /web/devices/{id}` — which **revokes** the device, review SEC-27/WEB-21). The temperature
+config lives in the `device_temp_config` table
 (per device+profile, latest-wins); the WebUI mirror (`web/src/temp.ts` + `TempGauge`/`TempBanner`/
 `TempOverlay`/`BatteryProfilePanel`) re-evaluates the same zone ladder read-only. The **capacity
 seize threshold** rides the same `POST /api/v1/config` body (optional flat `seize_soc`/`alerts_on`
@@ -1229,14 +1239,16 @@ deployed to prod** (`bmsmon.covert.life`), landing all six planned views: **Comm
 `/web/fleet` + `/ws`, plus a per-cell-voltage pipeline android `cells[]` → server `samples.cellN_v`
 → fleet snapshot `cells` → web), **Fleet Health** (tiles + 8-pack board + 24h sparkline off
 `GET /web/history`; **offline packs show their LAST-KNOWN SOC/capacity, muted + "last seen
-<ago>"** — same rule as v1 and the Command rail, because a pack out of BLE range still holds its
-charge and a blank "—" hid it. **Every summary tile counts offline packs on their last-known
+<ago>"** — same rule as v1, because a pack out of BLE range still holds its charge and a blank "—"
+hid it (the Command fleet rail does **not** follow it yet: it still blanks an offline pack's SOC to
+"—", review WEB-29). **Every summary tile counts offline packs on their last-known
 reading too** — `PACKS READY`, `NEED RECHARGE` and `FLEET CAPACITY` each footnote how much of
 their figure is stale ("incl. N offline · last known", from `readyStale`/`needRechargeStale`/
 `staleCounted`), so being away from the spares no longer reads as 0 ready / 0% capacity. The
 hero card's heading follows the base's real status instead of a hardcoded "In use now"),
 **Alerts** (capacity ladder + temp zones + cell imbalance; in-memory acknowledge that
-re-arms when the condition worsens and is forgotten when it clears — see below), **Settings** (units/map trail/theme segmented toggles), **History** (per-base
+re-arms when the condition worsens and is forgotten when it clears — see below), **Settings** (units/map trail/theme segmented toggles; v2's °C/°F defaults to °F and does not follow the
+phone's synced unit the way v1 does, review WEB-35), **History** (per-base
 capacity-fade/cell-imbalance/temperature trend charts with A/B breakdown, a charge-session log, and
 editable per-base notes, backed by `GET /web/trends`, `GET /web/charge-sessions`, and the
 **WebUI's first write path** `GET`/`POST /web/notes`), and **Journey** (GPS trip visualization —
@@ -1493,7 +1505,8 @@ docker exec -it bmsmon-api python -m tools.api_key_admin revoke <id>
 
 Time-limited public share links let a named guest follow the chair live:
 `https://bmsmon.covert.life/share/<token>` (token = `secrets.token_urlsafe(24)`; only
-sha256 stored in `location_shares`; link recoverable ONLY at creation). Traefik has a
+sha256 stored in `location_shares`, so the database cannot give the link back — it is shown only at
+creation). Traefik has a
 third zone — `PathPrefix(/share/)`, priority 100, `bmsmon-header` + `bmsmon-proxy-secret`
 (no Authentik; the proxy secret is there ONLY so the rate limiter can trust XFF for
 per-IP keying — `/share` endpoints never read identity headers) — and the guest page is
@@ -1576,7 +1589,9 @@ until the chair moved. `t` is the fix's 15 s bucket start, like the trail.
 
 **Local dev/test:** `docker compose -f server/docker-compose.dev.yml up -d` brings up a Postgres on
 `localhost:5432` (user/pw/db all `bmsmon`, matching the default `DATABASE_URL`). Run server tests
-with the venv: `cd server && .venv/bin/python -m pytest` (bare `python` lacks the deps).
+with the venv: `cd server && .venv/bin/python -m pytest` (bare `python` lacks the deps). Test-only
+deps are pinned in `server/requirements-dev.lock`; CI runs the suite on Python 3.12 in UTC (the venv
+may be newer) — "Image build" has the exact CI-equivalent command.
 
 **WebUI smoke test (Playwright, local):** seed the dev DB with a synthetic 4-pack fleet
 (`server/.venv/bin/python server/scripts/seed_dev.py` — TRUNCATES the dev DB, never point it at
@@ -1594,14 +1609,51 @@ renders as DISCONNECTED — useful for testing that state deliberately).
 
 ### Image build (GitHub Actions)
 
-`.github/workflows/build-server.yml` builds the multi-stage image (Node builds `web/dist` → Python
-serves API + static) and pushes `ghcr.io/mkeguy106/bmsmon-server:latest` (+ a `:<sha>` tag) on any
-push to `main` touching `server/**`, `web/**`, or that workflow. Watch a run with `gh run watch` or
-the Actions tab.
+`.github/workflows/build-server.yml` is a gated pipeline (review SEC-16 — until 2026-10 it pushed
+`:latest` without running a single test):
 
-The job sets `DOCKER_BUILD_RECORD_UPLOAD: false`. Without it `docker/build-push-action@v6` uploads a
-~63 KB `<owner>~<repo>~XXXXXX.dockerbuild` build record as an Actions artifact on **every** run;
-nothing ever reads them and 54 (3.2 MB) had accumulated by 2026-08-03.
+| Job | When | Does |
+|---|---|---|
+| `test-server` | every branch push touching the paths below; fork PRs | `check_workflows.py`, then the server suite on Python 3.12 against a `postgres:16-alpine` service |
+| `test-web` | same | `npm ci`, `tsc --noEmit -p .` (v2 + v1 + guest page), `vitest run` on Node 20 |
+| `build` | `main`, after both test jobs | builds the multi-stage image (Node builds `web/dist` → Python serves API + static) and pushes **only** `ghcr.io/mkeguy106/bmsmon-server:<full sha>`, labelled `org.opencontainers.image.revision=<sha>` |
+| `smoke` | `main`, after build | `.github/scripts/smoke-image.sh`: boots that exact image against an empty Postgres — `schema.sql` must apply from scratch, `/api/v1/health` must answer, `/` and `/v1/` must serve their shells, `tools.api_key_admin` must be in the image |
+| `promote` | `main`, after smoke | `docker buildx imagetools create` points `:latest` at the same manifest (no rebuild) and verifies the two digests match |
+
+Paths: `server/**`, `web/**`, `.github/workflows/build-server.yml`. Runs are serialized per ref; on
+`main` an in-progress run is never cancelled, but a queued run may be superseded by a newer push
+(that commit then gets no `:<sha>`). Serializing keeps `:latest` monotonic. A failed run leaves
+`:latest` where it was, and a failed smoke leaves an orphan `:<sha>` that nothing deploys — except
+when `promote`'s digest check fails: `imagetools create` has already run by then, so `:latest` may
+have moved without the proof that it is byte-identical to `:<sha>`. Then deploy by `:<sha>` (see
+"Production deploy") and, once the cause is fixed, re-run `promote` only for the newest `main` sha
+whose smoke passed. (Re-running an *old* main run's `promote` would move `:latest` backwards —
+never use that as a rollback; see "Production deploy".)
+
+`.github/scripts/check_workflows.py` — first step of `test-server`, locally
+`python3 .github/scripts/check_workflows.py` — fails if an edit re-opens the gap: `:latest` named
+outside `promote`, `build` not needing both test jobs, a publish job whose `if` is not exactly the
+main-only expression, any `continue-on-error`, `promote` pointing `:latest` at anything but the
+run's own `github.sha`, an action not pinned to a full SHA, a cancellable `main` run, or
+`DOCKER_BUILD_RECORD_UPLOAD` back on. Watch a run with `gh run watch` or the Actions tab.
+
+Run what CI runs, locally (dev Postgres up; containers give CI's Python 3.12 / Node 20 / UTC):
+
+```bash
+python3 .github/scripts/check_workflows.py
+docker run --rm --network host -e PYTHONDONTWRITEBYTECODE=1 -v "$PWD/server:/src:ro" -w /src \
+  python:3.12-slim sh -c 'pip install -q -r requirements.lock -r requirements-dev.lock && python -m pytest -q -p no:cacheprovider'
+docker run --rm -e PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 -v "$PWD/web:/src:ro" node:20-alpine sh -c \
+  'mkdir /w && tar -C /src --exclude=./node_modules --exclude=./dist -cf - . | tar -C /w -xf - && cd /w && npm ci --no-audit --no-fund && npx tsc --noEmit -p . && npx vitest run'
+docker build -t bmsmon-server:smoke -f server/Dockerfile . && bash .github/scripts/smoke-image.sh bmsmon-server:smoke
+```
+
+The repo-root `.dockerignore` keeps a local build from copying host `web/node_modules`/`dist` over
+the image's own `npm ci` output.
+
+The `build` job sets `DOCKER_BUILD_RECORD_UPLOAD: false`. Without it `docker/build-push-action@v6`
+uploads a ~63 KB `<owner>~<repo>~XXXXXX.dockerbuild` build record as an Actions artifact on
+**every** run; nothing ever reads them and 54 (3.2 MB) had accumulated by 2026-08-03.
 
 ### Storage hygiene — the GHCR "untagged" footgun
 
@@ -1621,7 +1673,20 @@ The untagged entries *are* the image. Bulk-deleting them strips the layers out f
 and the NAS `docker compose pull bmsmon-api` then fails with `manifest unknown`. `prune-ghcr.sh` is
 manifest-aware: it resolves each surviving index's children from the registry and only deletes an
 untagged version once nothing references it, aborting rather than guessing if a manifest won't
-resolve. It keeps the newest `KEEP` (default 10) tagged versions plus whatever carries `latest`.
+resolve. What survives is decided by the pure `.github/scripts/prune-select.jq`, unit-tested by
+`test-prune-select.sh` — which the prune job runs first, so a regression fails before anything is
+deleted: the newest `KEEP` (default 10) tagged versions, whatever carries `latest`, anything younger
+than `MIN_AGE_DAYS` (30 — one day in July produced 12 builds, more than `KEEP`), and the images of
+the newest `PROTECT_DEPLOYS` (3) distinct commits named by well-formed `deploy/YYYYMMDDTHHMMZ` git
+tags, i.e. the running image and its rollback targets however many builds have landed since (see
+"Production deploy"). Any other `deploy/*` ref is ignored, so a stray tag cannot take a slot, and a
+redeploy of the same commit counts once, so it cannot evict a rollback target. It refuses to prune
+at all if nothing carries `latest` or if a well-formed deploy tag does not resolve to a full commit
+sha, and a real (non-dry) run also refuses when the newest deploy tag matches no image version — the
+registry cannot know what the NAS runs, so that tag is the only record and pruning without it would
+be blind. It re-resolves every survivor and its children
+(before a dry run exits, after real deletes). Ad-hoc pins: the `protect` dispatch input
+(space-separated image tags).
 
 Two operational notes: `gh api --method DELETE` must **not** be passed `--silent` — it masks the exit
 status, so a loop reports success for every failed delete. And bmsmon is a **public** repo whose GHCR
@@ -1639,17 +1704,50 @@ stack is `~/qnap-nas-docker/bmsmon/docker-compose.yml`: `bmsmon-api`
 `${CONFDIR}/bmsmon/database`). Traefik splits routing: `/api/` → device-JWT auth (no Authentik);
 everything else → Authentik SSO.
 
-**Deploying a new server build** (the NAS does **not** auto-pull `:latest` — watchtower is monthly,
-and the qnap-nas-docker deploy runner only fires on `docker-compose.yml`/`.env` changes, and
-`up -d` alone won't re-pull an unchanged tag). After the image build finishes, pull + recreate just
-the API container:
+**Deploying a new server build — by tag, never by surprise.** CI moves `:latest` only after the test
+jobs and the image boot-smoke pass (see "Image build"), so `:latest` is always the newest *tested*
+image, and every `main` build that runs also stays pullable as `:<full sha>`. `bmsmon-api` and
+`bmsmon-db` are opted out of watchtower (`com.centurylinklabs.watchtower.enable: "false"`), so
+nothing recreates them unattended; the qnap-nas-docker deploy runner only fires on
+`docker-compose.yml`/`.env` changes, and `up -d` alone never re-pulls. Avoid 07:35–08:45 UTC: the
+nightly `pg_dump` runs then, and a booting API waits for it to finish. A normal deploy — once the
+`promote` job has succeeded — leaves `BMSMON_TAG` unset and pulls `:latest` (which also keeps the
+NAS's cached `:latest` current for any later `up -d`), recreates only the API (`--no-deps`), then
+records the deploy (below):
 
 ```bash
 ssh joely@ddnas02 'bash -lc "cd /share/bsv/docker-compose && \
   docker compose --env-file .env -f bmsmon/docker-compose.yml pull bmsmon-api && \
-  docker compose --env-file .env -f bmsmon/docker-compose.yml up -d bmsmon-api"'
+  docker compose --env-file .env -f bmsmon/docker-compose.yml up -d --no-deps bmsmon-api"'
 curl -fsS https://bmsmon.covert.life/api/v1/health   # expect {"status":"ok"}
 ```
+
+**Record every deploy as a git tag** — `deploy/YYYYMMDDTHHMMZ` (UTC, exactly that form; the prune
+ignores any other `deploy/*` name) on the commit that went live. The tags are the deploy history
+(`git tag -l 'deploy/*'`), and `prune-ghcr.sh` never deletes the images of the newest three deployed
+commits, so the running image and its rollback targets survive any number of later builds. Images
+built since 2026-10 carry `org.opencontainers.image.revision`, so read the sha off the running
+container instead of guessing what `:latest` was at pull time. The snippet records whatever
+`bmsmon-api` is running at that moment, not what you meant to deploy: run it only after the health
+check passes, because if the recreate did not take it tags the previous commit again. Run it from
+the repo root; it is wrapped in `bash -c` so it works from fish too, and it stops with an error if
+the container has no such label (an image older than that) rather than tagging a guess:
+
+```bash
+bash -c '
+set -euo pipefail
+SHA=$(ssh joely@ddnas02 "bash -lc \"docker inspect bmsmon-api\"" \
+  | jq -r ".[0].Config.Labels[\"org.opencontainers.image.revision\"] // empty")
+if [ -z "$SHA" ]; then
+  echo "error: bmsmon-api carries no org.opencontainers.image.revision label (image older than 2026-10?) - tag the deployed commit by hand" >&2
+  exit 1
+fi
+TAG="deploy/$(date -u +%Y%m%dT%H%MZ)"
+git tag "$TAG" "$SHA" && git push origin "$TAG"
+'
+```
+
+(A `deploy/*` tag push triggers no workflow: `build-server` filters on branches only.)
 
 On startup the new container re-runs `schema.sql`, so additive columns/tables land automatically.
 If the nightly dump is holding `samples`, startup waits for it (retrying for up to ~5 min),
@@ -1665,6 +1763,9 @@ A high-level summary of this project also lives in the Obsidian vault at
 the project's status or architecture changes meaningfully — it's a snapshot
 for cross-project reference, not a substitute for this CLAUDE.md's detail.
 
+Open measurement, verification and decision items live in `docs/checkins/NEXT.md`, each with a due
+date — check it at the start of any calibration or battery-saver work.
+
 ## Related Projects
 
 - [aiobmsble](https://github.com/patman15/aiobmsble) — Python async BLE BMS library (has `redodo_bms.py`)
@@ -1672,6 +1773,10 @@ for cross-project reference, not a substitute for this CLAUDE.md's detail.
 - [LiTime_BMS_bluetooth](https://github.com/calledit/LiTime_BMS_bluetooth) — Web Bluetooth implementation
 - [litime-bluetooth-battery](https://github.com/chadj/litime-bluetooth-battery) — Another JS implementation
 - [Litime_BMS_ESP32](https://github.com/mirosieber/Litime_BMS_ESP32) — ESP32 Arduino library
+
+## Motion gate field log (2026-08-08)
+
+Historical record; the current design is the silence-as-stillness gate in the Android section.
 
 **VERIFIED IN THE FIELD 2026-08-08 — the motion gate works.** The outstanding vehicle-outing proof
 was performed: a real round trip, both legs fully traced.
@@ -1694,9 +1799,9 @@ but `IN_VEHICLE` → GPS **stays** on; parked and still on arrival → gate clos
 transitions across two real vehicle trips on 2026-08-07; the periodic API logged 859 `IN_VEHICLE`
 readings across one. Do not revisit transitions without new evidence.
 
-Still open after the 2026-08-09 silence-as-stillness rework: AR's own power cost is still
-**unmeasured** with its revert condition intact, and the wire-cost measurement is still owed. Also
-still unverified: the settings line's two permission states.
+The follow-ups this work left open — AR's own power cost (revert condition intact), the
+motion-column wire cost, and the settings line's two permission states — are tracked with due dates
+in `docs/checkins/NEXT.md`.
 
 **Motion telemetry deployed and confirmed 2026-08-08 19:55.** Server deployed first, then the APK —
 that order is load-bearing: a new phone against the old server has its keys silently ignored
@@ -1705,13 +1810,7 @@ Android failure. The three columns landed automatically on container start from 
 `schema.sql`, with no migration step. Clean cutover in prod at 19:55: zero rows carried motion before
 it, essentially every row after.
 
-**Known gap found immediately by using it:** the first production rows read
-`motion_activity=STILL, motion_confidence=100, motion_still=false` with zero discharge — a confident
-still reading with the gate still open, minutes after restart and well past the 3-reading debounce.
-That is consistent with the documented bursty-delivery limitation (a reading older than
-`MOTION_STALE_MS` fails open), **but the stored fields cannot distinguish it from "debounce not yet
-met"**, because the reading's age is not uploaded. Adding the reading timestamp — or a derived
-staleness flag — would close that. Worth doing before the next diagnostic cycle rather than during
-one, which is the same lesson that produced this feature.
-
-**CLOSED 2026-08-08: `motion_at_ms` ships exactly this** — see the motion-state paragraph above.
+The first production rows (`STILL@100` with the gate still open) could not be told apart from
+"debounce not yet met" because the reading's age was not uploaded; `motion_at_ms` (deployed
+2026-08-09) closed that gap. The debounce/`MOTION_STALE_MS` design it was diagnosing was itself
+replaced by the silence-as-stillness gate the same week — see the Android section.
