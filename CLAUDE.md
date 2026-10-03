@@ -284,11 +284,29 @@ process-lifetime `MonitorEngine` (held by the `BmsApp` Application), kept alive 
 `MonitoringService` (a `connectedDevice`-type foreground service with an ongoing notification +
 Stop action). The `BatteryViewModel` no longer owns the BLE work — it delegates to the engine
 and mirrors `engine.state` into the UI, so monitoring survives the Activity/ViewModel being
-destroyed. Stage resolution and settings stay in the ViewModel. Clean shutdown (cancels BLE
-jobs → each `BleSession.close()` disconnects the GATT) happens on explicit Stop (in-app toggle
-or notification action) and on `onTaskRemoved` (app swiped from Recents) — so closing the app
-never leaves a zombie connection blocking the phone app. Just backgrounding (Home) keeps it
-running. Needs `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_CONNECTED_DEVICE` + runtime
+destroyed. **The engine owns stage resolution too** (T1.2, 2026-10-02): `resolveStage` — the
+low-pack seize included — runs inside `MonitorEngine.reevaluate()` (pure core:
+`engineDecision()` in `model/StageControl.kt`) on every BLE event, every config push and a 10 s
+tick, so a headless (sticky/boot) restore follows the chair and seizes exactly like the
+foreground app; the ViewModel pushes `StageConfig` (pin, dynamic, hold, daily driver, seize
+threshold) and mirrors `MonitorState.stageTarget`/`stagePinned`. Settings stay in the ViewModel.
+**Restore covers reboots and updates** (BLE-17): `BootRestoreReceiver` (`BOOT_COMPLETED`,
+`MY_PACKAGE_REPLACED`) starts the service through the same `restoreFromPersisted()` path as a
+sticky restart, only when monitoring was on and BLE is granted; it never relaunches the Activity.
+`BOOT_COMPLETED` is delivered after the first unlock, so on a phone with a lock-screen credential
+the reboot restore waits for that unlock; `LOCKED_BOOT_COMPLETED` is deliberately not handled,
+because the credential-encrypted storage holding the settings and database is still locked at that
+point. The service promotes to foreground FIRST and only then checks the BLE grant (BLE-26), so a
+`startForegroundService()` caller without the grant can't hit
+`ForegroundServiceDidNotStartInTimeException`; a refused re-promotion of an already-running service
+does not tear it down. Clean shutdown (cancels BLE jobs → each `BleSession.close()` disconnects the
+GATT) happens on explicit Stop (in-app toggle or notification action) and on `onTaskRemoved` (app
+swiped from Recents) — so closing the app never leaves a zombie connection blocking the phone app.
+A user Stop (notification or in-app; both route through `ACTION_STOP`) also persists
+`monitoring = false` (`MonitorEngine.persistMonitoringOff()`, BLE-30), so a reboot or update cannot
+undo it. A Recents swipe (`onTaskRemoved`) deliberately does NOT persist false: it means "close the
+app", and the next open or reboot resumes monitoring. Just backgrounding (Home) keeps it running.
+Needs `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_CONNECTED_DEVICE` + runtime
 `POST_NOTIFICATIONS` (requested opportunistically; never gates monitoring).
 
 **Screen policy is plug-aware, and monitoring holds a wakelock.** The display is the phone's
@@ -646,7 +664,9 @@ physical pages and read **~2.2× low** (183.6 MB estimated vs 403.7 MB actual). 
 and `Battery saver` now call it, so the two pages can never disagree.
 
 **Dev-workflow gotcha, and here it is a real-world one: `adb install -r` stops the app and nothing
-relaunches it.** The phone *is* the wheelchair's battery monitor, so an install that leaves the
+relaunches it.** Since 2026-10-02 the `MY_PACKAGE_REPLACED` receiver restores the *foreground
+service* headlessly after an install, but not the Activity — the `am start` step below stays
+mandatory. The phone *is* the wheelchair's battery monitor, so an install that leaves the
 process dead is downtime, not a dev inconvenience — during this build the chair's monitoring sat
 dead until it was manually restarted. Always follow an install with
 `adb shell am start -n dev.joely.bmsmon/.MainActivity` and confirm with
@@ -727,22 +747,30 @@ dedup.
 
 **Capacity alerts are fleet-wide, not stage-only.** Because only one base occupies the stage at a
 time, a low pack that isn't on the stage used to be invisible — a pack could drain to damage
-unseen. So `MonitorEngine.evaluateAlerts()` evaluates **every reachable pack** against the ladder
-and fires a **per-pack** headless notification, deduped **per address** (`AlertNotifier` keys
+unseen. So the engine's decision step (`engineDecision()`, run by `MonitorEngine.reevaluate()` on
+**every** BLE frame and reachability change — it used to run only on stage-pack events, which
+silenced every notification whenever the stage was dark, BLE-14) evaluates **every reachable pack**
+against the ladder and fires a **per-pack** headless notification, deduped **per address**
+(`AlertNotifier` keys
 `lastByAddr`/`idByAddr` by address, ids from `NOTIF_CAP_BASE`; per-pack charge-hold latch). The
 pure `reconcileFleetNotifications()` (`model/Alerts.kt`) does the fan-out dedup: notify the fresh
 crossings, cancel recovered/charging/vanished packs. A second low pack is never masked by the one
-on stage. (Temperature notifications stay stage-worst-driven.)
+on stage. (Temperature notifications stay stage-worst-driven.) Only packs that are actually showing
+a notification are ever cancelled (BLE-28).
 
 **Low pack seizes the stage (safety override).** `resolveStage()` (`model/Fleet.kt`) has a
 pre-emptive branch — before the manual-pin check — that stages the base of the **lowest reachable
 pack at/below the seize threshold**, over the active chair AND a manual pin (daily-driver breaks
-ties). The seize threshold is `StageInputs.seizeThreshold`, set by the ViewModel to the **highest
-enabled capacity threshold** (default ladder top = 30%) when both `alertsOn` and the new
-`seizeLowToStage` setting are on (else null). Charging doesn't block the seize (the flash is still
-charge-suppressed). On recovery the branch yields and normal pin/auto resolution takes back over.
+ties). The seize threshold is `seizeThresholdFor()` (`model/StageControl.kt`, shared by the
+ViewModel and the headless restore) = the **highest enabled capacity threshold** (default ladder
+top = 30%) when both `alertsOn` and the new `seizeLowToStage` setting are on (else null). Charging
+doesn't block the seize (the flash is still charge-suppressed). On recovery the branch yields and
+normal pin/auto resolution takes back over.
 `Settings › Alerts` gains a **"Pull low packs to stage"** toggle (default ON) gating only the
-visual seize — fleet-wide notifications fire regardless.
+visual seize — fleet-wide notifications fire regardless. Only roster members can seize, and a stage
+target left with no members falls back to the daily driver (then the first populated base) instead
+of a blank stage (UI-29). The rule itself — threshold, charging-doesn't-block, lowest-wins,
+seize-before-pin — is unchanged.
 
 **Temperature monitoring:** a vertical temperature gauge (`ui/gauge/TempGauge.kt`) sits beside the
 SOC ring on the stage (toggle + L/R position in settings), plus a `TEMP` stat tile. Thresholds are
@@ -913,10 +941,28 @@ tripped a false critical alarm) and rejects implausible readings (SOC 0–100, v
 The main stage shows a pack that isn't reachable as **DISCONNECTED** (dimmed ring, no %, no
 alert) rather than a misleading 0%.
 
+**Freshness model (UI-16 / UI-23 / BLE-18, 2026-10-02).** One definition of "is this reading
+live?", in `model/Freshness.kt`. The engine stamps `BatteryStatus.lastFrameAtElapsedMs`
+(`elapsedRealtime`, never persisted) and `frameIntervalMs` on every **parsed** frame;
+`freshness()` = LIVE while age ≤ poll interval + 9 s (two missed polls), STALE beyond that, and
+DISCONNECTED when unreachable or silent > 60 s. The restored seed has no stamp, so it is never
+LIVE: it renders as DISCONNECTED (no %) until the first frame. **Alert rule:** this session's
+readings drive alerts, the seize and stage activity (LIVE, or STALE with a known age — a STALE
+reading can only *hold* an alert its own LIVE frame raised); the seed and DISCONNECTED packs never
+do (`decisionView()`). STALE stage packs render muted with "UPDATED Ns AGO" (the ring keeps the
+accent hue at 45 % alpha and the number and age use `text2` — the dark theme's `segEmpty` is lighter
+than `text3`, so a grey fill read inverted; the stage header's activity reads `decisionView()`, and
+REGEN shows only for a LIVE pack); All Batteries and Detail dim every non-LIVE row with "Updated … /
+Out of range · seen … / Last seen … / Last known", monitoring off included. A frame that never
+decodes is a poll miss (drops at 5 like a timeout), and a link that drops between polls fails the
+next poll at once (`linkLost`; a non-success status write = link error, except BUSY = miss). The
+ViewModel advances its UI clock only when a rendered freshness label changes (1 s check).
+
 **No demo data (removed).** The old offline "demo" telemetry (`demoFor()`, `UiState.demo`,
 `tickDemo` drift loop) was removed — we're past needing it. When monitoring is off, the app keeps
 the **last-known fleet marked unreachable** and renders every pack as **DISCONNECTED** (dimmed,
-no %) instead of synthetic data; the top-bar status reads **MONITORING OFF**.
+no % on the stage; All Batteries/Detail dimmed with "Last seen …") instead of synthetic data; the
+top-bar status reads **MONITORING OFF**.
 
 **Disconnect semantics.** Per-battery disconnect and **Disconnect all** both drop the BLE link
 the same way — they add the pack(s) to the `disabled` set and call `engine.setDisabled(...)`,
@@ -933,9 +979,15 @@ tier (red / faster pulse) is user-configurable via `criticalThreshold` (`UiState
 shows the full ladder (chips ≤ critical tint red), a single-select **Critical level** picker, and
 a **Reset to defaults** button. `stageAlert()` resolves the in-app flash from the lowest pack on
 stage; charging suppresses the flash; acknowledged thresholds silence until SOC drops to the next
-level. The **highest enabled** ladder rung doubles as the stage-seize threshold (see "Low pack
-seizes the stage" above), and headless notifications are **fleet-wide/per-pack** (see "Capacity
-alerts are fleet-wide") — the ladder is the single source of truth for all three.
+level, and **re-arm** (UI-15): pruned to the still-crossed rungs on every live reading, cleared when
+the stage target changes or the stage starts charging. A pack inside its regen window does not count
+as "charging" for that re-arm: production data showed 86 of 531 regen samples (16 %) carry BMS
+`state=Charging`, so regen braking used to re-flash an acknowledged rung about 30 s later, mid-drive.
+The flash-suppression latch is unchanged. ACKNOWLEDGE acks the alert the overlay displayed, never
+one re-derived at tap time (UI-25), and an ACKNOWLEDGE that lands after the stage changed is ignored
+(`StageAlert.target`). The **highest enabled** ladder rung doubles as the stage-seize threshold
+(see "Low pack seizes the stage" above), and headless notifications are **fleet-wide/per-pack**
+(see "Capacity alerts are fleet-wide") — the ladder is the single source of truth for all three.
 
 **GPS telemetry (cloud upload).** When cloud sync is enrolled, the app captures the phone's
 location (`location/LocationSource.kt`, fused provider) and attaches `lat`/`lon`/`gps_accuracy_m`
