@@ -168,6 +168,10 @@ class BmsRepository(
     }
 
     /** Wake the CURRENT generation's control loop (external API paths only). */
+    /** BLE-22: one engine callback; a throw drops this event (logged) instead of the loop. */
+    private inline fun safely(what: String, block: () -> Unit) =
+        isolateCallback({ e -> Log.e(TAG, "$what threw — event dropped", e) }, block)
+
     private fun wake() { currentWake?.wake() }
 
     // ---- control loop: the only coroutine that mutates per-pack state ----
@@ -228,7 +232,7 @@ class BmsRepository(
                     pollJobs.remove(drop.addr)?.cancel()
                     connecting -= drop.addr
                     held.remove(drop.addr)?.close()
-                    if (drop.reason == DropReason.Undesired) onReachable(drop.addr, false)
+                    if (drop.reason == DropReason.Undesired) safely("onReachable ${drop.addr}") { onReachable(drop.addr, false) }
                 }
 
                 // 4. Kick off connect attempts the planner requested.
@@ -316,7 +320,7 @@ class BmsRepository(
                     heldSince[event.addr] = now
                     failCount[event.addr] = 0
                     backoffUntil -= event.addr
-                    onReachable(event.addr, true)
+                    safely("onReachable ${event.addr}") { onReachable(event.addr, true) }
                     // Start a persistent poll loop for this session.
                     val name    = allTargets.firstOrNull { it.address == event.addr }?.name ?: event.addr
                     val profile = ProfileRegistry.profileFor(name) ?: RedodoBekenProfile
@@ -332,13 +336,13 @@ class BmsRepository(
                         allTargets.firstOrNull { it.address == event.addr }?.name
                     ) ?: RedodoBekenProfile
                     backoffUntil[event.addr] = now + profile.backoff.delayFor(fc)
-                    if (fc >= profile.failThreshold) onReachable(event.addr, false)
+                    if (fc >= profile.failThreshold) safely("onReachable ${event.addr}") { onReachable(event.addr, false) }
                 }
-                is LoopEvent.PollFrame -> onPoll(event.addr, event.raw, event.tel)
+                is LoopEvent.PollFrame -> safely("onPoll ${event.addr}") { onPoll(event.addr, event.raw, event.tel) }
                 is LoopEvent.PollDrop -> {
                     pollJobs.remove(event.addr)?.cancel()
                     held.remove(event.addr)?.close()
-                    onReachable(event.addr, false)
+                    safely("onReachable ${event.addr}") { onReachable(event.addr, false) }
                     // Short backoff so the control loop reconnects promptly.
                     backoffUntil[event.addr] = now + RECONNECT_BACKOFF_MS
                 }

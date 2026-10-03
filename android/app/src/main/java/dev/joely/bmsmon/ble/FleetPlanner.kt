@@ -1,6 +1,7 @@
 package dev.joely.bmsmon.ble
 
 import dev.joely.bmsmon.ble.profile.BackoffSpec
+import kotlinx.coroutines.CancellationException
 
 /** Wait before the next connect attempt after [failCount] consecutive failures (0 → eligible now). */
 fun BackoffSpec.delayFor(failCount: Int): Long {
@@ -115,4 +116,19 @@ fun planFleet(
         }
     }
     return FleetPlan(toConnect = toConnect, toDisconnect = toDisconnect)
+}
+
+/**
+ * BLE-22: run one engine callback from the control loop. An Exception is reported and the event
+ * dropped instead of killing the loop (and with it the process and the foreground service);
+ * cancellation still propagates, and Errors (OOM, stack overflow) are deliberately not caught.
+ */
+internal inline fun isolateCallback(onError: (Exception) -> Unit, block: () -> Unit) {
+    try {
+        block()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        onError(e)
+    }
 }

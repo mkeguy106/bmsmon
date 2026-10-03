@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.util.Log
 import dev.joely.bmsmon.ble.BmsRepository
 import dev.joely.bmsmon.ble.hasBlePermissions
 import dev.joely.bmsmon.location.LocationSource
@@ -549,7 +550,11 @@ class MonitorEngine(
         )
         if (_state.value.gpsActive != active) {
             _state.update { it.copy(gpsActive = active) }
-            if (active) locationSource.start() else locationSource.stop()
+            // BLE-22: this runs on the BLE control loop via onPoll. A SecurityException from a
+            // permission revoked between LocationSource's check and the GMS request must not take
+            // the battery monitor down — the same guard MotionSource already carries internally.
+            runCatching { if (active) locationSource.start() else locationSource.stop() }
+                .onFailure { Log.w(TAG, "location ${if (active) "start" else "stop"} failed", it) }
         }
         return reading to motionGate
     }
@@ -581,7 +586,7 @@ class MonitorEngine(
     private fun shutdownGps() {
         gpsWanted = false
         _state.update { it.copy(gpsActive = false) }
-        locationSource.stop()
+        runCatching { locationSource.stop() }.onFailure { Log.w(TAG, "location stop failed", it) }
         motionSource.stop()
         motionGate = MotionGate()
     }
@@ -828,5 +833,9 @@ class MonitorEngine(
             if (groupActivity(g, fleet) == GroupActivity.Discharging) next[g.id] = now
         }
         return next
+    }
+
+    private companion object {
+        const val TAG = "MonitorEngine"
     }
 }
