@@ -8,19 +8,31 @@ import dev.joely.bmsmon.data.db.SessionEntity
 const val SESSION_GAP_MS = 10 * 60 * 1000L
 
 /**
+ * Longest a session may run (DATA-16). A stable BLE link never logs a disconnect, so without a cap
+ * one session stayed open for days — every finalize read all of it, and a process death mid-run left
+ * a giant stub for the startup sweep. 24 h bounds a stage pack's session at ~57.6k rows; the boundary
+ * pair's interval (one poll) is credited to neither side, same as a gap.
+ */
+const val MAX_SESSION_MS = 24 * 60 * 60 * 1000L
+
+/**
  * True when the incoming sample at [nowMs] should open a NEW session for a pack, given the pack's
- * previous sample time ([prevSampleTsMs], null if none) and whether the pack disconnected since
- * that sample ([prevWasDisconnect]). A gap strictly greater than [gapMs], a disconnect, or no
- * prior sample all start a new session.
+ * previous sample time ([prevSampleTsMs], null if none), whether it disconnected since that sample
+ * ([prevWasDisconnect]) and when the open session started ([sessionStartMs], null if unknown). No
+ * prior sample, a disconnect, a gap strictly greater than [gapMs], or a session [maxSessionMs] old
+ * (inclusive) all start a new session. A clock that steps backwards never splits on length.
  */
 fun isNewSession(
     prevSampleTsMs: Long?,
     prevWasDisconnect: Boolean,
     nowMs: Long,
     gapMs: Long = SESSION_GAP_MS,
+    sessionStartMs: Long? = null,
+    maxSessionMs: Long = MAX_SESSION_MS,
 ): Boolean {
     if (prevSampleTsMs == null) return true
     if (prevWasDisconnect) return true
+    if (sessionStartMs != null && nowMs - sessionStartMs >= maxSessionMs) return true
     return (nowMs - prevSampleTsMs) > gapMs
 }
 

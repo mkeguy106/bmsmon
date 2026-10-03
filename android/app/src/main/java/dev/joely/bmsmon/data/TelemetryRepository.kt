@@ -42,6 +42,7 @@ class TelemetryRepository(private val db: BmsDatabase) {
     private val openSessionId = HashMap<String, Long>()
     private val lastSampleTs = HashMap<String, Long>()
     private val pendingDisconnect = HashMap<String, Boolean>()
+    private val sessionStartTs = HashMap<String, Long>()
     private var sinceLastPrune = 0
 
     init {
@@ -144,20 +145,30 @@ class TelemetryRepository(private val db: BmsDatabase) {
 
     /** Decide the session for this sample, finalizing+opening as needed. Returns the open id. */
     private suspend fun advanceSession(address: String, tsMs: Long): Long {
-        val isNew = isNewSession(lastSampleTs[address], pendingDisconnect[address] == true, tsMs)
+        val isNew = isNewSession(
+            lastSampleTs[address], pendingDisconnect[address] == true, tsMs,
+            sessionStartMs = sessionStartTs[address],
+        )
         if (isNew) {
             finalizeSession(address)
-            val id = db.sessions().insert(emptySession(address, tsMs))
-            openSessionId[address] = id
+            openSession(address, tsMs)
         }
-        return openSessionId[address] ?: db.sessions().insert(emptySession(address, tsMs))
-            .also { openSessionId[address] = it }
+        return openSessionId[address] ?: openSession(address, tsMs)
+    }
+
+    /** Insert a fresh session stub for [address] starting at [tsMs] and make it the open one. */
+    private suspend fun openSession(address: String, tsMs: Long): Long {
+        val id = db.sessions().insert(emptySession(address, tsMs))
+        openSessionId[address] = id
+        sessionStartTs[address] = tsMs
+        return id
     }
 
     /** Stream rollups for the pack's currently-open session into its row, then forget it (DATA-16:
      *  never loads the session — a stable link used to keep one open for days, ~800k rows). */
     private suspend fun finalizeSession(address: String) {
         val id = openSessionId.remove(address) ?: return
+        sessionStartTs.remove(address)
         val acc = accumulateSession(address, id)
         if (acc.count == 0) return
         db.sessions().update(acc.toRollup())
@@ -238,6 +249,7 @@ class TelemetryRepository(private val db: BmsDatabase) {
         val openId = HashMap<String, Long>()
         val lastTs = HashMap<String, Long>()
         val wasDisconnect = HashMap<String, Boolean>()
+        val startTs = HashMap<String, Long>()
         val pending = ArrayList<SampleEntity>(IMPORT_CHUNK)
 
         suspend fun flush() {
@@ -249,6 +261,7 @@ class TelemetryRepository(private val db: BmsDatabase) {
 
         suspend fun localFinalize(addr: String) {
             val id = openId.remove(addr) ?: return
+            startTs.remove(addr)
             flush()   // the rollup reads this session's samples — they must be persisted first
             val acc = accumulateSession(addr, id)
             if (acc.count == 0) return
@@ -260,14 +273,21 @@ class TelemetryRepository(private val db: BmsDatabase) {
             for (line in file.readLines()) {
                 val parsed = parseCsvLine(line) ?: continue
                 val addr = parsed.address
-                val isNew = isNewSession(lastTs[addr], wasDisconnect[addr] == true, parsed.tsMs)
+                val isNew = isNewSession(
+                    lastTs[addr], wasDisconnect[addr] == true, parsed.tsMs,
+                    sessionStartMs = startTs[addr],
+                )
                 if (isNew) {
                     localFinalize(addr)
                     val id = db.sessions().insert(emptySession(addr, parsed.tsMs))
                     openId[addr] = id
+                    startTs[addr] = parsed.tsMs
                 }
                 val sessionId = openId[addr]
-                    ?: db.sessions().insert(emptySession(addr, parsed.tsMs)).also { openId[addr] = it }
+                    ?: db.sessions().insert(emptySession(addr, parsed.tsMs)).also {
+                        openId[addr] = it
+                        startTs[addr] = parsed.tsMs
+                    }
                 pending += parsed.copy(sessionId = sessionId)
                 if (pending.size >= IMPORT_CHUNK) flush()
                 lastTs[addr] = parsed.tsMs
@@ -287,7 +307,7 @@ class TelemetryRepository(private val db: BmsDatabase) {
     fun clearAll() {
         ops.trySend {
             db.samples().clear(); db.sessions().clear(); db.rawFrames().clear()
-            openSessionId.clear(); lastSampleTs.clear(); pendingDisconnect.clear()
+            openSessionId.clear(); lastSampleTs.clear(); pendingDisconnect.clear(); sessionStartTs.clear()
             sinceLastPrune = 0
         }
     }
