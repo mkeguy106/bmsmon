@@ -38,12 +38,19 @@ def configure_logging() -> None:
     log.addHandler(handler)
 
 
-def warn_on_invalid_carto_key() -> None:
-    """One WARNING when BMSMON_CARTO_KEY is set but was dropped as invalid (config.py
-    parse_carto_key). Runs once per create_app(), i.e. once per process in prod, after
-    configure_logging so it carries the normal log format. It names the variable and the
-    reason and NEVER the value: the key is a credential, and the logs are not secret."""
-    _key, problem = parse_carto_key(os.environ.get(CARTO_KEY_ENV))
+def log_carto_key_status() -> None:
+    """One startup line when the maps will run without a CARTO key: INFO when
+    BMSMON_CARTO_KEY is unset (so a forgotten map.env on the NAS shows in the log, not only
+    as placeholder tiles), WARNING when it is set but was dropped as invalid (config.py
+    parse_carto_key). Silent for a valid key. Runs once per create_app(), i.e. once per
+    process in prod, after configure_logging so it carries the normal log format. It names
+    the variable and the reason and NEVER the value: the key is a credential, and the logs
+    are not secret."""
+    raw = os.environ.get(CARTO_KEY_ENV)
+    if raw is None:
+        logger.info("%s not set: maps will show CARTO's key-required tiles", CARTO_KEY_ENV)
+        return
+    _key, problem = parse_carto_key(raw)
     if problem:
         logger.warning("%s ignored: %s. The Journey and share maps will show CARTO's "
                        "keyless placeholder tiles.", CARTO_KEY_ENV, problem)
@@ -152,7 +159,7 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     configure_logging()
-    warn_on_invalid_carto_key()
+    log_carto_key_status()
     app = FastAPI(title="bmsmon", lifespan=lifespan)
     from starlette.middleware.gzip import GZipMiddleware
 

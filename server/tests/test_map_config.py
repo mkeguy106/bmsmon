@@ -73,29 +73,39 @@ def test_settings_repr_never_shows_the_key(monkeypatch):
 
 # --- startup warning: one, naming the variable, never the value --------------------
 
-def _carto_warnings(caplog):
-    return [r for r in caplog.records
-            if r.levelno == logging.WARNING and CARTO_KEY_ENV in r.getMessage()]
+UNSET_LINE = "BMSMON_CARTO_KEY not set: maps will show CARTO's key-required tiles"
+
+
+def _carto_records(caplog):
+    return [r for r in caplog.records if CARTO_KEY_ENV in r.getMessage()]
 
 
 def test_invalid_key_logs_one_startup_warning_without_the_value(monkeypatch, caplog):
     bad = "test_key_12345!"
     monkeypatch.setenv(CARTO_KEY_ENV, bad)
-    caplog.set_level(logging.WARNING)
+    caplog.set_level(logging.INFO)
     create_app()
-    hits = _carto_warnings(caplog)
-    assert len(hits) == 1
+    hits = _carto_records(caplog)
+    assert [r.levelno for r in hits] == [logging.WARNING]
     assert bad not in caplog.text
     assert "test_key" not in caplog.text
 
 
-def test_valid_or_unset_key_logs_nothing(monkeypatch, caplog):
-    caplog.set_level(logging.WARNING)
+def test_unset_key_logs_one_info_line(monkeypatch, caplog):
+    # A forgotten map.env on the NAS must be visible in the startup log, not just as
+    # placeholder tiles.
+    monkeypatch.delenv(CARTO_KEY_ENV, raising=False)
+    caplog.set_level(logging.INFO)
+    create_app()
+    hits = _carto_records(caplog)
+    assert [(r.levelno, r.getMessage()) for r in hits] == [(logging.INFO, UNSET_LINE)]
+
+
+def test_valid_key_logs_nothing(monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
     monkeypatch.setenv(CARTO_KEY_ENV, FAKE_KEY)
     create_app()
-    monkeypatch.delenv(CARTO_KEY_ENV)
-    create_app()
-    assert _carto_warnings(caplog) == []
+    assert _carto_records(caplog) == []
     assert FAKE_KEY not in caplog.text
 
 

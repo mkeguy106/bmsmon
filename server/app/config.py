@@ -17,7 +17,7 @@ def parse_carto_key(raw: str | None) -> tuple[str | None, str | None]:
     state (dev, CI), not a misconfiguration. Surrounding whitespace and quotes are stripped
     (a quoted .env value); what remains must be 8-128 of [A-Za-z0-9_-], else (None, problem).
     `problem` describes only the KIND of fault and never contains any part of the value:
-    it is a credential, and `problem` goes into the log (main.py warn_on_invalid_carto_key)."""
+    it is a credential, and `problem` goes into the log (main.py log_carto_key_status)."""
     if raw is None:
         return None, None
     v = raw.strip().strip("\"'").strip()
@@ -107,8 +107,9 @@ class Settings:
     # serves "API KEY REQUIRED" placeholder tiles. The repo and the GHCR image are public,
     # so it is RUNTIME-ONLY: set on the NAS, served to viewers by GET /web/map-config and
     # to active share links by GET /share/{token}/map-config, never committed and never
-    # baked into a build. An invalid value becomes None with one startup warning that never
-    # includes it; repr=False keeps it out of any repr(settings).
+    # baked into a build. Unset logs one startup INFO line; an invalid value becomes None
+    # with one startup WARNING that never includes it; repr=False keeps it out of any
+    # repr(settings).
     carto_key: str | None = field(
         default_factory=lambda: parse_carto_key(os.environ.get(CARTO_KEY_ENV))[0],
         repr=False)

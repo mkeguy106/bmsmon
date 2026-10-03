@@ -1354,7 +1354,8 @@ the bmsmon stack's environment on the NAS (optionally a stack-local `map.env`), 
 committed and never baked into the image or the Vite builds (no `VITE_*` env; the build cannot
 know it). `Settings.carto_key` (`server/app/config.py`) strips whitespace and quotes and
 accepts only 8–128 of `[A-Za-z0-9_-]`; anything else becomes null with one startup warning
-that names the variable and the reason, never the value. Browsers fetch it from two
+that names the variable and the reason, never the value. An unset variable logs one INFO line
+at startup (`BMSMON_CARTO_KEY not set: …`), so a forgotten `map.env` shows in the log. Browsers fetch it from two
 `Cache-Control: no-store` endpoints, both returning `{"carto_key": "<key>" | null}`:
 `GET /web/map-config` (viewer-gated; v2 Journey reads it once per page session via
 `useCartoKey`) and `GET /share/{token}/map-config` (the feed's token gate — see Location
