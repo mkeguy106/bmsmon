@@ -29,7 +29,8 @@ export interface LiveOptions {
  *   delivers a snapshot resets the backoff.
  * - A 4401/4403 close, or PROBE_AFTER_FAILS sockets in a row that delivered nothing followed
  *   by an HTTP probe, gives a session verdict for onSession, so an expired sign-in reads as
- *   "session expired" and not as a phone that went quiet.
+ *   "session expired" and not as a phone that went quiet. A probe verdict that lands after a
+ *   socket has delivered a snapshot is dropped: the link recovered while it was in flight.
  */
 export function connectLive(
   onSnapshot: (f: FleetItem[]) => void,
@@ -52,6 +53,11 @@ export function connectLive(
   let failures = 0;
   let session: Session = "ok";
   let probing = false;
+  /** Bumped each time a socket delivers its first snapshot. A probe verdict that lands after
+   *  a snapshot arrived describes a link that has since recovered, so it is dropped; else a
+   *  slow probe's "expired" or "unreachable" would stick for the healthy socket's whole life,
+   *  since report("ok") fires only on a socket's first snapshot. */
+  let snapshotEpoch = 0;
 
   const report = (s: Session) => {
     if (stop || s === session) return;
@@ -62,8 +68,10 @@ export function connectLive(
   const runProbe = () => {
     if (probing) return;
     probing = true;
+    const epoch = snapshotEpoch;
+    const verdict = (s: Session) => { if (epoch === snapshotEpoch) report(s); };
     probe()
-      .then((p) => report(sessionFromProbe(p)), () => report("unreachable"))
+      .then((p) => verdict(sessionFromProbe(p)), () => verdict("unreachable"))
       .finally(() => { probing = false; });
   };
 
@@ -114,7 +122,7 @@ export function connectLive(
         const fleet = decodeSnapshot(m.fleet);
         if (fleet) {
           onSnapshot(fleet);
-          if (!healthy) { healthy = true; failures = 0; report("ok"); }
+          if (!healthy) { healthy = true; failures = 0; snapshotEpoch++; report("ok"); }
           if (!reportedLive) { reportedLive = true; onStatus(true); }
         }
       } else if (m.type === "sample") {

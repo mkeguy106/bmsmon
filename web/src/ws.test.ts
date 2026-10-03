@@ -322,6 +322,49 @@ describe("connectLive", () => {
     expect(sockets()).toHaveLength(1); // nothing reconnected
   });
 
+  // A slow probe must not paint a recovered link as broken: report("ok") fires only on a
+  // socket's first snapshot, so a late verdict would otherwise stick while LIVE is lit.
+  it("drops a probe verdict that lands after a socket delivered a snapshot", async () => {
+    let resolve: (p: ProbeResult) => void = () => {};
+    const { sessions, statuses, stop } = setup(() => new Promise<ProbeResult>((r) => { resolve = r; }));
+    for (const wait of [3_000, 6_000]) { lastSocket().fireClose(); advance(wait); }
+    lastSocket().fireClose(); // third failure: the probe is now in flight
+    advance(12_000);
+    lastSocket().goLive(); // the link recovers before the probe answers
+    expect(statuses).toEqual([true]);
+    resolve("network-error");
+    await flush();
+    expect(sessions).toEqual([]); // never "unreachable" while data flows
+    stop();
+  });
+
+  it("drops it even when the socket that recovered has closed again since", async () => {
+    let resolve: (p: ProbeResult) => void = () => {};
+    const { sessions, stop } = setup(() => new Promise<ProbeResult>((r) => { resolve = r; }));
+    for (const wait of [3_000, 6_000]) { lastSocket().fireClose(); advance(wait); }
+    lastSocket().fireClose();
+    advance(12_000);
+    lastSocket().goLive();
+    lastSocket().fireClose(); // healthy, then dropped: a snapshot still arrived after the probe began
+    resolve({ type: "opaqueredirect", status: 0 });
+    await flush();
+    expect(sessions).toEqual([]);
+    stop();
+  });
+
+  it("still reports a probe verdict when no snapshot arrived in the meantime", async () => {
+    let resolve: (p: ProbeResult) => void = () => {};
+    const { sessions, stop } = setup(() => new Promise<ProbeResult>((r) => { resolve = r; }));
+    for (const wait of [3_000, 6_000]) { lastSocket().fireClose(); advance(wait); }
+    lastSocket().fireClose();
+    advance(12_000);
+    lastSocket().fireClose(); // the next socket fails too
+    resolve("network-error");
+    await flush();
+    expect(sessions).toEqual(["unreachable"]);
+    stop();
+  });
+
   it("stop() drops a session verdict that lands afterwards", async () => {
     let resolve: (p: ProbeResult) => void = () => {};
     const { sessions, stop } = setup(() => new Promise<ProbeResult>((r) => { resolve = r; }));
