@@ -441,7 +441,7 @@ private fun HistoryLoading() {
 /** Full-screen notice when a history loader threw; back navigation still works via the BackHandler. */
 @Composable
 private fun HistoryFailed(error: Throwable) {
-    LaunchedEffect(error) { android.util.Log.w("App", "history load failed", error) }
+    LaunchedEffect(error) { android.util.Log.e("App", "history load failed", error) }
     Box(Modifier.fillMaxSize().background(Bm.colors.bg), contentAlignment = androidx.compose.ui.Alignment.Center) {
         androidx.compose.material3.Text(
             "Couldn't load history — press back and try again.",

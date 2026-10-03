@@ -194,6 +194,7 @@ class TelemetryReporter(
         var after = p.importWatermark
         val ingestUrl = CloudConfig(p.apiBaseUrl).ingestUrl
         var poisonSkips = 0   // the import's own poison circuit breaker (DATA-14, see decideUpload)
+        var heldPageAfter: Long? = null   // the page the breaker is holding — logged once, not every 5 s retry
         while (true) {
             try {
                 val page = db.samples().pageAfter(after, IMPORT_PAGE)
@@ -222,7 +223,8 @@ class TelemetryReporter(
                         // The rows themselves stay in the local Room samples table.
                         Log.w(TAG, "import: server permanently rejected page after id=$after (${page.size} rows) — skipping")
                     BatchStep.BACK_OFF, BatchStep.BACK_OFF_AUTH -> {
-                        if (result == PostResult.Poison) {
+                        if (result == PostResult.Poison && heldPageAfter != after) {
+                            heldPageAfter = after
                             Log.w(TAG, "import: page after id=$after rejected again with no 2xx since the last skip — holding it (poison breaker open)")
                         }
                         delay(5000)
