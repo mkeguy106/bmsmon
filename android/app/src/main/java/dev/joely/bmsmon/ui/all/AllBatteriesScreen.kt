@@ -89,8 +89,11 @@ private data class RowGroup(val id: String, val label: String)
 /** One list row's data (UI-13a: named PackRow — `Row` shadowed Compose's Row composable). */
 private data class PackRow(val group: RowGroup?, val target: BmsTarget, val status: BatteryStatus?) {
     val tele: Telemetry? get() = status?.telemetry
-    val reachable: Boolean get() = status?.reachable == true
 }
+
+/** UI-23: a row renders live (undimmed, its BMS state shown) only when its reading is LIVE and the
+ *  user hasn't disconnected it — the one definition the row and the "Reachable" filter share. */
+private fun rowIsLive(fresh: Freshness, disabled: Boolean): Boolean = fresh is Freshness.Live && !disabled
 
 private fun activityRank(t: Telemetry?): Int = when (t?.state) {
     BatteryState.Discharging -> 0
@@ -107,6 +110,8 @@ private fun buildRows(
     filterBaseId: String,
     dailyDriverId: String,
     sortKey: SortKey,
+    disabled: Set<String>,
+    nowElapsedMs: Long,
 ): List<PackRow> {
     val grouped = roster.groupViews().flatMap { g ->
         g.targets.map { t -> PackRow(RowGroup(g.id, g.label), t, fleet[t.address]) }
@@ -115,7 +120,9 @@ private fun buildRows(
         .map { b -> PackRow(null, BmsTarget(b.address, b.alias), fleet[b.address]) }
     var rows = grouped + ungrouped
 
-    if (FilterKey.ReachableOnly in filters) rows = rows.filter { it.reachable }
+    if (FilterKey.ReachableOnly in filters) {
+        rows = rows.filter { rowIsLive(freshness(it.status, nowElapsedMs), it.target.address in disabled) }
+    }
     if (FilterKey.ActiveOnly in filters) rows = rows.filter { activityRank(it.tele) <= 1 }
     if (FilterKey.ByBase in filters) rows = rows.filter { it.group?.id == filterBaseId }
     if (FilterKey.DailyDriverOnly in filters) rows = rows.filter { it.group?.id == dailyDriverId }
@@ -141,10 +148,10 @@ fun AllBatteriesScreen(
     // often than the ~1.5 s poll actually changes the data).
     val rows = remember(
         state.roster, state.fleet, state.filters, state.filterBaseId,
-        state.dailyDriverId, state.sortKey,
+        state.dailyDriverId, state.sortKey, state.disabled, state.nowElapsedMs,
     ) {
         buildRows(state.roster, state.fleet, state.filters, state.filterBaseId,
-            state.dailyDriverId, state.sortKey)
+            state.dailyDriverId, state.sortKey, state.disabled, state.nowElapsedMs)
     }
 
     // Fill the page height so content is top-aligned (the HorizontalPager centers wrap-height pages).
@@ -377,8 +384,8 @@ private fun BatteryRow(
     // UI-23: one freshness definition everywhere. Anything not LIVE — out of range, silent, a
     // carried seed, or monitoring OFF — renders dimmed with its age instead of a live-looking state.
     val live = fresh is Freshness.Live
-    val reachable = monitoring && live && !disabled
-    val dim = disabled || !live
+    val reachable = monitoring && rowIsLive(fresh, disabled)
+    val dim = !rowIsLive(fresh, disabled)
     var menuOpen by remember { mutableStateOf(false) }
     var renameOpen by remember { mutableStateOf(false) }
     var groupPickOpen by remember { mutableStateOf(false) }

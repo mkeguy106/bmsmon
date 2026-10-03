@@ -137,6 +137,12 @@ private fun BatteryBlock(
     val tempCritical = zone != null && zone.rank.ordinal >= TempRank.CRITICAL.ordinal
     // Null-safe bind (UI-13b): non-null exactly when the gauge should render — no `zone!!`.
     val gaugeZone = zone.takeIf { showTempGauge }
+    // Beside a STALE ring the gauge mutes like the stat tiles (M6): a non-critical zone colour
+    // goes to text2 (legible in both themes, like the stale SOC number), while CRITICAL and CUTOFF
+    // stay loud — an old reading at the cutoff is still the most important thing on the screen.
+    val gaugeColor = gaugeZone?.let { z ->
+        if (item.staleAgeMs != null && !tempCritical) c.text2 else tempZoneColor(z)
+    }
     Column(
         modifier
             .fillMaxWidth()
@@ -146,12 +152,12 @@ private fun BatteryBlock(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-            if (gaugeZone != null && tempGaugeSide == GaugeSide.LEFT) {
-                TempGauge(b.temp, tempZoneColor(gaugeZone), formatTemp(b.temp, unit), tempCritical)
+            if (gaugeColor != null && tempGaugeSide == GaugeSide.LEFT) {
+                TempGauge(b.temp, gaugeColor, formatTemp(b.temp, unit), tempCritical)
             }
             StageRingBox(item, c)
-            if (gaugeZone != null && tempGaugeSide == GaugeSide.RIGHT) {
-                TempGauge(b.temp, tempZoneColor(gaugeZone), formatTemp(b.temp, unit), tempCritical)
+            if (gaugeColor != null && tempGaugeSide == GaugeSide.RIGHT) {
+                TempGauge(b.temp, gaugeColor, formatTemp(b.temp, unit), tempCritical)
             }
         }
         Text(

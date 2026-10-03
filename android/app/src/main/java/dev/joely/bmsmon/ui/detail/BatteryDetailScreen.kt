@@ -49,7 +49,9 @@ fun BatteryDetailScreen(state: UiState, sessions: List<SessionEntity>, onBack: (
     val tele = address?.let { state.fleet[it]?.telemetry }
     // UI-23: Detail used to show the last reading with no reachability or age at all.
     val fresh = freshness(address?.let { state.fleet[it] }, state.nowElapsedMs)
-    val live = fresh is Freshness.Live
+    // A pack the user disconnected says so first, like its All Batteries row — not "Out of range".
+    val disabled = address != null && address in state.disabled
+    val live = fresh is Freshness.Live && !disabled
 
     Column(Modifier.fillMaxSize().background(c.bg)) {
         Row(
@@ -111,7 +113,10 @@ fun BatteryDetailScreen(state: UiState, sessions: List<SessionEntity>, onBack: (
                 ) {
                     // One condensed "Telemetry" card instead of three (SOC / Power / Temperature).
                     Section(
-                        freshnessLabel(fresh, state.monitoring)?.let { "Telemetry · $it" } ?: "Telemetry · live",
+                        when {
+                            disabled -> "Telemetry · Disconnected"
+                            else -> freshnessLabel(fresh, state.monitoring)?.let { "Telemetry · $it" } ?: "Telemetry · live"
+                        },
                     ) {
                         KeyVal("SOC", "${tele.soc.roundToInt()} %", mono = true)
                         KeyVal("SOH", "${tele.soh} %", mono = true)

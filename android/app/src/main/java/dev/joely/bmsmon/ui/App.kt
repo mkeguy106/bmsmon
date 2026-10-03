@@ -179,8 +179,11 @@ fun App(vm: BatteryViewModel) {
 
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
-    ) { result ->
-        if (result.values.all { it }) {
+    ) {
+        // Ask the platform, not the result: a request issued while another is in flight comes back
+        // as an EMPTY cancelled result, and `all { it }` over an empty map is true — that read as
+        // "granted" and started monitoring without the BLE grant.
+        if (hasBlePermissions(context)) {
             askExtraPermissions()
             vm.startMonitoring()
         }
