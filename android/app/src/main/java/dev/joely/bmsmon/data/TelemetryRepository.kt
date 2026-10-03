@@ -1,5 +1,6 @@
 package dev.joely.bmsmon.data
 
+import android.os.SystemClock
 import android.util.Log
 import androidx.room.withTransaction
 import dev.joely.bmsmon.data.db.BmsDatabase
@@ -32,6 +33,20 @@ private const val ROLLUP_PAGE = 1_000
 private const val TIMELINE_PAGE = 2_000
 
 /**
+ * Run a logging call whose own failure must not escape — formatting a stack trace can itself throw
+ * (an OOM, for one), and on the writer loop and the orphan sweep an escape from the catch block
+ * would kill the process-lifetime consumer that the catch exists to protect. The block never
+ * suspends, so there is no cancellation to preserve.
+ */
+private inline fun logSafely(block: () -> Unit) {
+    try {
+        block()
+    } catch (_: Throwable) {
+        // Nothing left to report it with; dropping the log line is the only safe outcome.
+    }
+}
+
+/**
  * Single facade for telemetry persistence (replaces TelemetryLogger). Writes are serialized through
  * an unlimited channel consumed by one coroutine, so callers (the BLE poll loop) never block and DB
  * access is single-threaded. Per-pack session continuity is tracked in memory: a gap or disconnect
@@ -48,6 +63,8 @@ class TelemetryRepository(private val db: BmsDatabase) {
     private val pendingDisconnect = HashMap<String, Boolean>()
     private val sessionStartTs = HashMap<String, Long>()
     private var sinceLastPrune = 0
+    // Declared before init: the writer it launches may fail an op before the constructor returns.
+    private val opFailures = FailureLogThrottle()
 
     init {
         // Startup retention pass FIRST (DATA-6, reordered for DATA-16): bound the tables before any
@@ -64,30 +81,17 @@ class TelemetryRepository(private val db: BmsDatabase) {
         // before the consumer starts, so it runs ahead of any new ingest and never blocks the
         // constructing caller. (importCsvOnce bypasses the channel, but it's a one-time legacy
         // backfill triggered later by the engine.)
-        // Each stub is streamed in bounded pages and individually guarded: a stub that throws —
-        // anything, Errors included — is logged and deleted (a zero-count stub is invisible to
-        // History anyway) instead of escaping and crash-looping every launch (DATA-16).
+        // Each stub is streamed in bounded pages and individually guarded by sweepOrphanedStubs: a
+        // stub that throws — anything, Errors included — is logged and deleted (a zero-count stub
+        // is invisible to History anyway) instead of escaping and crash-looping every launch (DATA-16).
         ops.trySend {
-            for (stub in db.sessions().zeroCountStubs()) {
-                try {
-                    when (val action = orphanedSessionAction(accumulateSession(stub.address, stub.id))) {
-                        is OrphanedSessionAction.Finalize -> db.sessions().update(action.rollup)
-                        OrphanedSessionAction.Delete -> db.sessions().deleteById(stub.id)
-                    }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (t: Throwable) {
-                    Log.w(TAG, "orphan sweep: stub id=${stub.id} (${stub.address}) failed — deleting it", t)
-                    try {
-                        db.sessions().deleteById(stub.id)
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (t2: Throwable) {
-                        // Skip it; the next stub must still be swept (it is retried next launch).
-                        Log.w(TAG, "orphan sweep: stub id=${stub.id} could not be deleted — skipping it", t2)
-                    }
-                }
-            }
+            sweepOrphanedStubs(
+                stubs = db.sessions().zeroCountStubs(),
+                accumulate = { address, sessionId -> accumulateSession(address, sessionId) },
+                update = { rollup -> db.sessions().update(rollup) },
+                delete = { sessionId -> db.sessions().deleteById(sessionId) },
+                onError = { message, error -> logSafely { Log.w(TAG, message, error) } },
+            )
         }
         scope.launch {
             for (op in ops) {
@@ -100,9 +104,24 @@ class TelemetryRepository(private val db: BmsDatabase) {
                     // loop, and must never escape this process-lifetime scope: there is no exception
                     // handler, so an escape kills the process, and the foreground service and BLE
                     // monitoring with it.
-                    Log.w(TAG, "telemetry op failed", t)
+                    logOpFailure(t)
                 }
             }
+        }
+    }
+
+    /** The writer loop's failure log, rate-limited by [opFailures] and guarded by [logSafely]. */
+    private fun logOpFailure(t: Throwable) = logSafely {
+        when (val line = opFailures.onFailure(SystemClock.elapsedRealtime())) {
+            is FailureLogThrottle.Action.Full ->
+                if (line.unreported == 0) {
+                    Log.w(TAG, "telemetry op failed", t)
+                } else {
+                    Log.w(TAG, "telemetry op failed (${line.unreported} earlier failures went unreported)", t)
+                }
+            is FailureLogThrottle.Action.Summary ->
+                Log.w(TAG, "telemetry op failed ${line.count} more times since the last report; latest: $t")
+            FailureLogThrottle.Action.Suppress -> Unit
         }
     }
 

@@ -3,6 +3,7 @@ package dev.joely.bmsmon.data
 import dev.joely.bmsmon.data.db.RollupRow
 import dev.joely.bmsmon.data.db.SampleEntity
 import dev.joely.bmsmon.data.db.SessionEntity
+import kotlinx.coroutines.CancellationException
 
 /** A gap larger than this (or a disconnect) between samples for one pack starts a new session. */
 const val SESSION_GAP_MS = 10 * 60 * 1000L
@@ -119,6 +120,43 @@ fun orphanedSessionAction(
     sessionId: Long,
     samples: List<SampleEntity>,
 ): OrphanedSessionAction = orphanedSessionAction(rollupAccumulatorOf(address, sessionId, samples))
+
+/**
+ * The startup orphan sweep's per-stub loop (DATA-2/DATA-16), pure so its guard is JVM-tested: each
+ * stub is folded ([accumulate]) and then finalized ([update]) or deleted ([delete]) per
+ * [orphanedSessionAction]. A stub that throws anything — Errors included — is reported to [onError]
+ * and deleted (a zero-count stub is invisible to History anyway) instead of escaping and
+ * crash-looping every launch; if that delete fails too, it is reported again and skipped (the next
+ * launch retries it). Either way the next stub is still swept. Cancellation is never swallowed.
+ */
+suspend fun sweepOrphanedStubs(
+    stubs: List<SessionEntity>,
+    accumulate: suspend (address: String, sessionId: Long) -> RollupAccumulator,
+    update: suspend (SessionEntity) -> Unit,
+    delete: suspend (sessionId: Long) -> Unit,
+    onError: (message: String, error: Throwable) -> Unit,
+) {
+    for (stub in stubs) {
+        try {
+            when (val action = orphanedSessionAction(accumulate(stub.address, stub.id))) {
+                is OrphanedSessionAction.Finalize -> update(action.rollup)
+                OrphanedSessionAction.Delete -> delete(stub.id)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            onError("orphan sweep: stub id=${stub.id} (${stub.address}) failed — deleting it", t)
+            try {
+                delete(stub.id)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t2: Throwable) {
+                // Skip it; the next stub must still be swept (it is retried next launch).
+                onError("orphan sweep: stub id=${stub.id} could not be deleted — skipping it", t2)
+            }
+        }
+    }
+}
 
 /** The SampleEntity → streaming-row projection. Callers must skip link-event rows. */
 fun SampleEntity.toRollupRow() = RollupRow(
