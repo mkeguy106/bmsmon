@@ -4,7 +4,8 @@ import { connectLive } from "../ws";
 import { getFleet, getRangeConfig } from "../api";
 import { selectRangeParams, type RangeParams } from "../range";
 import { stableSet } from "../util";
-import { staleAddresses } from "../freshness";
+import { anyFresh, staleAddresses } from "../freshness";
+import type { Session } from "../liveLink";
 import { visibleInterval } from "../visiblePoll";
 import type { FleetItem } from "../types";
 
@@ -21,8 +22,13 @@ const STALE_TICK_MS = 5_000;
 export interface FleetData {
   items: FleetItem[];
   staleAddrs: Set<string>;
+  /** The live socket is delivering (ws.ts: from its first snapshot until it closes). */
   live: boolean;
   gps: boolean;
+  /** At least one pack has fresh telemetry, i.e. the phone is uploading (WEB-27). */
+  synced: boolean;
+  /** The web session as the live link last judged it (liveLink.ts). */
+  session: Session;
   rangeParams: Map<string, RangeParams>;
 }
 
@@ -38,9 +44,11 @@ export function useFleetData(): FleetData {
   // exactly once per change (no manual force-counter).
   const v = useSyncExternalStore(store.subscribe, store.getVersion);
   const [live, setLive] = useState(false);
+  const [session, setSession] = useState<Session>("ok");
   const [rangeParams, setRangeParams] = useState<Map<string, RangeParams>>(new Map());
 
-  useEffect(() => connectLive((f) => store.applySnapshot(f), store.applySample, setLive), [store]);
+  useEffect(() => connectLive(
+    (f) => store.applySnapshot(f), store.applySample, setLive, { onSession: setSession }), [store]);
   useEffect(() => {
     if (live) return;
     // Visibility-gated: a hidden tab skips the fallback poll and catches up on refocus
@@ -77,10 +85,11 @@ export function useFleetData(): FleetData {
 
   const gps = useMemo(
     () => items.some((i) => !staleAddrs.has(i.address) && i.lat != null), [items, staleAddrs]);
+  const synced = useMemo(() => anyFresh(items, staleAddrs), [items, staleAddrs]);
 
   // Stable data-object identity: consumers (and their effects) only see a new
   // object when one of the fields actually changed.
   return useMemo(
-    () => ({ items, staleAddrs, live, gps, rangeParams }),
-    [items, staleAddrs, live, gps, rangeParams]);
+    () => ({ items, staleAddrs, live, gps, synced, session, rangeParams }),
+    [items, staleAddrs, live, gps, synced, session, rangeParams]);
 }

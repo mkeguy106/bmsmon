@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createStore } from "./store";
-import { STALE_MS, isPackStale, staleAddresses } from "./freshness";
+import { STALE_MS, anyFresh, isPackStale, staleAddresses } from "./freshness";
 import type { FleetItem } from "./types";
 
 const T = 1_000_000;
@@ -38,5 +38,14 @@ describe("staleAddresses", () => {
     const a = s.getFleet()["A"];
     expect(a.ts_ms).toBe(T);
     expect(staleAddresses([a], T + 120_000)).toEqual(new Set(["A"]));
+  });
+});
+
+describe("anyFresh", () => {
+  it("is true while any pack is fresh, false when every pack is stale or there are none", () => {
+    const items = [pack({ address: "A" }), pack({ address: "B" })];
+    expect(anyFresh(items, new Set(["A"]))).toBe(true);
+    expect(anyFresh(items, new Set(["A", "B"]))).toBe(false);
+    expect(anyFresh([], new Set())).toBe(false);
   });
 });

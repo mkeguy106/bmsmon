@@ -20,10 +20,11 @@ const THEME_STEPS: { mode: ThemeMode; icon: IconName; label: string }[] = [
   { mode: "dark", icon: "moon", label: "Dark" },
 ];
 
-function Pill({ label, active }: { label: string; active: boolean }) {
+function Pill({ label, active, title }: { label: string; active: boolean; title: string }) {
   return (
     <span
       className="mono"
+      title={title}
       style={{
         display: "flex",
         alignItems: "center",
@@ -117,9 +118,9 @@ export function TopBar({ view, live, gps, synced, themeMode, mobile, onCycleThem
 
       {!mobile && (
         <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-          <Pill label="LIVE" active={live} />
-          <Pill label="GPS" active={gps} />
-          <Pill label="SYNCED" active={synced} />
+          <Pill label="LIVE" active={live} title="Live link to the server" />
+          <Pill label="GPS" active={gps} title="A live pack has a recent GPS fix" />
+          <Pill label="SYNCED" active={synced} title="The phone uploaded within the last 90 s" />
         </div>
       )}
 

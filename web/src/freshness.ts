@@ -16,3 +16,9 @@ export function isPackStale(i: FleetItem, nowMs: number): boolean {
 export function staleAddresses(items: readonly FleetItem[], nowMs: number): Set<string> {
   return new Set(items.filter((i) => isPackStale(i, nowMs)).map((i) => i.address));
 }
+
+/** At least one pack has fresh telemetry: the phone is uploading. Drives v2's SYNCED pill,
+ *  which used to mirror the socket and stayed green while every pack was stale (WEB-27). */
+export function anyFresh(items: readonly FleetItem[], staleAddrs: ReadonlySet<string>): boolean {
+  return items.some((i) => !staleAddrs.has(i.address));
+}
