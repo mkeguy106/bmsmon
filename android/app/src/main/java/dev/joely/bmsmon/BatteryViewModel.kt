@@ -294,10 +294,7 @@ data class UiState(
         if (packs.isEmpty()) return none
 
         // --- capacity (existing low-battery behavior) ---
-        val capEval = evalStageAlert(
-            packs.map { PackSoc(it.second.soc, it.second.state == BatteryState.Charging) },
-            AlertConfig(alertsOn, enabledThresholds, criticalThreshold),
-        )
+        val capEval = capacityEval(packs)
         // Suppressed while charging OR within the latched hold after charging (UI-9) — the
         // Idle/Charging flap at the charger must not strobe the overlay.
         val suppressed = capEval.charging || stageChargeHold
@@ -390,11 +387,24 @@ data class UiState(
             .maxByOrNull { it.third.rank.ordinal }
     }
 
+    /** The capacity evaluation of the stage's alert-driving [packs] against the user's ladder —
+     *  the single definition behind both [stageAlert] and [withCapAcksPruned]. */
+    private fun capacityEval(packs: List<Pair<String, Telemetry>>) = evalStageAlert(
+        packs.map { PackSoc(it.second.soc, it.second.state == BatteryState.Charging) },
+        AlertConfig(alertsOn, enabledThresholds, criticalThreshold),
+    )
+
     /**
      * Re-arm temperature acks: once the stage's worst alert-driving pack recovers below CRITICAL,
      * any acknowledged temp keys are cleared so the same condition flashes again if it recurs later
      * (mirrors the headless AlertNotifier, which resets its dedup key when the rank drops below
-     * CRITICAL). Requires a reading from this session — a transient BLE dropout does not clear acks.
+     * CRITICAL).
+     *
+     * Judged on the alert-driving stage packs only ([stagePacks]). When there are none — every link
+     * down, packs still on the restored seed, or silent past STALE_MAX_MS — there is no reading to
+     * judge a recovery by, so the acks are untouched: a dropout of the whole stage never re-arms. If
+     * only some of the stage's packs drop out, the remaining ones decide: the acks clear once none
+     * of them is at CRITICAL or worse.
      */
     fun withTempAcksPruned(): UiState {
         if (acknowledgedTempKeys.isEmpty()) return this
@@ -404,19 +414,67 @@ data class UiState(
     }
 
     /**
+     * Re-arm capacity acks (UI-15) — the capacity twin of [withTempAcksPruned]. Acks used to be
+     * add-only for the life of the process and global across bases: after one ACKNOWLEDGE at 30 %,
+     * every later 30 % crossing — the next day, or a different base seized onto the stage — stayed
+     * silent on the stage, and warning-tier notifications are a silent channel, so the overlay is
+     * their only attention signal.
+     *  - the stage target changed from [prevTarget] (seize, swap, pin) -> clear: an ack belongs to
+     *    the base it was given on;
+     *  - the stage's lowest alert-driving pack is charging -> clear: that episode is over;
+     *  - otherwise, with at least one alert-driving pack, keep only the rungs still crossed, so a
+     *    recovery re-arms the next crossing.
+     * Like the temperature acks, the judging reading must be alert-driving ([stagePacks]): if none
+     * of the stage's packs is (whole-stage dropout, seed, silent past STALE_MAX_MS) the acks are
+     * untouched — a link blip must not re-arm. If only some packs drop out, the remaining ones
+     * decide, so a partner that never crossed the rung lets the ack clear.
+     */
+    fun withCapAcksPruned(prevTarget: StageTarget): UiState {
+        if (acknowledgedThresholds.isEmpty()) return this
+        if (stageTarget != prevTarget) return copy(acknowledgedThresholds = emptySet())
+        val packs = stagePacks()
+        if (packs.isEmpty()) return this
+        val eval = capacityEval(packs)
+        val kept = if (eval.charging) emptySet() else acknowledgedThresholds intersect eval.crossed
+        return if (kept == acknowledgedThresholds) this else copy(acknowledgedThresholds = kept)
+    }
+
+    /** Acknowledge exactly the alert the overlay DISPLAYED (UI-25) — never one re-derived at tap
+     *  time, which could silence a rung or temperature key the user never saw. */
+    fun withAcknowledged(shown: StageAlert): UiState = when {
+        shown.kind == AlertKind.TEMPERATURE && shown.tempAckKey != null ->
+            copy(acknowledgedTempKeys = acknowledgedTempKeys + shown.tempAckKey)
+        shown.kind == AlertKind.CAPACITY && shown.activeThreshold != null ->
+            copy(acknowledgedThresholds = acknowledgedThresholds + shown.activeThreshold)
+        else -> this
+    }
+
+    /**
+     * The VM-owned alert state advanced off the stage as it stands: the charging-suppression latch
+     * (UI-9), the temperature ack re-arm and the capacity ack re-arm (UI-15). The one chain run on
+     * every engine emission and on every freshness tick, so the two can never drift apart.
+     * [prevTarget] is the stage before this step — a stage change clears the capacity acks; the
+     * default (no change) is right for a tick, which never moves the stage.
+     */
+    fun withStageDerivations(nowMs: Long, prevTarget: StageTarget = stageTarget): UiState =
+        withChargeHold(nowMs).withTempAcksPruned().withCapAcksPruned(prevTarget)
+
+    /**
      * One step of the ViewModel's freshness ticker. Freshness and the overlay's charge hold (UI-9)
      * are time-driven, but the engine publishes only when its state changes: during total BLE
      * silence nothing would re-render a LIVE pack as STALE, and a latched hold would never expire
      * — a real low alert from a STALE pack would stay suppressed. This advances the UI clock to
-     * [elapsedMs] and the stage-alert latches to [nowMs] (wall clock, as on every engine emission),
+     * [elapsedMs] and the stage-alert state to [nowMs] (wall clock, as on every engine emission),
      * but returns `this` — no publish, no recomposition — unless something rendered changed: a
-     * freshness label, the hold, or the temperature acks. An all-LIVE fleet, or a charging stage
+     * freshness label, the hold, or either ack set (a pack going silent can re-arm an ack, and a
+     * pruned set that was not published would be lost). An all-LIVE fleet, or a charging stage
      * whose latch merely re-stamps its timestamp, costs nothing (UI-26).
      */
     fun freshnessTick(nowMs: Long, elapsedMs: Long): UiState {
-        val next = copy(nowElapsedMs = elapsedMs).withChargeHold(nowMs).withTempAcksPruned()
+        val next = copy(nowElapsedMs = elapsedMs).withStageDerivations(nowMs)
         val changed = next.stageChargeHold != stageChargeHold ||
             next.acknowledgedTempKeys != acknowledgedTempKeys ||
+            next.acknowledgedThresholds != acknowledgedThresholds ||
             freshnessLabels(fleet, elapsedMs, monitoring) != freshnessLabels(fleet, nowElapsedMs, monitoring)
         return if (changed) next else this
     }
@@ -542,6 +600,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         // engine's own STAGE_TICK_MS tick expires pins and holds, headless or not.)
         viewModelScope.launch {
             engine.state.collect { es ->
+                val prevTarget = _state.value.stageTarget
                 _state.update { s ->
                     val mirrored = s.copy(
                         monitoring = es.monitoring,
@@ -569,7 +628,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                         mirrored.copy(fleet = s.fleet.mapValues { (_, st) -> st.copy(reachable = false) })
                     }
                 }
-                applyStageDerivations()
+                applyStageDerivations(prevTarget)
                 if (es.monitoring) {
                     val now = clockMs()
                     if (now - lastTeleSaveAt > TELE_SAVE_INTERVAL_MS) {
@@ -1166,17 +1225,8 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         engine.setGpsPauseParked(on)
     }
 
-    /** Acknowledge the active alert: silence it until the condition changes/resolves. */
-    fun acknowledgeAlert() = _state.update { s ->
-        val a = s.stageAlert()
-        when {
-            a.kind == AlertKind.TEMPERATURE && a.tempAckKey != null ->
-                s.copy(acknowledgedTempKeys = s.acknowledgedTempKeys + a.tempAckKey)
-            a.activeThreshold != null ->
-                s.copy(acknowledgedThresholds = a.ackEffective + a.activeThreshold)
-            else -> s
-        }
-    }
+    /** Acknowledge the alert the overlay showed — [shown] is passed up from DangerOverlay (UI-25). */
+    fun acknowledgeAlert(shown: StageAlert) = _state.update { it.withAcknowledged(shown) }
 
     /** Stage inputs → engine (T1.2). Call after ANY change to pin / dynamic / hold / daily driver /
      *  alert ladder / seize toggle: the engine re-resolves at once and the mirror carries it back. */
@@ -1194,11 +1244,11 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    /** VM-owned alert state advanced off the mirrored stage on every engine emission: the
-     *  charging-suppression latch (UI-9) and the temperature ack re-arm. */
-    private fun applyStageDerivations() {
+    /** [UiState.withStageDerivations] on every engine emission; [prevTarget] = the stage before this
+     *  emission was mirrored, so a stage change clears the capacity acks (UI-15). */
+    private fun applyStageDerivations(prevTarget: StageTarget) {
         val now = clockMs()
-        _state.update { it.withChargeHold(now).withTempAcksPruned() }
+        _state.update { it.withStageDerivations(now, prevTarget) }
     }
 
     override fun onCleared() {

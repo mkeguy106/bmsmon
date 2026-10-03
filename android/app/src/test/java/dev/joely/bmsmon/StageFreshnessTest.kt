@@ -107,4 +107,22 @@ class StageFreshnessTest {
         assertTrue(s.stageChargeHold)
         assertSame(s, s.freshnessTick(nowMs = 2_000L, elapsedMs = nowE))
     }
+
+    @Test fun tickRearmsACapAckWhenTheLowPackGoesSilent() {
+        // The low pack (acked at 15) is STALE but still holding the alert; its healthy partner is
+        // alert-driving. 15 s later the low pack is past the backstop and drops out of the stage,
+        // leaving only the healthy reading: nothing crosses 15 any more, so the ack re-arms - and
+        // the tick must publish that, not drop it with a "nothing rendered" no-op.
+        val s = state(stale(12f, 50_000L), live(80f)).copy(acknowledgedThresholds = setOf(15))
+        assertEquals(setOf(15), s.freshnessTick(nowMs = 1_000L, elapsedMs = nowE + 1_000L).acknowledgedThresholds)
+        val t = s.freshnessTick(nowMs = 1_000L, elapsedMs = nowE + 15_000L)
+        assertTrue(t.acknowledgedThresholds.isEmpty())
+    }
+
+    @Test fun tickKeepsCapAcksWhenEveryStagePackIsSilent() {
+        // Whole stage gone: there is no reading to judge a recovery by, so the ack is untouched.
+        val s = state(stale(12f, 50_000L), stale(13f, 50_000L)).copy(acknowledgedThresholds = setOf(15))
+        val t = s.freshnessTick(nowMs = 1_000L, elapsedMs = nowE + 15_000L)
+        assertEquals(setOf(15), t.acknowledgedThresholds)
+    }
 }

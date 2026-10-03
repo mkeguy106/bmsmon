@@ -12,14 +12,17 @@ import dev.joely.bmsmon.model.groupById
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Worst-of arbitration between capacity and temperature stage alerts, plus temp-ack re-arming.
- * Regression coverage for two safety bugs:
+ * Worst-of arbitration between capacity and temperature stage alerts, plus ack re-arming.
+ * Regression coverage for the safety bugs:
  *  - an acknowledged temp CRITICAL must not mask an un-acked (flashing) capacity alert;
- *  - temp acks must clear once the condition recovers, so a recurrence flashes again.
+ *  - temp and capacity acks must clear once the condition recovers (capacity acks also on a stage
+ *    change or when the stage starts charging), so a recurrence flashes again;
+ *  - ACKNOWLEDGE acks the alert the overlay displayed, never one re-derived at tap time.
  */
 class StageAlertArbitrationTest {
 
@@ -234,5 +237,104 @@ class StageAlertArbitrationTest {
         s = s.copy(fleet = s.fleet.mapValues { (_, st) -> st.copy(reachable = false) })
         s = s.withChargeHold(now = 1_000L + CHARGE_SUPPRESS_HOLD_MS + 1)
         assertFalse(s.stageChargeHold)
+    }
+
+    // --- UI-15: capacity acks re-arm (the capacity twin of tempAckRearmsAfterRecovery) ---
+
+    @Test fun capAckRearmsAfterRecovery() {
+        var s = stateAt(soc = 28f, tempC = 25f)
+        val shown = s.stageAlert()
+        assertEquals(30, shown.activeThreshold)
+        assertTrue(shown.flashing)
+        s = s.withAcknowledged(shown)
+        assertFalse(s.stageAlert().flashing)
+        // still crossed: the ack holds
+        assertEquals(setOf(30), s.withCapAcksPruned(s.stageTarget).acknowledgedThresholds)
+        // recovers above the rung on a live reading -> ack pruned
+        s = s.copy(fleet = fleetAt("2012", 45f, 25f)).withCapAcksPruned(s.stageTarget)
+        assertTrue(s.acknowledgedThresholds.isEmpty())
+        // the next crossing (e.g. the next day) flashes again
+        s = s.copy(fleet = fleetAt("2012", 29f, 25f))
+        assertTrue(s.stageAlert().flashing)
+    }
+
+    @Test fun capAckDoesNotCarryAcrossBases() {
+        var s = stateAt(soc = 28f, tempC = 25f)
+        s = s.withAcknowledged(s.stageAlert())
+        // another base (seize, swap) takes the stage at the same rung: it must flash, not inherit
+        val prev = s.stageTarget
+        s = s.copy(stageTarget = StageTarget.Base("2016"), fleet = s.fleet + fleetAt("2016", 28f, 25f))
+            .withCapAcksPruned(prev)
+        assertTrue(s.acknowledgedThresholds.isEmpty())
+        assertTrue(s.stageAlert().flashing)
+    }
+
+    @Test fun capAckClearsWhenTheStageStartsCharging() {
+        var s = stateAt(soc = 28f, tempC = 25f)
+        s = s.withAcknowledged(s.stageAlert())
+        s = s.copy(fleet = fleetAt("2012", 28f, 25f, charging = true)).withCapAcksPruned(s.stageTarget)
+        assertTrue(s.acknowledgedThresholds.isEmpty())
+    }
+
+    @Test fun dropoutDoesNotPruneCapAcks() {
+        var s = stateAt(soc = 28f, tempC = 25f)
+        s = s.withAcknowledged(s.stageAlert())
+        val dropped = s.copy(fleet = s.fleet.mapValues { (_, st) -> st.copy(reachable = false) })
+        assertEquals(setOf(30), dropped.withCapAcksPruned(dropped.stageTarget).acknowledgedThresholds)
+    }
+
+    // --- UI-25: ACKNOWLEDGE acks what was DISPLAYED, never a re-derived alert ---
+
+    @Test fun ackAcksTheDisplayedRungNotTheCurrentOne() {
+        val shown = stateAt(soc = 26f, tempC = 25f).stageAlert()   // the overlay showed 30
+        assertEquals(30, shown.activeThreshold)
+        val moved = stateAt(soc = 24f, tempC = 25f)                // crossed 25 before the tap landed
+        val acked = moved.withAcknowledged(shown)
+        assertEquals(setOf(30), acked.acknowledgedThresholds)
+        assertTrue("25 was never shown - it must still flash", acked.stageAlert().flashing)
+        assertEquals(25, acked.stageAlert().activeThreshold)
+    }
+
+    @Test fun ackOfADisplayedCapacityAlertNeverSilencesATempAlertThatWonLater() {
+        val shown = stateAt(soc = 22f, tempC = 25f).stageAlert()   // capacity 25 shown
+        val now = stateAt(soc = 22f, tempC = 55f)                  // temp CRITICAL won before the tap
+        val acked = now.withAcknowledged(shown)
+        assertTrue(acked.acknowledgedTempKeys.isEmpty())
+        assertEquals(AlertKind.TEMPERATURE, acked.stageAlert().kind)
+        assertTrue(acked.stageAlert().flashing)
+    }
+
+    @Test fun ackOfADisplayedTempAlertAcksThatKey() {
+        val s = stateAt(soc = 80f, tempC = 55f)
+        assertEquals(setOf("temp:HOT:CRITICAL"), s.withAcknowledged(s.stageAlert()).acknowledgedTempKeys)
+    }
+
+    @Test fun ackOfAnAlertThatShowedNothingChangesNothing() {
+        val quiet = stateAt(soc = 80f, tempC = 25f)
+        assertSame(quiet, quiet.withAcknowledged(quiet.stageAlert()))
+    }
+
+    // --- the one derivation chain (engine emissions and the freshness tick share it) ---
+
+    @Test fun stageDerivationsRunTheWholeChain() {
+        // Charging latches the hold, and a recovered stage re-arms BOTH ack kinds, in one pass.
+        val s = stateAt(
+            soc = 80f, tempC = 25f, charging = true,
+            ackedTemp = setOf("temp:HOT:CRITICAL"), ackedCap = setOf(30),
+        )
+        val d = s.withStageDerivations(nowMs = 1_000L)
+        assertTrue(d.stageChargeHold)
+        assertTrue(d.acknowledgedTempKeys.isEmpty())
+        assertTrue(d.acknowledgedThresholds.isEmpty())
+    }
+
+    @Test fun stageDerivationsClearCapAcksOnAStageChange() {
+        var s = stateAt(soc = 28f, tempC = 25f)
+        s = s.withAcknowledged(s.stageAlert())
+        val prev = s.stageTarget
+        s = s.copy(stageTarget = StageTarget.Base("2016"), fleet = s.fleet + fleetAt("2016", 28f, 25f))
+        // the default prevTarget is the current stage: no change, the ack stays (it is for 2012)
+        assertEquals(setOf(30), s.withStageDerivations(nowMs = 1_000L).acknowledgedThresholds)
+        assertTrue(s.withStageDerivations(nowMs = 1_000L, prevTarget = prev).acknowledgedThresholds.isEmpty())
     }
 }
