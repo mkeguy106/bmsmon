@@ -28,7 +28,7 @@ from app.util import jsonable
 router = APIRouter(prefix="/api/v1")
 
 # A pack is treated as offline when nothing has arrived for this long. Mirrors
-# STALE_MS in web/src/v2/useFleetData.ts — keep the two in step.
+# STALE_MS in web/src/freshness.ts — keep the two in step.
 STALE_MS = 90_000
 
 # Inner-ring full scale, mirroring POWER_RING_FULL_W in the app and web Ring.

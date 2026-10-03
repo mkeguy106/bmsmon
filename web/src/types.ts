@@ -9,7 +9,12 @@ export interface Sample {
   cell_min_v?: number | null; cell_max_v?: number | null; mosfet_temp_c?: number | null;
   cells?: number[] | null;
 }
-export type FleetItem = Sample & { alias?: string | null; group_id?: string | null };
+export type FleetItem = Sample & {
+  alias?: string | null; group_id?: string | null;
+  /** Store-internal (store.ts), never on the wire: the time of the newest BLE link event,
+   *  kept only while that event is newer than the newest telemetry (ts_ms). */
+  link_ts_ms?: number | null;
+};
 export interface DeviceRow {
   id: string; install_uuid: string; label?: string | null;
   last_seen_at?: string | null; revoked: boolean;

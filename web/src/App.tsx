@@ -14,13 +14,12 @@ import {
 import { selectRangeParams, type RangeParams } from "./range";
 import { readStored, useLocalStorage, type Codec } from "./useLocalStorage";
 import { stableSet } from "./util";
+import { staleAddresses } from "./freshness";
 import { visibleInterval } from "./visiblePoll";
 import type { FleetItem } from "./types";
 
-// The phone polls background packs slowly (a pack can go ~a minute between reports), so only
-// treat a pack as disconnected after a generous gap — otherwise cards flap to DISCONNECTED.
-const STALE_MS = 90_000;
-// Staleness only needs coarse resolution against that 90 s threshold: re-check on this
+// Staleness (freshness.ts: 90 s without telemetry, or a reported disconnect) only needs
+// coarse resolution against that 90 s threshold: re-check on this
 // cadence (and on every fleet change). Visible age text ticks in <Ago>/useNow leaves.
 const STALE_TICK_MS = 5_000;
 
@@ -160,8 +159,7 @@ export default function App() {
   const [staleAddrs, setStaleAddrs] = useState<Set<string>>(() => new Set());
   useEffect(() => {
     const check = () => {
-      const nowMs = Date.now();
-      const next = new Set(items.filter((i) => nowMs - i.ts_ms > STALE_MS).map((i) => i.address));
+      const next = staleAddresses(items, Date.now());
       setStaleAddrs((prev) => stableSet(prev, next));
     };
     check();

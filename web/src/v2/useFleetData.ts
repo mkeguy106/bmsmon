@@ -4,14 +4,14 @@ import { connectLive } from "../ws";
 import { getFleet, getRangeConfig } from "../api";
 import { selectRangeParams, type RangeParams } from "../range";
 import { stableSet } from "../util";
+import { staleAddresses } from "../freshness";
 import { visibleInterval } from "../visiblePoll";
 import type { FleetItem } from "../types";
 
-// A pack is stale (treated as offline) if we haven't heard from it in 90 s —
-// mirrors v1 App.tsx. The REST fallback polls the fleet snapshot every 10 s
-// while the WS is down; applySnapshot merges through the store's ts-guard so a
+// Pack staleness (90 s without telemetry, or a reported disconnect) is defined once in
+// ../freshness.ts and shared with v1. The REST fallback polls the fleet snapshot every
+// 10 s while the WS is down; applySnapshot merges through the store's ts-guard so a
 // late/stale REST response can never regress fresher WS data.
-const STALE_MS = 90_000;
 const REST_FALLBACK_MS = 10_000;
 // Staleness only needs coarse resolution against the 90 s threshold. It is
 // re-checked on this cadence (and on every fleet change), NOT every second —
@@ -67,8 +67,7 @@ export function useFleetData(): FleetData {
   const [staleAddrs, setStaleAddrs] = useState<Set<string>>(() => new Set());
   useEffect(() => {
     const check = () => {
-      const nowMs = Date.now();
-      const next = new Set(items.filter((i) => nowMs - i.ts_ms > STALE_MS).map((i) => i.address));
+      const next = staleAddresses(items, Date.now());
       setStaleAddrs((prev) => stableSet(prev, next));
     };
     check();
