@@ -1,4 +1,6 @@
-from pydantic import BaseModel, field_validator
+from typing import Any, TypeVar
+
+from pydantic import BaseModel, ValidationError, field_validator
 
 
 class EnrollBody(BaseModel):
@@ -70,21 +72,27 @@ class SampleIn(BaseModel):
         return v if v is not None and 0 < v < 4_102_444_800_000 else None
 
 
-class IngestBody(BaseModel):
+class IngestEnvelope(BaseModel):
+    """The ingest body's ENVELOPE, the only part whose failure is a 422 (C3): not JSON,
+    not an object, no `samples` list, or a bad batch_seq. Samples stay raw JSON values
+    here and are validated ONE BY ONE in the router (validate_each), because the phone
+    deletes a 4xx'd batch (PostResult.Poison) and one bad field must never cost the
+    other rows (SRV-18). The phone always sends both keys (CloudJson.encodeBatch)."""
     # batch_seq semantics: a per-process counter on the phone (no ordering guarantee
     # across uploader restarts); -1 marks a historical-import batch, which the ingest
     # router does NOT fan out to the live WS. Echoed back as last_seq; reserved for
     # diagnostics — NOT used for dedup (the samples PK handles that).
     batch_seq: int
-    samples: list[SampleIn] = []
+    samples: list[Any]
 
 
 class IngestResponse(BaseModel):
-    # accepted = rows actually inserted this batch (SRV-9): samples that failed server
-    # validation (ts_ms window, address rule) are dropped before insert, and re-uploads
-    # already present under the samples PK dedup to 0. Diagnostics only — the phone
-    # keys retry/poison handling off the HTTP status, never off this count.
+    # accepted = rows actually inserted this batch (SRV-9); re-uploads already present
+    # under the samples PK dedup to 0. dropped = samples refused server-side (C3): schema
+    # rejects + ts_ms window + address rule. Duplicates are neither. Diagnostics only:
+    # the phone keys retry/poison handling off the HTTP status, never off these counts.
     accepted: int
+    dropped: int = 0
     last_seq: int
 
 
@@ -126,7 +134,9 @@ class TempConfigBody(BaseModel):
     alerts_on: bool | None = None
     # Learned discharge-range bands, one row per pack (2026-07-11 design). Optional — an
     # older app pushing a temp-only body must keep validating (never a re-POSTed 422).
-    ranges: list[RangeConfigRow] | None = None
+    # Raw here: each row is validated on its own (RangeConfigRow via validate_each in the
+    # router), so one bad row is dropped instead of 422ing the whole push (C3).
+    ranges: list[Any] | None = None
 
 
 class NoteBody(BaseModel):
@@ -151,6 +161,30 @@ class NoteBody(BaseModel):
 
 class OkResponse(BaseModel):
     ok: bool = True
+
+
+class ConfigResponse(OkResponse):
+    # dropped = ranges[] rows refused by validation (C3); diagnostics only.
+    dropped: int = 0
+
+
+M = TypeVar("M", bound=BaseModel)
+
+
+def validate_each(model: type[M], items: list[Any]) -> tuple[list[M], list[tuple[int, str]]]:
+    """C3: validate list items one at a time. Returns (valid models, rejects), where each
+    reject is (index, "<loc>: <error type>") of that item's FIRST pydantic error. The
+    location and type only, NEVER the value: samples carry GPS coordinates."""
+    ok: list[M] = []
+    bad: list[tuple[int, str]] = []
+    for i, item in enumerate(items):
+        try:
+            ok.append(model.model_validate(item))
+        except ValidationError as e:
+            first = e.errors()[0]
+            loc = ".".join(str(p) for p in first["loc"]) or "<item>"
+            bad.append((i, f"{loc}: {first['type']}"))
+    return ok, bad
 
 
 class MintCodeResponse(BaseModel):

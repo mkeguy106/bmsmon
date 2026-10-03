@@ -96,7 +96,7 @@ def test_ws_skips_historical_import_batches():
             r = _ingest(tc, priv, device_id,
                         [{"ts_ms": now_ms - 5000, "address": A, "soc": 11.0}], batch_seq=-1)
             assert r.status_code == 200
-            assert r.json() == {"accepted": 1, "last_seq": -1}  # stored, just not broadcast
+            assert r.json() == {"accepted": 1, "dropped": 0, "last_seq": -1}  # stored, just not broadcast
             r = _ingest(tc, priv, device_id,
                         [{"ts_ms": now_ms, "address": A, "soc": 22.0}], batch_seq=2)
             assert r.status_code == 200

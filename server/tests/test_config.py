@@ -50,7 +50,7 @@ async def test_config_accepts_gzipped_signed_body(app, client):
                           headers={"Authorization": f"Bearer {_token(priv, device_id, body)}",
                                    "Content-Type": "application/json", "Content-Encoding": "gzip"})
     assert r.status_code == 200
-    assert r.json() == {"ok": True}
+    assert r.json() == {"ok": True, "dropped": 0}
     async with app.state.pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM device_temp_config WHERE device_id=$1", device_id)
     assert row["cold_crit_c"] == -12

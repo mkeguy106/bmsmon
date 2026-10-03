@@ -15,7 +15,8 @@ from app.config import settings
 from app.db import queries as q
 from app.db.pool import get_pool
 from app.models import (
-    EnrollBody, EnrollResponse, IngestBody, IngestResponse, OkResponse, TempConfigBody,
+    ConfigResponse, EnrollBody, EnrollResponse, IngestEnvelope, IngestResponse,
+    RangeConfigRow, SampleIn, TempConfigBody, validate_each,
 )
 from app.ratelimit import client_key
 
@@ -33,6 +34,28 @@ def _partition_ts_window() -> tuple[int, int]:
 # SRV-13: max accepted sample-address length. BLE MACs are 17 chars; the headroom is
 # forward compat (e.g. iOS CoreBluetooth surfaces UUID-ish identifiers, not MACs).
 ADDRESS_MAX_LEN = 32
+
+# C3: invalid-item WARNINGs at most once per device per kind per interval. An outbox
+# drain of a drifted client would otherwise log the same failure for every batch.
+REJECT_LOG_INTERVAL_S = 60.0
+
+
+def _may_log_reject(request: Request, device_id: str, kind: str) -> bool:
+    """True at most once per device per `kind` per REJECT_LOG_INTERVAL_S (app.state.reject_log)."""
+    return request.app.state.reject_log.should_touch((device_id, kind))
+
+
+def _log_rejects(request: Request, device_id: str, kind: str,
+                 rejects: list[tuple[int, str]], total: int) -> None:
+    """WARNING for dropped-invalid items: count + the first error's location and type."""
+    if not _may_log_reject(request, device_id, kind):
+        return
+    index, reason = rejects[0]
+    logger.warning(
+        "%s: dropped %d/%d invalid %s(s) from device %s; first: #%d %s "
+        "(repeats for this device suppressed for %.0f s)",
+        request.url.path, len(rejects), total, kind, device_id, index, reason,
+        REJECT_LOG_INTERVAL_S)
 
 
 def _address_ok(address: str) -> bool:
@@ -186,29 +209,39 @@ async def ingest(request: Request, pool=Depends(get_pool)):
     # The device may gzip the body; it is read (capped) and decompressed only now, after
     # the token verified. The JWT's bh is over the decompressed plaintext.
     raw = await _read_verified_body(request, claims)
+    # C3/SRV-18: ONLY the envelope can 422. Each sample is validated on its own and
+    # dropped if invalid; the phone deletes a 4xx'd batch, so one bad field must never
+    # cost the other rows.
     try:
-        body = IngestBody.model_validate_json(raw)
+        env = IngestEnvelope.model_validate_json(raw)
     except ValidationError:
         raise HTTPException(422, "invalid body")
+    parsed, rejects = validate_each(SampleIn, env.samples)
+    if rejects:
+        _log_rejects(request, device_id, "sample", rejects, len(env.samples))
     # T2.3/SRV-5: drop (don't 4xx) samples whose device-supplied ts_ms is outside a
     # sane window — ts_ms drives partition CREATE TABLEs and datetime conversion.
     ts_min, ts_max = _partition_ts_window()
-    samples = [s for s in body.samples if ts_min <= s.ts_ms <= ts_max]
-    if len(samples) != len(body.samples):
-        bad = [s.ts_ms for s in body.samples if not (ts_min <= s.ts_ms <= ts_max)]
+    samples = [s for s in parsed if ts_min <= s.ts_ms <= ts_max]
+    if len(samples) != len(parsed) and _may_log_reject(request, device_id, "ts_ms window"):
+        bad = [s.ts_ms for s in parsed if not (ts_min <= s.ts_ms <= ts_max)]
         logger.warning(
-            "ingest: dropped %d/%d sample(s) with out-of-range ts_ms from device %s: %s",
-            len(bad), len(body.samples), device_id, bad[:10])
+            "ingest: dropped %d/%d sample(s) with out-of-range ts_ms from device %s: %s "
+            "(repeats for this device suppressed for %.0f s)",
+            len(bad), len(parsed), device_id, bad[:10], REJECT_LOG_INTERVAL_S)
     # SRV-13: same drop-don't-4xx policy for junk addresses, which would otherwise
     # create permanent `batteries` registry rows (rule documented on _address_ok).
     kept = [s for s in samples if _address_ok(s.address)]
-    if len(kept) != len(samples):
+    if len(kept) != len(samples) and _may_log_reject(request, device_id, "address"):
         bad_addr = [s.address for s in samples if not _address_ok(s.address)]
         logger.warning(
-            "ingest: dropped %d/%d sample(s) with invalid address from device %s: %s",
+            "ingest: dropped %d/%d sample(s) with invalid address from device %s: %s "
+            "(repeats for this device suppressed for %.0f s)",
             len(bad_addr), len(samples), device_id,
-            [a[:40].encode("ascii", "backslashreplace").decode() for a in bad_addr[:10]])
+            [a[:40].encode("ascii", "backslashreplace").decode() for a in bad_addr[:10]],
+            REJECT_LOG_INTERVAL_S)
     samples = kept
+    dropped = len(env.samples) - len(samples)
     # model_dump() once per sample, reused for both the DB row and the WS publish
     # below (it used to run twice per sample on the ingest hot path). sample_row
     # and publish both only READ the dict, so sharing it is safe.
@@ -229,23 +262,28 @@ async def ingest(request: Request, pool=Depends(get_pool)):
         # approximate within ~60 s, which is fine).
         if request.app.state.device_touch.should_touch(device_id):
             await conn.execute("UPDATE devices SET last_seen_at=now() WHERE id=$1", device_id)
-    # batch_seq < 0 (-1) marks a historical-import batch (see IngestBody): store it,
+    # batch_seq < 0 (-1) marks a historical-import batch (see IngestEnvelope): store it,
     # but don't flood the live WS dashboards with thousands of stale frames (WEB-5).
-    if body.batch_seq >= 0:
+    if env.batch_seq >= 0:
         for d in dumped:
             await request.app.state.bus.publish({"type": "sample", **d})
-    return IngestResponse(accepted=accepted, last_seq=body.batch_seq)
+    return IngestResponse(accepted=accepted, dropped=dropped, last_seq=env.batch_seq)
 
 
-@router.post("/config", response_model=OkResponse)
+@router.post("/config", response_model=ConfigResponse)
 async def config(request: Request, pool=Depends(get_pool)):
-    """One-way temperature-alert config push from the phone (same auth/gzip/verify as ingest)."""
+    """One-way temperature-alert config push from the phone (same auth/gzip/verify as
+    ingest). The core thresholds are the envelope (422 if malformed); ranges[] rows are
+    validated one by one and invalid rows dropped (C3)."""
     device_id, claims = await _authenticate(request, pool)
     raw = await _read_verified_body(request, claims)
     try:
         cfg = TempConfigBody.model_validate_json(raw)
     except ValidationError:
         raise HTTPException(422, "invalid body")
+    ranges, rejects = validate_each(RangeConfigRow, cfg.ranges or [])
+    if rejects:
+        _log_rejects(request, device_id, "range row", rejects, len(cfg.ranges or []))
     async with pool.acquire() as conn:
         await q.upsert_temp_config(conn, device_id, cfg.model_dump())
         # Device-level capacity alert sync (parallel to temp config): only when the phone
@@ -254,10 +292,9 @@ async def config(request: Request, pool=Depends(get_pool)):
             await q.upsert_alert_config(
                 conn, device_id, cfg.seize_soc,
                 cfg.alerts_on if cfg.alerts_on is not None else True, cfg.updated_at_ms)
-        # Learned discharge-range bands (parallel to alert config): only when the phone
-        # includes them — a temp-only body leaves ranges None and the stored rows untouched.
-        if cfg.ranges:
-            for row in cfg.ranges:
-                await q.upsert_range_config(conn, device_id, row.model_dump())
+        # Learned discharge-range bands: only the rows that validated; a temp-only body
+        # (ranges None) leaves the stored rows untouched.
+        for row in ranges:
+            await q.upsert_range_config(conn, device_id, row.model_dump())
         await conn.execute("UPDATE devices SET last_seen_at=now() WHERE id=$1", device_id)
-    return OkResponse()
+    return ConfigResponse(dropped=len(rejects))

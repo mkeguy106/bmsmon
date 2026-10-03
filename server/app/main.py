@@ -16,6 +16,27 @@ from app.routers import api_device, api_widget, share, web, ws
 
 logger = logging.getLogger(__name__)
 
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+_LOG_HANDLER_NAME = "bmsmon"
+
+
+def configure_logging() -> None:
+    """SRV-21/C3: give the `app` logger hierarchy its own INFO handler. Under uvicorn the
+    root logger has no handlers and sits at WARNING, so `logger.info` lines (rollup, GPS
+    scrub) were discarded and warnings printed bare via logging.lastResort. Idempotent
+    (create_app runs once per test). propagate stays True so pytest's caplog, which hooks
+    the root logger, still sees app records; uvicorn attaches no root handler, so lines
+    are not printed twice in prod."""
+    log = logging.getLogger("app")
+    log.setLevel(logging.INFO)
+    if any(h.get_name() == _LOG_HANDLER_NAME for h in log.handlers):
+        return
+    handler = logging.StreamHandler()
+    handler.set_name(_LOG_HANDLER_NAME)
+    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    log.addHandler(handler)
+
+
 # GPS retention scrub cadence: once shortly after startup, then daily.
 GPS_SCRUB_INITIAL_DELAY_S = 30
 GPS_SCRUB_INTERVAL_S = 24 * 3600
@@ -118,6 +139,7 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    configure_logging()
     app = FastAPI(title="bmsmon", lifespan=lifespan)
     from starlette.middleware.gzip import GZipMiddleware
 
@@ -154,6 +176,8 @@ def create_app() -> FastAPI:
     app.state.share_touch = TouchThrottle(interval_s=TOUCH_INTERVAL_S)
     # devices.last_seen_at write throttle (see routers/api_device.py).
     app.state.device_touch = TouchThrottle(interval_s=60.0)
+    # C3: invalid-sample/range-row WARNINGs, at most once per device per kind per interval.
+    app.state.reject_log = TouchThrottle(interval_s=api_device.REJECT_LOG_INTERVAL_S)
     # SEC-4: per-IP limiter for the unauthenticated /api/v1/enroll (see app/ratelimit.py).
     app.state.enroll_limiter = RateLimiter()
     # Widgets poll on a timer with a key they already hold, so legitimate traffic

@@ -1240,6 +1240,16 @@ Enforced in the app itself (not delegated to Traefik/Authentik) and pinned by te
   The `sub` is canonicalised once (`str(uuid.UUID(...))`), so every spelling of a device's
   UUID shares one budget. Also fixed: a non-string or `{braced}`/`urn:uuid:` `sub`
   (pre-auth), or a non-string `aud`, used to escape as a 500.
+- **Samples are validated one at a time** (C3/SRV-18). Only a malformed envelope is a
+  422: not JSON, not an object, no `samples` list, or a bad `batch_seq`. Each sample goes
+  through `SampleIn` on its own (`models.validate_each`), and invalid ones are dropped and
+  logged at WARNING: the first error's location + type only, never values (samples carry
+  GPS), at most once per device per kind per minute (schema, ts-window and address drops
+  each have their own window). The response is
+  `{"accepted", "dropped", "last_seq"}`, where `dropped` = schema + ts-window + address
+  drops. `/api/v1/config` does the same for `ranges[]` rows and answers
+  `{"ok", "dropped"}`. The `app` logger hierarchy logs at INFO with time/level/name
+  (`main.configure_logging`), so rollup, scrub and drop lines are visible in `docker logs`.
 
 ### Read-only API keys (`/api/v1/groups`, desktop widgets)
 

@@ -54,7 +54,7 @@ async def test_ingest_accepts_valid_signed_batch(app, client):
                           headers={"Authorization": f"Bearer {_token(priv, device_id, body)}",
                                    "Content-Type": "application/json"})
     assert r.status_code == 200
-    assert r.json() == {"accepted": 1, "last_seq": 7}
+    assert r.json() == {"accepted": 1, "dropped": 0, "last_seq": 7}
     async with app.state.pool.acquire() as conn:
         assert await conn.fetchval("SELECT count(*) FROM samples") == 1
 
@@ -72,7 +72,7 @@ async def test_ingest_accepts_gzipped_body(app, client):
                                    "Content-Type": "application/json",
                                    "Content-Encoding": "gzip"})
     assert r.status_code == 200
-    assert r.json() == {"accepted": 1, "last_seq": 7}
+    assert r.json() == {"accepted": 1, "dropped": 0, "last_seq": 7}
     async with app.state.pool.acquire() as conn:
         assert await conn.fetchval("SELECT count(*) FROM samples") == 1
 
@@ -181,7 +181,7 @@ async def test_ingest_drops_out_of_window_ts_and_keeps_valid(app, client):
     r = await client.post("/api/v1/ingest", content=body,
                           headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
     assert r.status_code == 200
-    assert r.json() == {"accepted": 1, "last_seq": 11}
+    assert r.json() == {"accepted": 1, "dropped": 4, "last_seq": 11}
     async with app.state.pool.acquire() as conn:
         stored = await conn.fetch("SELECT ts_ms, soc FROM samples")
     assert [(x["ts_ms"], x["soc"]) for x in stored] == [(now_ms, 87.0)]
@@ -200,7 +200,7 @@ async def test_ingest_all_invalid_ts_batch_is_200_accepted_0(app, client):
     r = await client.post("/api/v1/ingest", content=body,
                           headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
     assert r.status_code == 200
-    assert r.json() == {"accepted": 0, "last_seq": 12}
+    assert r.json() == {"accepted": 0, "dropped": 2, "last_seq": 12}
     async with app.state.pool.acquire() as conn:
         assert await conn.fetchval("SELECT count(*) FROM samples") == 0
         assert await conn.fetchval("SELECT count(*) FROM batteries") == 0
@@ -224,7 +224,7 @@ async def test_ingest_ignores_legacy_cells_field(app, client):
     r = await client.post("/api/v1/ingest", content=body,
                           headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
     assert r.status_code == 200
-    assert r.json() == {"accepted": 1, "last_seq": 7}
+    assert r.json() == {"accepted": 1, "dropped": 0, "last_seq": 7}
 
 
 async def test_ingest_upserts_battery_last_values_per_address(app, client):
@@ -242,7 +242,7 @@ async def test_ingest_upserts_battery_last_values_per_address(app, client):
     r = await client.post("/api/v1/ingest", content=body,
                           headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
     assert r.status_code == 200
-    assert r.json() == {"accepted": 2, "last_seq": 13}
+    assert r.json() == {"accepted": 2, "dropped": 0, "last_seq": 13}
     async with app.state.pool.acquire() as conn:
         row = await conn.fetchrow("SELECT alias, group_id FROM batteries WHERE address=$1", A)
     assert row["alias"] == "2012 · A"
@@ -259,7 +259,7 @@ async def test_ingest_accepts_correct_aud_claim(app, client):
                           headers={"Authorization":
                                    f"Bearer {_token(priv, device_id, body, aud='bmsmon-api')}"})
     assert r.status_code == 200
-    assert r.json() == {"accepted": 1, "last_seq": 7}
+    assert r.json() == {"accepted": 1, "dropped": 0, "last_seq": 7}
 
 
 async def test_ingest_rejects_wrong_aud_claim(app, client):
@@ -302,7 +302,7 @@ async def test_ingest_drops_junk_addresses_and_keeps_valid(app, client):
     r = await client.post("/api/v1/ingest", content=body,
                           headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
     assert r.status_code == 200
-    assert r.json() == {"accepted": 2, "last_seq": 14}
+    assert r.json() == {"accepted": 2, "dropped": 5, "last_seq": 14}
     async with app.state.pool.acquire() as conn:
         addrs = [x["address"] for x in await conn.fetch("SELECT address FROM batteries")]
         n = await conn.fetchval("SELECT count(*) FROM samples")
@@ -319,7 +319,7 @@ async def test_ingest_all_junk_addresses_is_200_accepted_0(app, client):
     r = await client.post("/api/v1/ingest", content=body,
                           headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
     assert r.status_code == 200
-    assert r.json() == {"accepted": 0, "last_seq": 15}
+    assert r.json() == {"accepted": 0, "dropped": 1, "last_seq": 15}
     async with app.state.pool.acquire() as conn:
         assert await conn.fetchval("SELECT count(*) FROM batteries") == 0
 
@@ -336,7 +336,7 @@ async def test_ingest_accepted_excludes_db_duplicates(app, client):
     h2 = {"Authorization": f"Bearer {_token(priv, device_id, body)}"}  # fresh jti
     r = await client.post("/api/v1/ingest", content=body, headers=h2)
     assert r.status_code == 200
-    assert r.json() == {"accepted": 0, "last_seq": 7}
+    assert r.json() == {"accepted": 0, "dropped": 0, "last_seq": 7}
     async with app.state.pool.acquire() as conn:
         assert await conn.fetchval("SELECT count(*) FROM samples") == 1
 
@@ -348,7 +348,7 @@ async def test_ingest_stores_gps(app, client):
     r = await client.post("/api/v1/ingest", content=body,
                           headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
     assert r.status_code == 200
-    assert r.json() == {"accepted": 1, "last_seq": 8}
+    assert r.json() == {"accepted": 1, "dropped": 0, "last_seq": 8}
     async with app.state.pool.acquire() as conn:
         row = await conn.fetchrow("SELECT lat, lon, gps_accuracy_m FROM samples")
     assert row["lat"] == 41.8781
@@ -367,7 +367,7 @@ async def test_ingest_accepts_motion_fields(app, client):
     r = await client.post("/api/v1/ingest", content=body,
                           headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
     assert r.status_code == 200
-    assert r.json() == {"accepted": 1, "last_seq": 16}
+    assert r.json() == {"accepted": 1, "dropped": 0, "last_seq": 16}
     async with app.state.pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT motion_activity, motion_confidence, motion_still FROM samples")
@@ -389,7 +389,7 @@ async def test_ingest_clamps_out_of_range_motion_confidence(app, client):
     r = await client.post("/api/v1/ingest", content=body,
                           headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
     assert r.status_code == 200
-    assert r.json() == {"accepted": 1, "last_seq": 17}
+    assert r.json() == {"accepted": 1, "dropped": 0, "last_seq": 17}
     async with app.state.pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT motion_activity, motion_confidence, motion_still FROM samples")
@@ -408,7 +408,7 @@ async def test_ingest_without_motion_fields_still_works(app, client):
     r = await client.post("/api/v1/ingest", content=body,
                           headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
     assert r.status_code == 200
-    assert r.json() == {"accepted": 1, "last_seq": 7}
+    assert r.json() == {"accepted": 1, "dropped": 0, "last_seq": 7}
     async with app.state.pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT motion_activity, motion_confidence, motion_still, motion_at_ms FROM samples")
@@ -431,7 +431,7 @@ async def test_ingest_persists_motion_at_ms(app, client):
     r = await client.post("/api/v1/ingest", content=body,
                           headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
     assert r.status_code == 200
-    assert r.json() == {"accepted": 1, "last_seq": 18}
+    assert r.json() == {"accepted": 1, "dropped": 0, "last_seq": 18}
     async with app.state.pool.acquire() as conn:
         row = await conn.fetchrow("SELECT motion_at_ms FROM samples")
     assert row["motion_at_ms"] == 1719686245000
@@ -451,7 +451,7 @@ async def test_ingest_clamps_out_of_range_motion_at_ms(app, client):
     r = await client.post("/api/v1/ingest", content=body,
                           headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
     assert r.status_code == 200
-    assert r.json() == {"accepted": 1, "last_seq": 19}
+    assert r.json() == {"accepted": 1, "dropped": 0, "last_seq": 19}
     async with app.state.pool.acquire() as conn:
         row = await conn.fetchrow("SELECT motion_activity, motion_at_ms FROM samples")
     assert row["motion_activity"] == "STILL"
