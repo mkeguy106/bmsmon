@@ -60,6 +60,7 @@ import dev.joely.bmsmon.model.applyDisabled
 import dev.joely.bmsmon.model.groupActivity
 import dev.joely.bmsmon.model.groupOf
 import dev.joely.bmsmon.model.groupViews
+import dev.joely.bmsmon.model.hasDesiredLinks
 import dev.joely.bmsmon.model.pruneToRoster
 import dev.joely.bmsmon.model.MotionGate
 import dev.joely.bmsmon.model.MotionReading
@@ -107,6 +108,11 @@ data class MonitorState(
     val peakPowerW: Float = 0f,
     val peakCurrentA: Float = 0f,
     val gpsActive: Boolean = false,
+    // BLE-27: some roster pack is not user-disconnected, i.e. BLE has a link to want. Single writer:
+    // the engine (start / setDisabled / setRoster). The service holds its wakelock only while
+    // monitoring && linksWanted, and the GPS gate needs it too (fixes only ride BLE samples).
+    // Defaults true so a state built without it (stop()'s reset, tests) never reads "nothing to poll".
+    val linksWanted: Boolean = true,
     // Stage (T1.2, 2026-10-02 review) — single writer: the engine. Resolved (low-pack seize
     // included) on every BLE event, every config push and a 10 s tick, with or without a
     // ViewModel; the VM pushes StageConfig and mirrors these two fields.
@@ -302,6 +308,7 @@ class MonitorEngine(
                 peakCurrentA = 0f,
                 tailMinByAddress = emptyMap(),
                 tailRunEndByAddress = emptyMap(),
+                linksWanted = hasDesiredLinks(roster, disabledAddrs),
             )
         }
         ble.start(
@@ -374,9 +381,13 @@ class MonitorEngine(
             st.copy(
                 fleet = pruneToRoster(st.fleet, roster),
                 regenAddrs = st.regenAddrs.filter { roster.batteryAt(it) != null }.toSet(),
+                linksWanted = hasDesiredLinks(roster, disabledAddrs),
             )
         }
-        if (_state.value.monitoring) ble.setTargets(roster.allTargets())
+        if (_state.value.monitoring) {
+            ble.setTargets(roster.allTargets())
+            applyGpsGate(now())   // BLE-27: a roster left with no wanted pack stops GPS too
+        }
         reevaluate()
     }
 
@@ -483,7 +494,7 @@ class MonitorEngine(
         disabledAddrs = addresses.map { it.uppercase() }.toSet()
         _state.update { st ->
             val (fleet, regen) = applyDisabled(st.fleet, st.regenAddrs, addresses)
-            st.copy(fleet = fleet, regenAddrs = regen)
+            st.copy(fleet = fleet, regenAddrs = regen, linksWanted = hasDesiredLinks(roster, disabledAddrs))
         }
         ble.setDisabled(addresses)
         // "Disconnect all" cancels every worker, so onPoll — the gate's primary driver — may never
@@ -752,7 +763,10 @@ class MonitorEngine(
      */
     @Synchronized
     private fun applyGpsGate(now: Long): Pair<MotionReading?, MotionGate> {
-        val wanted = gpsWanted
+        // BLE-27: GPS needs a pack to attach fixes to — fixes only ever ride BLE samples (onPoll), so
+        // with every pack disconnected GNSS would cost ~22 mA for nothing, and with the service's
+        // wakelock released this gate's 5-min tick may not run to stop it.
+        val wanted = gpsWanted && _state.value.linksWanted
         if (wanted && gpsPauseParked) {
             motionSource.start()
             motionSource.maybeResubscribe(now)

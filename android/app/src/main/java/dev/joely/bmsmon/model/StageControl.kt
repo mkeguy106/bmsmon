@@ -42,6 +42,17 @@ fun stageAddrsFor(target: StageTarget, roster: Roster, disabled: Set<String>): S
     return target.memberAddresses(roster) - off
 }
 
+/** The packs BLE should hold links to: every roster member the user hasn't disconnected
+ *  (uppercased, case-insensitive). */
+fun wantedAddrs(roster: Roster, disabled: Set<String>): Set<String> {
+    val off = disabled.map { it.uppercase() }.toSet()
+    return roster.allTargets().map { it.address.uppercase() }.filter { it !in off }.toSet()
+}
+
+/** BLE-27: whether BLE has any link to want — false after "Disconnect all" or with an empty roster.
+ *  With nothing wanted, nothing is polled: the service releases its wakelock and GPS stops. */
+fun hasDesiredLinks(roster: Roster, disabled: Set<String>): Boolean = wantedAddrs(roster, disabled).isNotEmpty()
+
 /** UI-29 fallback for a target with no members: the daily-driver base, else the first base with
  *  members, else the first battery as a single. Null only for an empty roster. */
 fun fallbackStage(roster: Roster, dailyDriverId: String): StageTarget? {

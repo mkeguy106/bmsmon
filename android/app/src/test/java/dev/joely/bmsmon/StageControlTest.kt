@@ -12,14 +12,17 @@ import dev.joely.bmsmon.model.STAGE_POLL_MS
 import dev.joely.bmsmon.model.StageConfig
 import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.Telemetry
+import dev.joely.bmsmon.model.allTargets
 import dev.joely.bmsmon.model.engineDecision
 import dev.joely.bmsmon.model.fallbackStage
 import dev.joely.bmsmon.model.groupById
+import dev.joely.bmsmon.model.hasDesiredLinks
 import dev.joely.bmsmon.model.pruneToRoster
 import dev.joely.bmsmon.model.reconcileFleetNotifications
 import dev.joely.bmsmon.model.resolveEngineStage
 import dev.joely.bmsmon.model.seizeThresholdFor
 import dev.joely.bmsmon.model.stageAddrsFor
+import dev.joely.bmsmon.model.wantedAddrs
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -243,5 +246,17 @@ class StageControlTest {
         val keep = addrs("2012").first()
         val fleet = mapOf(keep to live(50f), "AA:BB:CC:DD:EE:FF" to live(50f))
         assertEquals(setOf(keep), pruneToRoster(fleet, roster).keys)
+    }
+
+    // --- BLE-27: does BLE have any link to want? ---
+
+    @Test fun linksAreWantedWhileAnyRosterPackIsNotDisconnected() {
+        val all = roster.allTargets().map { it.address }.toSet()
+        assertTrue(hasDesiredLinks(roster, emptySet()))
+        assertTrue(hasDesiredLinks(roster, all - all.first()))
+        assertFalse(hasDesiredLinks(roster, all))                                   // "Disconnect all"
+        assertFalse(hasDesiredLinks(roster, all.map { it.lowercase() }.toSet()))   // case-insensitive
+        assertFalse(hasDesiredLinks(Roster(), emptySet()))                          // empty roster
+        assertEquals(all - all.first(), wantedAddrs(roster, setOf(all.first().lowercase())))
     }
 }

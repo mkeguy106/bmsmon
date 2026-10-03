@@ -9,14 +9,18 @@ import dev.joely.bmsmon.model.DEFAULT_ROSTER
 import dev.joely.bmsmon.model.DEFAULT_STAGE_HOLD_MIN
 import dev.joely.bmsmon.model.Group
 import dev.joely.bmsmon.model.Roster
+import dev.joely.bmsmon.model.STAGE_POLL_MS
 import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.Telemetry
 import dev.joely.bmsmon.model.TempUnit
+import dev.joely.bmsmon.model.allTargets
+import dev.joely.bmsmon.model.hasDesiredLinks
 import dev.joely.bmsmon.model.stageAddrsFor
 import dev.joely.bmsmon.monitor.MonitorState
 import dev.joely.bmsmon.monitor.RestorePlan
 import dev.joely.bmsmon.monitor.monitoringNotificationText
 import dev.joely.bmsmon.monitor.restorePlan
+import dev.joely.bmsmon.monitor.wantsCpuWakeLock
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -245,45 +249,107 @@ class MonitorRestoreTest {
         assertNull(restorePlan(persisted(alertsOn = false))!!.stageConfig.seizeThreshold)
     }
 
-    // --- monitoringNotificationText (BLE-11 de-churn: text only changes when this changes) ---
+    // --- monitoringNotificationText (BLE-11 de-churn; counts only this session's readings) ---
+
+    private val nowE = 5_000_000L
+
+    /** A pack heard from 1 s ago at the stage cadence. */
+    private fun liveStatus(soc: Float) = BatteryStatus(
+        telemetry = tel(soc), reachable = true, lastFrameAtElapsedMs = nowE - 1_000L, frameIntervalMs = STAGE_POLL_MS,
+    )
 
     @Test
     fun `no reachable packs reads connecting`() {
-        assertEquals("Connecting…", monitoringNotificationText(MonitorState()))
+        assertEquals("Connecting…", monitoringNotificationText(MonitorState(), nowE))
         // Unreachable / telemetry-less packs don't count.
         val st = MonitorState(
             fleet = mapOf(
-                "A" to BatteryStatus(telemetry = tel(50f), reachable = false),
+                "A" to liveStatus(50f).copy(reachable = false),
                 "B" to BatteryStatus(telemetry = null, reachable = true),
             ),
         )
-        assertEquals("Connecting…", monitoringNotificationText(st))
+        assertEquals("Connecting…", monitoringNotificationText(st, nowE))
     }
 
     @Test
     fun `reachable packs read count and lowest soc`() {
         val st = MonitorState(
             fleet = mapOf(
-                "A" to BatteryStatus(telemetry = tel(83.4f), reachable = true),
-                "B" to BatteryStatus(telemetry = tel(51.6f), reachable = true),
-                "C" to BatteryStatus(telemetry = tel(90f), reachable = false),
+                "A" to liveStatus(83.4f),
+                "B" to liveStatus(51.6f),
+                "C" to liveStatus(90f).copy(reachable = false),
             ),
         )
-        assertEquals("2 packs connected · lowest 52%", monitoringNotificationText(st))
+        assertEquals("2 packs connected · lowest 52%", monitoringNotificationText(st, nowE))
     }
 
     @Test
     fun `single pack uses singular wording`() {
-        val st = MonitorState(fleet = mapOf("A" to BatteryStatus(telemetry = tel(99.6f), reachable = true)))
-        assertEquals("1 pack connected · lowest 100%", monitoringNotificationText(st))
+        val st = MonitorState(fleet = mapOf("A" to liveStatus(99.6f)))
+        assertEquals("1 pack connected · lowest 100%", monitoringNotificationText(st, nowE))
     }
 
     @Test
     fun `identical fleets produce identical text so distinctUntilChanged suppresses the repost`() {
-        val a = MonitorState(fleet = mapOf("A" to BatteryStatus(telemetry = tel(60.2f), reachable = true)))
-        val b = MonitorState(fleet = mapOf("A" to BatteryStatus(telemetry = tel(60.4f), reachable = true)))
+        val a = MonitorState(fleet = mapOf("A" to liveStatus(60.2f)))
+        val b = MonitorState(fleet = mapOf("A" to liveStatus(60.4f)))
         // Different raw SOC, same rounded display → same string → no notification churn.
-        assertEquals(monitoringNotificationText(a), monitoringNotificationText(b))
-        assertNotNull(monitoringNotificationText(a))
+        assertEquals(monitoringNotificationText(a, nowE), monitoringNotificationText(b, nowE))
+        assertNotNull(monitoringNotificationText(a, nowE))
+    }
+
+    // Tier-2 follow-up: a connected pack still showing only its restored seed is not "connected",
+    // and its possibly days-old SOC must never be the notification's "lowest".
+    @Test
+    fun `a seed-only pack is not counted and never sets the lowest`() {
+        val st = MonitorState(
+            fleet = mapOf("A" to liveStatus(80f), "B" to BatteryStatus(telemetry = tel(3f), reachable = true)),
+        )
+        assertEquals("1 pack connected · lowest 80%", monitoringNotificationText(st, nowE))
+    }
+
+    @Test
+    fun `a pack silent past the backstop is not counted`() {
+        val silent = liveStatus(10f).copy(lastFrameAtElapsedMs = nowE - 61_000L)
+        val st = MonitorState(fleet = mapOf("A" to liveStatus(80f), "B" to silent))
+        assertEquals("1 pack connected · lowest 80%", monitoringNotificationText(st, nowE))
+    }
+
+    @Test
+    fun `a pack that just missed two polls still counts`() {
+        val stale = liveStatus(40f).copy(lastFrameAtElapsedMs = nowE - 15_000L)   // STALE, this session
+        val st = MonitorState(fleet = mapOf("A" to liveStatus(80f), "B" to stale))
+        assertEquals("2 packs connected · lowest 40%", monitoringNotificationText(st, nowE))
+    }
+
+    @Test
+    fun `every pack disconnected by the user reads so`() {
+        val st = MonitorState(monitoring = true, linksWanted = false, fleet = mapOf("A" to liveStatus(80f)))
+        assertEquals("All packs disconnected", monitoringNotificationText(st, nowE))
+    }
+
+    @Test
+    fun `the cpu is held only while monitoring has a pack to poll`() {
+        assertTrue(wantsCpuWakeLock(MonitorState(monitoring = true, linksWanted = true)))
+        assertFalse(wantsCpuWakeLock(MonitorState(monitoring = true, linksWanted = false)))
+        assertFalse(wantsCpuWakeLock(MonitorState(monitoring = false, linksWanted = true)))
+    }
+
+    // BLE-27 hard rule: the wakelock released by "Disconnect all" is taken again as soon as any
+    // pack is wanted — left released, the poll's delay() would stop firing in CPU suspend and
+    // overnight monitoring would silently stall. Walks the engine's published decision
+    // (linksWanted = hasDesiredLinks(roster, disabled)) through each path that changes the set.
+    @Test
+    fun `disconnect all releases the cpu and every way back to a wanted pack takes it again`() {
+        val all = DEFAULT_ROSTER.allTargets().map { it.address }.toSet()
+        fun holdCpu(disabled: Set<String>, roster: Roster = DEFAULT_ROSTER) =
+            wantsCpuWakeLock(MonitorState(monitoring = true, linksWanted = hasDesiredLinks(roster, disabled)))
+        assertTrue(holdCpu(emptySet()))                       // monitoring every pack
+        assertTrue(holdCpu(all - all.first()))                // one pack still wanted: still held
+        assertFalse(holdCpu(all))                             // Disconnect all: released
+        assertTrue(holdCpu(all - all.first()))                // Reconnect one pack: taken again
+        assertTrue(holdCpu(emptySet()))                       // Reconnect all: taken again
+        assertFalse(holdCpu(emptySet(), Roster()))            // every battery removed: released
+        assertTrue(holdCpu(emptySet(), DEFAULT_ROSTER))       // a battery added back: taken again
     }
 }

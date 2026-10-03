@@ -11,6 +11,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -55,7 +56,8 @@ class MonitoringService : Service() {
     // BLE poll cadence depends on the CPU being awake: the loop is a coroutine delay(), which
     // does not fire in suspend. Screen-on used to provide this incidentally; now that the screen
     // is allowed to sleep on battery, this wakelock is what keeps polling, alerting and GPS
-    // capture at full cadence. Held for exactly the monitoring session.
+    // capture at full cadence. Held while the monitoring session has a pack to poll (BLE-27,
+    // wantsCpuWakeLock): released after "Disconnect all", taken again on Reconnect.
     private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -66,8 +68,9 @@ class MonitoringService : Service() {
     }
 
     /** The parts of engine state the notification layer reacts to — anything else changing
-     *  (~every 1.5 s poll) must NOT re-post the ongoing notification (BLE-11). */
-    private data class NotifState(val monitoring: Boolean, val text: String, val fgsType: Int)
+     *  (~every 1.5 s poll) must NOT re-post the ongoing notification (BLE-11). [holdCpu] is the
+     *  wakelock decision (BLE-27). */
+    private data class NotifState(val monitoring: Boolean, val text: String, val fgsType: Int, val holdCpu: Boolean)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
@@ -90,14 +93,13 @@ class MonitoringService : Service() {
         // already foreground) keeps the foreground state it had, so tearing down would only lose it.
         val firstPromotion = collectorJob == null
         val promoted = runCatching {
-            startForegroundCompat(buildNotification(monitoringNotificationText(engine.state.value)))
+            startForegroundCompat(buildNotification(monitoringNotificationText(engine.state.value, SystemClock.elapsedRealtime())))
         }.onFailure { Log.w(TAG, "startForeground refused", it) }.isSuccess
         if (firstPromotion && (!promoted || !hasBlePermissions(this))) {
             Log.w(TAG, if (promoted) "BLE permission missing — not monitoring" else "not promoted — not monitoring")
             stopCleanly()
             return START_NOT_STICKY
         }
-        acquireWakeLock()
         if (collectorJob == null) {
             // No ViewModel to drive us — restore headlessly from the persisted settings: a
             // START_STICKY restart (null intent: the OS killed the process while monitoring was on)
@@ -112,12 +114,24 @@ class MonitoringService : Service() {
                 engine.state
                     // Derive the notification-relevant fields first, then de-duplicate: the engine
                     // emits on every poll (~1.5 s) but the text/type change rarely (BLE-11).
-                    .map { st -> NotifState(st.monitoring, monitoringNotificationText(st), fgsType(st.gpsActive)) }
+                    .map { st ->
+                        NotifState(
+                            st.monitoring,
+                            monitoringNotificationText(st, SystemClock.elapsedRealtime()),
+                            fgsType(st.gpsActive),
+                            wantsCpuWakeLock(st),
+                        )
+                    }
                     .distinctUntilChanged()
                     .collect { ns ->
                         if (!ns.monitoring) {
                             stopCleanly()
-                        } else if (Build.VERSION.SDK_INT >= 30 && ns.fgsType != appliedType) {
+                            return@collect
+                        }
+                        // BLE-27: hold the CPU while some pack is wanted; release it when "Disconnect
+                        // all" (or an empty roster) leaves nothing to poll. Reconnect takes it again.
+                        if (ns.holdCpu) acquireWakeLock() else releaseWakeLock()
+                        if (Build.VERSION.SDK_INT >= 30 && ns.fgsType != appliedType) {
                             // The parked-GPS gate flips gpsActive on its own now, so the location
                             // bit of the FGS type changes *while the service runs* and often while
                             // the app is in the background. Android 14+ re-checks the FGS start
@@ -168,7 +182,7 @@ class MonitoringService : Service() {
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
             val wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_TAG)
             wl.setReferenceCounted(false)
-            wl.acquire()  // no timeout: its lifetime is the monitoring session
+            wl.acquire()  // no timeout: held while monitoring has a pack to poll (see wantsCpuWakeLock)
             wakeLock = wl
         }
     }
