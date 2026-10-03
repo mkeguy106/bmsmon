@@ -6,14 +6,45 @@ import { Bar } from "./Atoms";
 import { RouteSketch } from "./RouteSketch";
 import type { TrackPoint } from "../track";
 import { socColor } from "../colors";
+import { Ago } from "../../components/Ago";
+import { minutesLeft, rechargePhase, rechargePlan, type RechargeRow } from "../model/recharge";
 
 function fmtEta(min: number): string {
   const m = Math.round(min);
   if (m < 60) return `${m} min`;
   return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
 }
-function clock(ms: number): string {
-  return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+/** A clock time, with the weekday when it is not today ("Tue 5:00 PM"). */
+function when(ms: number, nowMs: number): string {
+  const d = new Date(ms);
+  const n = new Date(nowMs);
+  const today = d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth()
+    && d.getDate() === n.getDate();
+  return today
+    ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+    : d.toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
+}
+
+/** One recharge-plan row: live rows count down to their anchored ready time; a pack that is
+ *  not live is muted and says when it was last seen and when it was due (WEB-18). */
+function RechargeLine({ row, now }: { row: RechargeRow; now: number }) {
+  const phase = rechargePhase(row, now);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, opacity: row.live ? 1 : 0.55 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span className="mono" style={{ fontSize: 12, flex: 1 }}>{row.label}</span>
+        <span className="mono" style={{ fontSize: 11, color: "var(--text-3)" }}>
+          {row.soc != null ? `${Math.round(row.soc)}%` : "—"}
+        </span>
+      </div>
+      <Bar frac={(row.soc ?? 0) / 100} color={socColor(row.soc, row.live)} />
+      <div className="mono" style={{ fontSize: 11, color: "var(--text-4)" }}>
+        {phase === "charging"
+          ? <>≈ {fmtEta(minutesLeft(row, now))} to full · ready by {when(row.readyAtMs, now)}</>
+          : <>last seen <Ago tsMs={row.tsMs} /> · {phase === "due" ? "due full" : "was due full"} {when(row.readyAtMs, now)}</>}
+      </div>
+    </div>
+  );
 }
 
 interface Row { label: string; item: FleetItem }
@@ -30,16 +61,15 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 export function CommandAside({ bases, onOpen, todayPoints }: {
   bases: Base[]; onOpen: (v: "journey" | "history") => void; todayPoints: TrackPoint[];
 }) {
-  // Local clock for the "ready by <time>" line — h:mm resolution, so a 30 s
-  // tick keeps it honest without the parent carrying a hot `now`.
+  // Local clock for the countdown and the due/past-due split — h:mm resolution, so a 30 s
+  // tick keeps it honest without the parent carrying a hot `now`. The ready times
+  // themselves are anchored to each sample (model/recharge.ts), not to this clock.
   const now = useNow(30_000);
   const allPacks: Row[] = bases.flatMap((b) =>
     b.packs.map((p) => ({ label: `Base ${b.id} · ${p.letter}`, item: p.item })));
 
-  // RECHARGE PLAN — packs charging toward full (have an ETA and aren't already full).
-  const charging = allPacks.filter((r) =>
-    r.item.eta_full_min != null && Number.isFinite(r.item.eta_full_min) &&
-    (r.item.soc ?? 100) < 99);
+  // RECHARGE PLAN — packs charging toward full, live or last known.
+  const plan = rechargePlan(bases);
 
   // FLEET HEALTH — SOH banding over every pack that reports SOH.
   const withSoh = allPacks.filter((r) => r.item.soh != null);
@@ -60,26 +90,10 @@ export function CommandAside({ bases, onOpen, todayPoints }: {
     <div style={{ width: "100%", display: "flex", flexDirection: "column",
       gap: 12, overflowY: "auto", padding: "2px 2px 12px" }}>
       <Section title="Recharge plan">
-        {charging.length === 0 ? (
+        {plan.length === 0 ? (
           <div className="mono" style={{ fontSize: 12, color: "var(--text-4)" }}>Nothing charging.</div>
         ) : (
-          charging.map((r) => {
-            const eta = r.item.eta_full_min!;
-            return (
-              <div key={r.item.address} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span className="mono" style={{ fontSize: 12, flex: 1 }}>{r.label}</span>
-                  <span className="mono" style={{ fontSize: 11, color: "var(--text-3)" }}>
-                    {r.item.soc != null ? `${Math.round(r.item.soc)}%` : "—"}
-                  </span>
-                </div>
-                <Bar frac={(r.item.soc ?? 0) / 100} color={socColor(r.item.soc)} />
-                <div className="mono" style={{ fontSize: 11, color: "var(--text-4)" }}>
-                  ≈ {fmtEta(eta)} to full · ready by {clock(now + eta * 60_000)}
-                </div>
-              </div>
-            );
-          })
+          plan.map((r) => <RechargeLine key={r.address} row={r} now={now} />)
         )}
       </Section>
 
