@@ -49,7 +49,9 @@ import dev.joely.bmsmon.model.lockRefreshRate
 import dev.joely.bmsmon.ui.detail.BatteryDetailScreen
 import dev.joely.bmsmon.ui.history.GroupHealthScreen
 import dev.joely.bmsmon.ui.history.HealthReviewScreen
+import dev.joely.bmsmon.ui.history.HistoryLoad
 import dev.joely.bmsmon.ui.history.SessionTimelineScreen
+import dev.joely.bmsmon.ui.history.loadHistory
 import dev.joely.bmsmon.ui.home.HomeScreen
 import androidx.activity.compose.BackHandler
 import dev.joely.bmsmon.ui.scan.ScanSheet
@@ -349,30 +351,48 @@ fun App(vm: BatteryViewModel) {
                         onHomePageChanged = vm::setHomePage,
                         locked = state.locked,
                     )
+                    // The loaders are main-safe (IO/Default inside — DATA-15); produceState itself
+                    // runs on Main, so loadHistory turns any failure into a rendered state rather
+                    // than an exception that would kill the process (and monitoring with it).
                     Screen.History -> {
-                        val packs by androidx.compose.runtime.produceState<List<dev.joely.bmsmon.data.PackHealth>?>(null, vm) {
-                            value = vm.loadFleetHealth()
+                        val packs by androidx.compose.runtime.produceState<HistoryLoad<List<dev.joely.bmsmon.data.PackHealth>>>(HistoryLoad.Loading, vm) {
+                            value = loadHistory { vm.loadFleetHealth() }
                         }
-                        val p = packs
-                        if (p == null) HistoryLoading() else GroupHealthScreen(packs = p, onBack = vm::goHome)
+                        when (val p = packs) {
+                            HistoryLoad.Loading -> HistoryLoading()
+                            is HistoryLoad.Failed -> HistoryFailed(p.error)
+                            is HistoryLoad.Ready -> GroupHealthScreen(packs = p.value, onBack = vm::goHome)
+                        }
                     }
                     Screen.Review -> {
                         val addr = state.reviewAddress
-                        val pack by androidx.compose.runtime.produceState<dev.joely.bmsmon.data.PackHealth?>(null, addr) {
-                            value = addr?.let { vm.loadPackHealth(it) }
+                        val pack by androidx.compose.runtime.produceState<HistoryLoad<dev.joely.bmsmon.data.PackHealth?>>(HistoryLoad.Loading, addr) {
+                            value = loadHistory { addr?.let { vm.loadPackHealth(it) } }
                         }
-                        val p = pack
-                        if (p == null) HistoryLoading()
-                        else HealthReviewScreen(pack = p, onBack = vm::closeReview, onOpenTimeline = vm::openTimeline)
+                        when (val p = pack) {
+                            HistoryLoad.Loading -> HistoryLoading()
+                            is HistoryLoad.Failed -> HistoryFailed(p.error)
+                            is HistoryLoad.Ready -> {
+                                val health = p.value
+                                if (health == null) HistoryLoading()
+                                else HealthReviewScreen(pack = health, onBack = vm::closeReview, onOpenTimeline = vm::openTimeline)
+                            }
+                        }
                     }
                     Screen.Timeline -> {
                         val sid = state.timelineSession
-                        val data by androidx.compose.runtime.produceState<Triple<String, dev.joely.bmsmon.data.db.SessionEntity, List<dev.joely.bmsmon.data.TimelineBucket>>?>(null, sid) {
-                            value = sid?.let { vm.loadTimeline(it) }
+                        val data by androidx.compose.runtime.produceState<HistoryLoad<Triple<String, dev.joely.bmsmon.data.db.SessionEntity, List<dev.joely.bmsmon.data.TimelineBucket>>?>>(HistoryLoad.Loading, sid) {
+                            value = loadHistory { sid?.let { vm.loadTimeline(it) } }
                         }
-                        val d = data
-                        if (d == null) HistoryLoading()
-                        else SessionTimelineScreen(alias = d.first, session = d.second, buckets = d.third, onBack = vm::closeTimeline)
+                        when (val d = data) {
+                            HistoryLoad.Loading -> HistoryLoading()
+                            is HistoryLoad.Failed -> HistoryFailed(d.error)
+                            is HistoryLoad.Ready -> {
+                                val t = d.value
+                                if (t == null) HistoryLoading()
+                                else SessionTimelineScreen(alias = t.first, session = t.second, buckets = t.third, onBack = vm::closeTimeline)
+                            }
+                        }
                     }
                     Screen.Settings -> SettingsScreen(
                         state = state,
@@ -415,6 +435,19 @@ fun App(vm: BatteryViewModel) {
 private fun HistoryLoading() {
     Box(Modifier.fillMaxSize().background(Bm.colors.bg), contentAlignment = androidx.compose.ui.Alignment.Center) {
         androidx.compose.material3.Text("Loading…", color = Bm.colors.text3, fontSize = 13.sp)
+    }
+}
+
+/** Full-screen notice when a history loader threw; back navigation still works via the BackHandler. */
+@Composable
+private fun HistoryFailed(error: Throwable) {
+    LaunchedEffect(error) { android.util.Log.w("App", "history load failed", error) }
+    Box(Modifier.fillMaxSize().background(Bm.colors.bg), contentAlignment = androidx.compose.ui.Alignment.Center) {
+        androidx.compose.material3.Text(
+            "Couldn't load history — press back and try again.",
+            color = Bm.colors.text3,
+            fontSize = 13.sp,
+        )
     }
 }
 
