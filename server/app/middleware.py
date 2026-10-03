@@ -5,12 +5,18 @@ and must never buffer a streaming body. The ORDER is set in app.main.create_app 
 read the comment there before adding another.
 """
 
+import asyncio
+import logging
+
+import asyncpg
 from fastapi import HTTPException
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 # C1 (cross-plan contract): every response this app generates carries this header, so
 # the phone can tell an app-level rejection (a real 4xx from a route) from Traefik's own
@@ -50,13 +56,39 @@ class ApiMarkerMiddleware:
         await self.app(scope, receive, send_marked)
 
 
-async def marked_internal_error(request, exc: Exception) -> PlainTextResponse:
-    """500 handler. Starlette's ServerErrorMiddleware sits OUTSIDE every user middleware,
-    so its default 500 never passes ApiMarkerMiddleware; this handler stamps the marker
-    itself. The body matches Starlette's default, and the exception is still re-raised
-    (and logged by uvicorn) after this response is sent."""
-    return PlainTextResponse("Internal Server Error", status_code=500,
-                             headers={API_MARKER_HEADER: API_MARKER_VALUE})
+_CLOSED_MARKERS = ("pool is closed", "pool is closing", "connection is closed")
+
+
+def is_db_unavailable(exc: BaseException) -> bool:
+    """True when exc means the database cannot be reached right now (restart, refused
+    connection, exhausted or closed pool, acquire timeout) rather than a bug. Such a
+    failure is transient, so the phone must retry it instead of treating it as a
+    deterministic fault."""
+    if isinstance(exc, (asyncpg.exceptions.PostgresConnectionError,
+                        asyncpg.exceptions.CannotConnectNowError,
+                        asyncpg.exceptions.TooManyConnectionsError)):
+        return True
+    if isinstance(exc, asyncpg.exceptions.InterfaceError):
+        msg = str(exc).lower()
+        return any(m in msg for m in _CLOSED_MARKERS)
+    # OSError covers ConnectionRefusedError and (3.11+) asyncio.TimeoutError from acquire.
+    return isinstance(exc, (OSError, asyncio.TimeoutError))
+
+
+async def marked_internal_error(request, exc: Exception):
+    """Catch-all handler. Starlette's ServerErrorMiddleware sits OUTSIDE every user
+    middleware, so its default 500 never passes ApiMarkerMiddleware; this handler stamps
+    the marker itself. DB unavailability becomes a marked 503 + Retry-After (transient:
+    retry); anything else is a marked 500 (a crash) whose body matches Starlette's
+    default. The exception is still re-raised (and logged by uvicorn) after the response
+    is sent."""
+    headers = {API_MARKER_HEADER: API_MARKER_VALUE}
+    if is_db_unavailable(exc):
+        logger.warning("database unavailable (%s) on %s %s", type(exc).__name__,
+                       request.method, request.url.path)
+        return JSONResponse({"detail": "database unavailable"}, status_code=503,
+                            headers={**headers, "Retry-After": "30"})
+    return PlainTextResponse("Internal Server Error", status_code=500, headers=headers)
 
 
 class BodySizeLimitMiddleware:
