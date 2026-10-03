@@ -1778,16 +1778,24 @@ git tag "$TAG" "$SHA" && git push origin "$TAG"
 (A `deploy/*` tag push triggers no workflow: `build-server` filters on branches only.)
 
 **Rollback = pin the previous deploy's sha, persistently.** Find it from the well-formed deploy tags
-only, taking the newest commit that differs from the one now live (the same rules the GHCR prune
-uses):
+only (the same rules the GHCR prune uses), taking the newest deployed commit that differs from the
+one **running now** — read off the container's revision label, not off the newest tag, so the
+snippet stays right after a rollback has itself been recorded as a deploy tag:
 
 ```bash
 bash -c '
 set -euo pipefail
 git fetch --tags
-cur=$(git rev-list -n1 "$(git tag -l "deploy/*" | grep -E "^deploy/[0-9]{8}T[0-9]{4}Z$" | sort | tail -1)")
-prev=$(for t in $(git tag -l "deploy/*" | grep -E "^deploy/[0-9]{8}T[0-9]{4}Z$" | sort -r); do c=$(git rev-list -n1 "$t"); [ "$c" != "$cur" ] && { echo "$c"; break; }; done)
-echo "rollback to $prev"'
+cur=$(ssh joely@ddnas02 "bash -lc \"docker inspect bmsmon-api\"" \
+  | jq -r ".[0].Config.Labels[\"org.opencontainers.image.revision\"] // empty")
+[ -n "$cur" ] || { echo "error: bmsmon-api has no revision label" >&2; exit 1; }
+prev=""
+for t in $(git tag -l "deploy/*" | grep -E "^deploy/[0-9]{8}T[0-9]{4}Z$" | sort -r); do
+  c=$(git rev-list -n1 "$t"); [ "$c" != "$cur" ] && { prev=$c; break; }
+done
+[ -n "$prev" ] || { echo "error: no earlier deploy/* commit to roll back to" >&2; exit 1; }
+echo "live:        $cur"
+echo "rollback to: $prev"'
 ```
 
 Its image survives pruning (see "Storage hygiene"). Add `BMSMON_TAG=<full 40-char sha>` to the NAS's
