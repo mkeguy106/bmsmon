@@ -32,7 +32,7 @@ class StageAlertArbitrationTest {
     /** Fleet where every pack of base [gid] reports [soc] / [tempC], all reachable. */
     private fun fleetAt(gid: String, soc: Float, tempC: Float, charging: Boolean = false): Map<String, BatteryStatus> =
         DEFAULT_ROSTER.groupById(gid)!!.targets.associate {
-            it.address to BatteryStatus(tel(soc, tempC, charging), reachable = true)
+            it.address to BatteryStatus(tel(soc, tempC, charging), reachable = true, lastFrameAtElapsedMs = 0L)
         }
 
     // Redodo default temp thresholds: hotCrit 53 °C, hotCutoff 60 °C — 55 °C = CRITICAL, 60 °C = CUTOFF.
@@ -200,6 +200,7 @@ class StageAlertArbitrationTest {
                 Telemetry("x", soc = soc, powerW = 0f, current = 0f, voltage = 13f,
                     capacityAh = 50f, cellV = 3.3f, temp = 25f, state = BatteryState.Idle),
                 reachable = true,
+                lastFrameAtElapsedMs = 0L,
             )
         }
 
