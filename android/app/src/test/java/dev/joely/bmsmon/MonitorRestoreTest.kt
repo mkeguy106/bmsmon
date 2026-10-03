@@ -4,6 +4,7 @@ import dev.joely.bmsmon.data.Persisted
 import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.Battery
 import dev.joely.bmsmon.model.DEFAULT_DIM_LEVEL
+import dev.joely.bmsmon.model.DEFAULT_GROUP_ID
 import dev.joely.bmsmon.model.DEFAULT_ROSTER
 import dev.joely.bmsmon.model.DEFAULT_STAGE_HOLD_MIN
 import dev.joely.bmsmon.model.Group
@@ -217,6 +218,23 @@ class MonitorRestoreTest {
         assertTrue(c.dynamicEnabled)
         assertEquals(DEFAULT_STAGE_HOLD_MIN * 60_000L, c.holdMs)
         assertEquals("2012", c.dailyDriverId)
+    }
+
+    // Same daily-driver reducer as the ViewModel (`p.dailyDriverId ?: DEFAULT_GROUP_ID`), not the
+    // old `?: ""` that silently fell through to the FIRST group. Only a roster whose first group
+    // isn't DEFAULT_GROUP_ID tells the two apart (DEFAULT_ROSTER's first group is 2012).
+    @Test
+    fun `daily driver defaults to DEFAULT_GROUP_ID even when it is not the first group`() {
+        val roster = Roster(
+            batteries = listOf(
+                Battery("AA:00:00:00:00:01", "R-1", "One", "2016"),
+                Battery("AA:00:00:00:00:02", "R-2", "Two", DEFAULT_GROUP_ID),
+            ),
+            groups = listOf(Group("2016", "2016"), Group(DEFAULT_GROUP_ID, "2012")),
+        )
+        val plan = restorePlan(persisted(roster = roster))!!
+        assertEquals(DEFAULT_GROUP_ID, plan.stageConfig.dailyDriverId)
+        assertEquals(StageTarget.Base(DEFAULT_GROUP_ID), plan.stage)
     }
 
     @Test

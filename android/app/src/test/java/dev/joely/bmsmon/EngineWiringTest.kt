@@ -34,4 +34,28 @@ class EngineWiringTest {
     @Test fun theDecisionStepIsSynchronized() {
         assertTrue(Regex("@Synchronized\\s+private fun reevaluate\\(").containsMatchIn(src))
     }
+
+    // Fix round 1: the user's disconnects must be in force on BLE before the session's first stage
+    // push releases BmsRepository's launch barrier (see SessionStartOrderTest for why and what
+    // the barrier then plans). start() takes the set from its caller and hands it to ble.start(),
+    // which installs it before its control loop runs — never as a follow-up setDisabled.
+    @Test fun theDisabledSetIsInForceBeforeTheFirstStagePush() {
+        val start = flat
+            .substringAfter("fun start(roster: Roster, seed: Map<String, BatteryStatus>, loggingEnabled: Boolean, disabled: Set<String>) {")
+            .substringBefore("suspend fun restoreFromPersisted(")
+        val taken = start.indexOf("disabledAddrs = disabled.")
+        val bleStart = start.indexOf("ble.start(")
+        val handedOver = start.indexOf("disabled = disabledAddrs,")
+        val firstPush = start.indexOf("markStageAuthoritative() reevaluate()")
+        assertTrue("start() takes the disabled set before BLE starts", taken in 0 until bleStart)
+        assertTrue("ble.start() receives it", handedOver > bleStart)
+        assertTrue("before the first stage push", firstPush > handedOver)
+    }
+
+    // forceStage writes stageTarget BEFORE reevaluate(), so applyStage sees no change and would
+    // never persist it — a headless restore would then start on an older stage.
+    @Test fun forceStagePersistsItsTarget() {
+        val body = flat.substringAfter("fun forceStage(target: StageTarget) {").substringBefore("fun setStageConfig(")
+        assertTrue(body.contains("persistStage(target)"))
+    }
 }

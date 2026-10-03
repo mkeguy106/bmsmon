@@ -96,14 +96,23 @@ class BmsRepository(
         object Kick : LoopEvent()
     }
 
+    /**
+     * Begin a monitoring generation. [disabled] (user-disconnected packs) is installed here, after
+     * stop() has wiped the previous generation's set and BEFORE this generation's control loop
+     * runs (T1.2): the session's first [setStage] releases the launch barrier, and the planner
+     * then connects from `targets − disabled` — a disabled set applied any later lets that first
+     * plan open a GATT link to a pack the user freed for the Redodo app (single-client Beken).
+     */
     fun start(
         scope: CoroutineScope,
         targets: List<BmsTarget>,
+        disabled: Set<String>,
         onPoll: (String, ByteArray, Telemetry?) -> Unit,
         onReachable: (String, Boolean) -> Unit,
     ) {
         stop()
         allTargets = targets.map { it.copy(address = it.address.trim().uppercase()) }
+        disabledAddrs = disabled.map { it.uppercase() }.toSet()
         this.onPoll = onPoll
         this.onReachable = onReachable
         // Fresh channel + wake for THIS generation (BLE-5): captured by the loop/workers below;
@@ -207,10 +216,14 @@ class BmsRepository(
                 // Launch barrier: while within the grace window and the stage isn't fully up yet,
                 // admit only stage packs. Releases the moment every stage pack is held (their poll
                 // loops are then already running) or the grace window expires — then normal rotation.
-                val stageDesired = desired.filter { it in stageAddrs }
-                val allStageHeld = stageDesired.isNotEmpty() && stageDesired.all { it in held.keys }
-                val stageFirst = now < stagePriorityUntil &&
-                    (!stageInitialized || (stageDesired.isNotEmpty() && !allStageHeld))
+                val stageFirst = launchBarrierHolds(
+                    desired = desired,
+                    stage = stageAddrs,
+                    held = held.keys,
+                    stageInitialized = stageInitialized,
+                    now = now,
+                    priorityUntil = stagePriorityUntil,
+                )
                 val plan = planFleet(
                     desired      = desired,
                     stage        = stageAddrs,

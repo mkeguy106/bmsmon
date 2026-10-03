@@ -119,6 +119,28 @@ fun planFleet(
 }
 
 /**
+ * The launch barrier for one control-loop tick: within the grace window ([now] < [priorityUntil])
+ * admit only stage packs while the stage is still unknown (no setStage yet this session) or not
+ * every desired stage pack is held. It releases the moment the whole stage is held, or at once
+ * when the stage has no desired pack — then normal rotation. [desired] is the tick's targets
+ * minus the user-disabled packs, so the session's FIRST setStage hands the planner exactly what
+ * it may connect: the disabled set must already be in force by then (T1.2 — BmsRepository.start
+ * installs it before the loop runs).
+ */
+internal fun launchBarrierHolds(
+    desired: Set<String>,
+    stage: Set<String>,
+    held: Set<String>,
+    stageInitialized: Boolean,
+    now: Long,
+    priorityUntil: Long,
+): Boolean {
+    val stageDesired = desired.filter { it in stage }
+    val allStageHeld = stageDesired.isNotEmpty() && stageDesired.all { it in held }
+    return now < priorityUntil && (!stageInitialized || (stageDesired.isNotEmpty() && !allStageHeld))
+}
+
+/**
  * BLE-22: run one engine callback from the control loop. An Exception is reported and the event
  * dropped instead of killing the loop (and with it the process and the foreground service);
  * cancellation still propagates, and Errors (OOM, stack overflow) are deliberately not caught.

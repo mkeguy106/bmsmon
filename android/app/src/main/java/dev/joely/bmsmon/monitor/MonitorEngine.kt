@@ -174,9 +174,10 @@ class MonitorEngine(
     @Volatile private var tempUnit: TempUnit = TempUnit.F
 
     // --- Stage ownership (T1.2). Synchronization: fields marked "lock" are read and written ONLY
-    // inside @Synchronized engine methods (reevaluate, seedStage, forceStage, markStageAuthoritative)
-    // or stop()'s synchronized(this) block — the same monitor as applyGpsGate/shutdownGps. The
-    // @Volatile ones are written from the main thread by setters that then call reevaluate().
+    // inside @Synchronized engine methods (reevaluate, seedStage, forceStage, markStageAuthoritative
+    // — and persistStage, called only from those) or stop()'s synchronized(this) block — the same
+    // monitor as applyGpsGate/shutdownGps. The @Volatile ones are written from the main thread by
+    // start() and by setters that then call reevaluate().
     @Volatile private var stageConfig: StageConfig = StageConfig()
     @Volatile private var disabledAddrs: Set<String> = emptySet()
     /** Resolved stage addresses (minus disabled), as last pushed to BLE. Written under the lock;
@@ -254,8 +255,11 @@ class MonitorEngine(
 
     private fun now() = System.currentTimeMillis()
 
-    /** Begin monitoring every pack in [roster]. [seed] pre-populates the fleet (dimmed until live). */
-    fun start(roster: Roster, seed: Map<String, BatteryStatus>, loggingEnabled: Boolean) {
+    /** Begin monitoring every pack in [roster]. [seed] pre-populates the fleet (dimmed until live).
+     *  [disabled] — the user's disconnected packs — is part of the session's starting state, not a
+     *  follow-up push: it must be in force on BLE before this method's first stage push releases
+     *  BmsRepository's launch barrier (T1.2 fix round 1; see BmsRepository.start). */
+    fun start(roster: Roster, seed: Map<String, BatteryStatus>, loggingEnabled: Boolean, disabled: Set<String>) {
         if (_state.value.monitoring) return
         // Reset GPS intent/state/request together through shutdownGps() rather than folding a
         // bare `gpsActive = false` into the state copy below. A bare state reset only touches
@@ -270,6 +274,7 @@ class MonitorEngine(
         shutdownGps()
         this.roster = roster
         logging = loggingEnabled
+        disabledAddrs = disabled.map { it.uppercase() }.toSet()
         _state.update { st ->
             st.copy(
                 monitoring = true,
@@ -290,6 +295,11 @@ class MonitorEngine(
         ble.start(
             scope = scope,
             targets = roster.allTargets(),
+            // Installed by ble.start() before its control loop runs — so before the first stage
+            // push below, the one that releases the launch barrier. A later setDisabled() would
+            // let that first plan connect packs the user disconnected (BmsRepository.start wipes
+            // the previous set).
+            disabled = disabledAddrs,
             // Every BLE event re-runs the decision step (BLE-14/UI-20) — never only stage-pack
             // ones, so fleet-wide alerts and the seize keep working when the stage is dark.
             onPoll = { addr, raw, t -> onPoll(addr, raw, t); reevaluate() },
@@ -333,8 +343,7 @@ class MonitorEngine(
         setRoster(plan.roster)           // the stage below resolves against the restored roster
         seedStage(plan.stage)
         setStageConfig(plan.stageConfig)
-        start(plan.roster, plan.seed, plan.logging)
-        setDisabled(plan.disabled)
+        start(plan.roster, plan.seed, plan.logging, plan.disabled)
         setAlertConfig(plan.alertConfig)
         setTempAlertConfig(plan.tempAlertsEnabled, plan.tempThresholdsByProfile, plan.tempUnit)
         // Pause setting first, so the gate's first evaluation is already correct and GPS is never
@@ -375,6 +384,10 @@ class MonitorEngine(
     fun forceStage(target: StageTarget) {
         stageInitialized = true
         _state.update { it.copy(stageTarget = target) }
+        // Persist here: reevaluate() compares against the target just written, so applyStage sees
+        // no change and would never save it — a later headless restore would start on an older
+        // stage. If the re-resolve moves the stage (seize, pin), applyStage's newer write wins.
+        persistStage(target)
         reevaluate()
     }
 
@@ -507,30 +520,36 @@ class MonitorEngine(
     }
 
     /** Publish a resolved stage (lock held by [reevaluate]): mirror it into [MonitorState], persist
-     *  a changed target for the next (possibly headless) restore, and push the BLE stage set —
-     *  always on a session's first pass ([forceStagePush]) so BmsRepository's launch barrier is
-     *  released exactly as the ViewModel-driven setStage used to. */
+     *  a changed target for the next (possibly headless) restore, and push the BLE stage set. The
+     *  push is forced on a session's first pass ([forceStagePush]) because that first setStage is
+     *  what releases BmsRepository's launch barrier — which is safe only because [start] hands the
+     *  disabled set to ble.start() first, so the planner it releases never wants a pack the user
+     *  disconnected. */
     private fun applyStage(st: MonitorState, d: EngineDecision) {
         val target = d.stage.target
         if (target != st.stageTarget || d.stage.pinned != st.stagePinned) {
             _state.update { it.copy(stageTarget = target, stagePinned = d.stage.pinned) }
         }
-        if (target != st.stageTarget) {
-            persistStageJob?.cancel()
-            persistStageJob = scope.launch {
-                runCatching { settings.setLastStage(target) }.onFailure {
-                    // A cancellation is this write being superseded by a newer target — not a failure.
-                    if (it !is CancellationException) {
-                        Log.w(TAG, "lastStage write failed; the next restore may use an older stage", it)
-                    }
-                }
-            }
-        }
+        if (target != st.stageTarget) persistStage(target)
         if (st.monitoring && (forceStagePush || d.stageAddrs != stageAddrs)) {
             forceStagePush = false
             ble.setStage(d.stageAddrs)
         }
         stageAddrs = d.stageAddrs
+    }
+
+    /** Save [target] as lastStage for the next (possibly headless) restore. Lock held (callers:
+     *  [applyStage], [forceStage]); the newest call wins — an older in-flight write is cancelled. */
+    private fun persistStage(target: StageTarget) {
+        persistStageJob?.cancel()
+        persistStageJob = scope.launch {
+            runCatching { settings.setLastStage(target) }.onFailure {
+                // A cancellation is this write being superseded by a newer target — not a failure.
+                if (it !is CancellationException) {
+                    Log.w(TAG, "lastStage write failed; the next restore may use an older stage", it)
+                }
+            }
+        }
     }
 
     /** Clock-driven re-resolution: pin and stage-hold expiry and the STALE_MAX_MS backstop happen

@@ -811,8 +811,17 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         // Stage inputs first: start() resolves the launch stage from them (seeded with the restored
         // lastStage in init) and pushes it to BLE (T1.2).
         pushStageConfig()
-        // Seed the engine with the current roster + last-known readings (shown dimmed until live).
-        engine.start(roster = _state.value.roster, seed = _state.value.fleet, loggingEnabled = _state.value.logging)
+        // Seed the engine with the current roster + last-known readings (shown dimmed until live)
+        // and the user's disconnects — part of the starting state, so BLE has them before the
+        // first stage push releases its launch barrier (never connect a pack the user freed).
+        engine.start(
+            roster = _state.value.roster,
+            seed = _state.value.fleet,
+            loggingEnabled = _state.value.logging,
+            disabled = _state.value.disabled,
+        )
+        // Redundant right after a real start (same set); it matters when start() was a no-op
+        // because a headless restore already runs the engine.
         engine.setDisabled(_state.value.disabled)
         pushAlertConfig()
         pushTempConfig()
