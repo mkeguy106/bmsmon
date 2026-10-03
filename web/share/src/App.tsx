@@ -45,10 +45,11 @@ export default function App() {
   const [guest, setGuest] = useState<LivePos | null>(null);
   const [theme, setTheme] = useState<ShareTheme>(() => loadShareTheme(localStorage));
   const [trailMode, setTrailMode] = useState<TrailMode>(() => loadTrailMode(localStorage));
-  // CARTO basemap key, fetched once. Purely cosmetic: any failure (an ended or expired
-  // link included) leaves it null and the map on placeholder tiles. The feed poll alone
-  // decides the page's terminal states.
-  const [tileKey, setTileKey] = useState<string | null>(null);
+  // CARTO basemap key: undefined while pending (the map holds its tiles briefly), then the
+  // key or null. Purely cosmetic: any failure (an ended or expired link included) leaves it
+  // null and the map on placeholder tiles. The feed poll alone decides the page's
+  // terminal states; the key fetch only follows them (see the effect below).
+  const [tileKey, setTileKey] = useState<string | null | undefined>(undefined);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -56,12 +57,17 @@ export default function App() {
   }, [theme]);
   useEffect(() => { saveTrailMode(localStorage, trailMode); }, [trailMode]);
 
+  // One fetch chain per page (timeout + capped retry of transient failures; 404/410 are
+  // final). Aborted on unmount and as soon as the poller reports the link ended or
+  // expired, so no pending retry outlives the share.
+  const linkOver = status === "ended" || status === "expired";
   useEffect(() => {
-    if (!token) return;
-    let alive = true;
-    void fetchCartoKey(`/share/${token}/map-config`).then((k) => { if (alive) setTileKey(k); });
-    return () => { alive = false; };
-  }, [token]);
+    if (!token || linkOver) return;
+    const ctl = new AbortController();
+    void fetchCartoKey(`/share/${token}/map-config`, ctl.signal)
+      .then((k) => { if (!ctl.signal.aborted) setTileKey(k); });
+    return () => ctl.abort();
+  }, [token, linkOver]);
 
   useEffect(() => {
     if (!token) { setStatus("ended"); return; }

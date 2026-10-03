@@ -4,7 +4,7 @@ import "leaflet/dist/leaflet.css";
 import type { TrackPoint } from "../track";
 import { dischargeColor, socColor, type SegKind, type Hotspot } from "../model/journey";
 import type { LivePos } from "../model/live";
-import { tileUrl } from "../basemap";
+import { KEY_WAIT_MS, tileUrl } from "../basemap";
 
 /** Resolve a CSS custom property off :root to its concrete computed value. */
 function cssVar(name: string): string {
@@ -32,10 +32,12 @@ function makeColorCache(): (spec: string) => string {
 
 const TILE_ATTRIB = "© OpenStreetMap contributors © CARTO";
 
-/** `tileKey` is the CARTO basemap key (see ../basemap). It usually arrives after the map
- *  exists, so the tile layer is re-pointed when it does; without it CARTO serves
- *  "API KEY REQUIRED" placeholder tiles and everything else still works. */
-export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, live, liveStale, fitKey, metric, emptyText, fill, showTrail = true, guest = null, tileKey = null }: {
+/** `tileKey` is the CARTO basemap key (see ../basemap): `undefined` while its request is
+ *  pending, then the key or null. A pending key holds the tile layer back for up to
+ *  KEY_WAIT_MS, so a fresh page doesn't flash keyless "API KEY REQUIRED" placeholders; a
+ *  key that lands later re-points the layer in place. Without a key the placeholders
+ *  show and everything else still works. */
+export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, live, liveStale, fitKey, metric, emptyText, fill, showTrail = true, guest = null, tileKey }: {
   points: TrackPoint[]; segKinds: SegKind[]; hotspots: Hotspot[]; cursorIndex: number;
   theme: "dark" | "light"; live: LivePos | null; liveStale?: boolean; fitKey: string;
   metric: "power" | "soc"; emptyText?: string; fill?: boolean; showTrail?: boolean;
@@ -55,6 +57,8 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
   const engagedKeyRef = useRef<string | null>(null);
   const [mapReady, setMapReady] = useState(false);
   const [following, setFollowing] = useState(false);
+  const keyPending = tileKey === undefined;
+  const [keyWaitOver, setKeyWaitOver] = useState(false);
 
   const hasPoints = points.length > 0;
   const hasMapContent = hasPoints || live != null;
@@ -113,15 +117,25 @@ export function JourneyMap({ points, segKinds, hotspots, cursorIndex, theme, liv
     }
   }, [live == null, fitKey]);
 
-  // --- CARTO tiles: one layer per map, re-pointed in place (setUrl redraws it) when the
-  //     app theme flips or the basemap key arrives, so neither leaves stale tiles behind.
+  // --- Bounded wait for a pending basemap key: past KEY_WAIT_MS the tiles load keyless
+  //     rather than leave the map blank behind a slow or retrying request.
+  useEffect(() => {
+    if (!keyPending) return;
+    const t = setTimeout(() => setKeyWaitOver(true), KEY_WAIT_MS);
+    return () => clearTimeout(t);
+  }, [keyPending]);
+
+  // --- CARTO tiles: one layer per map, added once the key has settled (or the wait is
+  //     over), then re-pointed in place (setUrl redraws it) when the app theme flips or a
+  //     late key arrives, so neither leaves stale tiles behind.
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
+    if (keyPending && !keyWaitOver) return;
     const url = tileUrl(theme, tileKey);
     if (tileRef.current) tileRef.current.setUrl(url);
     else tileRef.current = L.tileLayer(url, { attribution: TILE_ATTRIB, maxZoom: 19 }).addTo(map);
-  }, [theme, tileKey, mapReady]);
+  }, [theme, tileKey, keyPending, keyWaitOver, mapReady]);
 
   // --- Trail + hotspots. Rebuilt whenever the trip, its segmentation, or theme changes
   //     (theme re-resolves the grey transit color from --text-4).

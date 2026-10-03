@@ -1357,13 +1357,18 @@ accepts only 8–128 of `[A-Za-z0-9_-]`; anything else becomes null with one sta
 that names the variable and the reason, never the value. An unset variable logs one INFO line
 at startup (`BMSMON_CARTO_KEY not set: …`), so a forgotten `map.env` shows in the log. Browsers fetch it from two
 `Cache-Control: no-store` endpoints, both returning `{"carto_key": "<key>" | null}`:
-`GET /web/map-config` (viewer-gated; v2 Journey reads it once per page session via
-`useCartoKey`) and `GET /share/{token}/map-config` (the feed's token gate — see Location
-sharing). `JourneyMap`'s `tileKey` prop appends `?key=` (`tileUrl` in
-`web/src/v2/basemap.ts`) and re-points the existing tile layer with `setUrl` when the key lands
-after the map exists. No key, or a failed fetch, means placeholder tiles and nothing else. The
-key is necessarily visible to a browser that loads the tiles; the point is keeping it out of
-public source and artefacts and handing it only to viewers and live share links.
+`GET /web/map-config` (viewer-gated; v2 Journey reads it through one fetch chain per page
+session, `useCartoKey`) and `GET /share/{token}/map-config` (the feed's token gate — see
+Location sharing). Both clients go through `fetchCartoKey` (`web/src/v2/basemap.ts`): each
+request times out at 8 s; a 200 (key or null) and 401/403/404/410 are final; a network error,
+timeout, 408, 429 or 5xx is retried after 5 s, 15 s and 45 s, then given up as null. The share
+page aborts a pending retry on unmount and as soon as its poller reports the link ended or
+expired. `JourneyMap`'s `tileKey` prop is `undefined` while the key is pending: the tile layer
+waits for it up to `KEY_WAIT_MS` (3 s) so a fresh page doesn't flash keyless placeholders, then
+`tileUrl` appends `?key=` and a key that lands later re-points the existing layer with `setUrl`.
+No key, or a failed fetch, means placeholder tiles and nothing else. The key is necessarily
+visible to a browser that loads the tiles; the point is keeping it out of public source and
+artefacts and handing it only to viewers and live share links.
 
 **v2 stage selection, alert acks, the guest page's connection state and the Journey RANGE clamp
 (2026-10-02 review, WEB-12/13/17/20/25, XC-1/XC-2).** One pure `selectStageBase()`
