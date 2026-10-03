@@ -1,6 +1,73 @@
-from typing import Any, TypeVar
+import math
+from typing import Annotated, Any, TypeVar
 
-from pydantic import BaseModel, ValidationError, field_validator
+from pydantic import AfterValidator, BaseModel, ValidationError, field_validator
+
+# Postgres storage bounds for device-pushed values. A value can pass the pydantic type and
+# still be unstorable: an int4 or float4 overflow (asyncpg's binary codecs refuse it) or a
+# NUL byte (Postgres text cannot hold 0x00). insert_samples is ONE set-based statement per
+# batch, so a single such value used to 500 the WHOLE batch, and the phone retries a 500
+# forever: its upload queue stayed blocked behind that batch. So: OPTIONAL fields degrade
+# to None (clamp, like _clip_conf), NaN/±inf included since nothing downstream can use
+# them; REQUIRED config fields fail validation instead (the range row is dropped, or the
+# config envelope 422s), because None would violate their NOT NULL; NUL is stripped from
+# text.
+INT4_MIN, INT4_MAX = -(2**31), 2**31 - 1
+INT8_MIN, INT8_MAX = -(2**63), 2**63 - 1
+FLOAT4_MAX = 3.4028234663852886e38  # largest finite float4 (real)
+
+
+def _int4_ok(v: int) -> bool:
+    return INT4_MIN <= v <= INT4_MAX
+
+
+def _real_ok(v: float) -> bool:
+    return math.isfinite(v) and abs(v) <= FLOAT4_MAX
+
+
+def _int4_or_none(v: int | None) -> int | None:
+    return v if v is None or _int4_ok(v) else None
+
+
+def _real_or_none(v: float | None) -> float | None:
+    return v if v is None or _real_ok(v) else None
+
+
+def _finite_or_none(v: float | None) -> float | None:
+    return v if v is None or math.isfinite(v) else None
+
+
+def _strip_nul(v: str | None) -> str | None:
+    return v.replace("\x00", "") if v else v
+
+
+def _require_int4(v: int) -> int:
+    if not _int4_ok(v):
+        raise ValueError("outside the int4 range")
+    return v
+
+
+def _require_int8(v: int) -> int:
+    if not INT8_MIN <= v <= INT8_MAX:
+        raise ValueError("outside the int8 range")
+    return v
+
+
+def _require_real(v: float) -> float:
+    if not _real_ok(v):
+        raise ValueError("not a finite float4")
+    return v
+
+
+# Named after the column type each field is stored in.
+Int4OrNone = Annotated[int | None, AfterValidator(_int4_or_none)]
+RealOrNone = Annotated[float | None, AfterValidator(_real_or_none)]
+Float8OrNone = Annotated[float | None, AfterValidator(_finite_or_none)]
+TextOrNone = Annotated[str | None, AfterValidator(_strip_nul)]
+Int4 = Annotated[int, AfterValidator(_require_int4)]
+Int8 = Annotated[int, AfterValidator(_require_int8)]
+Real = Annotated[float, AfterValidator(_require_real)]
+Text = Annotated[str, AfterValidator(_strip_nul)]
 
 
 class EnrollBody(BaseModel):
@@ -15,43 +82,48 @@ class EnrollResponse(BaseModel):
 
 
 class SampleIn(BaseModel):
+    # ts_ms is bounded by the router's window filter and address by _address_ok, both
+    # before any row is built; every other field is clamped to its column (see above).
     ts_ms: int
     address: str
-    advertised_name: str | None = None
-    alias: str | None = None
-    group_id: str | None = None
-    state: str | None = None
-    soc: float | None = None
-    current_a: float | None = None
-    power_w: float | None = None
-    voltage_v: float | None = None
-    temp_c: float | None = None
-    mosfet_temp_c: int | None = None
-    soh: int | None = None
-    full_charge_ah: float | None = None
-    remaining_ah: float | None = None
-    cycles: int | None = None
-    cell_min_v: float | None = None
-    cell_max_v: float | None = None
+    advertised_name: TextOrNone = None
+    alias: TextOrNone = None
+    group_id: TextOrNone = None
+    state: TextOrNone = None
+    soc: RealOrNone = None
+    current_a: RealOrNone = None
+    power_w: RealOrNone = None
+    voltage_v: RealOrNone = None
+    temp_c: RealOrNone = None
+    mosfet_temp_c: Int4OrNone = None
+    soh: Int4OrNone = None
+    full_charge_ah: RealOrNone = None
+    remaining_ah: RealOrNone = None
+    cycles: Int4OrNone = None
+    cell_min_v: RealOrNone = None
+    cell_max_v: RealOrNone = None
     cells: list[float] | None = None
     regen: bool = False
-    link_event: str | None = None
-    lat: float | None = None
-    lon: float | None = None
-    gps_accuracy_m: float | None = None
-    eta_full_min: float | None = None
-    motion_activity: str | None = None
+    link_event: TextOrNone = None
+    lat: Float8OrNone = None
+    lon: Float8OrNone = None
+    gps_accuracy_m: RealOrNone = None
+    eta_full_min: RealOrNone = None
+    motion_activity: TextOrNone = None
     motion_confidence: int | None = None
     motion_still: bool | None = None
     motion_at_ms: int | None = None
 
     @field_validator("cells")
     @classmethod
-    def _clip_cells(cls, v: list[float] | None) -> list[float] | None:
+    def _clip_cells(cls, v: list[float] | None) -> list[float | None] | None:
         # The stored/REST representation is always exactly 4 cells (cell1_v..cell4_v),
         # so truncate here to keep the WS broadcast (raw model_dump()) in agreement
-        # with fleet_snapshot instead of diverging on non-4-element uploads.
-        return v[:4] if v else v
+        # with fleet_snapshot instead of diverging on non-4-element uploads. Cells are
+        # positional, so an unstorable item becomes None IN PLACE rather than shifting
+        # the rest (the web drops a cells array holding a null and falls back to
+        # cell_min_v/cell_max_v).
+        return [_real_or_none(x) for x in v[:4]] if v else v
 
     @field_validator("motion_confidence")
     @classmethod
@@ -97,40 +169,43 @@ class IngestResponse(BaseModel):
 
 
 class RangeConfigRow(BaseModel):
-    address: str
-    wh_per_day_lo: float
-    wh_per_day_hi: float
-    active_w_lo: float
-    active_w_hi: float
-    wh_per_mile_lo: float
-    wh_per_mile_hi: float
-    learned_days: int = 0
-    updated_at_ms: int
+    # Every column is NOT NULL, so an unstorable value invalidates (drops) the row.
+    address: Text
+    wh_per_day_lo: Real
+    wh_per_day_hi: Real
+    active_w_lo: Real
+    active_w_hi: Real
+    wh_per_mile_lo: Real
+    wh_per_mile_hi: Real
+    learned_days: Int4 = 0
+    updated_at_ms: Int8
 
 
 class TempConfigBody(BaseModel):
-    profile_id: str
-    cold_caution_c: int
-    hot_caution_c: int
-    cold_crit_c: int
-    hot_crit_c: int
-    unit: str
-    updated_at_ms: int
+    # The required fields are NOT NULL columns: an unstorable value is a malformed
+    # envelope (422). The optional ones degrade to None.
+    profile_id: Text
+    cold_caution_c: Int4
+    hot_caution_c: Int4
+    cold_crit_c: Int4
+    hot_crit_c: Int4
+    unit: Text
+    updated_at_ms: Int8
     # WEB-6c: optional profile envelope (BMS cutoffs + charge lock/resume points) so the
     # web mirror can render the exact envelope the phone alerts on instead of hardcoding
     # it. Optional (None when an older app pushes without them) — which also retro-fixes
     # the WEB-6b hazard for these fields: an old-shape body must keep validating, never
     # turn into a 422 the phone would re-POST forever.
-    cutoff_cold_c: float | None = None
-    cutoff_hot_c: float | None = None
-    charge_lock_cold_c: float | None = None
-    charge_lock_hot_c: float | None = None
-    charge_resume_cold_c: float | None = None
+    cutoff_cold_c: RealOrNone = None
+    cutoff_hot_c: RealOrNone = None
+    charge_lock_cold_c: RealOrNone = None
+    charge_lock_hot_c: RealOrNone = None
+    charge_resume_cold_c: RealOrNone = None
     # Device-level capacity alert sync (parallel to temp config): the SOC threshold at
     # which a low pack should seize the WebUI main stage, and whether capacity alerts are
     # on. Optional — an older app pushing a temp-only body must keep validating (never a
     # 422 the phone re-POSTs forever), so both stay None-defaulted and backward compatible.
-    seize_soc: int | None = None
+    seize_soc: Int4OrNone = None
     alerts_on: bool | None = None
     # Learned discharge-range bands, one row per pack (2026-07-11 design). Optional — an
     # older app pushing a temp-only body must keep validating (never a re-POSTed 422).

@@ -1248,7 +1248,11 @@ Enforced in the app itself (not delegated to Traefik/Authentik) and pinned by te
   each have their own window). The response is
   `{"accepted", "dropped", "last_seq"}`, where `dropped` = schema + ts-window + address
   drops. `/api/v1/config` does the same for `ranges[]` rows and answers
-  `{"ok", "dropped"}`. The `app` logger hierarchy logs at INFO with time/level/name
+  `{"ok", "dropped"}`. A value that validates but that its column cannot store (int4 or
+  float4 overflow, NaN/±inf, a NUL byte) never fails the batch either: optional fields
+  store NULL and NUL bytes are stripped (`models.py` `Int4OrNone`/`RealOrNone`/
+  `TextOrNone`; positional `cells` are nulled in place), while a required config field
+  with such a value drops its range row or 422s the config envelope. The `app` logger hierarchy logs at INFO with time/level/name
   (`main.configure_logging`), so rollup, scrub and drop lines are visible in `docker logs`.
 
 ### Read-only API keys (`/api/v1/groups`, desktop widgets)
