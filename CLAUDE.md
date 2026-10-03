@@ -1273,15 +1273,14 @@ deployed to prod** (`bmsmon.covert.life`), landing all six planned views: **Comm
 `/web/fleet` + `/ws`, plus a per-cell-voltage pipeline android `cells[]` → server `samples.cellN_v`
 → fleet snapshot `cells` → web), **Fleet Health** (tiles + 8-pack board + 24h sparkline off
 `GET /web/history`; **offline packs show their LAST-KNOWN SOC/capacity, muted + "last seen
-<ago>"** — same rule as v1, because a pack out of BLE range still holds its charge and a blank "—"
-hid it (the Command fleet rail does **not** follow it yet: it still blanks an offline pack's SOC to
-"—", review WEB-29). **Every summary tile counts offline packs on their last-known
+<ago>"** — same rule as v1 and the Command rail and stage, because a pack out of BLE range still
+holds its charge and a blank "—" hid it. **Every summary tile counts offline packs on their last-known
 reading too** — `PACKS READY`, `NEED RECHARGE` and `FLEET CAPACITY` each footnote how much of
 their figure is stale ("incl. N offline · last known", from `readyStale`/`needRechargeStale`/
 `staleCounted`), so being away from the spares no longer reads as 0 ready / 0% capacity. The
 hero card's heading follows the base's real status instead of a hardcoded "In use now"),
 **Alerts** (capacity ladder + temp zones + cell imbalance; in-memory acknowledge that
-re-arms when the condition worsens and is forgotten when it clears — see below), **Settings** (units/map trail/theme segmented toggles; v2's °C/°F defaults to °F and does not follow the
+re-arms when the condition worsens and is forgotten when it clears — see below), **Settings** (units/map trail/theme segmented toggles, editing the App's one settings instance so a change applies everywhere at once; Distance MI/KM converts every v2 distance and Wh-per-distance readout while the models stay in miles; v2's °C/°F defaults to °F and does not follow the
 phone's synced unit the way v1 does, review WEB-35), **History** (per-base
 capacity-fade/cell-imbalance/temperature trend charts with A/B breakdown, a charge-session log, and
 editable per-base notes, backed by `GET /web/trends`, `GET /web/charge-sessions`, and the
@@ -1337,9 +1336,10 @@ ages on offline bases. **Efficiency card (2026-07-16, desktop, replaced the play
 the old play/scrub bar only animated a dot along the visible track, so it's gone. In its slot
 `EfficiencyCard.tsx` (pure `model/efficiency.ts` + tests) shows the viewed outing's real
 cost-per-mile — `outingWh` (∫|power| over discharging buckets, Δt capped at 60 s) ÷
-`summary.activeMiles` — against the learned `whPerMile` band (summed across connected packs to
+`summary.activeMiles` — against the learned `whPerMile` band (summed across the base's packs to
 match the merged track's base-total power basis). Live "today" window → **"CAN YOU MAKE IT?"**
-with `~X mi left at today's rate · ~Y at your usual` (base-total remaining Wh ÷ each rate);
+with `~X mi left at today's rate · ~Y at your usual` (the base's usable energy ÷ each rate: pack
+count × the weaker pack's remaining Ah × 12.8 V, live or last known, because the pair is in series);
 past day → **"THIS OUTING"** with DRIVEN/USED/DRAINED. Gated below `MIN_OUTING_MI` (0.5),
 projection suppressed while charging, and the band chip reads **"vs seed est."** (never a false
 comparison) until a pack has `learnedDays > 0`. Point inspection survives as **hover** on the
@@ -1364,7 +1364,8 @@ fetches `[lastBucketT, now)` and splices via the tested `appendTrack`; unchanged
 previous array identity so the map effect no-ops; 10-min full-refetch safety net), the trail
 renders as one polyline per same-color run (`interactive: false`), and every REST poller is
 visibility-gated (`web/src/visiblePoll.ts` — hidden tabs skip ticks, refocus catches up). **Device admin** (enroll-code QR, device list,
-revoke — a port of v1's `AdminDevices`, reusing the admin `/web/devices` + `/web/enroll-codes`
+revoke, confirmed first and naming the device and what stops, plus **Restore** for a revoked device
+(`POST /web/devices/{id}/restore`) — a port of v1's `AdminDevices`, reusing the admin `/web/devices` + `/web/enroll-codes`
 endpoints) lives as a **Devices section inside Settings** (`DevicesPanel.tsx`), not a separate nav
 entry — so there is no longer any "SOON" item. Roadmap/spec:
 `docs/superpowers/specs/2026-07-12-webui-v2-roadmap.md`.
@@ -1426,6 +1427,49 @@ the server's 48 h `last` lookback, after midnight the page shows yesterday's pos
 "last known · Xm ago". Journey's RANGE mode is clamped client-side (`clampTrackWindow`,
 `web/src/v2/model/journey.ts`) to `/web/track`'s span cap of 31 d + 1 h, keeping the most recent
 days and saying **LAST 31 DAYS SHOWN** instead of rendering a rejected request as a blank map.
+
+**v2 base view-model, freshness and connection state (2026-10 review, Tier 2: WEB-14/15/16/18/19/21/22/26/27/29/31).**
+`baseView()` (`web/src/v2/model/baseView.ts`, pure, tested) decides what the Command stage, the
+range card and the Journey efficiency card show about the staged base:
+- Every pack stays on the stage. A pack that is not live keeps its last-known reading, muted, with
+  "DISCONNECTED · last seen".
+- Flow, charging, time-to-full and temperature come from live packs only.
+- The weaker pack bounds range and runtime over live **and** last-known readings, and the UI names
+  a last-known pack inside the bound ("incl. A · last seen 3m ago"). A pack that dropped off BLE is
+  still in the series circuit.
+- A pack at 0 Ah bounds the base to zero, and a regen burst (the phone's `regen` flag) is not
+  charging.
+- The range card says which empty case it is in: charging, base offline, or no capacity reading.
+- The Journey projection's usable energy is pack count × the weaker pack's remaining Ah × 12.8 V.
+- The stage thermal banner follows the phone-synced temperature zones on both sides (`tempZone`,
+  rank ≥ 1, live packs).
+- The Journey dock's CAP line follows the same bound (`model/dock.ts`, shown as "≤NN%" when the
+  bound is a last-known reading).
+- The recharge plan (`model/recharge.ts`) anchors each "ready by" to its sample's `ts_ms`. It keeps
+  a charging spare that went out of range, muted, as "last seen … · due / was due full …".
+- The fleet rail shows an offline pack's last-known SOC, muted.
+
+**Pack freshness** is one function, `web/src/freshness.ts` (`STALE_MS` 90 s, shared by v1 and v2).
+A BLE link event never refreshes a pack's freshness, and a "Disconnected" newer than the newest
+telemetry reads stale at once. `store.ts` keeps `link_event`/`link_ts_ms` only while they are newer
+than the telemetry.
+
+**The live link** (`web/src/ws.ts` + pure `web/src/liveLink.ts`):
+- It reports LIVE from its first snapshot, not on socket open.
+- It reconnects with exponential backoff and jitter (1.5 s, doubling to 60 s, reset by a snapshot).
+- A 4401/4403 close, or three silent sockets followed by a `GET /web/alert-config` probe that does
+  not follow redirects, becomes a session verdict.
+- v2 then shows a banner under the TopBar on every layout: "Session expired" / "Not authorized"
+  with Reload, or "Can't reach the server".
+
+The header's SYNCED pill means at least one pack has fresh telemetry.
+
+Settings has one owner, the App. `web/src/v2/singleOwner.test.ts` pins `useV2Settings`,
+`useFleetData`, `useV2Configs` and `useStageBase` to `App.tsx`.
+
+Admin revokes (device, share link, API key) ask first, naming the target and what stops
+(`web/src/adminConfirm.ts`). A revoked device can be restored from Settings › Devices, and the share
+dialog no longer closes on a backdrop tap once its shown-once link exists.
 
 ### Server access control & request hardening (2026-10 review, T1.6)
 
@@ -1544,7 +1588,7 @@ Security model (`server/app/auth/api_key.py`), mirroring the share-token one:
 - `Cache-Control: no-store` on every response.
 
 **Staleness and the status ladder are evaluated server-side** (`STALE_MS = 90_000`,
-`_status()`), mirroring `web/src/v2/useFleetData.ts` and `fleet.ts` `baseStatus`, so there is
+`_status()`), mirroring `web/src/freshness.ts` and `fleet.ts` `baseStatus`, so there is
 one implementation of "is this pack live" rather than one per client. Keep the three in step
 if the threshold ever moves. Disconnected packs keep their last-known telemetry and are
 flagged `connected: false` instead of being dropped — the widget dims rather than blanks,
