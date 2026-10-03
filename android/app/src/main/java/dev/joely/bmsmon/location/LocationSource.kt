@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
+import android.location.Location
 import android.os.Looper
 import androidx.core.content.ContextCompat
 import com.google.android.gms.location.LocationCallback
@@ -11,7 +12,6 @@ import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
-import java.util.concurrent.atomic.AtomicReference
 
 /**
  * A single cached GPS fix attached to outgoing telemetry. [timeMs] is the fix timestamp
@@ -22,13 +22,13 @@ import java.util.concurrent.atomic.AtomicReference
 data class GpsFix(val lat: Double, val lon: Double, val accuracyM: Float?, val timeMs: Long)
 
 /**
- * A `lastLocation` fix older than this is dropped rather than seeded into the cache. Before the
- * parked-GPS gate, [LocationSource.start] ran once per monitoring session; now it runs at every
- * park→drive transition, so `lastLocation` can hand back an arbitrarily old pre-park fix — which
- * would otherwise get attached to every locally logged Room sample until a real GNSS fix arrives
- * (up to the measured 292 s indoor TTFF), writing known-wrong coordinates into field telemetry.
- * 120 s comfortably exceeds normal fix cadence (2-20 s) while staying well under that TTFF, so a
- * genuinely fresh idle fix is never rejected.
+ * A fix older than this is never used as "now". Before the parked-GPS gate, [LocationSource.start]
+ * ran once per monitoring session; now it runs at every park→drive transition, so `lastLocation`
+ * can hand back an arbitrarily old pre-park fix — which would otherwise get attached to every
+ * locally logged Room sample until a real GNSS fix arrives (up to the measured 292 s indoor TTFF),
+ * writing known-wrong coordinates into field telemetry. 120 s comfortably exceeds normal fix
+ * cadence (2-20 s) while staying well under that TTFF, so a genuinely fresh idle fix is never
+ * rejected. Applied when a seed is cached AND when any fix is read (BLE-23).
  */
 private const val MAX_CACHED_FIX_AGE_MS = 120_000L
 
@@ -42,35 +42,101 @@ internal fun isFixTooStale(fixTimeMs: Long, nowMs: Long, maxAgeMs: Long = MAX_CA
     nowMs - fixTimeMs > maxAgeMs
 
 /**
- * Thin wrapper over the fused location provider. Holds the latest fix in an atomic reference;
- * [current] is read on each telemetry upload. Safe to call [start]/[stop] repeatedly.
+ * The fix cache behind [LocationSource], pure so its rules are JVM-tested (BLE-23). The staleness
+ * guard used to apply only when the `lastLocation` seed was WRITTEN, so a seed that landed after
+ * stop() (start → stop inside the Task's latency) sat in the cache until the next start() and was
+ * then attached to every sample until GNSS got a fix — a phantom point on the map. Now the guard
+ * also applies at READ time, and each start has a generation, so a late seed from an earlier start
+ * is ignored. Synchronized: GMS callbacks arrive on the main looper, readers on the BLE threads.
  */
-class LocationSource(private val context: Context) {
+class FixCache(private val maxAgeMs: Long = MAX_CACHED_FIX_AGE_MS) {
+    private var generation = 0L
+    private var fix: GpsFix? = null
+
+    /** True between [begin] and [end]. */
+    @Volatile var requesting = false
+        private set
+
+    /** A request starts: returns its generation (pass it back with that start's seed). */
+    @Synchronized
+    fun begin(): Long {
+        generation++
+        requesting = true
+        return generation
+    }
+
+    /** The request ends: forget the fix; anything still in flight from it is ignored. */
+    @Synchronized
+    fun end() {
+        generation++
+        requesting = false
+        fix = null
+    }
+
+    /** A continuous-update result. Dropped once the request has ended (one dispatched just before
+     *  the updates were removed can still arrive). */
+    @Synchronized
+    fun offerLive(f: GpsFix) {
+        if (requesting) fix = f
+    }
+
+    /** The one-shot `lastLocation` seed of start [gen]: kept only while that start is current, when
+     *  it isn't stale, and when no newer live fix has already landed. */
+    @Synchronized
+    fun offerSeed(gen: Long, f: GpsFix, nowMs: Long) {
+        if (gen != generation || !requesting) return
+        if (isFixTooStale(f.timeMs, nowMs, maxAgeMs)) return
+        val cur = fix
+        if (cur != null && cur.timeMs >= f.timeMs) return
+        fix = f
+    }
+
+    /** The cached fix, or null once it is older than the limit — checked at READ time. */
+    @Synchronized
+    fun read(nowMs: Long): GpsFix? = fix?.takeIf { !isFixTooStale(it.timeMs, nowMs, maxAgeMs) }
+}
+
+/**
+ * Thin wrapper over the fused location provider. Holds the latest fix in a [FixCache]; [current]
+ * is read on each telemetry sample. Safe to call [start]/[stop] repeatedly.
+ */
+class LocationSource(private val context: Context) : LocationControl {
 
     private val client = LocationServices.getFusedLocationProviderClient(context)
-    private val cache = AtomicReference<GpsFix?>(null)
-    private var requesting = false
+    private val fixes = FixCache()
     private var balanced = false
 
     private val callback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
-            result.lastLocation?.let {
-                cache.set(GpsFix(it.latitude, it.longitude, if (it.hasAccuracy()) it.accuracy else null, it.time))
-            }
+            result.lastLocation?.let { fixes.offerLive(it.toFix()) }
         }
     }
 
+    /**
+     * Register the fused request if it isn't already (idempotent). Returns whether one is registered
+     * after the call: false without location permission — the GPS gate publishes gpsActive from this
+     * and calls again at its next evaluation, so a later grant is picked up (BLE-19). A GMS throw
+     * propagates with nothing registered.
+     */
     @Synchronized
     @SuppressLint("MissingPermission") // guarded by hasLocationPermission
-    fun start() {
-        if (requesting || !hasLocationPermission(context)) return
-        requesting = true
-        client.lastLocation.addOnSuccessListener { loc ->
-            loc?.takeIf { !isFixTooStale(it.time, System.currentTimeMillis()) }?.let {
-                cache.set(GpsFix(it.latitude, it.longitude, if (it.hasAccuracy()) it.accuracy else null, it.time))
+    override fun start(): Boolean {
+        if (fixes.requesting) return true
+        if (!hasLocationPermission(context)) return false
+        val gen = fixes.begin()
+        try {
+            requestUpdates()
+        } catch (e: Exception) {
+            fixes.end()
+            throw e
+        }
+        // Best-effort seed: the request above is what matters, so a failure here is not a failed start.
+        runCatching {
+            client.lastLocation.addOnSuccessListener { loc ->
+                loc?.let { fixes.offerSeed(gen, it.toFix(), System.currentTimeMillis()) }
             }
         }
-        requestUpdates()
+        return true
     }
 
     /**
@@ -88,7 +154,7 @@ class LocationSource(private val context: Context) {
     fun setBalanced(balanced: Boolean) {
         if (balanced == this.balanced) return
         this.balanced = balanced
-        if (!requesting) return  // will pick up the new mode on the next start()
+        if (!fixes.requesting) return  // will pick up the new mode on the next start()
         client.removeLocationUpdates(callback)
         requestUpdates()
     }
@@ -108,14 +174,16 @@ class LocationSource(private val context: Context) {
     }
 
     @Synchronized
-    fun stop() {
-        if (!requesting) return
-        requesting = false
+    override fun stop() {
+        if (!fixes.requesting) return
         client.removeLocationUpdates(callback)
-        cache.set(null)
+        fixes.end()
     }
 
-    fun current(): GpsFix? = cache.get()
+    /** The cached fix, or null when none is fresher than 120 s (checked at read time, BLE-23). */
+    fun current(nowMs: Long = System.currentTimeMillis()): GpsFix? = fixes.read(nowMs)
+
+    private fun Location.toFix() = GpsFix(latitude, longitude, if (hasAccuracy()) accuracy else null, time)
 
     companion object {
         fun hasLocationPermission(context: Context): Boolean =

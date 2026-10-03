@@ -104,6 +104,17 @@ class EngineWiringTest {
         assertFalse(onReachable.contains(".copy(reachable = reachable)"))
     }
 
+    // BLE-19 / BLE-23: the request is driven on every gate evaluation (a later permission grant is
+    // picked up), gpsActive comes from what is actually registered, and a sample reads the fix with
+    // the read-time staleness check.
+    @Test fun theGpsGateDrivesTheRequestEveryEvaluation() {
+        val gate = flat.substringAfter("private fun applyGpsGate(").substringBefore("private fun shutdownGps(")
+        assertTrue(gate.contains("val active = driveLocation(run, locationSource)"))
+        assertFalse(gate.contains("if (active) locationSource.start() else locationSource.stop()"))
+        val onPoll = flat.substringAfter("private fun onPoll(").substringBefore("private fun onReachable(")
+        assertTrue(onPoll.contains("locationSource.current(now)"))
+    }
+
     // M7: no CoroutineExceptionHandler on the engine scope — an unguarded import throw kills the process.
     @Test fun theLegacyCsvImportCannotCrashTheProcess() {
         val body = flat.substringAfter("fun importLegacyCsvIfNeeded(")

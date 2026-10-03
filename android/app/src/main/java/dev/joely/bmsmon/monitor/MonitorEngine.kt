@@ -10,10 +10,12 @@ import android.util.Log
 import dev.joely.bmsmon.ble.BmsRepository
 import dev.joely.bmsmon.ble.hasBlePermissions
 import dev.joely.bmsmon.location.LocationSource
+import dev.joely.bmsmon.location.driveLocation
 import dev.joely.bmsmon.motion.MotionSource
 import dev.joely.bmsmon.ble.profile.ProfileRegistry
 import dev.joely.bmsmon.ble.profile.RedodoBekenProfile
 import dev.joely.bmsmon.cloud.TelemetryReporter
+import dev.joely.bmsmon.data.FailureLogThrottle
 import dev.joely.bmsmon.data.SettingsStore
 import dev.joely.bmsmon.data.TelemetryRepository
 import dev.joely.bmsmon.data.classifyFrame
@@ -275,9 +277,8 @@ class MonitorEngine(
         // Reset GPS intent/state/request together through shutdownGps() rather than folding a
         // bare `gpsActive = false` into the state copy below. A bare state reset only touches
         // MonitorState — if `gpsActive` were ever false while LocationSource was still
-        // `requesting` (unreachable today, but exactly the desync the gate can't recover from),
-        // applyGpsGate's `if (_state.value.gpsActive == active) return` early-out would then
-        // never call locationSource.stop(), i.e. a silent GNSS drain. shutdownGps() is safe to
+        // `requesting` (unreachable today), GNSS would run with the state claiming it doesn't
+        // until the gate's next evaluation stopped it. shutdownGps() is safe to
         // call before a session begins: gpsWanted is already false pre-start, gpsActive is
         // already false (a fresh engine's default MonitorState(), or stop()'s explicit reset),
         // and LocationSource.stop() no-ops when it isn't requesting — so this is a genuine no-op
@@ -661,6 +662,22 @@ class MonitorEngine(
     // unsynchronized and was exactly the bug a prior review caught here.
     private var motionGate = MotionGate()
 
+    // Rate limit for a GPS start/stop that throws on every gate evaluation (~100/min while it
+    // persists — driveLocation retries each one, BLE-19). Only touched inside @Synchronized
+    // applyGpsGate, so its single-consumer contract holds.
+    private val gpsFailures = FailureLogThrottle()
+
+    private fun logGpsFailure(run: Boolean, e: Throwable) {
+        val what = "location ${if (run) "start" else "stop"} failed"
+        when (val line = gpsFailures.onFailure(elapsedNow())) {
+            is FailureLogThrottle.Action.Full ->
+                Log.w(TAG, if (line.unreported == 0) what else "$what (${line.unreported} earlier failures went unreported)", e)
+            is FailureLogThrottle.Action.Summary ->
+                Log.w(TAG, "${line.count} more location failures since the last report; latest: $e")
+            FailureLogThrottle.Action.Suppress -> Unit
+        }
+    }
+
     /** Record whether GPS capture is wanted at all; the parked gate decides if it actually runs. */
     fun setGpsActive(active: Boolean) {
         gpsWanted = active
@@ -675,7 +692,8 @@ class MonitorEngine(
 
     /**
      * Fold intent + parked state into the actual GPS run state, and start/stop [MotionSource]
-     * alongside it. The engine stays the single writer of [MonitorState.gpsActive].
+     * alongside it. The engine stays the single writer of [MonitorState.gpsActive], which is true
+     * only while a fused request is actually registered (BLE-19).
      *
      * The chair cannot move without discharging a pack, so a parked chair's fixes teach the range
      * learner nothing (its discharge gate discards them) while GNSS costs ~22 mA. Full stop rather
@@ -734,7 +752,8 @@ class MonitorEngine(
      */
     @Synchronized
     private fun applyGpsGate(now: Long): Pair<MotionReading?, MotionGate> {
-        if (gpsWanted && gpsPauseParked) {
+        val wanted = gpsWanted
+        if (wanted && gpsPauseParked) {
             motionSource.start()
             motionSource.maybeResubscribe(now)
         } else {
@@ -742,21 +761,21 @@ class MonitorEngine(
         }
         val reading = motionSource.current()
         motionGate = foldMotion(motionGate, reading, now)
-        val active = gpsShouldRun(
-            wanted = gpsWanted,
+        val run = gpsShouldRun(
+            wanted = wanted,
             pauseEnabled = gpsPauseParked,
             lastDischargeMs = _state.value.lastDischargeAt.values.maxOrNull(),
             nowMs = now,
             confidentlyStill = motionGate.still,
         )
-        if (_state.value.gpsActive != active) {
-            _state.update { it.copy(gpsActive = active) }
-            // BLE-22: this runs on the BLE control loop via onPoll. A SecurityException from a
-            // permission revoked between LocationSource's check and the GMS request must not take
-            // the battery monitor down — the same guard MotionSource already carries internally.
-            runCatching { if (active) locationSource.start() else locationSource.stop() }
-                .onFailure { Log.w(TAG, "location ${if (active) "start" else "stop"} failed", it) }
-        }
+        // BLE-19: drive the request on EVERY evaluation, not only when the verdict flips, and publish
+        // gpsActive only for a request that is actually registered — start() used to no-op silently
+        // without permission while gpsActive still went true, and a later grant re-pushed nothing.
+        // Both calls are idempotent, so a grant is picked up at the next BLE frame (or the 5-min
+        // range tick). BLE-22: a throw (a permission revoked between the check and the GMS call) is
+        // logged, rate-limited, and reads as inactive — it never takes the battery monitor down.
+        val active = driveLocation(run, locationSource) { e -> logGpsFailure(run, e) }
+        if (_state.value.gpsActive != active) _state.update { it.copy(gpsActive = active) }
         return reading to motionGate
     }
 
@@ -933,7 +952,7 @@ class MonitorEngine(
         // lock — never two independent motionSource.current() calls, which could pair a fresh
         // reading with a stale verdict (or vice versa) if a broadcast landed in between.
         val (motion, gate) = applyGpsGate(now)
-        val fix = if (_state.value.gpsActive) locationSource.current() else null
+        val fix = if (_state.value.gpsActive) locationSource.current(now) else null
         // Upload GPS only when the fix is new for this pack (bandwidth — see isNewFixForPack).
         val uploadFix = fix?.takeIf { isNewFixForPack(lastGpsFixUploaded[addr], it.timeMs) }
         if (uploadFix != null) lastGpsFixUploaded[addr] = uploadFix.timeMs
