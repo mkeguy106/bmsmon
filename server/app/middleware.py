@@ -70,7 +70,14 @@ def is_db_unavailable(exc: BaseException) -> bool:
                         # query canceled) and 55P03 (a pg_dump holding a lock): all
                         # transient, so err toward a retry, never a skipped row.
                         asyncpg.exceptions.OperatorInterventionError,
-                        asyncpg.exceptions.LockNotAvailableError)):
+                        asyncpg.exceptions.LockNotAvailableError,
+                        # SQLSTATE class 53 (disk full, out of memory, too many
+                        # connections) and 25006 (a read-only standby or a disk-full
+                        # read-only fallback): the DB is up but cannot take writes. A
+                        # marked 500 here would read as a deterministic fault and let the
+                        # phone skip good rows while the DB is sick (DATA-22 review).
+                        asyncpg.exceptions.InsufficientResourcesError,
+                        asyncpg.exceptions.ReadOnlySQLTransactionError)):
         return True
     if isinstance(exc, asyncpg.exceptions.InterfaceError):
         msg = str(exc).lower()
