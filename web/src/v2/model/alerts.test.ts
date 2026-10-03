@@ -52,6 +52,20 @@ describe("ack lifecycle (WEB-17)", () => {
     expect(new Set([capAt(28).id, capAt(9).id])).toEqual(new Set(["cap:b"]));
   });
 
+  // Guards WEB-17 against CRITICAL_SOC drifting off a rung: if it sat between rungs, one
+  // rank would cover both a warning and a critical reading, and acking the warning would
+  // silence the critical. Every warning rank must sit strictly below every critical rank.
+  it("every capacity warning ranks below every critical over SOC 0–30", () => {
+    const warn: number[] = [], crit: number[] = [];
+    for (let soc = 0; soc <= 30; soc += 0.5) {
+      const a = capAt(soc);
+      (a.severity === "critical" ? crit : warn).push(a.rank);
+    }
+    expect(warn.length).toBeGreaterThan(0);
+    expect(crit.length).toBeGreaterThan(0);
+    expect(Math.max(...warn)).toBeLessThan(Math.min(...crit));
+  });
+
   // The review's scenario: ack 2012-B at 28% in the morning, it reaches 9% that afternoon.
   it("acking a 28% warning does not hide the same pack's later 9% critical", () => {
     const acked = ackAlert(NONE, capAt(28));
