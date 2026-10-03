@@ -42,6 +42,23 @@ fun evalStageAlert(packs: List<PackSoc>, cfg: AlertConfig): AlertEval {
 }
 
 /**
+ * Re-arm hysteresis for an acknowledged capacity rung (M4): the ack for rung r is kept while the
+ * stage's lowest alert-driving pack reads below r + this margin. The BMS reports SOC as an integer
+ * percent and regen braking ticks it up by 1 % at a time, so without a margin a regen uptick at a
+ * rung boundary cleared the ack and the very next downtick re-flashed the rung mid-drive. 2 % is
+ * the smallest margin a single 1 % uptick can't cross. A stage change or real (non-regen) charging
+ * still clears acks at once.
+ */
+const val ACK_REARM_MARGIN_PCT = 2
+
+/** The acknowledged rungs still held at [lowSoc] (the stage's lowest alert-driving pack): an enabled
+ *  rung stays acknowledged until [lowSoc] reaches rung + [ACK_REARM_MARGIN_PCT]; with alerts off
+ *  nothing is held. Charging and stage changes are the caller's (they clear everything). */
+fun heldCapAcks(acks: Set<Int>, lowSoc: Float, cfg: AlertConfig): Set<Int> =
+    if (!cfg.alertsOn) emptySet()
+    else acks.filterTo(mutableSetOf()) { it in cfg.enabledThresholds && lowSoc < it + ACK_REARM_MARGIN_PCT }
+
+/**
  * Shared severity scale for the capacity-vs-temperature worst-of arbitration (UI-12). These used
  * to be raw literals aligned with `TempRank.ordinal`, which silently broke if the enum was ever
  * reordered — [tempSeverity] pins the mapping explicitly (exhaustive `when`, test-locked).

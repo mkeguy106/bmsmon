@@ -17,6 +17,7 @@ import dev.joely.bmsmon.ble.profile.BatteryProfile
 import dev.joely.bmsmon.ble.profile.ProfileRegistry
 import dev.joely.bmsmon.cloud.CloudJson
 import dev.joely.bmsmon.ble.profile.RedodoBekenProfile
+import dev.joely.bmsmon.model.ACK_REARM_MARGIN_PCT
 import dev.joely.bmsmon.model.AlertConfig
 import dev.joely.bmsmon.model.AlertKind
 import dev.joely.bmsmon.model.BatteryGroup
@@ -58,6 +59,7 @@ import dev.joely.bmsmon.model.assignGroup
 import dev.joely.bmsmon.model.batteryAt
 import dev.joely.bmsmon.model.decisionView
 import dev.joely.bmsmon.model.drivesAlerts
+import dev.joely.bmsmon.model.heldCapAcks
 import dev.joely.bmsmon.model.evalStageAlert
 import dev.joely.bmsmon.model.freshness
 import dev.joely.bmsmon.model.freshnessLabels
@@ -72,6 +74,7 @@ import dev.joely.bmsmon.model.targetFor
 import dev.joely.bmsmon.ui.theme.DefaultAccent
 import dev.joely.bmsmon.ui.theme.DefaultPower
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -240,9 +243,10 @@ data class UiState(
             ?: (ProfileRegistry.all.firstOrNull { it.id == profileId } ?: RedodoBekenProfile)
                 .tempEnvelope.defaults
 
-    /** The 1–2 stage packs with their regen flags. A pack shows a number only when its reading is
-     *  from THIS session (UI-16): LIVE, or STALE with a known age (muted, "UPDATED Ns AGO"). The
-     *  restored seed and absent packs read DISCONNECTED (no %), never as a live-looking number. */
+    /** The 1–2 stage packs with their regen flags. A pack shows a number only when it is
+     *  alert-driving ([drivesAlerts]) — its reading is from THIS session (UI-16): LIVE, or STALE with
+     *  a known age (muted, "UPDATED Ns AGO"). The restored seed, packs silent past STALE_MAX_MS and
+     *  absent packs read DISCONNECTED (no %), never as a live-looking number. */
     fun stageItems(): List<StageItem> {
         val targets = when (val t = stageTarget) {
             is StageTarget.Base -> roster.groupById(t.groupId)?.targets ?: emptyList()
@@ -319,7 +323,7 @@ data class UiState(
             else -> CAP_SEVERITY_WARNING
         }
 
-        // --- temperature (worst reachable stage pack; flashes only at rank >= CRITICAL) ---
+        // --- temperature (worst alert-driving stage pack; flashes only at rank >= CRITICAL) ---
         val worst = stageWorstTemp()
         val tempRank = worst?.third?.rank ?: TempRank.SAFE
         val tempPresent = tempAlertsEnabled && tempRank.ordinal >= TempRank.CRITICAL.ordinal
@@ -361,11 +365,13 @@ data class UiState(
     }
 
     /**
-     * Reachable stage packs that have reported telemetry, with their addresses.
+     * The stage's alert-driving packs ([drivesAlerts]: this session's LIVE or STALE readings), with
+     * their addresses.
      *
-     * The `reachable`-only filter is also what excludes *disabled* packs from alerting (UI-8):
-     * `engine.setDisabled` marks a disconnected pack unreachable synchronously in MonitorState
-     * (see `applyDisabled`), so a user-disconnected stage pack can never drive an alert.
+     * Alert-driving implies reachable, which is also what excludes *disabled* packs from alerting
+     * (UI-8): `engine.setDisabled` marks a disconnected pack unreachable synchronously in
+     * MonitorState (see `applyDisabled`), and the engine never marks it reachable again (M1), so a
+     * user-disconnected stage pack can never drive an alert.
      * Deliberate consequence (accepted, documented): an UNREACHABLE low pack raises no alert at
      * all — the DISCONNECTED stage rendering is the only signal. We alert on data, not absence.
      *
@@ -446,8 +452,9 @@ data class UiState(
      *    here — otherwise a burst mid-drive would clear the ack and the rung would re-flash ~30 s
      *    later, in the middle of the outing. (The flash suppression and the charge hold still treat
      *    that state as charging, exactly as before.)
-     *  - otherwise, with at least one alert-driving pack, keep only the rungs still crossed, so a
-     *    recovery re-arms the next crossing.
+     *  - otherwise, with at least one alert-driving pack, keep a rung only while the stage's lowest
+     *    alert-driving pack reads below rung + [ACK_REARM_MARGIN_PCT] ([heldCapAcks]), so a genuine
+     *    recovery re-arms the next crossing but a 1 % regen uptick at the rung does not (M4).
      * Like the temperature acks, the judging reading must be alert-driving ([stagePacks]): if none
      * of the stage's packs is (whole-stage dropout, seed, silent past STALE_MAX_MS) the acks are
      * untouched — a link blip must not re-arm. If only some packs drop out, the remaining ones
@@ -459,7 +466,14 @@ data class UiState(
         val packs = stagePacks()
         if (packs.isEmpty()) return this
         val eval = capacityEval(packs, countRegenAsCharging = false)
-        val kept = if (eval.charging) emptySet() else acknowledgedThresholds intersect eval.crossed
+        val kept = if (eval.charging) {
+            emptySet()
+        } else {
+            heldCapAcks(
+                acknowledgedThresholds, packs.minOf { it.second.soc },
+                AlertConfig(alertsOn, enabledThresholds, criticalThreshold),
+            )
+        }
         return if (kept == acknowledgedThresholds) this else copy(acknowledgedThresholds = kept)
     }
 
@@ -528,6 +542,10 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     private fun clockMs() = System.currentTimeMillis()
+
+    // The freshness ticker (see startFreshnessTicker). Main thread only: init, onAppForeground,
+    // onAppBackground. Declared BEFORE init, which starts it — a later initializer would null it.
+    private var freshnessJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -672,16 +690,26 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
-        // Freshness is time-based (UI-16): with no engine emission (every frame stopped) nothing
-        // would ever re-render a LIVE pack as STALE, or let the overlay's charge hold expire. Re-check
-        // once a second, but publish only when something rendered actually changes (freshnessTick)
-        // — an all-LIVE fleet costs no recomposition at all (UI-26).
-        viewModelScope.launch {
+        startFreshnessTicker()
+    }
+
+    /**
+     * Freshness is time-based (UI-16): with no engine emission (every frame stopped) nothing would
+     * ever re-render a LIVE pack as STALE, or let the overlay's charge hold expire. Re-check once a
+     * second, but publish only when something rendered actually changes (freshnessTick) — an
+     * all-LIVE fleet costs no recomposition at all (UI-26). Runs only while the Activity is in the
+     * foreground ([onAppForeground]/[onAppBackground]): nothing renders in the background, the
+     * engine's own tick and notifier carry alerts there, and the first tick on return runs at once,
+     * so the UI catches up before the user can read it.
+     */
+    private fun startFreshnessTicker() {
+        if (freshnessJob?.isActive == true) return
+        freshnessJob = viewModelScope.launch {
             while (true) {
-                delay(FRESHNESS_TICK_MS)
                 val nowMs = clockMs()
                 val elapsedMs = SystemClock.elapsedRealtime()
                 _state.update { it.freshnessTick(nowMs, elapsedMs) }
+                delay(FRESHNESS_TICK_MS)
             }
         }
     }
@@ -991,6 +1019,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
 
     fun onAppForeground() {
         foreground = true
+        startFreshnessTicker()
         updateSensor()
         if (_state.value.monitoring) engine.kickAll()
     }
@@ -1009,6 +1038,8 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     /** App backgrounded: flush the latest readings so they survive a process kill. */
     fun onAppBackground() {
         foreground = false
+        freshnessJob?.cancel()
+        freshnessJob = null
         updateSensor()
         persistLastTelemetry()
     }

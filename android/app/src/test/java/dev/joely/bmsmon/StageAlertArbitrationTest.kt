@@ -1,5 +1,6 @@
 package dev.joely.bmsmon
 
+import dev.joely.bmsmon.model.ACK_REARM_MARGIN_PCT
 import dev.joely.bmsmon.model.AlertKind
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.BatteryStatus
@@ -274,6 +275,47 @@ class StageAlertArbitrationTest {
         s = s.withAcknowledged(s.stageAlert())
         s = s.copy(fleet = fleetAt("2012", 28f, 25f, charging = true)).withCapAcksPruned(s.stageTarget)
         assertTrue(s.acknowledgedThresholds.isEmpty())
+    }
+
+    // --- M4: re-arm hysteresis. BMS SOC is an integer percent, so regen on the stage's lowest pack
+    //     ticks it 1 % back over a rung; without a margin that cleared the ack, and the next
+    //     downtick re-flashed the rung mid-drive. ---
+
+    @Test fun aOnePercentUptickKeepsTheCapAck() {
+        var s = stateAt(soc = 30f, tempC = 25f)
+        s = s.withAcknowledged(s.stageAlert())
+        assertEquals(setOf(30), s.acknowledgedThresholds)
+        s = s.copy(fleet = fleetAt("2012", 31f, 25f)).withCapAcksPruned(s.stageTarget)   // regen uptick
+        assertEquals(setOf(30), s.acknowledgedThresholds)
+        s = s.copy(fleet = fleetAt("2012", 30f, 25f)).withCapAcksPruned(s.stageTarget)   // back down
+        assertEquals(setOf(30), s.acknowledgedThresholds)
+        assertFalse("the acked rung must not re-flash", s.stageAlert().flashing)
+    }
+
+    @Test fun aRecoveryOfTheMarginRearmsTheCapAck() {
+        var s = stateAt(soc = 30f, tempC = 25f)
+        s = s.withAcknowledged(s.stageAlert())
+        s = s.copy(fleet = fleetAt("2012", 30f + ACK_REARM_MARGIN_PCT, 25f)).withCapAcksPruned(s.stageTarget)
+        assertTrue(s.acknowledgedThresholds.isEmpty())
+        s = s.copy(fleet = fleetAt("2012", 30f, 25f))
+        assertTrue("a genuine recovery re-arms the next crossing", s.stageAlert().flashing)
+    }
+
+    @Test fun realChargingStillClearsTheCapAckInsideTheMargin() {
+        var s = stateAt(soc = 30f, tempC = 25f)
+        s = s.withAcknowledged(s.stageAlert())
+        s = s.copy(fleet = fleetAt("2012", 31f, 25f, charging = true)).withCapAcksPruned(s.stageTarget)
+        assertTrue(s.acknowledgedThresholds.isEmpty())
+    }
+
+    @Test fun aDeeperRungStillFlashesThroughAHeldAck() {
+        // The margin only holds the acked rung; a further drop to the next one is a new alert.
+        var s = stateAt(soc = 30f, tempC = 25f)
+        s = s.withAcknowledged(s.stageAlert())
+        s = s.copy(fleet = fleetAt("2012", 25f, 25f)).withCapAcksPruned(s.stageTarget)
+        assertEquals(setOf(30), s.acknowledgedThresholds)
+        assertTrue(s.stageAlert().flashing)
+        assertEquals(25, s.stageAlert().activeThreshold)
     }
 
     @Test fun dropoutDoesNotPruneCapAcks() {

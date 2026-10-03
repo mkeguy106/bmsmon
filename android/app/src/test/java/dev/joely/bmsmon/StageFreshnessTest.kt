@@ -116,9 +116,18 @@ class StageFreshnessTest {
         assertFalse(state(seed(60f), seed(61f)).copy(regenAddrs = setOf(stage[0])).stageRegen)
     }
 
-    @Test fun monitoringOffEverythingIsDisconnected() {
-        val s = state(live(12f).copy(reachable = false), live(80f).copy(reachable = false)).copy(monitoring = false)
-        assertTrue(s.stageItems().none { it.connected })
+    // stageItems keys on reachability, never on the monitoring flag: "monitoring off → every pack
+    // DISCONNECTED" holds because the engine's stop() (and the VM's mirror of a fresh process)
+    // marks every pack unreachable. The overlay does read the flag, so nothing flashes either way.
+    @Test fun unreachableStagePacksRenderDisconnectedAndMonitoringOffNeverAlerts() {
+        val gone = state(live(12f).copy(reachable = false), live(80f).copy(reachable = false))
+        assertTrue(gone.stageItems().none { it.connected })
+        assertTrue(gone.copy(monitoring = false).stageItems().none { it.connected })
+        assertFalse(gone.stageAlert().present)
+        // A low reading that still looks fresh can't flash once monitoring is off.
+        val off = state(live(12f), live(80f)).copy(monitoring = false)
+        assertFalse(off.stageAlert().flashing)
+        assertFalse(off.stageAlert().present)
     }
 
     // --- the ViewModel's freshness ticker step: it publishes only when something rendered changes
