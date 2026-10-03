@@ -30,8 +30,10 @@ ENV BMSMON_WEB_DIST=/app/web/dist PYTHONPATH=/app
 RUN useradd --system --no-create-home --uid 10001 app
 USER app
 EXPOSE 8000
-# Mirrors the compose healthcheck; python urllib because slim has no curl. urlopen
-# raises on any non-2xx/timeout, failing the check.
+# The image's default healthcheck. The prod compose file defines its own, with a far
+# longer start_period (a startup may wait minutes for the schema lock, app/db/pool.py),
+# and that one wins. python urllib because slim has no curl; urlopen raises on any
+# non-2xx/timeout, failing the check.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=4)"]
 # SINGLE WORKER ONLY — do not add --workers: the jti replay cache (app/auth/device_jwt.py)

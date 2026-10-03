@@ -1482,6 +1482,8 @@ curl -fsS https://bmsmon.covert.life/api/v1/health   # expect {"status":"ok"}
 ```
 
 On startup the new container re-runs `schema.sql`, so additive columns/tables land automatically.
+If the nightly dump is holding `samples`, startup waits for it (retrying for up to ~5 min),
+then fails and the container restarts.
 Changes to the **stack** itself (`bmsmon/docker-compose.yml` or the shared `.env`) deploy
 differently: push them to the `~/qnap-nas-docker` repo's `master` and its self-hosted runner
 (`.github/workflows/deploy.yml`) SSHes in and restarts the changed service.
