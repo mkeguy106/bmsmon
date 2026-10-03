@@ -4,6 +4,7 @@ import { Ago } from "../../components/Ago";
 import type { FleetItem } from "../../types";
 import { estimatePackRange, minRange, SEED_RANGE_PARAMS, type PackRange, type RangeParams } from "../../range";
 import type { TripSummary } from "../model/journey";
+import type { StageReason } from "../model/stageBase";
 import { Ring } from "./Ring";
 import { StatTile, CellTiles, Chip } from "./Atoms";
 import { sohColor } from "../colors";
@@ -76,8 +77,9 @@ function FlowTile({ label, value, sub }: { label: string; value: string; sub?: s
   );
 }
 
-export function CommandStage({ base, rangeParams, tempF, mobile, drivenToday }: {
-  base: Base; rangeParams: Map<string, RangeParams>; tempF: boolean; mobile: boolean;
+export function CommandStage({ base, reason = null, onClearPin, rangeParams, tempF, mobile, drivenToday }: {
+  base: Base; reason?: StageReason | null; onClearPin?: () => void;
+  rangeParams: Map<string, RangeParams>; tempF: boolean; mobile: boolean;
   drivenToday: TripSummary;
 }) {
   const live = base.packs.filter((p) => p.connected);
@@ -121,10 +123,28 @@ export function CommandStage({ base, rangeParams, tempF, mobile, drivenToday }: 
       )}
 
       <div className="card" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        {/* Wraps: with PINNED + AUTO (or LOW) the row is wider than a 390 px phone. */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", rowGap: 6 }}>
           <div className="eyebrow">Main stage</div>
           <span className="mono" style={{ fontSize: 15, fontWeight: 600 }}>Base {base.id}</span>
           <Chip tone={STATUS_COLOR[base.status]}>{STATUS_TAG[base.status]}</Chip>
+          {reason === "seize" && (
+            <span title="A pack dropped to the low-SOC threshold and seized the stage">
+              <Chip tone="var(--live)">LOW</Chip>
+            </span>
+          )}
+          {reason === "pin" && (
+            <>
+              <Chip>PINNED</Chip>
+              <button type="button" className="mono" onClick={onClearPin}
+                title="Return to automatic selection (the base in use)"
+                style={{ fontSize: 10, letterSpacing: ".08em", padding: "4px 10px", minHeight: 24,
+                  borderRadius: 5, border: "1px solid var(--border-strong)", background: "transparent",
+                  color: "var(--text-2)", cursor: "pointer" }}>
+                AUTO
+              </button>
+            </>
+          )}
           <span className="mono" style={{ fontSize: 11, color: "var(--text-4)", marginLeft: "auto" }}>
             {roleText(base)}
           </span>

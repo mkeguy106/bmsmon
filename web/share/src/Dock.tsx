@@ -32,15 +32,17 @@ function Fill({ frac, background }: { frac: number; background: string }) {
     borderRadius: 5, background, transition: "width .6s ease" }} />;
 }
 
-/** Guest dock: battery capacity + live flow so a guest can see active discharge. */
-export function Dock({ status }: { status: GuestStatus | null }) {
+/** Guest dock: battery capacity + live flow so a guest can see active discharge.
+ *  [dim] mutes the last-good numbers while the page can't reach the server, so a frozen
+ *  FLOW bar never reads as the chair's live draw. */
+export function Dock({ status, dim = false }: { status: GuestStatus | null; dim?: boolean }) {
   const cap = guestCap(status);
   const flow = guestFlow(status);
   return (
     <div className="mono" style={{
       padding: "10px 14px", display: "flex", flexDirection: "column", gap: 9, flexShrink: 0,
       borderTop: "1px solid var(--border)", background: "var(--panel-3)",
-      fontVariantNumeric: "tabular-nums", opacity: status ? 1 : 0.5,
+      fontVariantNumeric: "tabular-nums", opacity: status && !dim ? 1 : 0.5,
     }}>
       <div style={rowStyle}>
         <span style={eyebrow}>CAP</span>

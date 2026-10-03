@@ -2,6 +2,20 @@ import type { TrackPoint, Track } from "../track";
 
 export interface LatLon { lat: number; lon: number }
 
+/** Server cap on one /web/track request (server `app.routers.web.TRACK_MAX_SPAN_MS`): 31 days
+ *  plus 1 h of DST slack, so any 31-calendar-day range passes unclamped. Keep in step. */
+export const TRACK_MAX_SPAN_MS = 31 * 86_400_000 + 3_600_000;
+
+/** Clamp a Journey window to the server's span cap. Keeps the END — the most recent part of the
+ *  range is the likeliest thing being looked for — and reports whether it clamped so the toolbar
+ *  can say so (a 400 would otherwise render as a silently empty map). */
+export function clampTrackWindow(
+  fromMs: number, toMs: number,
+): { fromMs: number; toMs: number; clamped: boolean } {
+  if (toMs - fromMs <= TRACK_MAX_SPAN_MS) return { fromMs, toMs, clamped: false };
+  return { fromMs: toMs - 31 * 86_400_000, toMs, clamped: true };
+}
+
 export const DISCHARGE_EPS = 0.1;   // A — matches fleet.ts/android
 export const MOVE_EPS_MI = 0.003;   // ~5 m
 export const POWER_GREEN_W = 150;   // base-total; below → green

@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useMemo, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from "react";
 import { useLocalStorage, type Codec } from "../useLocalStorage";
 import { useV2Settings } from "./useV2Settings";
 import { useTheme, type ThemeMode } from "./useTheme";
@@ -14,7 +14,9 @@ import { AlertsView } from "./views/AlertsView";
 import { SettingsView } from "./views/SettingsView";
 import { useFleetData } from "./useFleetData";
 import { useV2Configs } from "./useV2Configs";
-import { deriveAlerts } from "./model/alerts";
+import { useStageBase } from "./useStageBase";
+import { seizeThresholdFrom } from "./model/stageBase";
+import { ackAlert, deriveAlerts, pruneAcks, unackedCount, type AckMap, type V2Alert } from "./model/alerts";
 import type { V2View } from "./nav";
 
 const viewCodec: Codec<V2View> = {
@@ -59,21 +61,30 @@ export default function App() {
   const data = useFleetData();
   const tempF = settings.tempUnitPref === "F";
 
-  const { tempConfig } = useV2Configs();
+  const { tempConfig, alertConfig } = useV2Configs();
+  // One stage selection for every view (WEB-12): seize → pin → in use → hold → parked →
+  // daily driver. Command, Journey and the Health hero all read this same answer. No seize
+  // until the seize config is known (seizeThresholdFrom(null) → null).
+  const stage = useStageBase(data, seizeThresholdFrom(alertConfig));
   const alerts = useMemo(
     () => deriveAlerts(data.items, data.staleAddrs, tempConfig),
     [data.items, data.staleAddrs, tempConfig],
   );
-  const [acked, setAcked] = useState<Set<string>>(new Set());
-  const ack = useCallback((id: string) => setAcked((p) => new Set(p).add(id)), []);
-  const unacked = alerts.filter((a) => !acked.has(a.id)).length;
+  // Acks live for the tab's lifetime (in memory). Each records the rank it was given at,
+  // so a worse reading re-arms it, and it is dropped once its condition clears (WEB-17).
+  const [acked, setAcked] = useState<AckMap>(() => new Map());
+  useEffect(() => {
+    setAcked((p) => pruneAcks(p, alerts, data.staleAddrs));
+  }, [alerts, data.staleAddrs]);
+  const ack = useCallback((a: V2Alert) => setAcked((p) => ackAlert(p, a)), []);
+  const unacked = unackedCount(alerts, acked);
 
   const content =
-    view === "command" ? <CommandView data={data} mobile={mobile} onOpen={setView} tempF={tempF} /> :
-    view === "health" ? <HealthView data={data} unit={settings.tempUnitPref} mobile={mobile} /> :
+    view === "command" ? <CommandView data={data} stage={stage} mobile={mobile} onOpen={setView} tempF={tempF} /> :
+    view === "health" ? <HealthView data={data} heroBase={stage.staged} unit={settings.tempUnitPref} mobile={mobile} /> :
     view === "journey" ? (
       <Suspense fallback={<ViewLoading />}>
-        <JourneyView data={data} theme={resolvedTheme} unit={settings.tempUnitPref} mobile={mobile} mapMetric={settings.mapMetricPref} />
+        <JourneyView data={data} base={stage.staged} theme={resolvedTheme} unit={settings.tempUnitPref} mobile={mobile} mapMetric={settings.mapMetricPref} />
       </Suspense>
     ) :
     view === "history" ? <HistoryView data={data} unit={settings.tempUnitPref} mobile={mobile} /> :

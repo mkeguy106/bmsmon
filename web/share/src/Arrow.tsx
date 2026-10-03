@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import type { LivePos } from "../../src/v2/model/live";
+import { arrowMessage, arrowState } from "./arrowState";
 import { arrowRotation, cardinal, fmtDistance, haversineMeters, initialBearingDeg } from "./geo";
 
 /** Direction-to-target panel. Tier 1 (all browsers): watch the guest's geolocation and
@@ -7,9 +8,12 @@ import { arrowRotation, cardinal, fmtDistance, haversineMeters, initialBearingDe
  *  Tier 2 (progressive): rotate a live arrow by device heading. iOS gates the compass
  *  behind DeviceOrientationEvent.requestPermission() (must be called from the tap);
  *  webkitCompassHeading is already degrees-from-north, absolute alpha is CCW so
- *  heading = 360 - alpha. No compass → arrow hidden, cardinal text stays. */
-export function ArrowPanel({ target, onGuest }: {
+ *  heading = 360 - alpha. No compass → arrow hidden, cardinal text stays.
+ *  [targetNote] ("last known · 10h ago") is shown whenever the chair fix isn't live, so a
+ *  guest knows they are walking to where the chair WAS. */
+export function ArrowPanel({ target, targetNote = null, onGuest }: {
   target: LivePos | null;
+  targetNote?: string | null;
   onGuest: (g: LivePos | null) => void;
 }) {
   const [on, setOn] = useState(false);
@@ -70,7 +74,8 @@ export function ArrowPanel({ target, onGuest }: {
     }
   }, []);
 
-  if (!on) {
+  const state = arrowState({ on, denied, hasGuest: pos != null, hasTarget: target != null });
+  if (state === "idle") {
     return (
       <div style={panel}>
         <button style={btn} onClick={start}>Point me there</button>
@@ -80,21 +85,10 @@ export function ArrowPanel({ target, onGuest }: {
       </div>
     );
   }
-  if (denied) {
+  if (state !== "ready" || !pos || !target) {
     return (
       <div style={panel}>
-        <span style={{ color: "var(--text-3)", fontSize: 12 }}>
-          Location permission denied — enable it in your browser to get directions.
-        </span>
-      </div>
-    );
-  }
-  if (!pos || !target) {
-    return (
-      <div style={panel}>
-        <span style={{ color: "var(--text-3)", fontSize: 12 }}>
-          {waiting ? "Locating… (waiting for GPS)" : "Locating…"}
-        </span>
+        <span style={{ color: "var(--text-3)", fontSize: 12 }}>{arrowMessage(state, waiting)}</span>
       </div>
     );
   }
@@ -109,6 +103,9 @@ export function ArrowPanel({ target, onGuest }: {
           transform: `rotate(${rot}deg)`, transition: "transform .2s" }}>↑</span>
       )}
       <span className="mono" style={{ fontSize: 14 }}>{fmtDistance(meters)} {cardinal(bearing)}</span>
+      {targetNote && (
+        <span className="mono" style={{ fontSize: 11, color: "var(--warn)" }}>{targetNote}</span>
+      )}
       <span style={{ fontSize: 11, color: "var(--text-4)" }}>
         {rot != null ? "the arrow points toward them" : "direction is from north"}
       </span>
