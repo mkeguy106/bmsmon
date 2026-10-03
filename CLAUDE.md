@@ -947,8 +947,8 @@ live?", in `model/Freshness.kt`. The engine stamps `BatteryStatus.lastFrameAtEla
 (`elapsedRealtime`, never persisted) and `frameIntervalMs` on every **parsed** frame; `freshness()`
 = LIVE while age ≤ poll interval + 10 s (two missed polls plus the round-trip of the poll that
 answers), STALE beyond that, and DISCONNECTED when unreachable or silent > 60 s (engine-side:
-≤ 60 s, plus up to one 10 s tick when no BLE event arrives). The restored seed has no stamp, so it is
-never LIVE: it renders as DISCONNECTED (no %) until the first frame. **Alert rule:** this session's
+≤ 60 s, plus up to one 10 s tick when no BLE event arrives). The restored seed has no stamp, so
+it is never LIVE: it renders as DISCONNECTED (no %) until the first frame. **Alert rule:** this session's
 readings drive alerts, the seize and stage activity (LIVE, or STALE with a known age — a STALE
 reading mostly *holds* an alert its own LIVE frame raised, though one ≤ 60 s old can raise a first
 notification or the seize once the 30 s charge latch expires, which is accepted as erring toward
@@ -978,9 +978,10 @@ which cancels the staged worker so its GATT closes; the engine keeps running. Ea
 row shows a **reconnect (link) icon**, and the All Batteries header toggles **Disconnect all ⇄
 Reconnect all**. "Disconnect all" is therefore distinct from *stopping monitoring* (the
 foreground-service Stop), which tears the engine down entirely. A frame or connect already in
-flight when a pack is disconnected is ignored by the engine (`onPoll`/`onReachable` check the
-disabled set inside their state update), so the pack can't flash back to connected — or drive an
-alert or the seize — while its worker tears down.
+flight when a pack is disconnected never touches the engine's fleet state (`onPoll`/`onReachable`
+check the disabled set inside their state update), so the pack can't flash back to connected — or
+drive an alert or the seize — while its worker tears down. (A frame that lands in that instant may
+still be logged and uploaded as an ordinary sample.)
 
 **Low-battery alerts (configurable ladder + critical tier).** `ALERT_THRESHOLDS`
 (BatteryViewModel.kt) is the full selectable 5% ladder **95%→5%**; `DEFAULT_THRESHOLDS`
