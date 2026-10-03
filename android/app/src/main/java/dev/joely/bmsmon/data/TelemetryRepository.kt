@@ -14,6 +14,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -234,7 +235,10 @@ class TelemetryRepository(private val db: BmsDatabase) {
         healthInputsFrom(
             bins = db.samples().ivMomentsBySocBin(address),
             cells = db.samples().cellStatsBySession(address),
-        ) { afterTs, afterId, skip -> db.samples().ivRowAfter(address, afterTs, afterId, skip) }
+        ) { afterTs, afterId, skip ->
+            ensureActive()   // up to ~1400 blocking steps per pack: stop as soon as the caller is cancelled
+            db.samples().ivRowAfter(address, afterTs, afterId, skip)
+        }
     }
 
     /** Telemetry rows for one pack since [sinceMs] (link rows excluded), oldest first — for tail learning. */
@@ -249,6 +253,7 @@ class TelemetryRepository(private val db: BmsDatabase) {
      *  whole-session load (a multi-day legacy session is hundreds of thousands of full rows). */
     suspend fun timeline(sessionId: Long): List<TimelineBucket> = withContext(Dispatchers.IO) {
         poolTimeline(db.samples().sessionSpan(sessionId), TIMELINE_PAGE) { afterId, limit ->
+            ensureActive()   // the pager is plain blocking code: leaving the screen must stop the paging
             db.samples().timelinePage(sessionId, afterId, limit)
         }
     }
