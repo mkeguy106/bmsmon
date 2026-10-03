@@ -1456,28 +1456,34 @@ stack is `~/qnap-nas-docker/bmsmon/docker-compose.yml`: `bmsmon-api`
 `${CONFDIR}/bmsmon/database`). Traefik splits routing: `/api/` → device-JWT auth (no Authentik);
 everything else → Authentik SSO.
 
-**Deploying a new server build.** Watchtower **does** pull `:latest` and recreate `bmsmon-api`
-unattended at 00:00 on the 1st of each month (`1.base` sets `WATCHTOWER_SCHEDULE=0 0 0 1 * *` with
-cleanup, and bmsmon carries no opt-out label yet); since 2026-10 CI moves `:latest` only after the
-test suites and an image boot-smoke pass, which bounds what that can ship. Nothing else pulls: the
-qnap-nas-docker deploy runner only fires on `docker-compose.yml`/`.env` changes, and `up -d` alone
-won't re-pull an unchanged tag. After the image build finishes, pull + recreate just the API
-container, then record the deploy (below):
+**Deploying a new server build — by tag, never by surprise.** CI moves `:latest` only after the test
+jobs and the image boot-smoke pass (see "Image build"), so `:latest` is always the newest *tested*
+image, and every `main` build that runs also stays pullable as `:<full sha>`. `bmsmon-api` and
+`bmsmon-db` are opted out of watchtower (`com.centurylinklabs.watchtower.enable: "false"`), so
+nothing recreates them unattended; the qnap-nas-docker deploy runner only fires on
+`docker-compose.yml`/`.env` changes, and `up -d` alone never re-pulls. Avoid 07:35–08:45 UTC: the
+nightly `pg_dump` runs then, and a booting API waits for it to finish. A normal deploy — once the
+`promote` job has succeeded — leaves `BMSMON_TAG` unset and pulls `:latest` (which also keeps the
+NAS's cached `:latest` current for any later `up -d`), recreates only the API (`--no-deps`), then
+records the deploy (below):
 
 ```bash
 ssh joely@ddnas02 'bash -lc "cd /share/bsv/docker-compose && \
   docker compose --env-file .env -f bmsmon/docker-compose.yml pull bmsmon-api && \
-  docker compose --env-file .env -f bmsmon/docker-compose.yml up -d bmsmon-api"'
+  docker compose --env-file .env -f bmsmon/docker-compose.yml up -d --no-deps bmsmon-api"'
 curl -fsS https://bmsmon.covert.life/api/v1/health   # expect {"status":"ok"}
 ```
 
-**Record every deploy as a git tag** — `deploy/<UTC timestamp>` on the commit that went live. The
-tags are the deploy history (`git tag -l 'deploy/*'`), and `prune-ghcr.sh` never deletes the images
-of the newest three deployed commits, so the running image and its rollback targets survive any
-number of later builds. Images built since 2026-10 carry `org.opencontainers.image.revision`, so read the sha off the
-running container instead of guessing what `:latest` was at pull time. Run it from the repo root; it
-is wrapped in `bash -c` so it works from fish too, and it stops with an error if the container has no
-such label (an image older than that) rather than tagging a guess:
+**Record every deploy as a git tag** — `deploy/YYYYMMDDTHHMMZ` (UTC, exactly that form; the prune
+ignores any other `deploy/*` name) on the commit that went live. The tags are the deploy history
+(`git tag -l 'deploy/*'`), and `prune-ghcr.sh` never deletes the images of the newest three deployed
+commits, so the running image and its rollback targets survive any number of later builds. Images
+built since 2026-10 carry `org.opencontainers.image.revision`, so read the sha off the running
+container instead of guessing what `:latest` was at pull time. The snippet records whatever
+`bmsmon-api` is running at that moment, not what you meant to deploy: run it only after the health
+check passes, because if the recreate did not take it tags the previous commit again. Run it from
+the repo root; it is wrapped in `bash -c` so it works from fish too, and it stops with an error if
+the container has no such label (an image older than that) rather than tagging a guess:
 
 ```bash
 bash -c '
