@@ -197,6 +197,13 @@ class MonitorEngine(
     private val lastGpsFixUploaded = HashMap<String, Long>()
     private var rangeJob: Job? = null
     @Volatile private var lastRangeLearnAt = 0L
+    // BLE-21: the monitoring session BLE callbacks belong to. start() mints one and captures it in
+    // the callbacks it hands to BLE; stop() clears it FIRST, so a callback already running on the
+    // control loop when the session ended (cancellation can't interrupt one) changes nothing.
+    // Written on the main thread (start/stop — the VM, or the service's Main.immediate restore);
+    // read on the control loop, also inside the state-update lambdas.
+    @Volatile private var currentSession = 0L
+    private var sessionSeq = 0L   // main thread only (start)
 
     // BLE-10: react to Bluetooth off→on. Without this, a BT toggle leaves every pack sitting out
     // its climbed backoff (up to 2 min each) before reconnecting — bad while backgrounded, where
@@ -262,6 +269,9 @@ class MonitorEngine(
      *  BmsRepository's launch barrier (T1.2 fix round 1; see BmsRepository.start). */
     fun start(roster: Roster, seed: Map<String, BatteryStatus>, loggingEnabled: Boolean, disabled: Set<String>) {
         if (_state.value.monitoring) return
+        // BLE-21: this session's id, captured by the callbacks handed to BLE below.
+        val session = ++sessionSeq
+        currentSession = session
         // Reset GPS intent/state/request together through shutdownGps() rather than folding a
         // bare `gpsActive = false` into the state copy below. A bare state reset only touches
         // MonitorState — if `gpsActive` were ever false while LocationSource was still
@@ -303,8 +313,8 @@ class MonitorEngine(
             disabled = disabledAddrs,
             // Every BLE event re-runs the decision step (BLE-14/UI-20) — never only stage-pack
             // ones, so fleet-wide alerts and the seize keep working when the stage is dark.
-            onPoll = { addr, raw, t -> onPoll(addr, raw, t); reevaluate() },
-            onReachable = { addr, reachable -> onReachable(addr, reachable); reevaluate() },
+            onPoll = { addr, raw, t -> onPoll(session, addr, raw, t); reevaluate() },
+            onReachable = { addr, reachable -> onReachable(session, addr, reachable); reevaluate() },
         )
         markStageAuthoritative()
         reevaluate()       // resolve + push the launch stage (releases BmsRepository's launch barrier)
@@ -412,6 +422,9 @@ class MonitorEngine(
      */
     fun stop() {
         if (!_state.value.monitoring && _state.value.fleet.isEmpty()) return
+        // BLE-21: end the session FIRST, so a BLE callback still in flight from it is refused from
+        // here on (onPoll/onReachable re-check inside their state update, too).
+        currentSession = 0L
         repository.finalizeOpenSessions()
         unregisterBtReceiver()
         stopPowerLoop()
@@ -844,7 +857,12 @@ class MonitorEngine(
     /** A user-disconnected pack ([setDisabled]); [disabledAddrs] is stored uppercased. */
     private fun isDisabled(addr: String) = addr.uppercase() in disabledAddrs
 
-    private fun onPoll(addr: String, raw: ByteArray, t: Telemetry?) {
+    private fun onPoll(session: Long, addr: String, raw: ByteArray, t: Telemetry?) {
+        // BLE-21: a frame from an ended session — stop() ran while this callback was already in
+        // flight on the control loop — changes nothing: no pack marked live under MONITORING OFF,
+        // nothing logged or uploaded, nothing carried into the next session. Re-checked inside the
+        // state update below, like the disabled check.
+        if (session != currentSession) return
         // UI-29: a frame already in flight when its pack was removed from the roster must not
         // re-add it to the fleet as a ghost (setRoster pruned it).
         if (roster.batteryAt(addr) == null) return
@@ -879,10 +897,15 @@ class MonitorEngine(
         // the window freshness() judges it by. Decode failures returned above, so they never stamp.
         val frameAt = elapsedNow()
         val cadence = if (addr.uppercase() in stageAddrs) profile.stagePollMs else profile.slowPollMs
+        // Whether the update below committed this frame (a CAS lambda may re-run; the last run decides).
+        var accepted = false
         _state.update { st ->
+            accepted = false
             // Read inside the CAS loop: if setDisabled's own update commits first, this retries,
             // sees the pack disabled, and leaves it unreachable.
             if (isDisabled(addr)) return@update st
+            if (session != currentSession || !st.monitoring) return@update st
+            accepted = true
             val fleet = st.fleet + (addr to (st.fleet[addr] ?: BatteryStatus()).copy(
                 telemetry = t, reachable = true, etaFullMin = etaFullMin, range = range,
                 lastFrameAtElapsedMs = frameAt, frameIntervalMs = cadence,
@@ -902,6 +925,9 @@ class MonitorEngine(
                 peakCurrentA = peakC,
             )
         }
+        // A frame the update refused (its pack disabled, or its session ended, meanwhile) isn't
+        // logged or uploaded either.
+        if (!accepted) return
         // lastDischargeAt just moved; re-derive whether the chair still counts as driving. The
         // reading and the gate verdict come from this ONE call, both computed under the same
         // lock — never two independent motionSource.current() calls, which could pair a fresh
@@ -938,13 +964,19 @@ class MonitorEngine(
         }
     }
 
-    private fun onReachable(addr: String, reachable: Boolean) {
+    private fun onReachable(session: Long, addr: String, reachable: Boolean) {
+        // BLE-21: see onPoll — a link event from an ended session changes nothing.
+        if (session != currentSession) return
         val was = _state.value.fleet[addr]?.reachable == true
         // The value actually committed: M1 — a user-disconnected pack is never marked reachable,
         // not even by a connect that completed just as the user disconnected it. Read inside the
         // CAS loop, like onPoll, so a racing setDisabled can't be overtaken.
         var up = reachable
+        var committed = false
         _state.update { st ->
+            committed = false
+            if (session != currentSession || !st.monitoring) return@update st
+            committed = true
             if (roster.batteryAt(addr) == null) {
                 // UI-29: a removed pack's final link-down must not keep it in the fleet. A frame
                 // in flight while setRoster pruned it can still have re-added it after the prune,
@@ -964,7 +996,7 @@ class MonitorEngine(
                 )
             }
         }
-        if (up != was) {
+        if (committed && up != was) {
             val ts = now()
             if (logging) repository.logLink(addr, up, ts)
             reporter?.reportLink(addr, roster.batteryAt(addr)?.alias, roster.groupOf(addr)?.id, up, ts)

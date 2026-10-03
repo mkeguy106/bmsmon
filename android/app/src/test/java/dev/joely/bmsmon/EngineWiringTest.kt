@@ -23,8 +23,30 @@ class EngineWiringTest {
     private val flat: String get() = src.replace(Regex("\\s+"), " ")
 
     @Test fun everyBleEventRunsTheDecisionStep() {
-        assertTrue(flat.contains("onPoll = { addr, raw, t -> onPoll(addr, raw, t); reevaluate() }"))
-        assertTrue(flat.contains("onReachable = { addr, reachable -> onReachable(addr, reachable); reevaluate() }"))
+        assertTrue(flat.contains("onPoll = { addr, raw, t -> onPoll(session, addr, raw, t); reevaluate() }"))
+        assertTrue(flat.contains("onReachable = { addr, reachable -> onReachable(session, addr, reachable); reevaluate() }"))
+    }
+
+    // BLE-21: a callback already running on the control loop when monitoring stopped (cancellation
+    // can't interrupt it) must not mark a pack live under MONITORING OFF, post anything, or leak into
+    // the next session.
+    @Test fun aCallbackFromAnEndedSessionChangesNothing() {
+        val stop = flat.substringAfter("fun stop() {").substringBefore("fun persistMonitoringOff(")
+        assertTrue("stop() ends the session before tearing BLE down",
+            stop.indexOf("currentSession = 0L") in 0 until stop.indexOf("ble.stop()"))
+        val start = flat.substringAfter("fun start(roster: Roster,").substringBefore("suspend fun restoreFromPersisted(")
+        assertTrue(start.contains("val session = ++sessionSeq"))
+        assertTrue("minted before BLE starts", start.indexOf("currentSession = session") in 0 until start.indexOf("ble.start("))
+        val bodies = mapOf(
+            "private fun onPoll(" to "private fun onReachable(",
+            "private fun onReachable(" to "private suspend fun learnTail(",
+        )
+        for ((from, to) in bodies) {
+            val body = flat.substringAfter(from).substringBefore(to)
+            assertTrue("$from returns early for an ended session", body.contains("if (session != currentSession) return"))
+            assertTrue("$from re-checks inside its state update",
+                body.contains("if (session != currentSession || !st.monitoring) return@update st"))
+        }
     }
 
     @Test fun noAlertOrStagePathIsGatedOnStageMembership() {
