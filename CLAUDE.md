@@ -1284,8 +1284,11 @@ Security model (`server/app/auth/api_key.py`), mirroring the share-token one:
   comparison to leak timing.
 - Unknown and revoked keys return the **same bare 401**, byte-identical, so a prober cannot
   tell "was valid, now revoked" from "never existed" (asserted in `test_api_widget.py`).
-- A per-IP rate limiter (`app.state.apikey_limiter`, 240/min — four widgets share one
-  desktop IP) throttles guessing *before* the database is touched.
+- A rate limiter (`app.state.apikey_limiter`, 240/min — four widgets share one desktop
+  IP) throttles guessing *before* the database is touched. It is per client IP when the
+  request carries the proxy secret: then the first `X-Forwarded-For` hop is trusted
+  (`test_proxy_limiter_keys.py`). The Traefik label that injects the secret on the
+  `bmsmon-api` router enables this; the enroll limiter works the same way.
 - **Read-only by construction.** No route here mutates, and a key presented to `/ingest`
   still gets 401 — there is a test for exactly that.
 - **No GPS, no device identity.** `lat`/`lon`/`gps_accuracy_m`/`device_id` are in the fleet
