@@ -56,6 +56,7 @@ import dev.joely.bmsmon.model.addresses
 import dev.joely.bmsmon.model.allTargets
 import dev.joely.bmsmon.model.assignGroup
 import dev.joely.bmsmon.model.batteryAt
+import dev.joely.bmsmon.model.decisionView
 import dev.joely.bmsmon.model.drivesAlerts
 import dev.joely.bmsmon.model.evalStageAlert
 import dev.joely.bmsmon.model.freshness
@@ -265,11 +266,17 @@ data class UiState(
         }
     }
 
-    /** True when any pack on the stage is currently dumping regen current. */
+    /** True when any pack on the stage is currently dumping regen current. Regen is a momentary
+     *  event, so only a LIVE pack counts — the ring of a STALE pack is muted ([stageItems]) and the
+     *  header must agree with it. */
     val stageRegen: Boolean
-        get() = when (val t = stageTarget) {
-            is StageTarget.Base -> roster.groupById(t.groupId)?.targets?.any { it.address in regenAddrs } ?: false
-            is StageTarget.Single -> t.address in regenAddrs
+        get() {
+            fun regenerating(addr: String) =
+                addr in regenAddrs && freshness(fleet[addr], nowElapsedMs) is Freshness.Live
+            return when (val t = stageTarget) {
+                is StageTarget.Base -> roster.groupById(t.groupId)?.targets?.any { regenerating(it.address) } ?: false
+                is StageTarget.Single -> regenerating(t.address)
+            }
         }
 
     val stageLabel: String
@@ -278,9 +285,12 @@ data class UiState(
             is StageTarget.Single -> roster.batteryAt(t.address)?.alias ?: t.address
         }
 
+    /** The header's activity word, decided on the same view the engine uses ([decisionView]): LIVE
+     *  plus in-session STALE readings, never the restored seed or a pack silent past STALE_MAX. */
     val stageActivity: GroupActivity
-        get() = (stageTarget as? StageTarget.Base)?.let { roster.groupById(it.groupId)?.let { g -> groupActivity(g, fleet) } }
-            ?: GroupActivity.Unknown
+        get() = (stageTarget as? StageTarget.Base)?.let {
+            roster.groupById(it.groupId)?.let { g -> groupActivity(g, decisionView(fleet, nowElapsedMs)) }
+        } ?: GroupActivity.Unknown
 
     /**
      * Low-battery alert for the stage, driven off its alert-driving packs' real telemetry — this

@@ -68,8 +68,11 @@ import dev.joely.bmsmon.UiState
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.BmsTarget
+import dev.joely.bmsmon.model.Freshness
 import dev.joely.bmsmon.model.Roster
 import dev.joely.bmsmon.model.Telemetry
+import dev.joely.bmsmon.model.freshness
+import dev.joely.bmsmon.model.freshnessLabel
 import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.ui.ChargingBolt
 import dev.joely.bmsmon.ui.FleetActions
@@ -200,6 +203,7 @@ fun AllBatteriesScreen(
                     isDailyDriver = row.group?.id == state.dailyDriverId,
                     disabled = row.target.address in state.disabled,
                     monitoring = state.monitoring,
+                    fresh = freshness(row.status, state.nowElapsedMs),
                     onOpenDetail = { fleet.onOpenDetail(row.target.address) },
                     onPin = { if (row.group != null) fleet.onPinBase(row.group.id) else fleet.onPinSingle(row.target.address) },
                     onDisconnect = { fleet.onDisconnect(row.target.address) },
@@ -251,6 +255,7 @@ private fun SwipeableBatteryRow(
     isDailyDriver: Boolean,
     disabled: Boolean,
     monitoring: Boolean,
+    fresh: Freshness,
     onOpenDetail: () -> Unit,
     onPin: () -> Unit,
     onDisconnect: () -> Unit,
@@ -267,7 +272,7 @@ private fun SwipeableBatteryRow(
     SwipeLeftToDelete(onTriggered = { confirmDelete = true }) {
         BatteryRow(
             row = row, groups = groups, isStage = isStage, isDailyDriver = isDailyDriver,
-            disabled = disabled, monitoring = monitoring,
+            disabled = disabled, monitoring = monitoring, fresh = fresh,
             onOpenDetail = onOpenDetail, onPin = onPin,
             onDisconnect = onDisconnect, onReconnect = onReconnect,
             onRemoveRequest = { confirmDelete = true },
@@ -356,6 +361,7 @@ private fun BatteryRow(
     isDailyDriver: Boolean,
     disabled: Boolean,
     monitoring: Boolean,
+    fresh: Freshness,
     onOpenDetail: () -> Unit,
     onPin: () -> Unit,
     onDisconnect: () -> Unit,
@@ -368,8 +374,11 @@ private fun BatteryRow(
 ) {
     val c = Bm.colors
     val t = row.tele
-    val reachable = monitoring && row.reachable && !disabled
-    val dim = disabled || (monitoring && !row.reachable)
+    // UI-23: one freshness definition everywhere. Anything not LIVE — out of range, silent, a
+    // carried seed, or monitoring OFF — renders dimmed with its age instead of a live-looking state.
+    val live = fresh is Freshness.Live
+    val reachable = monitoring && live && !disabled
+    val dim = disabled || !live
     var menuOpen by remember { mutableStateOf(false) }
     var renameOpen by remember { mutableStateOf(false) }
     var groupPickOpen by remember { mutableStateOf(false) }
@@ -378,11 +387,10 @@ private fun BatteryRow(
 
     val (stateLabel, stateColor) = when {
         disabled -> "Disconnected" to c.text3
-        monitoring && !row.reachable -> "Out of range" to c.text3
+        !live -> (freshnessLabel(fresh, monitoring) ?: "—") to c.text3
         t?.state == BatteryState.Discharging -> "Discharging" to Bm.power
         t?.state == BatteryState.Charging -> "Charging" to Bm.accent
         t?.state == BatteryState.Idle -> "Idle" to c.text2
-        t == null && monitoring -> "Connecting…" to c.text3
         else -> "—" to c.text3
     }
     val borderColor = if (isStage) Bm.accent else c.border

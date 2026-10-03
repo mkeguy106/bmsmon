@@ -24,6 +24,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -31,7 +32,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.joely.bmsmon.UiState
 import dev.joely.bmsmon.data.db.SessionEntity
+import dev.joely.bmsmon.model.Freshness
 import dev.joely.bmsmon.model.batteryAt
+import dev.joely.bmsmon.model.freshness
+import dev.joely.bmsmon.model.freshnessLabel
 import dev.joely.bmsmon.model.groupOf
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
@@ -43,6 +47,9 @@ fun BatteryDetailScreen(state: UiState, sessions: List<SessionEntity>, onBack: (
     val address = state.detailAddress
     val battery = address?.let { state.roster.batteryAt(it) }
     val tele = address?.let { state.fleet[it]?.telemetry }
+    // UI-23: Detail used to show the last reading with no reachability or age at all.
+    val fresh = freshness(address?.let { state.fleet[it] }, state.nowElapsedMs)
+    val live = fresh is Freshness.Live
 
     Column(Modifier.fillMaxSize().background(c.bg)) {
         Row(
@@ -96,47 +103,57 @@ fun BatteryDetailScreen(state: UiState, sessions: List<SessionEntity>, onBack: (
                 val tUnit = if (state.tempFahrenheit) "°F" else "°C"
                 fun conv(v: Float) = if (state.tempFahrenheit) v * 9f / 5f + 32f else v
 
-                // One condensed "Telemetry" card instead of three (SOC / Power / Temperature).
-                Section("Telemetry") {
-                    KeyVal("SOC", "${tele.soc.roundToInt()} %", mono = true)
-                    KeyVal("SOH", "${tele.soh} %", mono = true)
-                    KeyVal("Cycles", tele.cycles.toString(), mono = true)
-                    KeyVal("Capacity", "%.1f / %.1f Ah".format(tele.capacityAh, tele.fullChargeAh), mono = true)
-                    KeyVal("Voltage", "%.2f V".format(tele.voltage), mono = true)
-                    KeyVal("Current", "%.2f A".format(tele.current), mono = true)
-                    KeyVal("Power", "%.1f W".format(tele.powerW), mono = true)
-                    KeyVal("State", tele.state.name)
-                    KeyVal("Cell temp", "%.1f %s".format(conv(tele.temp), tUnit), mono = true)
-                    KeyVal("MOSFET temp", "%.1f %s".format(conv(tele.mosfetTemp.toFloat()), tUnit), mono = true)
-                }
+                // UI-23: anything not LIVE — out of range, silent, a carried seed, monitoring off —
+                // is dimmed and its title says how old it is, instead of reading as live.
+                Column(
+                    Modifier.alpha(if (live) 1f else 0.5f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    // One condensed "Telemetry" card instead of three (SOC / Power / Temperature).
+                    Section(
+                        if (live) "Telemetry · live"
+                        else "Telemetry · ${freshnessLabel(fresh, state.monitoring) ?: "live"}",
+                    ) {
+                        KeyVal("SOC", "${tele.soc.roundToInt()} %", mono = true)
+                        KeyVal("SOH", "${tele.soh} %", mono = true)
+                        KeyVal("Cycles", tele.cycles.toString(), mono = true)
+                        KeyVal("Capacity", "%.1f / %.1f Ah".format(tele.capacityAh, tele.fullChargeAh), mono = true)
+                        KeyVal("Voltage", "%.2f V".format(tele.voltage), mono = true)
+                        KeyVal("Current", "%.2f A".format(tele.current), mono = true)
+                        KeyVal("Power", "%.1f W".format(tele.powerW), mono = true)
+                        KeyVal("State", tele.state.name)
+                        KeyVal("Cell temp", "%.1f %s".format(conv(tele.temp), tUnit), mono = true)
+                        KeyVal("MOSFET temp", "%.1f %s".format(conv(tele.mosfetTemp.toFloat()), tUnit), mono = true)
+                    }
 
-                Section("Cells (${tele.cells.size})") {
-                    if (tele.cells.isEmpty()) {
-                        Text("No per-cell data in the last reading.", color = c.text3, fontSize = 13.sp)
-                    } else {
-                        val mn = tele.cells.min(); val mx = tele.cells.max()
-                        KeyVal("Min / Max", "%.3f / %.3f V".format(mn, mx), mono = true)
-                        KeyVal("Delta", "%.0f mV".format((mx - mn) * 1000f), mono = true)
-                        FlowRow(
-                            Modifier.fillMaxWidth().padding(top = 2.dp),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            tele.cells.forEachIndexed { i, v ->
-                                val color = when {
-                                    mn < mx && v == mx -> Bm.accent
-                                    mn < mx && v == mn -> Bm.power
-                                    else -> c.text
+                    Section("Cells (${tele.cells.size})") {
+                        if (tele.cells.isEmpty()) {
+                            Text("No per-cell data in the last reading.", color = c.text3, fontSize = 13.sp)
+                        } else {
+                            val mn = tele.cells.min(); val mx = tele.cells.max()
+                            KeyVal("Min / Max", "%.3f / %.3f V".format(mn, mx), mono = true)
+                            KeyVal("Delta", "%.0f mV".format((mx - mn) * 1000f), mono = true)
+                            FlowRow(
+                                Modifier.fillMaxWidth().padding(top = 2.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                tele.cells.forEachIndexed { i, v ->
+                                    val color = when {
+                                        mn < mx && v == mx -> Bm.accent
+                                        mn < mx && v == mn -> Bm.power
+                                        else -> c.text
+                                    }
+                                    CellChip(i + 1, v, color)
                                 }
-                                CellChip(i + 1, v, color)
                             }
                         }
                     }
-                }
 
-                if (tele.protections.isNotEmpty()) {
-                    Section("Active protections") {
-                        tele.protections.forEach { p -> Text("• $p", color = Bm.power, fontSize = 13.sp) }
+                    if (tele.protections.isNotEmpty()) {
+                        Section("Active protections") {
+                            tele.protections.forEach { p -> Text("• $p", color = Bm.power, fontSize = 13.sp) }
+                        }
                     }
                 }
             }

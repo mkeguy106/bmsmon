@@ -37,6 +37,7 @@ import dev.joely.bmsmon.model.TempRank
 import dev.joely.bmsmon.model.TempThresholds
 import dev.joely.bmsmon.model.TempUnit
 import dev.joely.bmsmon.model.cToF
+import dev.joely.bmsmon.model.formatAge
 import dev.joely.bmsmon.model.formatEtaMinutes
 import dev.joely.bmsmon.model.formatTemp
 import dev.joely.bmsmon.model.stageRangeLine
@@ -80,6 +81,15 @@ fun StageScreen(
         }
         return
     }
+    if (items.isEmpty()) {
+        // UI-29 belt-and-braces: the engine falls back to the daily driver whenever a target has
+        // no members, so this shows at most for the instant a roster edit takes to propagate —
+        // never a silent blank stage.
+        Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("No packs on this stage", color = Bm.colors.text3, fontSize = 14.sp)
+        }
+        return
+    }
     Column(modifier.fillMaxSize()) {
         if (items.size > 2) {
             Row(Modifier.weight(1f).fillMaxWidth().horizontalScroll(rememberScrollState()),
@@ -98,7 +108,7 @@ fun StageScreen(
                 }
             }
         }
-        stageRangeLine(items)?.let { line ->
+        stageRangeLine(items)?.takeIf { items.none { it.staleAgeMs != null } }?.let { line ->
             Text(
                 line,
                 color = Bm.colors.text2,
@@ -152,39 +162,56 @@ private fun BatteryBlock(
             letterSpacing = 2.2.sp,
             modifier = Modifier.padding(top = 10.dp),
         )
-        StatGrid(b, tempInF, item.connected, tempCritical, Modifier.padding(top = 12.dp))
+        StatGrid(
+            b = b, tempInF = tempInF, connected = item.connected, muted = item.staleAgeMs != null,
+            tempCritical = tempCritical, modifier = Modifier.padding(top = 12.dp),
+        )
     }
 }
 
 @Composable
 private fun StageRingBox(item: StageItem, c: dev.joely.bmsmon.ui.theme.BmColors) {
     val b = item.telemetry
+    // STALE (UI-16): this session's last reading, but older than the pack's live window. Keep the
+    // number — a real low reading must never vanish — but mute it and say how old it is.
+    val stale = item.connected && item.staleAgeMs != null
+    val live = item.connected && !stale
     Box(Modifier.size(170.dp), contentAlignment = Alignment.Center) {
         DualRingGauge(
-                // When disconnected we have no trustworthy SOC/power — draw an empty, dimmed ring
-                // rather than a real-looking 0% that would imply a flat battery.
-                soc = if (item.connected) b.soc else 0f,
-                powerW = if (item.connected) b.powerW else 0f,
-                accent = if (item.connected) Bm.accent else c.text3,
-                power = if (item.connected) Bm.power else c.text3,
-                segEmpty = c.segEmpty,
-                innerTrack = c.innerTrack,
-                modifier = Modifier.fillMaxSize(),
-                regen = item.connected && item.regen,
-            )
-            // Charging bolt pulses behind the readout, peaking bolder at the top of each beat.
-            if (item.connected && b.state == BatteryState.Charging) {
-                ChargingBoltIcon()
-            }
-            if (item.connected) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            // When disconnected we have no trustworthy SOC/power — draw an empty, dimmed ring rather
+            // than a real-looking 0% that would imply a flat battery. Stale keeps the SOC, muted.
+            soc = if (item.connected) b.soc else 0f,
+            powerW = if (live) b.powerW else 0f,
+            accent = if (live) Bm.accent else c.text3,
+            power = if (live) Bm.power else c.text3,
+            segEmpty = c.segEmpty,
+            innerTrack = c.innerTrack,
+            modifier = Modifier.fillMaxSize(),
+            regen = live && item.regen,
+        )
+        // Charging bolt pulses behind the readout, peaking bolder at the top of each beat.
+        if (live && b.state == BatteryState.Charging) {
+            ChargingBoltIcon()
+        }
+        if (item.connected) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    "${b.soc.roundToInt()}%",
+                    color = if (live) Bm.accent else c.text3,
+                    fontFamily = MonoFont,
+                    fontSize = 40.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                val age = item.staleAgeMs
+                if (stale && age != null) {
                     Text(
-                        "${b.soc.roundToInt()}%",
-                        color = Bm.accent,
-                        fontFamily = MonoFont,
-                        fontSize = 40.sp,
+                        "UPDATED ${formatAge(age)} AGO",
+                        color = c.text3,
+                        fontSize = 10.sp,
                         fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 1.sp,
                     )
+                } else {
                     Text(
                         if (item.regen) "↻ +${b.powerW.roundToInt()}W" else "${b.powerW.roundToInt()}W",
                         color = if (item.regen) RegenGreen else c.text2,
@@ -201,11 +228,12 @@ private fun StageRingBox(item: StageItem, c: dev.joely.bmsmon.ui.theme.BmColors)
                         )
                     }
                 }
-            } else {
-                DisconnectedReadout()
             }
+        } else {
+            DisconnectedReadout()
         }
     }
+}
 
 /** Center readout for a stage pack that isn't reachable: a dash and a DISCONNECTED tag, no %. */
 @Composable
@@ -253,6 +281,7 @@ private fun StatGrid(
     b: Telemetry,
     tempInF: Boolean,
     connected: Boolean,
+    muted: Boolean,
     tempCritical: Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -270,18 +299,19 @@ private fun StatGrid(
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         for (row in stats.chunked(3)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                for (s in row) StatCell(s, connected, Modifier.weight(1f))
+                for (s in row) StatCell(s, connected, muted, Modifier.weight(1f))
             }
         }
     }
 }
 
 @Composable
-private fun StatCell(s: Stat, connected: Boolean, modifier: Modifier = Modifier) {
+private fun StatCell(s: Stat, connected: Boolean, muted: Boolean, modifier: Modifier = Modifier) {
     val c = Bm.colors
     val valueColor = when {
         !connected -> c.text3
-        s.critical -> c.critical
+        s.critical -> c.critical   // a critical temperature stays loud even on a stale reading
+        muted -> c.text3
         else -> Bm.accent
     }
     Column(

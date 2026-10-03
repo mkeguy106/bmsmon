@@ -4,6 +4,7 @@ import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.CHARGE_SUPPRESS_HOLD_MS
 import dev.joely.bmsmon.model.DEFAULT_ROSTER
+import dev.joely.bmsmon.model.GroupActivity
 import dev.joely.bmsmon.model.STAGE_POLL_MS
 import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.Telemetry
@@ -64,6 +65,41 @@ class StageFreshnessTest {
         val s = state(stale(12f, 61_000L), live(80f))
         assertFalse(s.stageItems()[0].connected)
         assertNull(s.stageAlert().activeThreshold)
+    }
+
+    // --- the header (REGEN / DISCHARGING / CHARGING / IDLE) decides on the same view the engine does ---
+
+    @Test fun seedOnlyStageReadsUnknownActivityNotDischarging() {
+        // The restored seed is reachable=true with a Discharging reading; it must not light the header.
+        assertEquals(GroupActivity.Unknown, state(seed(60f), seed(61f)).stageActivity)
+    }
+
+    @Test fun stagePacksSilentPastTheBackstopReadUnknownActivity() {
+        assertEquals(GroupActivity.Unknown, state(stale(60f, 61_000L), stale(61f, 90_000L)).stageActivity)
+    }
+
+    @Test fun liveAndInSessionStalePacksStillDriveTheActivityHeader() {
+        assertEquals(GroupActivity.Discharging, state(live(60f), live(61f)).stageActivity)
+        // STALE with a known age is this session's reading: it holds the header, like it holds an alert.
+        assertEquals(GroupActivity.Discharging, state(stale(60f, 15_000L), stale(61f, 15_000L)).stageActivity)
+    }
+
+    @Test fun stalePackInRegenAddrsDoesNotLightTheRegenHeader() {
+        // Regen is a momentary event; the ring is already muted on a STALE pack, so the header agrees.
+        val s = state(stale(60f, 15_000L), live(61f, BatteryState.Idle)).copy(regenAddrs = setOf(stage[0]))
+        assertFalse(s.stageRegen)
+    }
+
+    @Test fun livePackInRegenAddrsLightsTheRegenHeader() {
+        val s = state(live(60f), live(61f)).copy(regenAddrs = setOf(stage[0]))
+        assertTrue(s.stageRegen)
+        // A STALE partner doesn't cancel a LIVE regenerating pack.
+        val mixed = state(live(60f), stale(61f, 15_000L)).copy(regenAddrs = setOf(stage[0]))
+        assertTrue(mixed.stageRegen)
+    }
+
+    @Test fun seedPackInRegenAddrsDoesNotLightTheRegenHeader() {
+        assertFalse(state(seed(60f), seed(61f)).copy(regenAddrs = setOf(stage[0])).stageRegen)
     }
 
     @Test fun monitoringOffEverythingIsDisconnected() {
