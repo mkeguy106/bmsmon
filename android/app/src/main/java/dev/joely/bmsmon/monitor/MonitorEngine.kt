@@ -479,6 +479,8 @@ class MonitorEngine(
         reevaluate()   // the stage's BLE address set excludes disabled packs
     }
     fun kickAll() = ble.kickAll()
+    /** App resume (BLE-16): a rate-limited [kickAll]; see BmsRepository.kickOnResume. */
+    fun kickOnResume() = ble.kickOnResume()
 
     /** Mirror the alert settings from the ViewModel; re-evaluate so changes take effect at once. */
     fun setAlertConfig(cfg: AlertConfig) {

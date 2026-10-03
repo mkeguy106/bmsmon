@@ -18,8 +18,6 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -56,8 +54,11 @@ class BmsRepository(
     private val now: () -> Long = { SystemClock.elapsedRealtime() },
 ) {
 
-    // Cap on simultaneous *connection attempts* (the LE initiator can't pursue many).
-    private val gate = Semaphore(2)
+    // Cap on simultaneous *connection attempts* (the LE initiator can't pursue many); one permit is
+    // kept for stage packs (BLE-16, ConnectGate).
+    private val gate = ConnectGate(total = 2)
+    // Monotonic time of the last app-resume kick (BLE-16). Written on the main thread (onResume).
+    @Volatile private var lastResumeKickAt: Long? = null
 
     @Volatile private var allTargets: List<BmsTarget> = emptyList()
     @Volatile private var stageAddrs: Set<String> = emptySet()
@@ -168,10 +169,21 @@ class BmsRepository(
         wake()
     }
 
-    /** Reset backoff and retry everything immediately (e.g. app returned to foreground). */
+    /** Reset backoff and retry everything immediately (a user Reconnect, Bluetooth back on). An app
+     *  resume goes through the rate-limited [kickOnResume] instead. */
     fun kickAll() {
         resultChannel.trySend(LoopEvent.Kick)
         wake()
+    }
+
+    /** App returned to the foreground: [kickAll], but at most once per [RESUME_KICK_MIN_INTERVAL_MS]
+     *  (BLE-16) — every screen glance used to reset every backoff. */
+    fun kickOnResume() {
+        val t = now()
+        if (!resumeKickDue(lastResumeKickAt, t)) return
+        lastResumeKickAt = t
+        Log.d(TAG, "resume kick: retrying every pack now")
+        kickAll()
     }
 
     fun stop() {
@@ -321,7 +333,8 @@ class BmsRepository(
                         val session = BleSession(context, addr, profile, highPriority = highPriority)
                         var handed = false
                         try {
-                            val ok = gate.withPermit { session.connect(profile.connectTimeoutMs) }
+                            // BLE-16: a background attempt may hold at most one of the two permits.
+                            val ok = gate.withPermit(stage = highPriority) { session.connect(profile.connectTimeoutMs) }
                             if (ok) {
                                 handed = ch.trySend(LoopEvent.ConnectSuccess(addr, attempt, session)).isSuccess
                             } else {

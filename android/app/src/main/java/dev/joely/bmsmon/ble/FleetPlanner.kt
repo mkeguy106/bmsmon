@@ -220,3 +220,16 @@ fun classifyWriteStatus(status: Int): WriteResult = when (status) {
 /** The pre-33 characteristic write returns only a Boolean, which can't tell busy from gone: a miss. */
 fun classifyLegacyWrite(accepted: Boolean): WriteResult =
     if (accepted) WriteResult.WRITTEN else WriteResult.BUSY
+
+/** Least time between two app-resume kicks (BLE-16) — see [resumeKickDue]. */
+const val RESUME_KICK_MIN_INTERVAL_MS = 5 * 60_000L
+
+/**
+ * Whether an app resume may reset every backoff now (BLE-16). The kick used to run on every
+ * onResume — every screen glance on an unplugged phone — so absent spares never climbed their
+ * backoff ladder and kept the connect gate busy. [lastAt] is the previous resume kick on the same
+ * monotonic clock as [now] (null = none yet). A user Reconnect and Bluetooth coming back on still
+ * kick at once ([BmsRepository.kickAll]).
+ */
+fun resumeKickDue(lastAt: Long?, now: Long, minIntervalMs: Long = RESUME_KICK_MIN_INTERVAL_MS): Boolean =
+    lastAt == null || now - lastAt >= minIntervalMs

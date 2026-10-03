@@ -1028,7 +1028,8 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         foreground = true
         startFreshnessTicker()
         updateSensor()
-        if (_state.value.monitoring) engine.kickAll()
+        // BLE-16: rate-limited (a user Reconnect still kicks at once through kickAll).
+        if (_state.value.monitoring) engine.kickOnResume()
     }
 
     private var lastTeleSaveAt = 0L

@@ -82,4 +82,25 @@ class AttemptWiringTest {
         assertFalse(src.contains("private var onReachable"))
         assertTrue(src.contains("controlLoop(childScope, ch, wake, onPoll, onReachable)"))
     }
+
+    // BLE-16: a background attempt can never take the permit a stage pack needs.
+    @Test fun connectAttemptsGoThroughTheStageReservingGate() {
+        assertTrue(src.contains("private val gate = ConnectGate(total = 2)"))
+        val connect = src.substringAfter("// 4. Kick off").substringBefore("// 5. Re-assert")
+        assertTrue(connect.contains("gate.withPermit(stage = highPriority)"))
+    }
+
+    // BLE-16: only the app resume is rate-limited; a user Reconnect and Bluetooth-on kick at once.
+    @Test fun onlyTheAppResumeIsRateLimited() {
+        fun read(path: String) = listOf("src/main/java", "app/src/main/java")
+            .map { File(it, path) }.first { it.isFile }.readText().replace(Regex("\\s+"), " ")
+        val vm = read("dev/joely/bmsmon/BatteryViewModel.kt")
+        val resume = vm.substringAfter("fun onAppForeground() {").substringBefore("}")
+        assertTrue(resume.contains("engine.kickOnResume()"))
+        assertFalse(resume.contains("engine.kickAll()"))
+        assertTrue("a user Reconnect still kicks at once", vm.contains("persistDisabled() engine.kickAll()"))
+        val engine = read("dev/joely/bmsmon/monitor/MonitorEngine.kt")
+        assertTrue(engine.contains("if (state == BluetoothAdapter.STATE_ON) ble.kickAll()"))
+        assertTrue(engine.contains("fun kickOnResume() = ble.kickOnResume()"))
+    }
 }

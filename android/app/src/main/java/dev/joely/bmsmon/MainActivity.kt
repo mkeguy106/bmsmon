@@ -22,7 +22,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Coming back to the app => immediately retry out-of-range batteries.
+        // Coming back to the app => retry out-of-range batteries (at most once per 5 min, BLE-16).
         vm.onAppForeground()
     }
 
