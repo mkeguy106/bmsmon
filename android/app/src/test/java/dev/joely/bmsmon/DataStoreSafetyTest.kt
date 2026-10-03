@@ -96,9 +96,9 @@ class DataStoreSafetyTest {
         }
     }
 
-    // Review Focus 5: the reporter's snapshot is a process-lifetime collector. Emitting defaults on
-    // an I/O error would COMPLETE the flow and freeze "cloud off" until the next process start; it
-    // must re-read and keep going instead.
+    // The reporter's snapshot is a process-lifetime collector. Emitting defaults on an I/O error
+    // would COMPLETE the flow and freeze "cloud off" until the next process start; it must re-read
+    // and keep going instead.
     @Test fun longLivedCollectorRetriesIoErrorsAndKeepsCollecting() {
         runBlocking {
             var attempts = 0

@@ -61,9 +61,9 @@ class RollupEquivalenceTest {
         assertEquals(referenceRollup("A", 9, s), computeRollup("A", 9, s))
     }
 
-    // Review Focus 2: production feeds id order; if the wall clock stepped back mid-session, id
-    // order is not time order. The span must still be min/max ts, and the negative interval must
-    // add no energy (the reference's coerceAtLeast(0), applied pairwise in feed order).
+    // Production feeds id order; if the wall clock stepped back mid-session, id order is not time
+    // order. The span must still be min/max ts, and the negative interval must add no energy (the
+    // reference's coerceAtLeast(0), applied pairwise in feed order).
     @Test fun clockStepBackUsesMinMaxSpanAndClampsNegativeInterval() {
         fun row(id: Long, ts: Long) = RollupRow(
             id = id, tsMs = ts, soc = 80f, currentA = -10f, powerW = 130f, voltageV = 13f,

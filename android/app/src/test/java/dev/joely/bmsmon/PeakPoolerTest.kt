@@ -16,8 +16,8 @@ class PeakPoolerTest {
         }
     }
 
-    // Review Focus 2: the session may still be OPEN (rows land after the span query, past endMs),
-    // or a stepped-back clock puts a row before startMs. Both clamp into the edge buckets.
+    // The session may still be OPEN (rows land after the span query, past endMs), or a stepped-back
+    // clock puts a row before startMs. Both clamp into the edge buckets.
     @Test fun rowsOutsideTheSpanClampIntoTheEdgeBuckets() {
         val pool = PeakPooler(startMs = 1_000, endMs = 2_000, rowCount = 10, buckets = 4)
         pool.add(tsMs = 5_000, isLink = false, currentA = -20f, powerW = 260f, voltageV = 13.0f, soc = 50f)

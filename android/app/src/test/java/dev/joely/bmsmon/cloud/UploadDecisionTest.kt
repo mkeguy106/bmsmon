@@ -42,8 +42,8 @@ class UploadDecisionTest {
         )
     }
 
-    // Review Focus 1: a flapping deploy interleaves edge errors between app rejects. Transient and
-    // AuthFailed prove nothing about whether the server would accept the rows — only a 2xx re-arms.
+    // A flapping deploy interleaves edge errors between app rejects. Transient and AuthFailed prove
+    // nothing about whether the server would accept the rows — only a 2xx re-arms.
     @Test fun transientAndAuthInBetweenDoNotCloseTheBreaker() {
         val s = steps(
             listOf(

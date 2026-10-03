@@ -40,7 +40,7 @@ class RollupSqlTest {
         }
     }
 
-    // Review Focus 4: a stub that only ever got link events folds nothing → the sweep deletes it.
+    // A stub that only ever got link events folds nothing → the sweep deletes it.
     @Test fun linkOnlyStubStreamsNothingSoTheSweepDeletesIt() {
         SqlTestDb().use { db ->
             db.insert(linkSample("A", ts = 1_000, sessionId = 3, event = "Connected"))

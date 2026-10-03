@@ -63,7 +63,7 @@ class PostResultTest {
     }
 
     @Test fun redirectsAreTransient() {
-        // The upload client never follows redirects (Task 2), so a 3xx reaches the classifier.
+        // The upload client never follows redirects (uploadHttpClient), so a 3xx reaches the classifier.
         for (code in listOf(301, 302, 303, 307, 308)) for (m in both) {
             assertEquals("code $code", PostResult.Transient, classifyPost(code, m))
         }

@@ -85,7 +85,8 @@ class HealthEquivalenceTest {
         val got = buildPackHealth("A", "2012 · A", sessions, healthInputsOf(pack))
         assertEquals(ref.sessions.map { it.copy(cellDeltaMv = null) }, got.sessions.map { it.copy(cellDeltaMv = null) })
         for ((r, g) in ref.sessions.zip(got.sessions)) {
-            if (r.cellDeltaMv == null) assertNull(g.cellDeltaMv) else assertEquals(r.cellDeltaMv!!, g.cellDeltaMv!!, 0.1001f)
+            val expected = r.cellDeltaMv
+            if (expected == null) assertNull(g.cellDeltaMv) else assertEquals(expected, g.cellDeltaMv!!, 0.1001f)
         }
         assertEquals(ref.copy(sessions = emptyList(), cell = null, resistance = null, scatter = null),
             got.copy(sessions = emptyList(), cell = null, resistance = null, scatter = null))
@@ -93,8 +94,8 @@ class HealthEquivalenceTest {
         assertEquals(ref.scatter!!.pts, got.scatter!!.pts)
     }
 
-    // Review Focus 4: a pack with sessions but no usable I/V rows (a spare that only logged link
-    // events) must build — every derived section null, nothing thrown.
+    // A pack with sessions but no usable I/V rows (a spare that only logged link events) must still
+    // build, with every derived section null and nothing thrown.
     @Test fun packWithNoUsableRowsBuildsEmptyHealth() {
         val linkOnly = listOf(linkSample("A", 1_000, 1, "Connected"), linkSample("A", 2_000, 1, "Disconnected"))
         val h = buildPackHealth("A", "2016 · A", emptyList(), healthInputsOf(linkOnly))
@@ -104,7 +105,7 @@ class HealthEquivalenceTest {
         assertEquals(0, h.sessionCount)
     }
 
-    // Review Focus 4: NULL-SOC rows (legacy CSV import) feed the scatter's global fit but no bin.
+    // NULL-SOC rows (legacy CSV import) feed the scatter's global fit but no bin.
     @Test fun nullSocRowsJoinTheGlobalFitButNoBin() {
         val rows = (0..20).map { k -> sample(soc = null, i = -k.toFloat(), v = 13.3f - k * 0.006f) }
         assertEquals(listOf<Int?>(null), ivBinMomentsOf(rows).map { it.bin })
