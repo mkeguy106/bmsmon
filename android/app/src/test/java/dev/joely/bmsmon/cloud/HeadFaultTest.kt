@@ -50,7 +50,7 @@ class HeadFaultTest {
         val s = fresh().faults(head = 1, sent = 200, times = listOf(0, 100 * sec, 200 * sec))
         val (next, action) = s.step(head = 1, sent = 200, r = PostResult.ServerFault, at = 5 * min)
         assertEquals(HeadFaultAction.NONE, action)
-        assertEquals(HeadFaultState(headId = 1, limit = 100, streak = 0, firstFaultAtMs = null), next)
+        assertEquals(HeadFaultState(headId = 1, limit = 100, streak = 0, firstFaultAtMs = null, searchEndId = 200), next)
     }
 
     @Test fun aLongSpanNeedsTheCountToo() {
@@ -316,5 +316,64 @@ class HeadFaultTest {
         assertEquals((1L..39L).toSet(), run.accepted)
         assertEquals(41L, run.queue.first())
         assertEquals(500 - 40, run.queue.size)
+    }
+
+    // --- DATA-22 minor: a 2xx inside a narrowing search must not undo the halving ---
+
+    /** Drain a queue with one bad row the way the upload loop does; count trips until it is skipped. */
+    private fun tripsToIsolate(total: Int, bad: Long): Int {
+        val queue = ArrayDeque((1L..total.toLong()).toList())
+        var s = fresh()
+        var t = 0L
+        var trips = 0
+        var posts = 0
+        while (queue.isNotEmpty() && posts++ < 10_000) {
+            val sent = queue.take(minOf(max, s.limit))
+            val r = if (bad in sent) PostResult.ServerFault else PostResult.Ok
+            val (next, action) = stepHeadFault(s, sent.first(), sent.size, r, t, max, tailId = sent.last())
+            if (r == PostResult.ServerFault && next.streak == 0) trips++
+            if (r == PostResult.Ok) repeat(sent.size) { queue.removeFirst() }
+            if (action == HeadFaultAction.SKIP_HEAD_ROW) return trips
+            s = next
+            t += min
+        }
+        error("bad row $bad was never isolated")
+    }
+
+    @Test fun isolationTakesOneTripPerHalvingWhereverTheBadRowSits() {
+        for (bad in listOf(1L, 2L, 99L, 100L, 101L, 150L, 199L, 200L, 333L, 777L, 1000L)) {
+            val trips = tripsToIsolate(total = 1000, bad = bad)
+            assertTrue("bad row $bad took $trips trips", trips <= 9)
+        }
+    }
+
+    @Test fun aHalvingRecordsTheSuspectRangeAndKeepsTheNarrowerEnd() {
+        val s = fresh().faults(head = 1, sent = 200, times = listOf(0, 2 * min, 4 * min))
+        val (halved, _) = s.step(head = 1, sent = 200, r = PostResult.ServerFault, at = 5 * min)
+        assertEquals(200L, halved.searchEndId)
+        val s2 = halved.faults(head = 150, sent = 100, times = listOf(6 * min, 8 * min, 10 * min))
+        val (again, _) = s2.step(head = 150, sent = 100, r = PostResult.ServerFault, at = 11 * min)
+        assertEquals(50, again.limit)
+        assertEquals(200L, again.searchEndId)
+    }
+
+    @Test fun anOkBeforeTheSuspectRangeEndsHoldsTheLimit() {
+        val searching = HeadFaultState(headId = 1, limit = 100, streak = 0, firstFaultAtMs = null, searchEndId = 200)
+        val (next, _) = stepHeadFault(searching, 1, 100, PostResult.Ok, 0L, max, tailId = 100)
+        assertEquals(HeadFaultState(headId = 1, limit = 100, streak = 0, firstFaultAtMs = null, searchEndId = 200), next)
+    }
+
+    @Test fun anOkThatCoversTheWholeSuspectRangeEndsTheSearchAndDoubles() {
+        val searching = HeadFaultState(headId = 101, limit = 100, streak = 0, firstFaultAtMs = null, searchEndId = 200)
+        val (next, _) = stepHeadFault(searching, 101, 100, PostResult.Ok, 0L, max, tailId = 200)
+        assertEquals(HeadFaultState(headId = 101, limit = 200, streak = 0, firstFaultAtMs = null, searchEndId = null), next)
+    }
+
+    @Test fun aTripAtOneRowConcludesTheSearch() {
+        val s = HeadFaultState(headId = 7, limit = 1, streak = 0, firstFaultAtMs = null, searchEndId = 9)
+            .faults(head = 7, sent = 1, times = listOf(0, 2 * min, 4 * min))
+        val (after, action) = s.step(head = 7, sent = 1, r = PostResult.ServerFault, at = 5 * min)
+        assertEquals(HeadFaultAction.SKIP_HEAD_ROW, action)
+        assertNull(after.searchEndId)
     }
 }

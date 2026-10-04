@@ -375,6 +375,7 @@ class TelemetryReporter(
                 val result = postSigned(CloudConfig(base).ingestUrl, p.deviceId, body, wire)
                 val (nextFault, faultAction) = stepHeadFault(
                     headFault, rows.first().id, rows.size, result, SystemClock.elapsedRealtime(), BATCH,
+                    tailId = rows.last().id,
                 )
                 // A ServerFault always extends the streak unless the streak tripped, which clears it.
                 if (result == PostResult.ServerFault && nextFault.streak == 0 && faultAction == HeadFaultAction.NONE) {

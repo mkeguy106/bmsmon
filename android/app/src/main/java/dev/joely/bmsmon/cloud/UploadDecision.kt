@@ -75,6 +75,13 @@ internal data class HeadFaultState(
     val streak: Int,
     val firstFaultAtMs: Long?,
     val skipsSinceOk: Int = 0,
+    /**
+     * While a bisection is narrowing: the last id of the smallest batch known to contain the faulting
+     * row. A 2xx on a batch that ends BEFORE it keeps [limit] (the bad row is still ahead, so a wider
+     * batch would only straddle it again and cost another full span); a 2xx that reaches it ends the
+     * search. Null = not searching.
+     */
+    val searchEndId: Long? = null,
 )
 
 /**
@@ -84,7 +91,9 @@ internal data class HeadFaultState(
  *
  * - A changed [headId] (the last batch was accepted, skipped or evicted) starts a fresh streak but
  *   KEEPS the limit and the breaker, so the bisection carries on past the half that was accepted.
- * - [PostResult.Ok] clears the streak, re-arms the breaker and doubles the limit toward [maxBatch].
+ * - [PostResult.Ok] clears the streak, re-arms the breaker and doubles the limit toward [maxBatch]
+ *   — except inside a narrowing search ([HeadFaultState.searchEndId]), where it keeps the limit until
+ *   a 2xx reaches the suspect range's end. [tailId] is the batch's last id; ids increase along the stream.
  * - [PostResult.ServerFault] extends the streak. Once it holds [FAULT_STREAK] faults spanning
  *   [FAULT_MIN_SPAN_MS] the streak trips, and every trip clears the streak, so the next one needs a
  *   fresh full span. A batch of [sentSize] > 1 is halved (rounded up). A batch of one row is skipped
@@ -106,12 +115,18 @@ internal fun stepHeadFault(
     result: PostResult,
     nowMs: Long,
     maxBatch: Int,
+    tailId: Long = headId + sentSize - 1,
 ): Pair<HeadFaultState, HeadFaultAction> {
     val cur = if (headId != s.headId) s.copy(headId = headId, streak = 0, firstFaultAtMs = null) else s
     return when (result) {
-        PostResult.Ok -> cur.copy(
-            limit = minOf(maxBatch, cur.limit * 2), streak = 0, firstFaultAtMs = null, skipsSinceOk = 0,
-        ) to HeadFaultAction.NONE
+        PostResult.Ok -> {
+            val searching = cur.searchEndId != null && tailId < cur.searchEndId
+            cur.copy(
+                limit = if (searching) cur.limit else minOf(maxBatch, cur.limit * 2),
+                streak = 0, firstFaultAtMs = null, skipsSinceOk = 0,
+                searchEndId = if (searching) cur.searchEndId else null,
+            ) to HeadFaultAction.NONE
+        }
         PostResult.ServerFault -> {
             val streak = cur.streak + 1
             val first = cur.firstFaultAtMs ?: nowMs
@@ -120,9 +135,12 @@ internal fun stepHeadFault(
             }
             val tripped = cur.copy(streak = 0, firstFaultAtMs = null)
             when {
-                sentSize > 1 -> tripped.copy(limit = (sentSize + 1) / 2) to HeadFaultAction.NONE
-                cur.skipsSinceOk == 0 -> tripped.copy(limit = 1, skipsSinceOk = 1) to HeadFaultAction.SKIP_HEAD_ROW
-                else -> tripped.copy(limit = 1) to HeadFaultAction.NONE   // breaker open: hold this row
+                sentSize > 1 -> tripped.copy(
+                    limit = (sentSize + 1) / 2,
+                    searchEndId = minOf(tailId, cur.searchEndId ?: tailId),
+                ) to HeadFaultAction.NONE
+                cur.skipsSinceOk == 0 -> tripped.copy(limit = 1, skipsSinceOk = 1, searchEndId = null) to HeadFaultAction.SKIP_HEAD_ROW
+                else -> tripped.copy(limit = 1, searchEndId = null) to HeadFaultAction.NONE   // breaker open: hold this row
             }
         }
         PostResult.Transient, PostResult.AuthFailed, PostResult.Poison -> cur to HeadFaultAction.NONE
