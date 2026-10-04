@@ -331,8 +331,17 @@ async def get_device(conn, device_id):
 
 async def list_devices(conn) -> list[dict]:
     rows = await conn.fetch(
-        "SELECT id, install_uuid, label, created_at, last_seen_at, revoked FROM devices ORDER BY created_at")
+        "SELECT id, install_uuid, label, created_at, last_seen_at, revoked, user_agent "
+        "FROM devices ORDER BY created_at")
     return [dict(r) for r in rows]
+
+
+async def touch_device(conn, device_id: str, user_agent: str | None) -> None:
+    """Bookkeeping on an authenticated upload: last_seen_at, and the app build that sent it
+    (DATA-28). A request without a User-Agent keeps the previous value."""
+    await conn.execute(
+        "UPDATE devices SET last_seen_at = now(), user_agent = COALESCE($2, user_agent) "
+        "WHERE id = $1", device_id, user_agent)
 
 
 async def revoke_device(conn, device_id) -> None:

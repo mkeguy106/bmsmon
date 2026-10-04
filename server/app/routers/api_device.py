@@ -251,6 +251,17 @@ async def enroll(body: EnrollBody, request: Request, pool=Depends(get_pool)):
     return EnrollResponse(device_id=str(device_id))
 
 
+async def _touch(conn, request: Request, device_id: str) -> None:
+    """Record last_seen_at + the app build (DATA-28). Pure bookkeeping: any error is logged
+    and swallowed, and the savepoint keeps a failure from aborting a caller's transaction."""
+    try:
+        async with conn.transaction():
+            await q.touch_device(conn, device_id,
+                                 clean_user_agent(request.headers.get("user-agent")))
+    except Exception:
+        logger.warning("touch_device failed for %s", device_id, exc_info=True)
+
+
 @router.post("/ingest", response_model=IngestResponse)
 async def ingest(request: Request, pool=Depends(get_pool)):
     device_id, claims = await _authenticate(request, pool)
@@ -310,7 +321,7 @@ async def ingest(request: Request, pool=Depends(get_pool)):
         # that resolution — throttle to once per device per interval (timestamp becomes
         # approximate within ~60 s, which is fine).
         if request.app.state.device_touch.should_touch(device_id):
-            await conn.execute("UPDATE devices SET last_seen_at=now() WHERE id=$1", device_id)
+            await _touch(conn, request, device_id)
     # batch_seq < 0 (-1) marks a historical-import batch (see IngestEnvelope): store it,
     # but don't flood the live WS dashboards with thousands of stale frames (WEB-5).
     if env.batch_seq >= 0:
@@ -346,5 +357,5 @@ async def config(request: Request, pool=Depends(get_pool)):
         # (ranges None) leaves the stored rows untouched.
         for row in ranges:
             await q.upsert_range_config(conn, device_id, row.model_dump())
-        await conn.execute("UPDATE devices SET last_seen_at=now() WHERE id=$1", device_id)
+        await _touch(conn, request, device_id)
     return ConfigResponse(dropped=len(rejects))
