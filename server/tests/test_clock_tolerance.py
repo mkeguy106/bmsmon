@@ -101,6 +101,19 @@ def test_a_jti_is_remembered_until_its_token_can_no_longer_be_accepted():
     assert not cache.contains("j")
 
 
+def test_a_token_whose_window_closes_before_its_body_is_verified_is_refused():
+    """Stage 1 passed just before exp + EXP_LEEWAY_S and the body finished just after: the
+    token is refused on the same clock the cache uses, and nothing is remembered."""
+    t = [1000.0]
+    cache = JtiCache(clock=lambda: t[0])
+    claims = {"jti": "late", "iat": 1000, "exp": 1060, "bh": body_hash(b"x")}
+    t[0] = 1060 + EXP_LEEWAY_S
+    with pytest.raises(JwtError) as e:
+        verify_body(claims, b"x", cache)
+    assert e.value.reason == "clock_skew" and e.value.skew_s is not None
+    assert "late" not in cache._seen
+
+
 def test_jti_cache_prunes_expired_entries_at_most_once_a_second():
     t = [0.0]
     cache = JtiCache(clock=lambda: t[0])

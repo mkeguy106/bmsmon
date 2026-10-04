@@ -216,7 +216,7 @@ async def _read_verified_body(request: Request, device_id: str, claims: dict) ->
     try:
         verify_body(claims, raw, request.app.state.jti_cache)
     except JwtError as e:
-        _note_auth_failure(request, device_id, e.reason, str(e), None)
+        _note_auth_failure(request, device_id, e.reason, str(e), e.skew_s)
         raise _deny(e.reason, "bad signature")
     request.app.state.auth_stats.record_ok(skew_of(claims))
     return raw
