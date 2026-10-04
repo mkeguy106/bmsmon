@@ -1085,11 +1085,13 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             // This is also the re-enroll path for a phone whose key is missing (DATA-17):
             // ensureKeyPair makes a new key and the server re-keys the same install.
             try {
-                dev.joely.bmsmon.cloud.DeviceKeys.ensureKeyPair()
-                val installUuid = store.installUuid()
-                val id = dev.joely.bmsmon.cloud.EnrollClient(
-                    dev.joely.bmsmon.cloud.uploadHttpClient(dev.joely.bmsmon.cloud.appUserAgent()),
-                ).enroll(base, code, installUuid, dev.joely.bmsmon.cloud.DeviceKeys.publicKeySpkiB64()).getOrThrow()
+                val keys = dev.joely.bmsmon.cloud.DeviceKeys
+                val id = dev.joely.bmsmon.cloud.rollingBackNewKey(keys.hasKey(), keys::deleteKey) {
+                    keys.ensureKeyPair()
+                    dev.joely.bmsmon.cloud.EnrollClient(
+                        dev.joely.bmsmon.cloud.uploadHttpClient(dev.joely.bmsmon.cloud.appUserAgent()),
+                    ).enroll(base, code, store.installUuid(), keys.publicKeySpkiB64()).getOrThrow()
+                }
                 val app = getApplication<BmsApp>()
                 // Re-sends queued under the old key are dropped and the history import is queued afresh
                 // (idempotent on the server); clear first and wait, so the import isn't wiped behind it.

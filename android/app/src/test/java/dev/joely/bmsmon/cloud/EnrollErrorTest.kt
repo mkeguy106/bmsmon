@@ -30,7 +30,7 @@ class EnrollErrorTest {
         val m = enrollErrorMessage(EnrollException(403, "device revoked; restore it first"))
         assertTrue(m, m.startsWith("This phone was revoked."))
         assertTrue(m, m.contains("Settings › Devices"))
-        assertTrue(m, m.contains("no new code is needed"))
+        assertTrue(m, m.contains("resumes uploading with its existing key"))
     }
 
     @Test fun aBadKeyIsNotBlamedOnTheCode() {
@@ -73,5 +73,30 @@ class EnrollErrorTest {
         val http = OkHttpClient.Builder().addInterceptor(Interceptor { throw IOException("offline") }).build()
         val e = EnrollClient(http).enroll("https://x.test", "c", "u", "k").exceptionOrNull()
         assertTrue(e is EnrollException && e.code == null && e.cause is IOException)
+    }
+
+    @Test fun aKeyThisAttemptCreatedIsDeletedOnAnyFailure() = runBlocking {
+        for (failure in listOf<Throwable>(EnrollException(403, null), EnrollException(null, null, IOException()),
+            IllegalStateException("malformed 200"))) {
+            var deleted = 0
+            val r = runCatching { rollingBackNewKey(false, { deleted++ }) { throw failure } }
+            assertTrue(r.exceptionOrNull() === failure)
+            assertEquals(1, deleted)
+        }
+    }
+
+    @Test fun aPreExistingKeyIsNeverTouched() = runBlocking {
+        var deleted = 0
+        runCatching { rollingBackNewKey(true, { deleted++ }) { throw EnrollException(400, null) } }
+        assertEquals(0, deleted)
+    }
+
+    @Test fun successKeepsTheNewKeyAndAKeystoreErrorOnDeleteDoesNotMaskTheFailure() = runBlocking {
+        var deleted = 0
+        assertEquals("id", rollingBackNewKey(false, { deleted++ }) { "id" })
+        assertEquals(0, deleted)
+        val e = EnrollException(500, null)
+        val r = runCatching { rollingBackNewKey(false, { error("ks") }) { throw e } }
+        assertTrue(r.exceptionOrNull() === e)
     }
 }

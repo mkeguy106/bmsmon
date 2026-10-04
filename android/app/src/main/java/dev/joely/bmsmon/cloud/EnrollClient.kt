@@ -34,7 +34,7 @@ internal fun enrollErrorMessage(t: Throwable): String = when {
         403 ->
             if (t.detail?.contains("revoked") == true) {
                 "This phone was revoked. An admin can restore it in the web dashboard (Settings › Devices); " +
-                    "no new code is needed."
+                    "once restored it resumes uploading with its existing key, so no re-enrollment and no new code are needed."
             } else {
                 "Enrollment failed (HTTP 403)."
             }
@@ -47,6 +47,20 @@ internal fun enrollErrorMessage(t: Throwable): String = when {
         "This phone couldn't create its upload key. Try again; if it keeps failing, restart the phone."
     else -> "Enrollment failed: the server's answer wasn't understood."
 }
+
+/**
+ * Runs [block], which may create the device key pair, and puts the key state back if it fails for any
+ * reason (an exception, a non-2xx, a malformed 200 all surface as a throw): a pair this attempt created
+ * is deleted via [deleteKey]; one that existed beforehand is never touched. A failed enroll must change
+ * nothing, or the phone would sign uploads with a key the server never registered.
+ */
+internal suspend fun <T> rollingBackNewKey(hadKey: Boolean, deleteKey: () -> Unit, block: suspend () -> T): T =
+    try {
+        block()
+    } catch (e: Throwable) {
+        if (!hadKey) runCatching { deleteKey() }
+        throw e
+    }
 
 class EnrollClient(private val http: OkHttpClient) {
     suspend fun enroll(baseUrl: String, code: String, installUuid: String,

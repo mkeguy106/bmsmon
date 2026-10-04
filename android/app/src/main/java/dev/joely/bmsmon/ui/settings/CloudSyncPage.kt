@@ -43,6 +43,10 @@ internal fun serverFaultSkipsLine(skipped: Long): String? = when {
     else -> "$skipped samples the server could not store were skipped"
 }
 
+/** The enroll section shows before enrollment, and again when an enrolled phone can't authenticate (no key, or the server rejects it). */
+internal fun showReenroll(enrolled: Boolean, keyMissing: Boolean, authFailed: Boolean): Boolean =
+    !enrolled || keyMissing || authFailed
+
 @Composable
 internal fun ColumnScope.CloudSyncContent(
     state: UiState,
@@ -83,7 +87,7 @@ internal fun ColumnScope.CloudSyncContent(
     }
 
     // --- Connection (shown only before enrollment) ---
-    if (!state.enrolled || state.cloud.keyMissing) {
+    if (showReenroll(state.enrolled, state.cloud.keyMissing, state.cloud.authFailed)) {
         val context = LocalContext.current
         val scanToEnroll = {
             val opts = GmsBarcodeScannerOptions.Builder()
@@ -100,7 +104,7 @@ internal fun ColumnScope.CloudSyncContent(
                 }
         }
 
-        SectionLabel(if (state.cloud.keyMissing) "Re-enroll this phone" else "Connection")
+        SectionLabel(if (state.enrolled) "Re-enroll this phone" else "Connection")
         PlainCard {
             Box(
                 Modifier
