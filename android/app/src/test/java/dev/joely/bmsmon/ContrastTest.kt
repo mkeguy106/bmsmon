@@ -1,7 +1,11 @@
 package dev.joely.bmsmon
 
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.toArgb
+import dev.joely.bmsmon.ui.all.STAGE_ROW_WASH_ALPHA
+import dev.joely.bmsmon.ui.home.ACK_PILL_WASH_ALPHA
+import dev.joely.bmsmon.ui.theme.AlertCritical
 import dev.joely.bmsmon.ui.theme.DarkBmColors
 import dev.joely.bmsmon.ui.theme.DefaultAccent
 import dev.joely.bmsmon.ui.theme.DefaultPower
@@ -11,6 +15,7 @@ import dev.joely.bmsmon.ui.theme.PowerSwatches
 import dev.joely.bmsmon.ui.theme.ThemeSwatches
 import dev.joely.bmsmon.ui.theme.contrastRatio
 import dev.joely.bmsmon.ui.theme.readableColors
+import dev.joely.bmsmon.ui.theme.readableInkOnWash
 import dev.joely.bmsmon.ui.theme.readableOn
 import dev.joely.bmsmon.ui.theme.rgbToHsv
 import kotlin.math.abs
@@ -88,5 +93,48 @@ class ContrastTest {
                 }
             }
         }
+    }
+
+    private fun ratio(a: Color, b: Color) = contrastRatio(a.toArgb() and 0xFFFFFF, b.toArgb() and 0xFFFFFF)
+
+    // Fix round 1 (review M3): text on a tinted strip is checked against the strip, not the page. The
+    // acknowledged-alert pill's red headline sits on a 10 % red wash over bg.
+    @Test fun theAckPillHeadlineIsReadableOnItsWash() {
+        for (isDark in listOf(true, false)) {
+            val bg = (if (isDark) DarkBmColors else LightBmColors).bg
+            val wash = AlertCritical.copy(alpha = ACK_PILL_WASH_ALPHA)
+            val strip = wash.compositeOver(bg)
+            val ink = readableInkOnWash(readableColors(isDark, DefaultAccent).critical, wash, bg)
+            assertEquals(1f, ink.alpha)
+            assertTrue("dark=$isDark ${ratio(ink, strip)}", ratio(ink, strip) >= MIN_TEXT_CONTRAST)
+        }
+        // Light theme, pinned: the page-corrected red read 4.07:1 on the wash; on the wash it is 4.64.
+        val bg = LightBmColors.bg
+        val wash = AlertCritical.copy(alpha = ACK_PILL_WASH_ALPHA)
+        val pageRed = readableColors(dark = false, accent = DefaultAccent).critical
+        assertEquals(4.07, ratio(pageRed, wash.compositeOver(bg)), 0.01)
+        assertEquals(4.64, ratio(readableInkOnWash(pageRed, wash, bg), wash.compositeOver(bg)), 0.01)
+    }
+
+    // Fix round 1 (review M2): All Batteries draws the staged pack's row on an accent tint over bg. Its
+    // SOC (normal / LOW / CRIT) and state label (Charging / Discharging) read on that tint, for every
+    // accent and power pick, in both themes.
+    @Test fun theListStageRowsReadoutsAreReadableOnItsAccentTint() {
+        for (isDark in listOf(true, false)) {
+            val bg = (if (isDark) DarkBmColors else LightBmColors).bg
+            for (accent in ThemeSwatches + DefaultAccent) for (power in PowerSwatches + DefaultPower) {
+                val wash = accent.copy(alpha = STAGE_ROW_WASH_ALPHA)
+                val strip = wash.compositeOver(bg)
+                val r = readableColors(isDark, accent, power)
+                val readouts = listOf("CRIT" to r.critical, "LOW" to r.warn, "SOC / Charging" to r.accent, "Discharging" to r.power)
+                for ((name, c) in readouts) {
+                    val ink = readableInkOnWash(c, wash, bg)
+                    assertTrue("$name dark=$isDark accent=${accent.toArgb()}: ${ratio(ink, strip)}", ratio(ink, strip) >= MIN_TEXT_CONTRAST)
+                }
+            }
+        }
+        // The finding, pinned: the page-corrected CRIT on the light tint (default accent) fell short.
+        val strip = DefaultAccent.copy(alpha = STAGE_ROW_WASH_ALPHA).compositeOver(LightBmColors.bg)
+        assertTrue(ratio(readableColors(dark = false, accent = DefaultAccent).critical, strip) < MIN_TEXT_CONTRAST)
     }
 }

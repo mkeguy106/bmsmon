@@ -54,7 +54,7 @@ import dev.joely.bmsmon.ui.rememberBoltAlpha
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
 import dev.joely.bmsmon.ui.theme.socSeverityFor
-import dev.joely.bmsmon.ui.theme.tag
+import dev.joely.bmsmon.ui.theme.stageSeverityWord
 import dev.joely.bmsmon.ui.theme.textColor
 import kotlin.math.roundToInt
 
@@ -213,9 +213,10 @@ private fun StageRingBox(item: StageItem, c: dev.joely.bmsmon.ui.theme.BmColors,
         }
         if (item.connected) {
             // UI-21: a LIVE number takes the user's ladder severity (LOW amber / CRIT red, the alerts'
-            // own rule), contrast-corrected for the theme, with a word under it so severity never rests
-            // on hue alone. A STALE number gets neither: it stays text2 with its age, so an old reading
-            // never looks live (a stale low pack still drives the alert pill/overlay).
+            // own rule), contrast-corrected for the theme, with a word under it (stageSeverityWord: not
+            // while charging) so severity doesn't rest on hue alone. A STALE number gets neither: it
+            // stays text2 with its age, so an old reading never looks live (a stale low pack still
+            // drives the alert pill/overlay).
             val severity = if (live) socSeverityFor(b.soc, alertConfig) else null
             val numberColor = severity?.textColor() ?: c.text2
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -228,9 +229,9 @@ private fun StageRingBox(item: StageItem, c: dev.joely.bmsmon.ui.theme.BmColors,
                     fontSize = 40.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
-                // Its own line under the number, so it can never overlap or squeeze it: at most ~65 dp
+                // Its own line under the number, so it can never overlap or squeeze it: at most ~60 dp
                 // wide, and the whole readout stays inside the fixed ring box at 1.3x font scale.
-                severity?.tag()?.let { tag ->
+                stageSeverityWord(item, alertConfig)?.let { tag ->
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Filled.Warning, contentDescription = null, modifier = Modifier.size(14.dp), tint = numberColor)
                         Text(

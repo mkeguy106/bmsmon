@@ -11,6 +11,7 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
@@ -95,17 +96,29 @@ val LocalBmColors = compositionLocalOf { DarkBmColors }
 val LocalAccent = staticCompositionLocalOf { DefaultAccent }
 val LocalPower = staticCompositionLocalOf { DefaultPower }
 
+/** [fg] made readable on every one of the opaque [surfaces] ([readableOn]), as an opaque Color. */
+fun readableInk(fg: Color, surfaces: List<Color>): Color =
+    Color(0xFF000000.toInt() or readableOn(fg.toArgb(), surfaces.map { it.toArgb() }))
+
+/**
+ * [fg] made readable on a tinted strip: the translucent [wash] drawn over [under]. Text on a strip
+ * (the acknowledged-alert pill, the list's stage row) is checked against the strip itself, which the
+ * theme's own surfaces don't cover — a page-safe ink can fall short of [MIN_TEXT_CONTRAST] on it.
+ */
+fun readableInkOnWash(fg: Color, wash: Color, under: Color): Color = readableInk(fg, listOf(wash.compositeOver(under)))
+
 /**
  * Text-safe variants of the user's accent/power colors and the status colors for one theme (UI-21)
- * — see [readableOn]. Each reaches [MIN_TEXT_CONTRAST] on every surface text sits on.
+ * — see [readableOn]. Each reaches [MIN_TEXT_CONTRAST] on the theme's bg, card, card2 and inputBg;
+ * text on a tinted strip is re-checked against that strip with [readableInkOnWash].
  */
 data class ReadableColors(val accent: Color, val warn: Color, val critical: Color, val good: Color, val power: Color)
 
 /** Contrast-correct the accent, power and status colors against [dark]'s surfaces (bg, cards, inputs). */
 fun readableColors(dark: Boolean, accent: Color, power: Color = DefaultPower): ReadableColors {
     val t = if (dark) DarkBmColors else LightBmColors
-    val surfaces = listOf(t.bg, t.card, t.card2, t.inputBg).map { it.toArgb() }
-    fun r(c: Color) = Color(0xFF000000.toInt() or readableOn(c.toArgb(), surfaces))
+    val surfaces = listOf(t.bg, t.card, t.card2, t.inputBg)
+    fun r(c: Color) = readableInk(c, surfaces)
     return ReadableColors(r(accent), r(AlertWarn), r(AlertCritical), r(RegenGreen), r(power))
 }
 

@@ -43,8 +43,6 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.compositeOver
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -60,7 +58,7 @@ import dev.joely.bmsmon.ui.theme.AlertCritical
 import dev.joely.bmsmon.ui.theme.AlertWarn
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
-import dev.joely.bmsmon.ui.theme.readableOn
+import dev.joely.bmsmon.ui.theme.readableInkOnWash
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -256,14 +254,17 @@ private fun stageState(state: UiState, locked: Boolean): StageStateLabel {
     return StageStateLabel(if (locked) "$text · LOCKED" else text, color)
 }
 
+/** Opacity of the acknowledged-alert pill's red wash (over the status line's bg). */
+internal const val ACK_PILL_WASH_ALPHA = 0.10f
+
 /** The acknowledged-alert form of the status line: a red strip naming the alert + its reading. */
 @Composable
 private fun AlertPill(alert: StageAlert) {
     val c = Bm.colors
-    val wash = AlertCritical.copy(alpha = 0.10f)
+    val wash = AlertCritical.copy(alpha = ACK_PILL_WASH_ALPHA)
     // UI-21: the icon and headline are text on the red wash, not on bg — so the readable red is checked
-    // against the wash itself (light theme: 4.1:1 on the wash otherwise). Wash and border stay raw red.
-    val ink = Color(0xFF000000.toInt() or readableOn(Bm.criticalText.toArgb(), listOf(wash.compositeOver(c.bg).toArgb())))
+    // against the wash itself (light theme: 4.07:1 on the wash otherwise). Wash and border stay raw red.
+    val ink = readableInkOnWash(Bm.criticalText, wash, c.bg)
     Row(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
             .background(wash)

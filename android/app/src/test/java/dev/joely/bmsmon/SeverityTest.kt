@@ -1,10 +1,14 @@
 package dev.joely.bmsmon
 
 import dev.joely.bmsmon.model.AlertConfig
+import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.PackSoc
+import dev.joely.bmsmon.model.StageItem
+import dev.joely.bmsmon.model.Telemetry
 import dev.joely.bmsmon.model.evalStageAlert
 import dev.joely.bmsmon.ui.theme.SocSeverity
 import dev.joely.bmsmon.ui.theme.socSeverityFor
+import dev.joely.bmsmon.ui.theme.stageSeverityWord
 import dev.joely.bmsmon.ui.theme.tag
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -84,5 +88,28 @@ class SeverityTest {
                 }
             }
         }
+    }
+
+    private fun pack(soc: Float, state: BatteryState = BatteryState.Discharging) = Telemetry(
+        "x", soc = soc, powerW = 26f, current = -2f, voltage = 13f,
+        capacityAh = 50f, cellV = 3.3f, temp = 25f, state = state,
+    )
+
+    // Fix round 1 (review M1): the stage word belongs to a LIVE reading that is not charging. A STALE
+    // number is muted with its age and a DISCONNECTED pack has no number; while charging, the bolt and
+    // the "to full" ETA say what is happening, the flash is suppressed, and the ETA needs the room.
+    @Test fun theStageWordShowsOnlyOnALiveReadingThatIsNotCharging() {
+        assertEquals("LOW", stageSeverityWord(StageItem(pack(25f), regen = false), ladder))
+        assertEquals("CRIT", stageSeverityWord(StageItem(pack(12f, BatteryState.Idle), regen = false), ladder))
+        assertNull(stageSeverityWord(StageItem(pack(80f), regen = false), ladder))   // NORMAL: no word
+        assertNull("charging", stageSeverityWord(StageItem(pack(25f, BatteryState.Charging), regen = false), ladder))
+        assertNull("STALE", stageSeverityWord(StageItem(pack(25f), regen = false, staleAgeMs = 15_000L), ladder))
+        assertNull("DISCONNECTED", stageSeverityWord(StageItem(pack(25f), regen = false, connected = false), ladder))
+    }
+
+    // A Charging frame from regen braking is not charging (the ETA's own rule), so the word — and the
+    // number above it — can't flicker on every regen burst mid-drive.
+    @Test fun regenBrakingIsNotChargingForTheStageWord() {
+        assertEquals("LOW", stageSeverityWord(StageItem(pack(25f, BatteryState.Charging), regen = true), ladder))
     }
 }

@@ -81,6 +81,7 @@ import dev.joely.bmsmon.ui.RosterActions
 import dev.joely.bmsmon.ui.rememberBoltAlpha
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
+import dev.joely.bmsmon.ui.theme.readableInkOnWash
 import dev.joely.bmsmon.ui.theme.socSeverityFor
 import dev.joely.bmsmon.ui.theme.tag
 import dev.joely.bmsmon.ui.theme.textColor
@@ -364,6 +365,9 @@ private fun SwipeLeftToDelete(onTriggered: () -> Unit, content: @Composable () -
     }
 }
 
+/** Opacity of the accent tint the staged pack's row is drawn on (over the page bg). */
+internal const val STAGE_ROW_WASH_ALPHA = 0.08f
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun BatteryRow(
@@ -398,26 +402,31 @@ private fun BatteryRow(
     var newGroupOpen by remember { mutableStateOf(false) }
     var renameGroupOpen by remember { mutableStateOf(false) }
 
+    // The staged pack's row sits on an accent tint, not card2: its readable inks are re-checked
+    // against that tint (UI-21), the same way the acknowledged-alert pill checks its red wash.
+    val rowWash = if (isStage) Bm.accent.copy(alpha = STAGE_ROW_WASH_ALPHA) else null
+    val bg = c.bg
+    fun ink(color: Color) = rowWash?.let { readableInkOnWash(color, it, bg) } ?: color
     val (stateLabel, stateColor) = when {
         disabled -> "Disconnected" to c.text3
         !live -> (freshnessLabel(fresh, monitoring) ?: "—") to c.text3
-        t?.state == BatteryState.Discharging -> "Discharging" to Bm.powerText
-        t?.state == BatteryState.Charging -> "Charging" to Bm.accentText
+        t?.state == BatteryState.Discharging -> "Discharging" to ink(Bm.powerText)
+        t?.state == BatteryState.Charging -> "Charging" to ink(Bm.accentText)
         t?.state == BatteryState.Idle -> "Idle" to c.text2
         else -> "—" to c.text3
     }
     val borderColor = if (isStage) Bm.accent else c.border
     // UI-21: severity on the user's own ladder (the alerts' rule, not fixed 15/30 bands), readable in
-    // either theme. A dimmed (non-LIVE) row keeps its severity hue at half alpha, as before, beside its
-    // "Last seen…" status; only a LIVE row adds the LOW/CRIT word, so a stale row never reads as live.
+    // either theme, with a LOW/CRIT word wherever the severity hue shows. A dimmed (non-LIVE) row keeps
+    // both at half alpha, as the hue always was, beside its "Last seen…" status, so it never reads as live.
     val severity = t?.let { socSeverityFor(it.soc, alertConfig) }
-    val socColor = severity?.textColor() ?: c.text3
+    val socColor = severity?.textColor()?.let(::ink) ?: c.text3
 
     Column(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(9.dp))
-            .background(if (isStage) Bm.accent.copy(alpha = 0.08f) else c.card2)
+            .background(rowWash ?: c.card2)
             .border(1.dp, borderColor, RoundedCornerShape(9.dp))
             .combinedClickable(onClick = onOpenDetail, onLongClick = { menuOpen = true })
             .padding(horizontal = 12.dp, vertical = 9.dp),
@@ -461,10 +470,10 @@ private fun BatteryRow(
                 color = socColor, fontFamily = MonoFont, fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.alpha(if (dim) 0.5f else 1f).padding(start = 8.dp))
             // The non-colour cue: on a light theme LOW amber and normal orange differ by hue alone.
-            severity?.tag()?.takeIf { !dim }?.let { tag ->
+            severity?.tag()?.let { tag ->
                 Text(
                     tag, color = socColor, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.6.sp,
-                    modifier = Modifier.padding(start = 4.dp),
+                    modifier = Modifier.alpha(if (dim) 0.5f else 1f).padding(start = 4.dp),
                 )
             }
             if (monitoring) {
