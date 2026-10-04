@@ -5,13 +5,14 @@ import android.os.SystemClock
 import android.util.Log
 import java.io.ByteArrayOutputStream
 import java.security.PrivateKey
+import java.util.concurrent.atomic.AtomicLong
 import java.util.zip.GZIPOutputStream
 import dev.joely.bmsmon.data.FailureLogThrottle
+import dev.joely.bmsmon.data.warnThrottled
 import dev.joely.bmsmon.data.Persisted
 import dev.joely.bmsmon.data.SettingsStore
 import dev.joely.bmsmon.data.db.BmsDatabase
 import dev.joely.bmsmon.data.db.OutboxEntity
-import dev.joely.bmsmon.model.DEFAULT_ROSTER
 import dev.joely.bmsmon.model.Roster
 import dev.joely.bmsmon.model.Telemetry
 import kotlinx.coroutines.CancellationException
@@ -56,10 +57,11 @@ internal fun shouldFlush(depth: Int, oldestAgeMs: Long?, draining: Boolean): Boo
 /**
  * How many enqueue-path inserts may pass between outbox-cap checks (DATA-5). An exact COUNT per
  * insert would double the write path's DB work for no benefit, so the cap is enforced amortized:
- * the drain loop re-counts every [CAP_CHECK_EVERY] inserts (and once at startup) and drops the
- * oldest overage. Worst-case transient overshoot is CAP_CHECK_EVERY rows (~0.25% of OUTBOX_MAX);
- * the upload loop's own per-iteration check still bounds it while uploading. Every eviction is
- * counted and queued for a re-send from local history (DATA-19, see capOutbox).
+ * the drain loop re-counts every [CAP_CHECK_EVERY] inserts (and once at startup) and evicts the
+ * oldest rows, down to OUTBOX_MAX − EVICT_CHUNK. Worst-case transient overshoot is CAP_CHECK_EVERY
+ * rows (~0.25% of OUTBOX_MAX); the upload loop's own per-iteration check still bounds it while
+ * uploading. Every eviction is counted and queued for a re-send from local history (DATA-19, see
+ * capOutbox).
  */
 private const val CAP_CHECK_EVERY = 500
 
@@ -92,6 +94,11 @@ class TelemetryReporter(
     private val importMutex = Mutex()
     // queueImport's failure log, rate-limited (the re-sync loop retries it every pass while it fails).
     private val importFailures = FailureLogThrottle()
+    // The re-sync loop's last-resort failure log, rate-limited (that loop is its only consumer).
+    private val resyncLoopFailures = FailureLogThrottle()
+    // Marked 2xx answers on any stream, counted by the shared outcome observer: proof the server accepts
+    // data, which re-arms the re-sender's one-park budgets (see resyncStep).
+    private val serverOks = AtomicLong()
 
     private val _status = MutableStateFlow(UploadStatus())
 
@@ -123,6 +130,7 @@ class TelemetryReporter(
         readWindows = { ledger.readResync() },
         mutateWindows = { transform -> ledger.mutateResync(transform) },
         readPage = { toMs, afterTs, afterId, limit -> db.samples().resyncPage(toMs, afterTs, afterId, limit) },
+        serverOks = { serverOks.get() },
         warn = { msg, e -> Log.w(TAG, msg, e) },
         elapsedNow = SystemClock::elapsedRealtime,
     )
@@ -286,12 +294,16 @@ class TelemetryReporter(
         }
     }
 
-    /** Add the import window once, if enrolled and not yet queued. Throws on a store error (nothing is marked done). */
+    /**
+     * Add the import window once, if enrolled and not yet queued. Throws on a store error (nothing is marked
+     * done). Idempotent ([queueImportWindow]): if the flag fails to save after the window did, the retry finds
+     * the import already queued and leaves its cursor where it is.
+     */
     private suspend fun queueImportIfDue() = importMutex.withLock {
         val p = settings.load()
         if (!p.enrolled || p.importDone) return@withLock
         val now = System.currentTimeMillis()
-        ledger.mutateResync { addResyncWindow(it, importWindow(now), now) }
+        ledger.mutateResync { queueImportWindow(it, now) }
         settings.setImportDone(true)
     }
 
@@ -329,12 +341,13 @@ class TelemetryReporter(
     /**
      * The one outcome observer for every stream (ingest, re-sync, config): folds a response into the
      * shared signing correction ([nextSigningOffsetMs]), the clock blame ([nextClockBlame]) and the
-     * skew shown to the user ([nextAuthSkewMs]), publishes them, and logs a rejected sign-in once per
-     * distinct reason. The independent clock is read at most once, and only when a rule needs it.
+     * skew shown to the user ([nextAuthSkewMs]), publishes them, counts marked 2xx answers ([serverOks],
+     * which re-arm the re-sender's parks), and logs a rejected sign-in once per distinct reason. The independent clock is read at most once, and only when a rule needs it.
      * Synchronized: the re-sync and the upload loop both report here.
      */
     @Synchronized
     private fun noteOutcome(o: PostOutcome) {
+        if (o.result == PostResult.Ok) serverOks.incrementAndGet()
         val phoneClockErr by lazy(LazyThreadSafetyMode.NONE) { independentClock.measurePhoneClockErrorMs() }
         val prevOffsetMs = signingOffsetMs
         signingOffsetMs = nextSigningOffsetMs(prevOffsetMs, o) { phoneClockErr }
@@ -522,14 +535,12 @@ class TelemetryReporter(
     private suspend fun resyncLoop() {
         while (true) {
             try {
-                val p = cachedSettings
-                val base = p?.apiBaseUrl
-                val deviceId = p?.deviceId
-                if (p == null || !p.cloudEnabled || !p.enrolled || deviceId == null || base == null) {
+                val inputs = resyncPassInputs(cachedSettings, depthKnown, _status.value.outboxDepth)
+                if (inputs == null) {
                     delay(RESYNC_IDLE_MS)
                     continue
                 }
-                if (!p.importDone) {
+                if (inputs.importDue) {
                     try {
                         queueImportIfDue()
                     } catch (e: CancellationException) {
@@ -538,14 +549,8 @@ class TelemetryReporter(
                         logImportFailure(e)
                     }
                 }
-                val depth = if (depthKnown) _status.value.outboxDepth else Int.MAX_VALUE
-                val wait = resync.pass(
-                    roster = p.roster ?: DEFAULT_ROSTER,
-                    withGps = p.gpsEnabled ?: p.cloudEnabled,
-                    liveDepth = depth,
-                    online = conn.online.value,
-                ) { body ->
-                    val outcome = postSigned(CloudConfig(base).ingestUrl, deviceId, body)
+                val wait = resync.pass(inputs.roster, inputs.withGps, inputs.liveDepth, conn.online.value) { body ->
+                    val outcome = postSigned(CloudConfig(inputs.apiBaseUrl).ingestUrl, inputs.deviceId, body)
                     noteOutcome(outcome)
                     outcome
                 }
@@ -553,7 +558,12 @@ class TelemetryReporter(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                delay(RESYNC_IDLE_MS)   // the sender handles its own failures; this is a last guard
+                // The sender handles its own failures; anything reaching here is unexpected, so say so.
+                warnThrottled(
+                    resyncLoopFailures, SystemClock.elapsedRealtime(), { msg, t -> Log.w(TAG, msg, t) },
+                    "re-sync: pass failed unexpectedly — retrying", e,
+                )
+                delay(RESYNC_IDLE_MS)
             }
         }
     }

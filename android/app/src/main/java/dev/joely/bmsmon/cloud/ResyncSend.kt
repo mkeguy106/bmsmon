@@ -1,7 +1,10 @@
 package dev.joely.bmsmon.cloud
 
 import dev.joely.bmsmon.data.FailureLogThrottle
+import dev.joely.bmsmon.data.Persisted
+import dev.joely.bmsmon.data.warnThrottled
 import dev.joely.bmsmon.data.db.SampleEntity
+import dev.joely.bmsmon.model.DEFAULT_ROSTER
 import dev.joely.bmsmon.model.Roster
 import dev.joely.bmsmon.model.batteryAt
 import kotlinx.coroutines.CancellationException
@@ -85,6 +88,8 @@ internal data class ResyncStepState(
     val poisonSkips: Int = 0,
     val fault: HeadFaultState = freshResyncFault(),
     val backoffMs: Long = INITIAL_BACKOFF_MS,
+    /** Marked 2xx answers on ANY stream (the shared outcome observer's count) already folded into the budgets. */
+    val serverOks: Long = 0L,
 )
 
 internal sealed interface ResyncAction {
@@ -111,15 +116,35 @@ internal data class ResyncStep(val state: ResyncStepState, val action: ResyncAct
  * parks the page, as the ingest stream parks its rejected batch; another before any 2xx is held. A row
  * the bisection isolates is parked. Everything else (a network error, an unmarked or 503 answer, a
  * 401/403, a missing key, a fault short of a trip) holds and backs off, Retry-After a floor.
+ *
+ * "Since a 2xx" counts a marked 2xx on ANY stream: [serverOks] is the shared outcome observer's running
+ * count, and a count past [ResyncStepState.serverOks] re-arms both one-park budgets. The re-sender alone
+ * can't tell "this row is bad" from "the server fails on everything": a parked row or page retried 6 h
+ * later has no clean neighbours whose 2xx could re-arm it, so counting only its own 2xxs, the second retry
+ * would be held, re-POSTed every minute until Room ages it out, and every later window would wait behind it.
+ * The live upload lands a 2xx every ~15 s, proving the server accepts data, so a re-send reject then
+ * parks. Only with no 2xx on any stream since the last park (the server failing on everything) is the
+ * next one held.
  */
-internal fun resyncStep(s: ResyncStepState, page: PageMeta, o: PostOutcome, nowElapsedMs: Long): ResyncStep {
+internal fun resyncStep(
+    s: ResyncStepState,
+    page: PageMeta,
+    o: PostOutcome,
+    nowElapsedMs: Long,
+    serverOks: Long = s.serverOks,
+): ResyncStep {
     val r = o.result
+    val armed = if (serverOks > s.serverOks) {
+        s.copy(poisonSkips = 0, fault = s.fault.copy(skipsSinceOk = 0), serverOks = serverOks)
+    } else {
+        s
+    }
     val (fault, faultAction) = stepHeadFault(
-        s.fault, page.headPos, page.size, r, nowElapsedMs, RESYNC_PAGE,
+        armed.fault, page.headPos, page.size, r, nowElapsedMs, RESYNC_PAGE,
         tailId = page.headPos + page.size - 1,
     )
-    val d = decideUpload(r, s.poisonSkips, authFailed = false)
-    val next = s.copy(poisonSkips = d.poisonSkipsSinceOk, fault = fault)
+    val d = decideUpload(r, armed.poisonSkips, authFailed = false)
+    val next = armed.copy(poisonSkips = d.poisonSkipsSinceOk, fault = fault)
     val parkHours = RESYNC_PARK_MS / 3_600_000L
     return when (d.step) {
         BatchStep.DELETE_ACCEPTED -> ResyncStep(
@@ -155,7 +180,7 @@ internal fun resyncStep(s: ResyncStepState, page: PageMeta, o: PostOutcome, nowE
                         "since the last 2xx — holding it (fault breaker open)"
                 else -> null
             }
-            ResyncStep(next.copy(backoffMs = nextBackoffMs(s.backoffMs)), ResyncAction.Hold, retryDelayMs(s.backoffMs, o.retryAfterMs), log)
+            ResyncStep(next.copy(backoffMs = nextBackoffMs(armed.backoffMs)), ResyncAction.Hold, retryDelayMs(armed.backoffMs, o.retryAfterMs), log)
         }
     }
 }
@@ -164,16 +189,52 @@ internal fun resyncStep(s: ResyncStepState, page: PageMeta, o: PostOutcome, nowE
 internal fun shouldResync(outboxDepth: Int, online: Boolean, hasDueWindow: Boolean): Boolean =
     online && hasDueWindow && outboxDepth < MIN_BATCH
 
+/** What one re-sync pass runs with, derived from the reporter's settings snapshot and its live queue. */
+internal data class ResyncPassInputs(
+    val apiBaseUrl: String,
+    val deviceId: String,
+    /** The persisted roster (alias, group, name on every row), else the default one. */
+    val roster: Roster,
+    /** The user's "Send GPS location": on by default with cloud sync, as everywhere else it is read. */
+    val withGps: Boolean,
+    /** The live outbox depth, or Int.MAX_VALUE (wait) until the upload loop has measured it once. */
+    val liveDepth: Int,
+    /** The history import has not been queued yet. */
+    val importDue: Boolean,
+)
+
+/**
+ * The reporter's re-sync loop inputs, pure so the wiring is JVM-tested. Null = not uploading (no settings
+ * yet, cloud sync off, not enrolled, or no device id or server): the loop idles. [depthKnown] is false
+ * until the upload loop has published a depth ([publishedDepth]); until then the live backlog is unknown,
+ * so the re-sender must not assume it is caught up.
+ */
+internal fun resyncPassInputs(p: Persisted?, depthKnown: Boolean, publishedDepth: Int): ResyncPassInputs? {
+    val base = p?.apiBaseUrl
+    val deviceId = p?.deviceId
+    if (p == null || !p.cloudEnabled || !p.enrolled || deviceId == null || base == null) return null
+    return ResyncPassInputs(
+        apiBaseUrl = base,
+        deviceId = deviceId,
+        roster = p.roster ?: DEFAULT_ROSTER,
+        withGps = p.gpsEnabled ?: p.cloudEnabled,
+        liveDepth = if (depthKnown) publishedDepth else Int.MAX_VALUE,
+        importDue = !p.importDone,
+    )
+}
+
 /**
  * The re-send loop's body, one page per [pass], against the re-sync windows ([readWindows] /
  * [mutateWindows]: the OutboxLedger's, which persist before they assign and throw on a store error) and
  * local history ([readPage]: one bounded keyset page, see RESYNC_PAGE_SQL). Pure of Android, so the
  * loop's rules are JVM-tested:
  * - a failing store or Room read pauses the re-sender (logged at most once a minute), never throws;
- * - the step's state is committed only once its window change persisted: a page whose advance or park
- *   didn't save is sent again from the previous state (the server dedups), and a breaker never spends a
- *   park that didn't happen;
- * - a window that changed underneath (a merge moved its cursor or its span) starts a fresh walk.
+ * - the step's state is committed only once its window change persisted AND took: a page whose advance or
+ *   park didn't save, or whose window changed during the POST (a merge; every change is compare-and-set,
+ *   so nothing moves), is sent again from the previous state (the server dedups), and a breaker never
+ *   spends a park that didn't happen;
+ * - a window that changed underneath (a merge moved its cursor or its span) starts a fresh walk;
+ * - both one-park budgets re-arm on a marked 2xx from any stream ([serverOks], see [resyncStep]).
  *
  * One consumer (the reporter's re-sync loop); not thread-safe.
  */
@@ -181,6 +242,8 @@ internal class ResyncSender(
     private val readWindows: suspend () -> ResyncState,
     private val mutateWindows: suspend ((ResyncState) -> ResyncState) -> ResyncState,
     private val readPage: suspend (toMs: Long, afterTs: Long, afterId: Long, limit: Int) -> List<SampleEntity>,
+    /** The shared outcome observer's running count of marked 2xx answers, every stream included. */
+    private val serverOks: () -> Long,
     private val warn: (String, Throwable?) -> Unit,
     private val wallNow: () -> Long = System::currentTimeMillis,
     /** Monotonic ms: the fault span and the log throttle. */
@@ -241,24 +304,32 @@ internal class ResyncSender(
         // seq = -1: stored by the server, never pushed to live dashboards (the import contract).
         val outcome = send(CloudJson.encodeBatch(seq = -1, rows = rows))
         val meta = PageMeta(w.pos, page.size, page.first().tsMs, page.first().id, page.last().tsMs, page.last().id)
-        val step = resyncStep(state, meta, outcome, elapsedNow())
+        val step = resyncStep(state, meta, outcome, elapsedNow(), serverOks())
         val exhausted = page.size < limit
+        // Whether the window was still exactly [due] when the change applied (every change is compare-and-set).
+        var took = false
         val nextWalk = try {
             when (val a = step.action) {
                 is ResyncAction.Advance -> {
-                    mutateWindows { advanceResync(it, due, a.afterTs, a.afterId, exhausted) }
+                    mutateWindows { took = due in it.windows; advanceResync(it, due, a.afterTs, a.afterId, exhausted) }
                     w.copy(cursorTs = a.afterTs, afterId = a.afterId, pos = w.pos + page.size, lastSent = sentNext)
                 }
                 is ResyncAction.ParkPage -> {
                     // The page's fixes never landed: the next page sends them again.
-                    mutateWindows { parkResyncPage(it, due, a.firstTsMs, a.lastTsMs, a.lastId, exhausted, wallNow()) }
+                    mutateWindows {
+                        took = due in it.windows
+                        parkResyncPage(it, due, a.firstTsMs, a.lastTsMs, a.lastId, exhausted, wallNow())
+                    }
                     w.copy(cursorTs = a.lastTsMs, afterId = a.lastId, pos = w.pos + page.size)
                 }
                 is ResyncAction.ParkRow -> {
-                    mutateWindows { parkResyncRow(it, due, a.tsMs, a.id, wallNow()) }
+                    mutateWindows { took = due in it.windows; parkResyncRow(it, due, a.tsMs, a.id, wallNow()) }
                     w.copy(cursorTs = a.tsMs, afterId = a.id, pos = w.pos + 1)
                 }
-                ResyncAction.Hold -> w
+                ResyncAction.Hold -> {
+                    took = true
+                    w
+                }
             }
         } catch (e: CancellationException) {
             throw e
@@ -270,6 +341,12 @@ internal class ResyncSender(
             val delay = retryDelayMs(state.backoffMs, outcome.retryAfterMs)
             state = state.copy(backoffMs = nextBackoffMs(state.backoffMs))
             return delay
+        }
+        if (!took) {
+            // The window changed during the POST: nothing moved, so nothing is spent. The next pass
+            // walks it afresh from its merged cursor and sends this page again.
+            walk = null
+            return step.delayMs
         }
         state = step.state
         walk = nextWalk

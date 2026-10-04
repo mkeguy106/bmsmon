@@ -99,7 +99,8 @@ class OutboxLedgerTest {
     private val outbox = FakeOutbox(events)
     private val store = FakeStore(events)
     private val logs = mutableListOf<String>()
-    private val ledger = OutboxLedger(outbox, store, warn = { m, _ -> logs += m }, now = { NOW }, maxRows = 5)
+    // evictChunk = 0: these tests pin the cap's recording and counting at the exact cap; hysteresis has its own.
+    private val ledger = OutboxLedger(outbox, store, warn = { m, _ -> logs += m }, now = { NOW }, maxRows = 5, evictChunk = 0)
 
     private val poison = PostOutcome(PostResult.Poison, code = 422, fromApi = true)
     private val ok = PostOutcome(PostResult.Ok, code = 200, fromApi = true)
@@ -165,11 +166,34 @@ class OutboxLedgerTest {
         assertTrue(logs.any { "count is short" in it })
     }
 
+    // Eviction hysteresis: past the cap the outbox is cut back a whole chunk, so each eviction, and its
+    // DataStore write of the re-send windows, waits for a chunk of new rows instead of happening every pass.
+    @Test fun rowsPastTheCapCostOneWindowWritePerChunkNotOnePerRow() = runBlocking {
+        val max = 50
+        val chunk = 10
+        val l = OutboxLedger(outbox, store, warn = { m, _ -> logs += m }, now = { NOW }, maxRows = max, evictChunk = chunk)
+        var ts = NOW - 1_000_000
+        outbox.fill(*LongArray(max) { ts++ })
+        assertEquals(max, l.capOutbox())
+        val n = 100
+        repeat(n) {                                         // one enqueue, then one upload-loop pass, each
+            outbox.fill(ts++)
+            assertTrue(l.capOutbox() <= max)
+        }
+        // The first row past the cap evicts down to max − chunk; then every chunk + 1 rows evict again:
+        // ⌈n / (chunk + 1)⌉ = ⌈100 / 11⌉ = 10 = ⌈n / chunk⌉ writes, not n.
+        assertEquals(10, store.writes)
+        assertEquals(10, events.count { it.startsWith("dropOldest") })
+        assertEquals(max + n - outbox.rows.size, store.evicted.toInt())   // every evicted row is counted
+        // and the windows cover every row that left, oldest first, contiguously.
+        assertEquals(listOf(ResyncWindow(NOW - 1_000_000, outbox.rows.minOf { it.enqueuedAt } - 1)), store.windows())
+    }
+
     // Offline at the cap, every ~1.5 s pass evicts a few rows: one line per minute, not one per pass
     // (logcat also holds the motion instrumentation). Every evicted row is still counted.
     @Test fun aPhoneOfflineAtTheCapLogsItsEvictionsAtMostOncePerMinute() = runBlocking {
         var clock = 0L
-        val l = OutboxLedger(outbox, store, warn = { m, _ -> logs += m }, now = { NOW }, maxRows = 5, elapsed = { clock })
+        val l = OutboxLedger(outbox, store, warn = { m, _ -> logs += m }, now = { NOW }, maxRows = 5, evictChunk = 0, elapsed = { clock })
         var ts = NOW - 100_000
         outbox.fill(*LongArray(5) { ts++ })
         repeat(80) {                                        // two minutes of passes, each two rows over the cap
@@ -186,7 +210,7 @@ class OutboxLedgerTest {
 
     @Test fun aStoreThatCannotRecordTheReSendLogsAtMostOncePerMinute() = runBlocking {
         var clock = 0L
-        val l = OutboxLedger(outbox, store, warn = { m, _ -> logs += m }, now = { NOW }, maxRows = 5, elapsed = { clock })
+        val l = OutboxLedger(outbox, store, warn = { m, _ -> logs += m }, now = { NOW }, maxRows = 5, evictChunk = 0, elapsed = { clock })
         store.readFailures = Int.MAX_VALUE
         outbox.fill(NOW - 7_000, NOW - 6_000, NOW - 5_000, NOW - 4_000, NOW - 3_000, NOW - 2_000)
         repeat(80) {

@@ -103,6 +103,28 @@ class ResyncWindowsTest {
         assertEquals(listOf(ResyncWindow(now - 3_000, now - 1_000, notBeforeMs = now + RESYNC_PARK_MS)), done.windows)
     }
 
+    // Parks are compare-and-set, like advances: a window that changed during the POST parks nothing.
+    @Test fun parkingAWindowThatChangedUnderneathIsANoOp() {
+        val w = ResyncWindow(now - 9_000, now - 1_000)
+        val merged = add(state(w), ResyncWindow(now - 990, now - 500))
+        assertEquals(merged, parkResyncPage(merged, w, now - 9_000, now - 6_000, 42, exhausted = false, nowMs = now))
+        assertEquals(merged, parkResyncRow(merged, w, tsMs = now - 7_000, id = 40, nowMs = now))
+    }
+
+    // Queueing the import again (its flag failed to save) must not restart it from 0.
+    @Test fun queueingTheImportAgainLeavesAQueuedImportWhereItIs() {
+        val queued = queueImportWindow(ResyncState(), now - 60_000)
+        assertEquals(listOf(importWindow(now - 60_000)), queued.windows)
+        val partlySent = advanceResync(queued, queued.windows.single(), afterTs = now - 70_000, afterId = 42, exhausted = false)
+        assertEquals(partlySent, queueImportWindow(partlySent, now))
+        val mergedWithAnEviction = add(partlySent, ResyncWindow(now - 30_000, now - 20_000))
+        assertEquals(0L, mergedWithAnEviction.windows.single().fromMs)
+        assertEquals(mergedWithAnEviction, queueImportWindow(mergedWithAnEviction, now))
+        // Another window doesn't count as the import: it is queued (and, overlapping, absorbs that window).
+        val other = state(ResyncWindow(now - 9_000, now - 1_000))
+        assertEquals(listOf(importWindow(now)), queueImportWindow(other, now).windows)
+    }
+
     @Test fun reParkingAParkedRowRestartsItLater() {
         val p = ResyncWindow(now - 7_000, now - 7_000, notBeforeMs = now - 1)
         val s = parkResyncRow(state(p), p, tsMs = now - 7_000, id = 40, nowMs = now)

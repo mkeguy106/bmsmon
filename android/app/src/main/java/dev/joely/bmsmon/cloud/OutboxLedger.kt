@@ -1,6 +1,7 @@
 package dev.joely.bmsmon.cloud
 
 import dev.joely.bmsmon.data.FailureLogThrottle
+import dev.joely.bmsmon.data.warnThrottled
 import dev.joely.bmsmon.data.db.OutboxDao
 import dev.joely.bmsmon.data.db.OutboxEntity
 import kotlinx.coroutines.CancellationException
@@ -11,6 +12,18 @@ import kotlinx.coroutines.withContext
 
 /** The most rows the outbox keeps; past it the oldest are evicted, counted and queued for a re-send (DATA-5, DATA-19). */
 internal const val OUTBOX_MAX = 200_000
+
+/**
+ * Eviction hysteresis: an outbox over [OUTBOX_MAX] is cut back to OUTBOX_MAX − EVICT_CHUNK, not to the cap
+ * itself. Every eviction first persists a re-send window (a DataStore write of the windows blob); cut to the
+ * exact cap, a phone offline at the cap evicted a few rows, and wrote that blob, on every ~1.5 s upload-loop
+ * pass. 500 rows is about four minutes of the fleet's samples (two staged packs at 1.5 s and six at 10 s make
+ * ~116 a minute), so offline at the cap the blob is written about every four minutes instead. It is 0.25% of
+ * OUTBOX_MAX, so the queue keeps 99.75% of its reach back in time, and it equals the enqueue path's amortized
+ * cap check (CAP_CHECK_EVERY), so that check's overshoot fits inside one chunk. Evicted rows are not lost:
+ * they are re-sent from local history while usage logging keeps it (DATA-19).
+ */
+internal const val EVICT_CHUNK = 500
 
 /** What [OutboxLedger] persists: the re-sync windows blob and two all-time counters. SettingsStore in the app. */
 internal interface LedgerStore {
@@ -60,6 +73,8 @@ internal class OutboxLedger(
     private val onResync: (ResyncSummary) -> Unit = {},
     private val now: () -> Long = System::currentTimeMillis,
     private val maxRows: Int = OUTBOX_MAX,
+    /** Past [maxRows], evict down to maxRows − evictChunk ([EVICT_CHUNK]); 0 = to the cap exactly. */
+    private val evictChunk: Int = EVICT_CHUNK,
     /** Monotonic ms for the log throttles (SystemClock.elapsedRealtime in the app). */
     private val elapsed: () -> Long = { System.nanoTime() / 1_000_000L },
 ) {
@@ -97,7 +112,9 @@ internal class OutboxLedger(
     suspend fun readResync(): ResyncState = mutateResync { it }
 
     /**
-     * Enforce the cap ([maxRows], DATA-5), never silently (DATA-19). The sample-time span of the rows
+     * Enforce the cap ([maxRows], DATA-5), never silently (DATA-19). Over the cap, the oldest rows are
+     * evicted down to maxRows − [evictChunk] (hysteresis, see [EVICT_CHUNK]), so the next eviction, and its
+     * window write, waits for a chunk of new rows. The sample-time span of the rows
      * about to go is persisted as a re-send window BEFORE they are deleted: a kill between the two costs a
      * duplicate send, which the server dedups, never a lost re-send. The rows actually deleted are then
      * counted (best-effort: a failed count is logged, the eviction stands). A window that can't be
@@ -108,7 +125,7 @@ internal class OutboxLedger(
         val depth = outbox.count()
         if (depth <= maxRows) return@withLock depth
         withContext(NonCancellable) {
-            val n = depth - maxRows
+            val n = depth - maxOf(0, maxRows - evictChunk)
             val span = outbox.oldestSpan(n)
             val from = span.fromMs ?: return@withContext depth
             val to = span.toMs ?: return@withContext depth
@@ -222,26 +239,6 @@ internal class OutboxLedger(
         line?.let { warn(it + stepLogSuffix(seq, rows, step.effects), null) }
         applied.failure?.let { warn("upload: seq=$seq updated the outbox, but saving its skip count failed — the count is short", it) }
         return IngestRun(step.state, memory, step.delayMs, took = true)
-    }
-}
-
-/**
- * A WARN that can repeat as fast as its loop runs, through [throttle] ([FailureLogThrottle]): the first of
- * a burst with its [cause], then at most one counted line per interval carrying the latest cause's text.
- */
-internal fun warnThrottled(
-    throttle: FailureLogThrottle,
-    nowElapsedMs: Long,
-    warn: (String, Throwable?) -> Unit,
-    what: String,
-    cause: Throwable?,
-) {
-    when (val a = throttle.onFailure(nowElapsedMs)) {
-        is FailureLogThrottle.Action.Full ->
-            warn(if (a.unreported == 0) what else "$what (${a.unreported} earlier times went unreported)", cause)
-        is FailureLogThrottle.Action.Summary ->
-            warn("$what (${a.count} times since the last report${cause?.let { "; latest: $it" } ?: ""})", null)
-        FailureLogThrottle.Action.Suppress -> Unit
     }
 }
 

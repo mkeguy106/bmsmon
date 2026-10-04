@@ -70,6 +70,15 @@ internal fun decodeResync(json: String?, nowMs: Long): ResyncState {
 /** The one-shot history import as a window: everything in local history up to now. */
 internal fun importWindow(nowMs: Long) = ResyncWindow(fromMs = 0L, toMs = nowMs)
 
+/**
+ * Queue the history import ([importWindow]) unless it is already queued. A window starting at 0 is the
+ * import, whole, partly sent, or merged with another (no sample is dated 1970). Adding it again would
+ * restart it from 0, because a union resumes at the earlier cursor, so a repeat (after the "import
+ * queued" flag failed to save, say) is a no-op.
+ */
+internal fun queueImportWindow(s: ResyncState, nowMs: Long): ResyncState =
+    if (s.windows.any { it.fromMs == 0L }) s else addResyncWindow(s, importWindow(nowMs), nowMs)
+
 private fun earlierCursor(a: ResyncWindow, b: ResyncWindow): Pair<Long, Long> {
     val ca = a.cursorTs to a.afterId
     val cb = b.cursorTs to b.afterId
@@ -159,9 +168,11 @@ internal fun completeResync(s: ResyncState, expected: ResyncWindow): ResyncState
 
 /**
  * The server keeps crashing on one sample at ([tsMs], [id]): step [expected] past it and park that
- * sample in its own window, retried after [RESYNC_PARK_MS] until Room ages it out.
+ * sample in its own window, retried after [RESYNC_PARK_MS] until Room ages it out. Compare-and-set like
+ * [advanceResync]: if [expected] changed underneath (a merge during the POST), nothing is parked.
  */
 internal fun parkResyncRow(s: ResyncState, expected: ResyncWindow, tsMs: Long, id: Long, nowMs: Long): ResyncState {
+    if (expected !in s.windows) return s
     // A window that is itself a parked single row is replaced, not advanced past itself.
     val wasParkedRow = expected.notBeforeMs > 0L && expected.fromMs == tsMs && expected.toMs == tsMs
     val advanced = if (wasParkedRow) completeResync(s, expected) else advanceResync(s, expected, tsMs, id, exhausted = false)
@@ -173,6 +184,7 @@ internal fun parkResyncRow(s: ResyncState, expected: ResyncWindow, tsMs: Long, i
  * [expected] past it ([exhausted]: it was the window's last page) and park the page's span for a retry
  * after [RESYNC_PARK_MS], until Room ages it out. The re-send's version of the ingest stream's poison
  * skip, which parks its batch the same way: a rejected sample is retried later, never abandoned.
+ * Compare-and-set like [advanceResync]: if [expected] changed underneath, nothing is parked.
  */
 internal fun parkResyncPage(
     s: ResyncState,
@@ -183,6 +195,7 @@ internal fun parkResyncPage(
     exhausted: Boolean,
     nowMs: Long,
 ): ResyncState {
+    if (expected !in s.windows) return s
     val advanced = advanceResync(s, expected, lastTsMs, lastId, exhausted)
     return addResyncWindow(advanced, ResyncWindow(firstTsMs, lastTsMs, notBeforeMs = nowMs + RESYNC_PARK_MS), nowMs)
 }

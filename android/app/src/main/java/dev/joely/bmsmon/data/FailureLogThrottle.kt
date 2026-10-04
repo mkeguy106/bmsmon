@@ -44,3 +44,23 @@ class FailureLogThrottle(private val intervalMs: Long = 60_000L) {
         return Action.Summary(count)
     }
 }
+
+/**
+ * A WARN that can repeat as fast as its loop runs, through [throttle] ([FailureLogThrottle]): the first of
+ * a burst with its [cause], then at most one counted line per interval carrying the latest cause's text.
+ */
+internal fun warnThrottled(
+    throttle: FailureLogThrottle,
+    nowElapsedMs: Long,
+    warn: (String, Throwable?) -> Unit,
+    what: String,
+    cause: Throwable?,
+) {
+    when (val a = throttle.onFailure(nowElapsedMs)) {
+        is FailureLogThrottle.Action.Full ->
+            warn(if (a.unreported == 0) what else "$what (${a.unreported} earlier times went unreported)", cause)
+        is FailureLogThrottle.Action.Summary ->
+            warn("$what (${a.count} times since the last report${cause?.let { "; latest: $it" } ?: ""})", null)
+        FailureLogThrottle.Action.Suppress -> Unit
+    }
+}
