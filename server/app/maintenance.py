@@ -8,6 +8,7 @@ import time
 
 import asyncpg
 
+from app.db.queries import register_orphan_addresses
 from app.db.partitions import PRECREATE_AHEAD_MS, precreate_partitions
 
 logger = logging.getLogger(__name__)
@@ -34,8 +35,12 @@ async def run_maintenance(pool, now_ms: int | None = None) -> dict[str, object]:
         report["partitions"] = await _step(
             "partition pre-create",
             precreate_partitions(conn, now_ms, now_ms + PRECREATE_AHEAD_MS))
+        report["registry"] = await _step("registry backfill", register_orphan_addresses(conn))
     if report["partitions"]:
         logger.info("maintenance: created partition(s) %s", ", ".join(report["partitions"]))
+    if report["registry"]:
+        logger.warning("maintenance: registered %d pack address(es) that had samples but no "
+                       "registry row", report["registry"])
     return report
 
 

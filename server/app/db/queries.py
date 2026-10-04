@@ -63,6 +63,17 @@ _INSERT_FIELDS = ["device_id", "address", "ts_ms", "ts", "state", "soc", "curren
                   "motion_activity", "motion_confidence", "motion_still", "motion_at_ms"]
 
 
+# Fleet-wide reads (share trail, history, rollup, GPS scrub) are driven per pack from the
+# small `batteries` registry (SRV-16), so every address that has a sample MUST have a
+# registry row. insert_samples is the only writer of samples and guarantees it below;
+# register_orphan_addresses (maintenance pass) backfills any row written another way.
+_REGISTER_ADDRESSES = """
+INSERT INTO batteries (address)
+SELECT DISTINCT a FROM unnest($1::text[]) AS a
+ON CONFLICT (address) DO NOTHING
+"""
+
+
 async def insert_samples(conn: asyncpg.Connection, rows: list[dict]) -> int:
     """Insert sample rows; returns the count of rows actually inserted (duplicates
     already present under the samples PK are skipped and NOT counted)."""
@@ -70,8 +81,33 @@ async def insert_samples(conn: asyncpg.Connection, rows: list[dict]) -> int:
         return 0
     ts_all = [r["ts_ms"] for r in rows]
     await ensure_partitions_for_range(conn, min(ts_all), max(ts_all))
+    await conn.execute(_REGISTER_ADDRESSES, sorted({r["address"] for r in rows}))
     cols = [[r[f] for r in rows] for f in _INSERT_FIELDS]
     return await conn.fetchval(_INSERT, *cols)
+
+
+# A loose index scan over the samples key: one descent of each partition's (address, ts)
+# prefix per distinct address (~250 buffers for the 8-pack fleet), never a full scan.
+_ORPHAN_ADDRESSES = """
+WITH RECURSIVE a AS (
+  (SELECT address FROM samples ORDER BY address LIMIT 1)
+  UNION ALL
+  SELECT (SELECT s.address FROM samples s WHERE s.address > a.address
+           ORDER BY s.address LIMIT 1)
+    FROM a WHERE a.address IS NOT NULL
+)
+INSERT INTO batteries (address)
+SELECT address FROM a WHERE address IS NOT NULL
+ON CONFLICT (address) DO NOTHING
+"""
+
+
+async def register_orphan_addresses(conn) -> int:
+    """Backfill a registry row for every samples address that lacks one (see
+    _REGISTER_ADDRESSES). Returns the rows added; above 0 means some writer bypassed
+    insert_samples."""
+    status = await conn.execute(_ORPHAN_ADDRESSES, timeout=MAINTENANCE_TIMEOUT_S)
+    return int(status.rsplit(" ", 1)[-1])  # "INSERT 0 n"
 
 
 async def upsert_battery(conn, address, advertised_name, alias, group_id, ts_ms: int) -> None:
