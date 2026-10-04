@@ -16,7 +16,7 @@
 //   bound at all: energy is unknown and range reads no-data. A bound from the packs that do
 //   report would be an overestimate with nothing to flag it.
 import type { Base } from "../fleet";
-import { baseLastSeenMs, isCharging } from "../fleet";
+import { baseLastSeenMs, isCharging, isDischarging } from "../fleet";
 import type { FleetItem } from "../../types";
 import {
   NOMINAL_PACK_V, SEED_RANGE_PARAMS, estimatePackRange, minRange,
@@ -37,8 +37,9 @@ export interface PackView {
 export interface LastKnownRef { letter: string; tsMs: number }
 
 export type RangeState =
-  /** A live pack is charging: the recharge ETA owns the slot. */
-  | { kind: "charging"; etaFullMin: number | null }
+  /** A live pack is charging: the recharge ETA owns the slot. [partial] names a pack that is
+   *  not live: its own time to full is not in etaFullMin, so the base may be ready later. */
+  | { kind: "charging"; etaFullMin: number | null; partial: LastKnownRef | null }
   /** No pack is live. */
   | { kind: "offline"; lastSeenMs: number | null }
   /** Live, but some pack (live or last known) reports no usable remaining capacity. */
@@ -60,6 +61,9 @@ export interface BaseView {
   livePacks: PackView[];
   /** Σ |power| over live packs; null when none is live. */
   flowW: number | null;
+  /** Which way flowW runs, from the same live packs: a draw, a charge, a regen burst while
+   *  driving (not a charge), or idle; null when none is live. */
+  flowDir: FlowDir | null;
   /** A live pack is charging. A regen burst while driving is not charging. */
   charging: boolean;
   /** The longest live time-to-full, in minutes; null when no live pack reports one. */
@@ -78,6 +82,8 @@ export interface BaseView {
    *  thresholds and envelope (WEB-31). */
   thermal: ThermalView | null;
 }
+
+export type FlowDir = "draw" | "charge" | "regen" | "idle";
 
 export interface BaseViewInputs {
   rangeParams: ReadonlyMap<string, RangeParams>;
@@ -119,6 +125,11 @@ export function baseView(base: Base, inputs: BaseViewInputs): BaseView {
   const flowW = livePacks.length > 0
     ? livePacks.reduce((s, p) => s + Math.abs(p.item.power_w ?? 0), 0) : null;
   const charging = livePacks.some((p) => isChargingNow(p.item));
+  const flowDir: FlowDir | null = livePacks.length === 0 ? null
+    : livePacks.some((p) => isDischarging(p.item)) ? "draw"
+      : charging ? "charge"
+        : livePacks.some((p) => isCharging(p.item)) ? "regen"
+          : "idle";
   const etaFullMin = livePacks.reduce<number | null>((mx, p) => {
     const e = p.item.eta_full_min;
     return e != null && Number.isFinite(e) && e > 0 ? Math.max(mx ?? 0, e) : mx;
@@ -142,7 +153,7 @@ export function baseView(base: Base, inputs: BaseViewInputs): BaseView {
 
   let range: RangeState;
   if (livePacks.length === 0) range = { kind: "offline", lastSeenMs: baseLastSeenMs(base) };
-  else if (charging) range = { kind: "charging", etaFullMin };
+  else if (charging) range = { kind: "charging", etaFullMin, partial: stale ? ref(stale) : null };
   else if (bound == null) range = { kind: "no-data" };
   else range = { kind: "estimate", range: bound, lastKnown };
 
@@ -162,7 +173,7 @@ export function baseView(base: Base, inputs: BaseViewInputs): BaseView {
   }
 
   return {
-    packs, livePacks, flowW, charging, etaFullMin, range, usableWh, usableLastKnown: lastKnown,
+    packs, livePacks, flowW, flowDir, charging, etaFullMin, range, usableWh, usableLastKnown: lastKnown,
     packParams: packs.map((p) => params(p.item)), thermal,
   };
 }

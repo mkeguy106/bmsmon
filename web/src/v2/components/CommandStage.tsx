@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import type { Base, BaseStatus } from "../fleet";
 import { DAILY_DRIVER_BASE } from "../fleet";
 import { Ago } from "../../components/Ago";
-import type { BaseView, PackView, RangeState, ThermalView } from "../model/baseView";
+import type { BaseView, FlowDir, PackView, RangeState, ThermalView } from "../model/baseView";
 import type { TripSummary } from "../model/journey";
 import type { StageReason } from "../model/stageBase";
 import { Ring } from "./Ring";
@@ -18,6 +18,10 @@ const STATUS_COLOR: Record<BaseStatus, string> = {
 const STATUS_TAG: Record<BaseStatus, string> = {
   "in-use": "IN USE", charging: "CHARGING", backup: "BACKUP",
   spares: "SPARES", offline: "OFFLINE",
+};
+
+const FLOW_LABEL: Record<FlowDir, string> = {
+  draw: "DRAW NOW", charge: "CHARGE IN", regen: "REGEN IN", idle: "FLOW",
 };
 
 function roleText(base: Base): string {
@@ -101,9 +105,15 @@ function ThermalBanner({ t, tempF }: { t: ThermalView; tempF: boolean }) {
 }
 
 /** Runtime band (the weaker pack bounds it; floored, never shown above the estimate) or
- *  time-to-full while charging. */
+ *  time-to-full while charging, flagged partial while a pack's own time to full is unknown. */
 function runtimeTile(range: RangeState): { label: string; value: string; sub?: ReactNode } {
-  if (range.kind === "charging") return { label: "TIME TO FULL", value: fmtEta(range.etaFullMin) };
+  if (range.kind === "charging") {
+    const p = range.partial;
+    return {
+      label: "TIME TO FULL", value: fmtEta(range.etaFullMin),
+      sub: p ? <>partial · excl. {p.letter} · last seen <Ago tsMs={p.tsMs} /></> : undefined,
+    };
+  }
   if (range.kind !== "estimate") return { label: "EST. RUNTIME", value: "—" };
   const r = range.range;
   return {
@@ -116,7 +126,8 @@ export function CommandStage({ base, view, reason = null, onClearPin, tempF, dis
   base: Base; view: BaseView; reason?: StageReason | null; onClearPin?: () => void;
   tempF: boolean; distUnit: DistUnit; mobile: boolean; drivenToday: TripSummary;
 }) {
-  const flowLabel = base.status === "in-use" ? "DRAW NOW" : view.charging ? "CHARGE IN" : "FLOW";
+  // From the view, like the watts it labels: base.status reads a regen burst as charging.
+  const flowLabel = FLOW_LABEL[view.flowDir ?? "idle"];
   const flowValue = view.flowW == null ? "—" : `${Math.round(view.flowW)} W`;
   const runtime = runtimeTile(view.range);
 

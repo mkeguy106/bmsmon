@@ -21,6 +21,7 @@ describe("Command with a pack lacking capacity", () => {
     const html = renderToStaticMarkup(<CommandRange view={view} trips={[]} onEditTrips={() => {}} distUnit="mi" />);
     expect(html).toContain("No capacity reading from this base yet");
     expect(html).not.toContain("miles");
+    expect(html).not.toMatch(/\d–\d/);
   });
 
   it("stage shows no runtime figure", () => {
@@ -73,5 +74,81 @@ describe("Command range figures are floored", () => {
       .replace(/<!-- -->/g, "");
     expect(html).toContain("~2–3h");
     expect(html).not.toContain("~3–4h");
+  });
+});
+
+// Task 5 carry: the other render states — a stale pack lacking capacity, charging, and an
+// estimate that includes a last-known pack.
+const strip = (html: string) => html.replace(/<!-- -->/g, "");
+const rangeHtml = (v: ReturnType<typeof baseView>, unit: "mi" | "km" = "mi") =>
+  strip(renderToStaticMarkup(<CommandRange view={v} trips={[]} onEditTrips={() => {}} distUnit={unit} />));
+const stageHtml = (b: ReturnType<typeof groupBases>[number], v: ReturnType<typeof baseView>) =>
+  strip(renderToStaticMarkup(
+    <CommandStage base={b} view={v} tempF={false} distUnit="mi" mobile={false} drivenToday={SUMMARY} />));
+
+describe("Command with a STALE pack lacking capacity", () => {
+  const b = groupBases([item("A", {}), item("B", { remaining_ah: null, ts_ms: NOW - 600_000 })], new Set(["B"]))[0];
+  const view = baseView(b, { rangeParams: new Map(), tempConfig: null });
+
+  it("no figure anywhere: the stale pack could be the weaker one", () => {
+    expect(rangeHtml(view)).toContain("No capacity reading from this base yet");
+    expect(rangeHtml(view)).not.toMatch(/\d–\d/);
+    expect(stageHtml(b, view)).not.toMatch(/~\d+(\.\d)?–\d+(\.\d)?h/);
+  });
+});
+
+describe("Command while charging", () => {
+  it("the range card yields to the recharge plan; the stage shows time to full", () => {
+    const b = groupBases([item("A", { current_a: 8, power_w: 110, eta_full_min: 90 }),
+      item("B", { current_a: 8, power_w: 110, eta_full_min: 60 })], new Set())[0];
+    const view = baseView(b, { rangeParams: new Map(), tempConfig: null });
+    expect(rangeHtml(view)).toContain("Charging — see recharge plan");
+    const html = stageHtml(b, view);
+    expect(html).toContain("TIME TO FULL");
+    expect(html).toContain("1h 30m");
+    expect(html).toContain("CHARGE IN");
+    expect(html).not.toContain("partial");
+  });
+
+  // Task 5 carry: a stale pack's own time to full is not in the figure.
+  it("flags the time to full as partial while a pack is not live", () => {
+    const b = groupBases([item("A", { current_a: 8, power_w: 110, eta_full_min: 90 }),
+      item("B", { ts_ms: NOW - 600_000 })], new Set(["B"]))[0];
+    const view = baseView(b, { rangeParams: new Map(), tempConfig: null });
+    const html = stageHtml(b, view);
+    expect(html).toContain("1h 30m");
+    expect(html).toMatch(/partial · excl\. B · last seen/);
+  });
+});
+
+describe("Command estimate with a last-known pack", () => {
+  const b = groupBases([item("A", { remaining_ah: 50 }),
+    item("B", { remaining_ah: 20, ts_ms: NOW - 600_000 })], new Set(["B"]))[0];
+  const view = baseView(b, { rangeParams: new Map(), tempConfig: null });
+
+  it("the range card shows the bound and names the last-known pack", () => {
+    const html = rangeHtml(view);
+    expect(html).toContain("miles · typical");
+    expect(html).toContain("Includes pack B&#x27;s last-known reading");
+  });
+
+  it("the stage's runtime names it too", () => {
+    const html = stageHtml(b, view);
+    expect(html).toMatch(/~\d+(\.\d)?–\d+(\.\d)?h/);
+    expect(html).toContain("incl. B · last seen");
+  });
+});
+
+// Task 5 carry: the flow label follows the view, so a regen burst is not labelled as a draw
+// or a charge.
+describe("Command flow label during regen", () => {
+  it("reads REGEN IN", () => {
+    const b = groupBases([item("A", { current_a: 6, power_w: 80, regen: true }),
+      item("B", { current_a: 6, power_w: 80, regen: true })], new Set())[0];
+    const view = baseView(b, { rangeParams: new Map(), tempConfig: null });
+    const html = stageHtml(b, view);
+    expect(html).toContain("REGEN IN");
+    expect(html).not.toContain("DRAW NOW");
+    expect(html).not.toContain("CHARGE IN");
   });
 });

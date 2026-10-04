@@ -22,6 +22,21 @@ const tempCfg = (o: Partial<TempConfig> = {}): TempConfig => ({
   cold_crit_c: -12, hot_crit_c: 53, unit: "F", updated_at_ms: 0, received_at: "", ...o,
 });
 
+// Task 5 carry: the stage's flow label comes from the view, the same live packs at the same
+// moment as the watts it labels (base.status read a regen burst as CHARGING).
+describe("baseView flow direction", () => {
+  it("reads draw, charge, regen and idle from the live packs, null with none live", () => {
+    expect(baseView(base({ current_a: -5 }, { current_a: -5 }), ctx()).flowDir).toBe("draw");
+    expect(baseView(base({ current_a: 8 }, { current_a: 8 }), ctx()).flowDir).toBe("charge");
+    expect(baseView(base({ current_a: 5, regen: true }, { current_a: 5, regen: true }), ctx()).flowDir).toBe("regen");
+    expect(baseView(base({ current_a: 0 }, { current_a: 0.05 }), ctx()).flowDir).toBe("idle");
+    expect(baseView(base({ current_a: -5 }, { current_a: -5 }, ["A", "B"]), ctx()).flowDir).toBeNull();
+  });
+  it("ignores a stale pack's current", () => {
+    expect(baseView(base({ current_a: -9 }, { current_a: 0 }, ["A"]), ctx()).flowDir).toBe("idle");
+  });
+});
+
 describe("baseView packs and flow", () => {
   it("keeps every pack with its own live flag, and sums flow over live packs only", () => {
     const v = baseView(base({ power_w: -300 }, { power_w: -64 }, ["A"]), ctx());
@@ -101,7 +116,14 @@ describe("baseView range", () => {
   it("gives the slot to a live pack that is charging, with the longest ETA", () => {
     const v = baseView(base({ current_a: 8, eta_full_min: 90 }, { current_a: 8, eta_full_min: 120 }), ctx());
     expect(v.charging).toBe(true);
-    expect(v.range).toEqual({ kind: "charging", etaFullMin: 120 });
+    expect(v.range).toEqual({ kind: "charging", etaFullMin: 120, partial: null });
+  });
+
+  // Task 5 carry: a pack that is not live has no time to full in the figure, so the base may
+  // be ready later than shown. The view names it, never posing as the whole base's ETA.
+  it("flags a charging ETA as partial while a pack is not live", () => {
+    const v = baseView(base({ current_a: 8, eta_full_min: 90 }, { ts_ms: NOW - 300_000 }, ["B"]), ctx());
+    expect(v.range).toEqual({ kind: "charging", etaFullMin: 90, partial: { letter: "B", tsMs: NOW - 300_000 } });
   });
 
   // Review Focus: regen pushes current positive for up to ~23 s while driving.
