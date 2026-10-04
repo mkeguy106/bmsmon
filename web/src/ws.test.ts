@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FleetItem, Sample } from "./types";
 import type { ProbeResult, Session } from "./liveLink";
-import { connectLive } from "./ws";
+import { connectLive, STABLE_MS } from "./ws";
 
 const STALE_MS = 60_000;
 /** reconnectDelayMs(0, 1): the first backoff step, with the jitter pinned at its top. */
@@ -123,6 +123,7 @@ describe("connectLive", () => {
   it("reconnects on the first backoff step after a healthy socket drops", () => {
     const { statuses, samples, stop } = setup();
     sockets()[0].goLive();
+    advance(STABLE_MS);
     sockets()[0].fireClose();
     expect(statuses).toEqual([true, false]);
     advance(RECONNECT_MS - 1);
@@ -137,6 +138,52 @@ describe("connectLive", () => {
     stop();
   });
 
+  // Final review minor 2: a server that crashes right after the snapshot must not be retried
+  // at the base step forever.
+  it("a socket that dies soon after its snapshot keeps the backoff growing", () => {
+    const { stop } = setup();
+    sockets()[0].goLive();
+    advance(STABLE_MS - 1);
+    sockets()[0].fireClose();        // failures 0 -> 1: next wait is the 3 s step
+    advance(RECONNECT_MS);
+    expect(sockets()).toHaveLength(1);
+    advance(RECONNECT_MS);
+    expect(sockets()).toHaveLength(2);
+    sockets()[1].goLive();
+    sockets()[1].fireClose();        // failures 1 -> 2: 6 s step
+    advance(6_000 - 1);
+    expect(sockets()).toHaveLength(2);
+    advance(1);
+    expect(sockets()).toHaveLength(3);
+    stop();
+  });
+
+  it("a socket that stays up for STABLE_MS resets the backoff to the base step", () => {
+    const { stop } = setup();
+    for (let i = 0; i < 3; i++) { lastSocket().fireClose(); advance(60_000); }
+    lastSocket().goLive();
+    advance(STABLE_MS);
+    const n = sockets().length;
+    lastSocket().fireClose();
+    advance(RECONNECT_MS);
+    expect(sockets()).toHaveLength(n + 1);
+    stop();
+  });
+
+  // Final review minor 1: replacing a zombie socket must drop LIVE until the new one delivers.
+  it("replacing a zombie socket on refocus reports not-live until the new socket delivers", () => {
+    const { statuses, stop } = setup();
+    sockets()[0].goLive();
+    expect(statuses).toEqual([true]);
+    advance(STALE_MS + 1);
+    visibilityHandler!();
+    expect(sockets()).toHaveLength(2);
+    expect(statuses).toEqual([true, false]);   // REST fallback may run meanwhile
+    sockets()[1].goLive();
+    expect(statuses).toEqual([true, false, true]);
+    stop();
+  });
+
   it("backs off exponentially while sockets keep failing, caps at 60 s, and resets on a snapshot", () => {
     const { statuses, stop } = setup();
     // Each socket closes without delivering anything (random pinned to 1: the top of each step).
@@ -148,7 +195,8 @@ describe("connectLive", () => {
       expect(sockets()).toHaveLength(i + 2);
     }
     expect(statuses).toEqual([]); // nothing was ever reported live
-    lastSocket().goLive(); // a snapshot resets the backoff
+    lastSocket().goLive(); // a snapshot that then stays up resets the backoff
+    advance(STABLE_MS);
     lastSocket().fireClose();
     advance(RECONNECT_MS);
     expect(sockets()).toHaveLength(9);
@@ -267,6 +315,7 @@ describe("connectLive", () => {
     const { samples, stop } = setup();
     const first = sockets()[0];
     first.goLive();
+    advance(STABLE_MS);
     const firstMessage = first.onmessage; // in-flight callback reference
 
     // Normal drop → scheduled reconnect → replacement socket.

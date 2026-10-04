@@ -9,6 +9,9 @@ import type { FleetItem, Sample } from "./types";
 // flowing, so any silence longer than this means the socket is dead (frozen tab,
 // slept machine, dropped proxy) rather than merely an idle fleet.
 const STALE_MS = 60_000;
+/** A socket must stay up this long after its snapshot before the backoff resets. A server that
+ *  crashes right after the snapshot would otherwise be retried every ~1 s forever. */
+export const STABLE_MS = 30_000;
 
 export interface LiveOptions {
   /** Called when the session verdict changes (liveLink.ts Session). It starts as "ok". */
@@ -26,7 +29,7 @@ export interface LiveOptions {
  *   live kept the REST fallback from ever running. onStatus(false) fires when the current
  *   socket closes after that.
  * - Reconnects back off exponentially with jitter (liveLink.reconnectDelayMs); a socket that
- *   delivers a snapshot resets the backoff.
+ *   delivers a snapshot and stays up STABLE_MS resets the backoff.
  * - A 4401/4403 close, or PROBE_AFTER_FAILS sockets in a row that delivered nothing followed
  *   by an HTTP probe, gives a session verdict for onSession, so an expired sign-in reads as
  *   "session expired" and not as a phone that went quiet. A probe verdict that lands after a
@@ -47,6 +50,8 @@ export function connectLive(
   let lastMsg = 0;
   /** The current socket has delivered a snapshot. */
   let healthy = false;
+  /** performance.now() of the current socket's first snapshot. */
+  let healthySince = 0;
   /** onStatus(true) was the last status reported. */
   let reportedLive = false;
   /** Consecutive sockets that closed without delivering a snapshot. */
@@ -122,7 +127,7 @@ export function connectLive(
         const fleet = decodeSnapshot(m.fleet);
         if (fleet) {
           onSnapshot(fleet);
-          if (!healthy) { healthy = true; failures = 0; snapshotEpoch++; report("ok"); }
+          if (!healthy) { healthy = true; healthySince = performance.now(); snapshotEpoch++; report("ok"); }
           if (!reportedLive) { reportedLive = true; onStatus(true); }
         }
       } else if (m.type === "sample") {
@@ -135,7 +140,12 @@ export function connectLive(
     sock.onclose = (e) => {
       if (ws !== sock) return;
       if (reportedLive) { reportedLive = false; onStatus(false); }
-      if (!healthy) {
+      if (healthy) {
+        // Only a socket that stayed up long enough proves the server is well; a quick
+        // snapshot-then-die keeps counting, so the backoff keeps growing.
+        if (performance.now() - healthySince >= STABLE_MS) failures = 0;
+        else failures++;
+      } else {
         failures++;
         const verdict = sessionFromClose(e?.code ?? 1006);
         if (verdict) report(verdict);
@@ -161,7 +171,12 @@ export function connectLive(
       || performance.now() - lastMsg > STALE_MS;
     // open() detaches + closes the old socket itself, so this can't race the
     // old socket's async onclose against the fresh connection.
-    if (dead) open();
+    if (dead) {
+      // The replacement is still CONNECTING: LIVE must drop until it delivers a snapshot, and
+      // the REST fallback must run meanwhile (open() detaches the old socket's onclose).
+      if (reportedLive) { reportedLive = false; onStatus(false); }
+      open();
+    }
   };
   document.addEventListener("visibilitychange", onVisible);
 
