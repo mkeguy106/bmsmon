@@ -7,6 +7,8 @@ import dev.joely.bmsmon.model.RangeParams
 import dev.joely.bmsmon.model.SEED_RANGE_PARAMS
 import dev.joely.bmsmon.model.TodayUsage
 import dev.joely.bmsmon.model.estimatePackRange
+import dev.joely.bmsmon.model.floorBand
+import dev.joely.bmsmon.model.floorFixed
 import dev.joely.bmsmon.model.formatRangeLine
 import dev.joely.bmsmon.model.minRange
 import dev.joely.bmsmon.model.tiltedBand
@@ -86,13 +88,31 @@ class RangeEstimateTest {
     }
 
     @Test fun formatsWholeMilesHoursAndDays() {
-        assertEquals("~37–50 mi · ~9–13h use · ~5–9 days",
+        assertEquals("~37–49 mi · ~8–12h use · ~4–8 days",
             formatRangeLine(PackRange(37.33f, 49.78f, 8.96f, 12.8f, 119.47f, 215.04f)))
     }
 
-    @Test fun formatsDecimalMilesWhenLow() {
-        assertEquals("~1.5–2.4 mi · ~0–1h use · ~34–42h",
+    @Test fun formatsDecimalMilesAndHoursWhenLow() {
+        assertEquals("~1.5–2.4 mi · ~0.4–0.6h use · ~34–42h",
             formatRangeLine(PackRange(1.5f, 2.4f, 0.4f, 0.6f, 34.2f, 42.1f)))
+    }
+
+    @Test fun neverRoundsAFigureUp() {
+        assertEquals("~30–37 mi · ~1–2h use · ~47–47h",
+            formatRangeLine(PackRange(30.9f, 37.6f, 1.99f, 2.99f, 47.9f, 47.99f)))
+        assertEquals("~8.9–9.9 mi · ~0.9–0.9h use · ~4–6 days",
+            formatRangeLine(PackRange(8.99f, 9.96f, 0.99f, 0.999f, 100f, 167.9f)))
+    }
+
+    @Test fun boundariesFloorAtTheDisplayedPrecision() {
+        assertEquals("26", floorFixed(26.9f))
+        assertEquals("0.9", floorFixed(0.95f, 1))
+        assertEquals("9.9", floorFixed(9.96f, 1))
+        assertEquals("0.0", floorFixed(0f, 1))
+        assertEquals("1.5–2.4", floorBand(1.55f, 2.47f, 10f))
+        assertEquals("12–19", floorBand(12.9f, 19.99f, 10f))
+        // exactly at the switch: tenths end at 10 mi / 1 h
+        assertEquals("9–10", floorBand(9.99f, 10f, 10f))
     }
 
     @Test fun seedParamsMatchSpec() {
