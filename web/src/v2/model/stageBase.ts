@@ -100,6 +100,11 @@ function newestBase(bases: Base[], freshOnly: boolean): string | null {
  *  unless regenerating (see the header): the base discharged within REGEN_WINDOW_MS, a pack
  *  on it discharges in this render (so this never relies on lastDischargeMs having been
  *  folded), or the row's regen flag. Ties go to the daily driver, then `before`. */
+/** Equal-SOC seize tie, as android `seizeCandidate`: a pack on the daily-driver base first, then
+ *  the lowest pack address (ordinal string order, like Kotlin's String.compareTo). */
+const seizeTieBefore = (baseA: string, addrA: string, baseB: string, addrB: string): boolean =>
+  (baseA === dd) !== (baseB === dd) ? baseA === dd : addrA < addrB;
+
 function seizeLead(i: StageInputs): string | null {
   if (i.seizeThreshold == null) return null;
   const inUse = new Set<string>();
@@ -114,7 +119,7 @@ function seizeLead(i: StageInputs): string | null {
     }
     if (held) inUse.add(held.id);
   }
-  let lead: { id: string; soc: number } | null = null;
+  let lead: { id: string; soc: number; addr: string } | null = null;
   for (const b of i.bases) {
     if (inUse.size > 0 && !inUse.has(b.id)) continue;
     const seen = i.lastDischargeMs.get(b.id);
@@ -125,7 +130,10 @@ function seizeLead(i: StageInputs): string | null {
       if (!p.connected || soc == null || soc > i.seizeThreshold) continue;
       const charging = p.item.state === "Charging" || (p.item.current_a ?? 0) > CHARGING_A;
       if (charging && !driving && !p.item.regen) continue;
-      if (!lead || soc < lead.soc || (soc === lead.soc && before(b.id, lead.id))) lead = { id: b.id, soc };
+      const addr = p.item.address;
+      if (!lead || soc < lead.soc || (soc === lead.soc && seizeTieBefore(b.id, addr, lead.id, lead.addr))) {
+        lead = { id: b.id, soc, addr };
+      }
     }
   }
   return lead?.id ?? null;

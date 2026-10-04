@@ -68,6 +68,22 @@ describe("selectStageBase", () => {
     expect(run(fleet({ "2023A": { soc: 10, state: "Charging" } }))).toEqual({ baseId: "2012", reason: "default" });
   });
 
+  it("breaks an equal-SOC seize tie by pack address after the daily driver, as the phone does", () => {
+    // Nothing in use; two idle low spares at the same SOC. Base id order would pick 2016, the
+    // phone picks the lowest pack ADDRESS, here 2024's.
+    const items = [
+      pack("Z1", "2016", { soc: 25 }), pack("Z2", "2016", { soc: 80 }),
+      pack("A1", "2024", { soc: 25 }), pack("A2", "2024", { soc: 80 }),
+    ];
+    expect(run(items)).toEqual({ baseId: "2024", reason: "seize" });
+  });
+  it("prefers the daily driver on an equal-SOC seize tie whatever the addresses", () => {
+    const items = [
+      pack("Z1", "2012", { soc: 25 }), pack("Z2", "2012", { soc: 80 }),
+      pack("A1", "2024", { soc: 25 }), pack("A2", "2024", { soc: 80 }),
+    ];
+    expect(run(items)).toEqual({ baseId: "2012", reason: "seize" });
+  });
   it("with two bases discharging, a low pack on the non-daily-driver one still seizes", () => {
     const sel = run(fleet({ "2012A": { current_a: -6 }, "2016A": { current_a: -6, soc: 20 } }));
     expect(sel).toEqual({ baseId: "2016", reason: "seize" });
