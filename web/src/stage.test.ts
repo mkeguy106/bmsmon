@@ -72,13 +72,57 @@ describe("selectStageItems", () => {
       expect(out.map((i) => i.address)).toEqual(["B", "C"]);
     });
 
-    it("overrides auto-selection (a discharging base) too", () => {
+    it("a low pack on the discharging base seizes over a pin and auto", () => {
       const items = [
-        mk("A", { alias: "2012 · A", group_id: "2012", current_a: -5, soc: 90 }), // would win auto
-        mk("B", { alias: "2016 · A", group_id: "2016", soc: 18 }), // low → seizes
+        mk("A", { alias: "2012 · A", group_id: "2012", current_a: -5, soc: 20 }),
+        mk("B", { alias: "2012 · B", group_id: "2012", current_a: -5, soc: 60 }),
+        mk("C", { alias: "2016 · A", group_id: "2016", soc: 70 }),
       ];
-      const out = selectStageItems(items, none, none, 30);
-      expect(out.map((i) => i.address)).toEqual(["B"]);
+      expect(selectStageItems(items, none, new Set(["C"]), 30).map((i) => i.address)).toEqual(["A", "B"]);
+    });
+
+    it("an idle low spare never displaces the discharging base", () => {
+      const items = [
+        mk("A", { alias: "2012 · A", group_id: "2012", current_a: -5, soc: 90 }),
+        mk("B", { alias: "2016 · A", group_id: "2016", soc: 18 }),
+      ];
+      expect(selectStageItems(items, none, none, 30).map((i) => i.address)).toEqual(["A"]);
+    });
+
+    it("a charging low spare never seizes, even with nothing else in use", () => {
+      const items = [
+        mk("A", { alias: "2012 · A", group_id: "2012", soc: 80 }),
+        mk("B", { alias: "2016 · A", group_id: "2016", soc: 10, current_a: 4 }),
+        mk("C", { alias: "2024 · A", group_id: "2024", soc: 10, state: "Charging" }),
+      ];
+      expect(selectStageItems(items, none, new Set(["A"]), 30).map((i) => i.address)).toEqual(["A"]);
+    });
+
+    it("with two bases discharging, a low pack on either still seizes", () => {
+      const items = [
+        mk("A", { alias: "2012 · A", group_id: "2012", current_a: -5, soc: 80 }),
+        mk("B", { alias: "2016 · A", group_id: "2016", current_a: -5, soc: 20 }),
+      ];
+      expect(selectStageItems(items, none, none, 30).map((i) => i.address)).toEqual(["B"]);
+    });
+
+    it("a regen (Charging-state) pack on the discharging base still seizes", () => {
+      const items = [
+        mk("A", { alias: "2012 · A", group_id: "2012", current_a: -5, soc: 80 }),
+        mk("B", { alias: "2012 · B", group_id: "2012", current_a: 2, state: "Charging", soc: 15 }),
+        mk("C", { alias: "2016 · A", group_id: "2016", soc: 25 }),
+      ];
+      expect(selectStageItems(items, none, none, 30).map((i) => i.address)).toEqual(["A", "B"]);
+      const own = [mk("D", { current_a: 2, state: "Charging", regen: true, soc: 15 }), mk("E", { soc: 50 })];
+      expect(selectStageItems(own, none, new Set(["E"]), 30).map((i) => i.address)).toEqual(["D"]);
+    });
+
+    it("with no base in use, a low idle spare seizes", () => {
+      const items = [
+        mk("A", { alias: "2012 · A", group_id: "2012", soc: 80 }),
+        mk("B", { alias: "2016 · A", group_id: "2016", soc: 18 }),
+      ];
+      expect(selectStageItems(items, none, new Set(["A"]), 30).map((i) => i.address)).toEqual(["B"]);
     });
 
     it("the lowest-SOC pack wins among several below the threshold", () => {
@@ -118,7 +162,13 @@ describe("selectStageItems", () => {
         mk("A", { alias: "2012 · A", group_id: "2012", current_a: -5, soc: 90 }),
         mk("B", { alias: "2024 · A", group_id: "2024", soc: 30 }),
       ];
-      expect(selectStageItems(at30, none, none, 30).map((i) => i.address)).toEqual(["B"]);
+      // The low pack is idle while A discharges: not on a base in use, so no seize.
+      expect(selectStageItems(at30, none, none, 30).map((i) => i.address)).toEqual(["A"]);
+      const idle30 = [
+        mk("A", { alias: "2012 · A", group_id: "2012", soc: 90 }),
+        mk("B", { alias: "2024 · A", group_id: "2024", soc: 30 }),
+      ];
+      expect(selectStageItems(idle30, none, new Set(["A"]), 30).map((i) => i.address)).toEqual(["B"]);
 
       const at31 = [
         mk("A", { alias: "2012 · A", group_id: "2012", current_a: -5, soc: 90 }),

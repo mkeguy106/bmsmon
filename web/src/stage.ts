@@ -20,6 +20,12 @@ import type { FleetItem } from "./types";
  * it has no group). Stale/muted packs never trigger the seize. This is checked
  * first, before pin/auto selection; when no fresh pack qualifies (or the
  * threshold is null), the existing pin/auto behavior is unchanged.
+ *
+ * Candidates (mirrors the phone and v2): when any base has a fresh discharging
+ * pack, only packs on those bases may seize (v1 keeps no hold memory, so "in
+ * use" means exactly that); and a charging pack (state Charging or current above
+ * +0.05 A) never seizes unless it is regenerating, i.e. its own regen flag is
+ * set or its base has a fresh discharging pack.
  */
 export function selectStageItems(
   items: FleetItem[],
@@ -32,8 +38,16 @@ export function selectStageItems(
   // Low-SOC seize takes precedence over pins and auto: among fresh packs only,
   // the lowest-SOC pack at/below the threshold owns the stage (its whole group).
   if (seizeThreshold != null) {
-    const low = items
-      .filter((i) => !staleAddrs.has(i.address) && i.soc != null && i.soc <= seizeThreshold)
+    const baseOf = (i: FleetItem) => i.group_id || i.address;
+    const fresh = items.filter((i) => !staleAddrs.has(i.address));
+    const driving = new Set(fresh.filter((i) => (i.current_a ?? 0) < -0.1).map(baseOf));
+    const low = fresh
+      .filter((i) => {
+        if (i.soc == null || i.soc > seizeThreshold) return false;
+        if (driving.size > 0 && !driving.has(baseOf(i))) return false;
+        const charging = i.state === "Charging" || (i.current_a ?? 0) > 0.05;
+        return !charging || !!i.regen || driving.has(baseOf(i));
+      })
       .sort((a, b) => (a.soc as number) - (b.soc as number));
     const lead = low[0];
     if (lead) {
