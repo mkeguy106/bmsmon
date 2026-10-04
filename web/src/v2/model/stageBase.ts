@@ -13,7 +13,9 @@
 //              so an idle spare on a charger never displaces the chair; with none in use any
 //              fresh pack may seize. A pack that is charging (state Charging or current above
 //              +0.05 A) never seizes unless it is regenerating: its base discharged within
-//              REGEN_WINDOW_MS, or the row's own regen flag is set.
+//              REGEN_WINDOW_MS, a pack on its base is discharging in this same render (kept
+//              so the answer never depends on the session memory having been folded yet), or
+//              the row's own regen flag is set.
 //   2. PIN     a rail pin made less than PIN_HOLD_MS ago (android PIN_HOLD_MS): tapping a
 //              spare shows it even while the chair is in use, and a forgotten pin can't
 //              hide the chair for more than 30 minutes. A pin dated PIN_HOLD_MS or more
@@ -95,7 +97,9 @@ function newestBase(bases: Base[], freshOnly: boolean): string | null {
 
 /** The SEIZE rung: the base of the lowest-SOC candidate pack, or null. Candidates are fresh
  *  packs at/below the threshold, on a base in use whenever any base is, and not charging
- *  unless regenerating (see the header). Ties go to the daily driver, then `before`. */
+ *  unless regenerating (see the header): the base discharged within REGEN_WINDOW_MS, a pack
+ *  on it discharges in this render (so this never relies on lastDischargeMs having been
+ *  folded), or the row's regen flag. Ties go to the daily driver, then `before`. */
 function seizeLead(i: StageInputs): string | null {
   if (i.seizeThreshold == null) return null;
   const inUse = new Set<string>();

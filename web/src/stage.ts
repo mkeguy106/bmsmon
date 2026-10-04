@@ -1,4 +1,5 @@
 import type { FleetItem } from "./types";
+import { isDischarging } from "./v2/fleet";
 
 /**
  * WEB-9: pure main-stage selection (extracted from App.tsx so it's testable).
@@ -40,7 +41,7 @@ export function selectStageItems(
   if (seizeThreshold != null) {
     const baseOf = (i: FleetItem) => i.group_id || i.address;
     const fresh = items.filter((i) => !staleAddrs.has(i.address));
-    const driving = new Set(fresh.filter((i) => (i.current_a ?? 0) < -0.1).map(baseOf));
+    const driving = new Set(fresh.filter(isDischarging).map(baseOf));
     const low = fresh
       .filter((i) => {
         if (i.soc == null || i.soc > seizeThreshold) return false;
@@ -48,6 +49,7 @@ export function selectStageItems(
         const charging = i.state === "Charging" || (i.current_a ?? 0) > 0.05;
         return !charging || !!i.regen || driving.has(baseOf(i));
       })
+      // Stable sort: equal SOC goes to input order (no daily-driver tie-break in v1).
       .sort((a, b) => (a.soc as number) - (b.soc as number));
     const lead = low[0];
     if (lead) {
