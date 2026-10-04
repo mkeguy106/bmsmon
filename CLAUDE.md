@@ -348,11 +348,36 @@ catching a dead charger was blind to exactly that case. Re-seating the phone too
 6.4 mA to **692 mA** (~108x), confirming alignment rather than the thermal throttle seen at 43 °C on
 2026-08-03. Regression test: `PowerPolicyTest.pluggedIntoADeadChargerIsNotCharging`.
 
-**The screen-hold gate still has this blind spot** and is deliberately left alone for now: it holds
-the display (~139 mA measured) whenever `EXTRA_PLUGGED` is nonzero, including on a connected-but-dead
-charger — the worst case for holding it. Fixing that means gating on current actually flowing, which
-needs hysteresis so it cannot flap between charging and not, so it is a more careful change than the
-icon was.
+**A connected charger that is not charging releases the screen hold.** A wireless pad can
+quit while the phone still reports it connected; the display then drains the battery for hours
+(the 2026-10-04 night: the counter fell at ~180 mA while the level sat frozen). The pure fold
+`foldChargerFault` (`model/ChargerFault.kt`) watches the **charge counter** (the sticky broadcast's
+`charge_counter` extra, else `BATTERY_PROPERTY_CHARGE_COUNTER`; mAh) while on external power and
+declares a fault when it has lost >= 25 mAh (`CHARGER_FAULT_DROP_MAH`) over 15 min
+(`CHARGER_FAULT_WINDOW_MS`). It clears on a rise of 6 mAh above the lowest value seen in the fault
+(`CHARGER_CLEAR_RISE_MAH`) or on unplug; unplugged or no counter reading resets it, so no reading
+never faults. Readings are buffered at most one per 30 s over a 20 min span. Releasing the screen
+does not clear the fault, because on a dead pad the counter still falls at the lower drain.
+`powerDecision` then treats the phone as unplugged for `holdScreen` only (the low-power latch and
+GPS mode are unchanged), and Settings > Battery saver shows a read-only line while it holds.
+`PowerMonitor` re-reads the sticky intent every 60 s, since a dead pad changes neither plug nor
+level; a failed read or missing intent publishes nothing, and the engine ignores the unread default
+and out-of-order readings.
+
+**Why the counter and not `EXTRA_STATUS`:** a healthy pad holding at a charge limit or FULL
+reads `NOT_CHARGING` too, so the status cannot tell a dead pad from a content one. A held battery is
+flat; a dead pad leaves it falling at the phone's whole load.
+
+**Measured basis (2026-10-04):** the exact rule replayed over four days of the phone's battery
+history gave 5 true detections (including a 6.5 h daytime failure) and one false 2-minute blip
+during 80%-limit charge cycling; healthy FULL/flat holds never tripped.
+
+**Upload and page.** Live ingest batches (never re-sync or import) carry a signed `phone` block:
+`level`, `plugged`, `charge_mah`, `fault`, `fault_since_ms`, `at_ms` (epoch ms), taken from the
+engine's `MonitorState.phonePower` (null while monitoring is off or before the first real reading).
+The server stores it per device, and its `phone_power` health check, which the Uptime Kuma monitor
+`bmsmon-phone-charger` polls, fails only once a fault has persisted 5 minutes, so a short blip never
+pages.
 
 Because the BLE poll loop is a coroutine `delay()` — which does NOT fire while the CPU is
 suspended — keep-screen-on had been load-bearing for poll cadence *by accident*.
