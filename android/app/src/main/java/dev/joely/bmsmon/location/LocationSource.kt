@@ -106,7 +106,8 @@ interface FusedProvider {
      * Register the request for [balanced] (or high) accuracy, delivering fixes to [onFix]. It
      * REPLACES any request this provider already has registered — GMS replaces a request made with
      * the same callback in place — so a throw leaves the previous registration in force.
-     * [onRejected] runs, on any thread, if the provider fails the request after accepting it.
+     * [onRejected] runs, on any thread, if the provider fails the request after accepting it (GMS
+     * posts it to the main looper; one run before [request] returns is handled too).
      */
     fun request(balanced: Boolean, onFix: (GpsFix) -> Unit, onRejected: () -> Unit)
 
@@ -208,7 +209,8 @@ class LocationSource internal constructor(
         }
         // Best-effort seed: the request above is what matters, so a failure here is not a failed start.
         runCatching { provider.lastFix { fixes.offerSeed(gen, it, wallNow()) } }
-        return true
+        // Not a bare `true`: a provider that fails the request before returning has already ended it.
+        return fixes.requesting
     }
 
     /**

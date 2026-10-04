@@ -25,12 +25,14 @@ class LocationSourceTest {
         var lastKnown: GpsFix? = null
         private val rejectors = ArrayList<() -> Unit>()
         var registered: Boolean? = null   // null = nothing registered; else the mode
+        var rejectAtOnce = false
 
         override fun request(balanced: Boolean, onFix: (GpsFix) -> Unit, onRejected: () -> Unit) {
             calls += "request(${if (balanced) "balanced" else "high"})"
             throwOnRequest?.let { throw it }
             registered = balanced
             rejectors += onRejected
+            if (rejectAtOnce) onRejected()
         }
         override fun remove() {
             calls += "remove"
@@ -88,6 +90,13 @@ class LocationSourceTest {
         assertEquals("the gate is told once, to re-evaluate", 1, lost)
         assertNull("nothing is left registered", provider.registered)
         assertFalse("start() no longer claims a request", source.start())
+    }
+
+    @Test fun aRequestRejectedBeforeRequestReturnsIsNeverReportedRegistered() {
+        provider.rejectAtOnce = true
+        assertFalse(source.start())
+        assertEquals(1, lost)
+        assertNull(provider.registered)
     }
 
     @Test fun aRejectedRequestIsRetriedAfterTheHoldOffNotOnEveryFrame() {
