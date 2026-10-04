@@ -37,6 +37,19 @@ internal fun phoneClockConfirmed(phoneClockErrorMs: Long?): Boolean =
     phoneClockErrorMs != null && phoneClockErrorMs in -SKEW_ATTRIBUTE_MS..SKEW_ATTRIBUTE_MS
 
 /**
+ * The most tracking may move a correction, in total, from the value it had when an independent clock last
+ * vouched for this phone's ([SigningCorrection.confirmedMs]). Measured as distance from that value, so a
+ * steady correction re-anchored by many slightly noisy readings never runs it down.
+ */
+internal const val UNCONFIRMED_WALK_MAX_MS = SKEW_ATTRIBUTE_MS
+
+/**
+ * The correction on token iat/exp ([offsetMs]; 0 = none), and the value it had when an independent clock
+ * last vouched for this phone's ([confirmedMs]; meaningless while there is no correction).
+ */
+internal data class SigningCorrection(val offsetMs: Long = 0L, val confirmedMs: Long = 0L)
+
+/**
  * The correction added to the next token's iat/exp (DATA-20), and nothing else: samples keep this
  * phone's clock. Only the app's own responses steer it, and only ones that carry its clock:
  * - a clock reject ([isClockReject]) sets it to the measured skew, or clears it when the clocks agree
@@ -47,27 +60,37 @@ internal fun phoneClockConfirmed(phoneClockErrorMs: Long?): Boolean =
  *
  * A server running behind and this phone running ahead measure the same skew, and correcting the
  * second would let this phone's future-dated samples into the cloud, where they read as live. So a
- * correction may START — or JUMP by more than the tolerance, which means a clock stepped — only when
- * an independent clock vouches for this phone's ([phoneClockConfirmed]); otherwise it is 0 and uploads
- * hold, as before the correction existed. [phoneClockErrorMs] is read only then. Clearing, and
- * tracking a correction already in force, need no such evidence.
+ * correction may START, or JUMP by more than the tolerance (a clock stepped), only when an independent
+ * clock vouches for this phone's ([phoneClockConfirmed]); otherwise it is 0 and uploads hold, as before
+ * the correction existed. Tracking a correction already in force needs no such evidence, but only within
+ * [UNCONFIRMED_WALK_MAX_MS] of the value last vouched for: small steps can't add up to a large drift. A
+ * move past that needs the independent clock to vouch again, which re-anchors it, or the correction
+ * clears. [phoneClockErrorMs] is read only when that evidence is needed. Clearing needs none.
  *
  * Always within ±[SIGNING_OFFSET_CAP_MS]. The server still enforces its own window; this only lets the
  * phone's tokens land inside it after a server clock step. Memory only: a restart costs one more 401.
  */
-internal fun nextSigningOffsetMs(prevMs: Long, o: PostOutcome, phoneClockErrorMs: () -> Long?): Long {
-    if (!o.fromApi) return prevMs
-    val skew = o.skewMs ?: return prevMs
+internal fun nextSigningCorrection(
+    prev: SigningCorrection,
+    o: PostOutcome,
+    phoneClockErrorMs: () -> Long?,
+): SigningCorrection {
+    if (!o.fromApi) return prev
+    val skew = o.skewMs ?: return prev
     val proposed = when {
         isClockReject(o) -> attributedSkewMs(skew)
-        o.result == PostResult.Ok && prevMs != 0L -> attributedSkewMs(skew)
-        else -> return prevMs
+        o.result == PostResult.Ok && prev.offsetMs != 0L -> attributedSkewMs(skew)
+        else -> return prev
     }
-    val tracking = prevMs != 0L &&
-        abs(proposed - prevMs.coerceIn(-SIGNING_OFFSET_CAP_MS, SIGNING_OFFSET_CAP_MS)) <= SKEW_ATTRIBUTE_MS
-    if (proposed == 0L || tracking) return proposed
-    return if (phoneClockConfirmed(phoneClockErrorMs())) proposed else 0L
+    if (proposed == 0L) return SigningCorrection()
+    val tracking = prev.offsetMs != 0L &&
+        abs(proposed - bounded(prev.offsetMs)) <= SKEW_ATTRIBUTE_MS &&
+        abs(proposed - bounded(prev.confirmedMs)) <= UNCONFIRMED_WALK_MAX_MS
+    if (tracking) return prev.copy(offsetMs = proposed)
+    return if (phoneClockConfirmed(phoneClockErrorMs())) SigningCorrection(proposed, confirmedMs = proposed) else SigningCorrection()
 }
+
+private fun bounded(ms: Long): Long = ms.coerceIn(-SIGNING_OFFSET_CAP_MS, SIGNING_OFFSET_CAP_MS)
 
 /**
  * The skew to show the user (bounded like the correction): set by a clock reject outside the

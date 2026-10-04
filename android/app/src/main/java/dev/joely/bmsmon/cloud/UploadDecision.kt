@@ -94,7 +94,8 @@ internal data class HeadFaultState(
  * batch forever while every later sample waited behind it.
  *
  * - A changed [headId] (the last batch was accepted, skipped or evicted) starts a fresh streak but
- *   KEEPS the limit and the breaker, so the bisection carries on past the half that was accepted.
+ *   KEEPS the limit and the breaker, so the bisection carries on past the half that was accepted. A
+ *   suspect range the new head has already passed is dropped: its rows are gone, so it bounds nothing.
  * - [PostResult.Ok] clears the streak, re-arms the breaker and doubles the limit toward [maxBatch]
  *   — except inside a narrowing search ([HeadFaultState.searchEndId]), where it keeps the limit until
  *   a 2xx reaches the suspect range's end. [tailId] is the batch's last id; ids increase along the stream.
@@ -122,7 +123,12 @@ internal fun stepHeadFault(
     maxBatch: Int,
     tailId: Long = headId + sentSize - 1,
 ): Pair<HeadFaultState, HeadFaultAction> {
-    val cur = if (headId != s.headId) s.copy(headId = headId, streak = 0, firstFaultAtMs = null) else s
+    // A suspect range that ends before the head is gone (accepted, skipped or evicted): it bounds nothing now.
+    val cur = if (headId != s.headId) {
+        s.copy(headId = headId, streak = 0, firstFaultAtMs = null, searchEndId = s.searchEndId?.takeIf { it >= headId })
+    } else {
+        s
+    }
     return when (result) {
         PostResult.Ok -> {
             val searching = cur.searchEndId != null && tailId < cur.searchEndId

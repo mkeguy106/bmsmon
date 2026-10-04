@@ -32,7 +32,11 @@ sealed class PostResult {
      */
     object ServerFault : PostResult()
 
-    /** 401/403 — revoked device or >60 s clock skew. Rows are kept; needs user attention. */
+    /**
+     * 401/403 — the sign-in was refused. An app-marked answer names why in [AUTH_REASON_HEADER]
+     * (`clock_skew`, `unknown_or_revoked_device`, `bad_signature`, …), which [outcomeOf] reads. Rows are
+     * kept; a clock reject may be corrected for (see nextSigningCorrection), anything else needs the user.
+     */
     object AuthFailed : PostResult()
 
     /**

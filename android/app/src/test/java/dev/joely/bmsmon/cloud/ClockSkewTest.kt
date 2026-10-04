@@ -22,7 +22,9 @@ class ClockSkewTest {
     private val noIndependentClock: () -> Long? = { null }
     private val notRead: () -> Long? = { throw AssertionError("the independent clock was read") }
 
-    private fun next(prevMs: Long, o: PostOutcome, phone: () -> Long? = phoneAgrees) = nextSigningOffsetMs(prevMs, o, phone)
+    // One step from a correction of [prevMs] that an independent clock vouched for at that value (0 = none).
+    private fun next(prevMs: Long, o: PostOutcome, phone: () -> Long? = phoneAgrees) =
+        nextSigningCorrection(SigningCorrection(prevMs, confirmedMs = prevMs), o, phone).offsetMs
 
     @Test fun aMarkedClockSkewRejectSetsTheOffsetToTheSkew() {
         assertEquals(585_000L, next(0L, marked401(585_000L)))
@@ -132,7 +134,8 @@ class ClockSkewTest {
     }
 
     @Test fun aOneOffBadServerTimeCannotPinTheCorrection() {
-        fun fold(vararg outcomes: PostOutcome) = outcomes.fold(0L) { prev, o -> next(prev, o) }
+        fun fold(vararg outcomes: PostOutcome) =
+            outcomes.fold(SigningCorrection()) { s, o -> nextSigningCorrection(s, o, phoneAgrees) }.offsetMs
         // A bogus clock on one reject: the next token is an hour off, the server rejects it with its
         // real clock, and the correction is gone.
         assertEquals(0L, fold(marked401(Long.MAX_VALUE), marked401(1_200L)))
@@ -140,6 +143,51 @@ class ClockSkewTest {
         assertEquals(0L, fold(marked401(500_000L), markedOk(800L)))
         // A real step is held across later successes.
         assertEquals(-700_400L, fold(marked401(-700_000L), markedOk(-700_200L), markedOk(-700_400L)))
+    }
+
+    // --- the unconfirmed walk: tracking may move a correction at most 30 s from where an independent
+    // --- clock last vouched for it; past that it needs that clock again, or it clears
+
+    private val vouchedAt585 = SigningCorrection(585_000L, confirmedMs = 585_000L)
+    private fun SigningCorrection.then(o: PostOutcome, phone: () -> Long? = notRead) = nextSigningCorrection(this, o, phone)
+
+    @Test fun smallStepsThatAddUpPastThirtySecondsWithoutAConfirmationClear() {
+        assertEquals(30_000L, UNCONFIRMED_WALK_MAX_MS)
+        val first = vouchedAt585.then(markedOk(605_000L))                    // 20 s: tracked, no clock read
+        assertEquals(SigningCorrection(605_000L, confirmedMs = 585_000L), first)
+        // Another 20 s step is within the per-step tolerance, but 40 s from the vouched value.
+        assertEquals(SigningCorrection(), first.then(markedOk(625_000L), noIndependentClock))
+        assertEquals(SigningCorrection(), first.then(markedOk(625_000L), phoneAhead))
+        // A clock reject walks the same budget.
+        assertEquals(SigningCorrection(), first.then(marked401(625_000L), noIndependentClock))
+    }
+
+    @Test fun aConfirmationInBetweenLetsTheWalkContinue() {
+        val walked = vouchedAt585.then(markedOk(605_000L))
+        val vouched = walked.then(markedOk(625_000L), phoneAgrees)            // 40 s out: the clock vouches again
+        assertEquals(SigningCorrection(625_000L, confirmedMs = 625_000L), vouched)
+        val onward = vouched.then(markedOk(645_000L))                         // 20 s from the new anchor: tracked
+        assertEquals(SigningCorrection(645_000L, confirmedMs = 625_000L), onward)
+    }
+
+    @Test fun theWalkBoundIsInclusive() {
+        val atEdge = SigningCorrection(605_000L, confirmedMs = 585_000L).then(markedOk(585_000L + UNCONFIRMED_WALK_MAX_MS))
+        assertEquals(SigningCorrection(615_000L, confirmedMs = 585_000L), atEdge)
+        assertEquals(SigningCorrection(), atEdge.then(markedOk(615_001L), noIndependentClock))
+    }
+
+    // The bound is on distance from the vouched value, not on the sum of every reading's jitter: a
+    // steady correction re-anchored by thousands of slightly noisy 2xx readings never needs the clock.
+    @Test fun jitterAroundTheVouchedValueNeverUsesUpTheWalk() {
+        var s = vouchedAt585
+        repeat(1_000) { i -> s = s.then(markedOk(if (i % 2 == 0) 600_000L else 575_000L)) }
+        assertEquals(SigningCorrection(575_000L, confirmedMs = 585_000L), s)
+    }
+
+    @Test fun aClearedCorrectionForgetsItsAnchor() {
+        val walked = SigningCorrection(605_000L, confirmedMs = 585_000L)
+        assertEquals(SigningCorrection(), walked.then(markedOk(1_000L)))      // the clocks agree again
+        assertEquals(SigningCorrection(), walked.then(marked401(5_000L)))
     }
 
     @Test fun everythingElseKeepsTheOffset() {

@@ -3,6 +3,7 @@ package dev.joely.bmsmon.cloud
 import java.io.IOException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -20,6 +21,7 @@ class ConfigPushTest {
         configPushStep(s, cfg, o, authFailed = false, nowElapsedMs = now, clear = {
             if (clearFailures > 0) { clearFailures--; throw IOException("clear failed") }
             pending = null
+            true
         }, warn = { m, _ -> logs += m })
 
     @Test fun aFailedClearNeverSpendsTheDrop() = runBlocking {
@@ -60,7 +62,7 @@ class ConfigPushTest {
         val sent = cfg
         val s = configPushStep(
             ConfigPushState(poisonSkips = 0, backoffMs = 8_000L), sent, ok, authFailed = false, nowElapsedMs = now,
-            clear = { if (pending == sent) pending = null },
+            clear = { (pending == sent).also { if (it) pending = null } },
             warn = { m, _ -> logs += m },
         )
         assertEquals("""{"profile":"newer"}""", pending)
@@ -68,11 +70,15 @@ class ConfigPushTest {
         assertTrue(logs.isEmpty())
         val dropped = configPushStep(
             ConfigPushState(), sent, poison, authFailed = false, nowElapsedMs = now,
-            clear = { if (pending == sent) pending = null },
+            clear = { (pending == sent).also { if (it) pending = null } },
             warn = { m, _ -> logs += m },
         )
         assertEquals(1, dropped.poisonSkips)
         assertEquals(0L, dropped.retryAtMs)
         assertEquals("""{"profile":"newer"}""", pending)
+        // Nothing was dropped: the log says the newer config is still to send.
+        val line = logs.single()
+        assertTrue(line, line.contains("a newer config is pending"))
+        assertFalse(line, line.contains("dropped it"))
     }
 }

@@ -71,6 +71,29 @@ internal fun gzip(data: ByteArray): ByteArray {
     return bos.toByteArray()
 }
 
+/**
+ * Look up the device key ([lookup]) and [send] with it. No key sends nothing: [PostResult.KeyMissing]
+ * (DATA-17). A lookup that throws is [PostResult.Transient]: a Keystore hiccup is not proof the key is gone.
+ */
+internal fun postWithDeviceKey(lookup: () -> PrivateKey?, send: (PrivateKey) -> PostOutcome): PostOutcome {
+    val key = try {
+        lookup()
+    } catch (e: Exception) {
+        return PostOutcome(PostResult.Transient)
+    }
+    return if (key == null) PostOutcome(PostResult.KeyMissing) else send(key)
+}
+
+/**
+ * Mark the history import due ([setImportDone] false), then drop every pending re-send window
+ * ([clearWindows]). Flag first: a process death between the two leaves the old windows and a due import,
+ * a re-send the server dedups, never a phone with neither. A failed flag write clears nothing.
+ */
+internal suspend fun resetResyncInOrder(setImportDone: suspend (Boolean) -> Unit, clearWindows: suspend () -> Unit) {
+    setImportDone(false)
+    clearWindows()
+}
+
 class TelemetryReporter(
     appContext: Context,
     private val db: BmsDatabase,
@@ -140,8 +163,9 @@ class TelemetryReporter(
         get() = cachedSettings.let { it != null && it.cloudEnabled && it.enrolled && it.deviceId != null }
 
     // DATA-20: the clock correction on token iat/exp, learned from the app's own responses
-    // (nextSigningOffsetMs). Shared by every stream; memory only. Never applied to a sample's time.
-    @Volatile private var signingOffsetMs = 0L
+    // (nextSigningCorrection). Shared by every stream; memory only. Never applied to a sample's time.
+    @Volatile private var signing = SigningCorrection()
+    private val signingOffsetMs: Long get() = signing.offsetMs
     @Volatile private var lastAuthLog: String? = null
     // Vouches for this phone's clock before a correction may start (a phone running ahead must
     // never be "corrected" into uploading future-dated samples).
@@ -271,15 +295,22 @@ class TelemetryReporter(
         }
     }
 
-    /** Forget every pending re-send (the device was forgotten; a new enrollment queues a fresh import). Join to order it before a following [queueImport]. */
-    fun clearResync(): Job = scope.launch {
-            try {
-                ledger.mutateResync { ResyncState() }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.w(TAG, "re-sync: could not clear the pending re-sends", e)
+    /**
+     * Forget every pending re-send and mark the history import due again (the device was forgotten, or a
+     * new enrollment queues a fresh import). Join to order it before a following [queueImport]. Runs under
+     * the import lock, so a re-sync pass can't queue the import between the two steps and see it wiped;
+     * [resetResyncInOrder] has the order. A store failure is logged and leaves the windows as they were.
+     */
+    fun resetResync(): Job = scope.launch {
+        try {
+            importMutex.withLock {
+                resetResyncInOrder(settings::setImportDone) { ledger.mutateResync { ResyncState() } }
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "re-sync: could not reset the pending re-sends", e)
+        }
     }
 
     /**
@@ -326,7 +357,7 @@ class TelemetryReporter(
 
     /**
      * The one outcome observer for every stream (ingest, re-sync, config): folds a response into the
-     * shared signing correction ([nextSigningOffsetMs]), the clock blame ([nextClockBlame]) and the
+     * shared signing correction ([nextSigningCorrection]), the clock blame ([nextClockBlame]) and the
      * skew shown to the user ([nextAuthSkewMs]), publishes them, counts marked 2xx answers ([serverOks],
      * which re-arm the re-sender's parks), and logs a rejected sign-in once per distinct reason. The independent clock is read at most once, and only when a rule needs it.
      * Synchronized: the re-sync and the upload loop both report here.
@@ -336,7 +367,7 @@ class TelemetryReporter(
         if (o.result == PostResult.Ok) serverOks.incrementAndGet()
         val phoneClockErr by lazy(LazyThreadSafetyMode.NONE) { independentClock.measurePhoneClockErrorMs() }
         val prevOffsetMs = signingOffsetMs
-        signingOffsetMs = nextSigningOffsetMs(prevOffsetMs, o) { phoneClockErr }
+        signing = nextSigningCorrection(signing, o) { phoneClockErr }
         val blame = nextClockBlame(clockBlame, o) { phoneClockErr }
         clockBlame = blame
         val skew = nextAuthSkewMs(authSkewMs, o)
@@ -363,7 +394,13 @@ class TelemetryReporter(
         } else if (o.result == PostResult.Ok) {
             lastAuthLog = null
             if (prevOffsetMs != 0L && signingOffsetMs == 0L) {
-                Log.i(TAG, "upload: the server's clock agrees with this phone again — signing correction cleared")
+                val agree = o.skewMs?.let { it in -SKEW_ATTRIBUTE_MS..SKEW_ATTRIBUTE_MS } == true
+                Log.i(
+                    TAG,
+                    if (agree) "upload: the server's clock agrees with this phone again — signing correction cleared"
+                    else "upload: the server's clock moved and no independent clock vouches for this phone's — " +
+                        "signing correction cleared",
+                )
             }
         }
     }
@@ -375,14 +412,12 @@ class TelemetryReporter(
      * the upload-rate indicator (gzip once). A Keystore with no device key sends nothing
      * ([PostResult.KeyMissing], DATA-17).
      */
-    private fun postSigned(url: String, deviceId: String, body: ByteArray, wire: ByteArray = gzip(body)): PostOutcome {
-        val key: PrivateKey? = try {
-            DeviceKeys.privateKeyOrNull()
-        } catch (e: Exception) {
-            return PostOutcome(PostResult.Transient)   // a Keystore hiccup is not proof the key is gone
-        }
-        if (key == null) return PostOutcome(PostResult.KeyMissing)
-        return try {
+    private fun postSigned(url: String, deviceId: String, body: ByteArray, wire: ByteArray = gzip(body)): PostOutcome =
+        postWithDeviceKey(DeviceKeys::privateKeyOrNull) { key -> sendSigned(key, url, deviceId, body, wire) }
+
+    /** One signed POST with [key]; no response at all (network, IO) is Transient. */
+    private fun sendSigned(key: PrivateKey, url: String, deviceId: String, body: ByteArray, wire: ByteArray): PostOutcome =
+        try {
             // Sign the PLAINTEXT body (the server's body-hash is over the decompressed JSON), then
             // send the gzipped wire bytes as a transport layer (~85% saved on this repetitive JSON).
             // The token is dated on the server's clock when one has been learned (DATA-20); the skew
@@ -401,7 +436,6 @@ class TelemetryReporter(
         } catch (e: Exception) {
             PostOutcome(PostResult.Transient)   // network/IO — retry with backoff
         }
-    }
 
     /**
      * The upload loop: an interpreter of [ingestStep]. It peeks a batch, POSTs it, feeds the outcome
@@ -425,10 +459,11 @@ class TelemetryReporter(
         var lastLog: String? = null
         // The config push: its own poison breaker (a reject of the config body says nothing about
         // sample batches, and vice versa), and its own retry gate. A config the uploader keeps —
-        // Transient, AuthFailed, a Poison the breaker holds, or a failed clear — is not re-sent on
-        // every loop pass (that is a POST per drained batch, or per idle ~1.5 s pass); it follows the
-        // ingest backoff schedule (1 s doubling to 60 s, Retry-After a floor) on its own clock, so a
-        // held config can never throttle sample uploads. See configPushStep.
+        // Transient, AuthFailed, a missing key (nothing was sent), a Poison the breaker holds, or a
+        // failed clear — is not re-sent on every loop pass (that is a POST per drained batch, or per
+        // idle ~1.5 s pass); it follows the ingest backoff schedule (1 s doubling to 60 s, Retry-After
+        // a floor) on its own clock, so a held config can never throttle sample uploads. See
+        // configPushStep.
         var config = ConfigPushState()
         while (true) {
             try {
@@ -444,7 +479,8 @@ class TelemetryReporter(
                 // permanent reject drops it (WEB-6b: re-POSTing a body the server will never accept
                 // is pure waste; the next threshold change enqueues a fresh one). A repeat reject
                 // before any 2xx trips the breaker — systematic rejection is a server problem, so
-                // the config stays pending instead of being thrown away.
+                // the config stays pending instead of being thrown away. A missing key sends
+                // nothing, so the config waits, like every sample, until the phone is re-enrolled.
                 if (conn.online.value && SystemClock.elapsedRealtime() >= config.retryAtMs) {
                     p.pendingTempConfig?.let { cfg ->
                         val outcome = postSigned(CloudConfig(base).configUrl, p.deviceId, cfg.toByteArray())

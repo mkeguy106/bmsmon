@@ -15,11 +15,13 @@ internal data class ConfigPushState(
 
 /**
  * One config-push response, applied. A 2xx, or the breaker's one permanent-reject drop (WEB-6b), clears
- * the pending config through [clear]. The breaker's count is committed only once that clear succeeded,
- * so a failed clear never spends the drop: the config stays pending and is retried on the push's own
- * clock. Anything else keeps the config and backs off on that clock (1 s doubling to 60 s, Retry-After a
- * floor), so a held config never throttles sample uploads. [authFailed] is the ingest stream's badge,
- * carried through [decideUpload] unchanged. Log lines come after the clear they describe.
+ * the pending config through [clear], a compare-and-clear that returns whether it removed the config
+ * (false: a newer config arrived mid-flight and stays pending). The breaker's count is committed only
+ * once that clear succeeded, so a failed clear never spends the drop: the config stays pending and is
+ * retried on the push's own clock. Anything else keeps the config and backs off on that clock (1 s
+ * doubling to 60 s, Retry-After a floor), so a held config never throttles sample uploads. [authFailed]
+ * is the ingest stream's badge, carried through [decideUpload] unchanged. Log lines come after the clear
+ * they describe.
  */
 internal suspend fun configPushStep(
     s: ConfigPushState,
@@ -27,7 +29,7 @@ internal suspend fun configPushStep(
     o: PostOutcome,
     authFailed: Boolean,
     nowElapsedMs: Long,
-    clear: suspend () -> Unit,
+    clear: suspend () -> Boolean,
     warn: (String, Throwable?) -> Unit,
 ): ConfigPushState {
     val d = decideUpload(o.result, s.poisonSkips, authFailed)
@@ -37,7 +39,7 @@ internal suspend fun configPushStep(
     )
     return when (d.step) {
         BatchStep.DELETE_ACCEPTED, BatchStep.DELETE_POISON -> {
-            try {
+            val removed = try {
                 clear()
             } catch (e: CancellationException) {
                 throw e
@@ -46,7 +48,11 @@ internal suspend fun configPushStep(
                 return backedOff
             }
             if (d.step == BatchStep.DELETE_POISON) {
-                warn("config: server permanently rejected the temp-config push — dropped it (re-enqueued on the next threshold change)", null)
+                warn(
+                    if (removed) "config: server permanently rejected the temp-config push — dropped it (re-enqueued on the next threshold change)"
+                    else "config: server permanently rejected the temp-config push — a newer config is pending and is sent next",
+                    null,
+                )
             }
             s.copy(poisonSkips = d.poisonSkipsSinceOk, backoffMs = INITIAL_BACKOFF_MS)
         }

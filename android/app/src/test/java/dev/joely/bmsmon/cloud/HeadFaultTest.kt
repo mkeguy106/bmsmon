@@ -320,9 +320,13 @@ class HeadFaultTest {
 
     // --- DATA-22 minor: a 2xx inside a narrowing search must not undo the halving ---
 
-    /** Drain a queue with one bad row the way the upload loop does; count trips until it is skipped. */
-    private fun tripsToIsolate(total: Int, bad: Long): Int {
-        val queue = ArrayDeque((1L..total.toLong()).toList())
+    /**
+     * Drain a queue of outbox [ids] (ascending; the uploader's ids need not be contiguous) with one bad
+     * row the way the upload loop does, passing each batch's real last id; count trips until a row is
+     * skipped, and check that the skipped row is the bad one.
+     */
+    private fun tripsToIsolate(ids: List<Long>, bad: Long): Int {
+        val queue = ArrayDeque(ids)
         var s = fresh()
         var t = 0L
         var trips = 0
@@ -333,7 +337,10 @@ class HeadFaultTest {
             val (next, action) = stepHeadFault(s, sent.first(), sent.size, r, t, max, tailId = sent.last())
             if (r == PostResult.ServerFault && next.streak == 0) trips++
             if (r == PostResult.Ok) repeat(sent.size) { queue.removeFirst() }
-            if (action == HeadFaultAction.SKIP_HEAD_ROW) return trips
+            if (action == HeadFaultAction.SKIP_HEAD_ROW) {
+                assertEquals("the skipped row is the bad row", listOf(bad), sent)
+                return trips
+            }
             s = next
             t += min
         }
@@ -342,9 +349,35 @@ class HeadFaultTest {
 
     @Test fun isolationTakesOneTripPerHalvingWhereverTheBadRowSits() {
         for (bad in listOf(1L, 2L, 99L, 100L, 101L, 150L, 199L, 200L, 333L, 777L, 1000L)) {
-            val trips = tripsToIsolate(total = 1000, bad = bad)
+            val trips = tripsToIsolate(ids = (1L..1000L).toList(), bad = bad)
             assertTrue("bad row $bad took $trips trips", trips <= 9)
         }
+    }
+
+    // Outbox ids have gaps (rows deleted out of order, an AUTOINCREMENT that skipped): the search keys on
+    // each batch's real last id, so it converges just as fast and still skips only the bad row.
+    @Test fun isolationIsAsFastWithGapsInTheOutboxIds() {
+        val ids = (1L..1000L).map { it * 3 + (it % 7) * 100_000 }.sorted()
+        for (i in listOf(0, 1, 98, 99, 100, 149, 199, 200, 332, 776, 999)) {
+            val trips = tripsToIsolate(ids = ids, bad = ids[i])
+            assertTrue("bad row ${ids[i]} took $trips trips", trips <= 9)
+        }
+    }
+
+    // A poison skip or a cap eviction can remove the suspect range, leaving the head past its end. That
+    // end no longer bounds anything: the next trip records its own batch, so its search holds the limit.
+    @Test fun aSuspectRangeTheHeadHasPassedIsDropped() {
+        val searching = HeadFaultState(headId = 1, limit = 100, streak = 0, firstFaultAtMs = null, searchEndId = 100)
+        // Rows 1..100 left the outbox without a 2xx (skipped or evicted); the head is now 101.
+        val s = searching.faults(head = 101, sent = 100, times = listOf(0, 2 * min, 4 * min))
+        assertNull(s.searchEndId)
+        val (tripped, _) = s.step(head = 101, sent = 100, r = PostResult.ServerFault, at = 5 * min)
+        assertEquals(50, tripped.limit)
+        assertEquals(200L, tripped.searchEndId)
+        // A 2xx on the clean first half keeps narrowing instead of doubling back.
+        val (next, _) = stepHeadFault(tripped, 101, 50, PostResult.Ok, 6 * min, max, tailId = 150)
+        assertEquals(50, next.limit)
+        assertEquals(200L, next.searchEndId)
     }
 
     @Test fun aHalvingRecordsTheSuspectRangeAndKeepsTheNarrowerEnd() {

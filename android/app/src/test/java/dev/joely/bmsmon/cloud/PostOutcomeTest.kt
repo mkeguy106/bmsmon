@@ -172,18 +172,25 @@ class PostOutcomeTest {
 
     // C2: a 401 is AuthFailed even when its body cannot be read (connection reset mid-body) — the
     // reason string is optional, the classification is not.
+    private fun brokenBody() = object : ResponseBody() {
+        override fun contentType(): MediaType? = null
+        override fun contentLength(): Long = -1L
+        override fun source(): BufferedSource = object : Source {
+            override fun read(sink: Buffer, byteCount: Long): Long = throw IOException("reset")
+            override fun timeout(): Timeout = Timeout.NONE
+            override fun close() {}
+        }.buffer()
+    }
+
     @Test fun a401WhoseBodyFailsToReadIsStillAnAuthFailure() {
-        val broken = object : ResponseBody() {
-            override fun contentType(): MediaType? = null
-            override fun contentLength(): Long = -1L
-            override fun source(): BufferedSource = object : Source {
-                override fun read(sink: Buffer, byteCount: Long): Long = throw IOException("reset")
-                override fun timeout(): Timeout = Timeout.NONE
-                override fun close() {}
-            }.buffer()
-        }
-        val r = resp(401, mapOf(API_MARKER_HEADER to "1", AUTH_REASON_HEADER to "replay")).newBuilder().body(broken).build()
+        val r = resp(401, mapOf(API_MARKER_HEADER to "1", AUTH_REASON_HEADER to "replay")).newBuilder().body(brokenBody()).build()
         assertEquals(PostOutcome(PostResult.AuthFailed, code = 401, fromApi = true, authReason = "replay"), read(r))
+    }
+
+    // The other half of "401/403 hold the rows regardless of the marker": an intermediary's 403.
+    @Test fun anUnmarked403WhoseBodyFailsToReadIsStillAnAuthFailure() {
+        val r = resp(403, emptyMap()).newBuilder().body(brokenBody()).build()
+        assertEquals(PostOutcome(PostResult.AuthFailed, code = 403, fromApi = false), read(r))
     }
 
     // C2 is unchanged: the outcome's result is exactly classifyPost's, for every status and marker.

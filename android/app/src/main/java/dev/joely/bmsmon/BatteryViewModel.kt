@@ -1097,9 +1097,8 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 val app = getApplication<BmsApp>()
                 // Re-sends queued under the old key are dropped and the history import is queued afresh
-                // (idempotent on the server); clear first and wait, so the import isn't wiped behind it.
-                app.reporter.clearResync().join()
-                store.setImportDone(false)
+                // (idempotent on the server); reset first and wait, so the import isn't wiped behind it.
+                app.reporter.resetResync().join()
                 store.setApiBaseUrl(base)
                 store.setDeviceId(id)
                 store.setEnrolled(true)
@@ -1132,9 +1131,8 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             store.setEnrolled(false)
             store.setCloudEnabled(false)
             store.setDeviceId("")
-            store.setImportDone(false)
             store.setGpsEnabled(false)
-            getApplication<BmsApp>().reporter.clearResync()
+            getApplication<BmsApp>().reporter.resetResync()
             _state.update { it.copy(enrolled = false, cloudEnabled = false, gpsEnabled = false, enrollError = null) }
             engine.setGpsActive(false)
         }
