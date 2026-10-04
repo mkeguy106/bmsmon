@@ -81,7 +81,7 @@ internal fun nextAuthSkewMs(prevMs: Long?, o: PostOutcome): Long? = when {
 }
 
 /** Which clock a sign-in rejected for its time blames (DATA-20), so the UI can say which one to fix. */
-internal enum class ClockBlame {
+enum class ClockBlame {
     /** An independent clock agrees with this phone: the server's clock is off, and tokens are corrected for it. */
     SERVER,
 

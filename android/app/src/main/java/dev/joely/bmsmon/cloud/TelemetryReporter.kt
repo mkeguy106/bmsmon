@@ -17,22 +17,29 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
 private const val TAG = "TelemetryReporter"
-private const val BATCH = 200
 private const val OUTBOX_MAX = 200_000
 private const val IMPORT_PAGE = 500
 
 /**
  * Batch accumulation (bandwidth): don't POST the moment the outbox is non-empty — that turned
- * BATCH=200 into an effective ~2 rows across ~3,000 POSTs/hour, paying ~470 B of per-POST
+ * [UPLOAD_BATCH]=200 into an effective ~2 rows across ~3,000 POSTs/hour, paying ~470 B of per-POST
  * overhead (unique JWT + headers) and a poor gzip ratio on tiny bodies. Flush only once
  * [MIN_BATCH] rows are queued OR the oldest queued row is [FLUSH_AGE_MS] old (bounds latency),
  * then drain to empty. Internal for unit tests.
@@ -54,7 +61,8 @@ internal fun shouldFlush(depth: Int, oldestAgeMs: Long?, draining: Boolean): Boo
  * insert would double the write path's DB work for no benefit, so the cap is enforced amortized:
  * the drain loop re-counts every [CAP_CHECK_EVERY] inserts (and once at startup) and drops the
  * oldest overage. Worst-case transient overshoot is CAP_CHECK_EVERY rows (~0.25% of OUTBOX_MAX);
- * the upload loop's own per-iteration check still bounds it while uploading.
+ * the upload loop's own per-iteration check still bounds it while uploading. Every eviction is
+ * counted and queued for a re-send from local history (DATA-19, see capOutbox).
  */
 private const val CAP_CHECK_EVERY = 500
 
@@ -70,6 +78,8 @@ class TelemetryReporter(
     private val db: BmsDatabase,
     private val settings: SettingsStore,
 ) {
+    // Everything a coroutine launched from `init` touches is declared ABOVE `init`: Kotlin runs
+    // initializers in declaration order, and the IO drain can start before a later one runs.
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val http = uploadHttpClient(appUserAgent())
     private val conn = Connectivity(appContext)
@@ -79,9 +89,25 @@ class TelemetryReporter(
     @Volatile private var importStarted = false
     private var uploaderJob: Job? = null
     private val uploadRate = UploadRate()
-    @Volatile private var authFailed = false
-    var onStatus: ((outboxCount: Long, lastUploadMs: Long, kbps: Double, authFailed: Boolean) -> Unit)? = null
     var onImportProgress: ((Long) -> Unit)? = null
+
+    private val _status = MutableStateFlow(UploadStatus())
+
+    /** Live upload status for the UI: the queue, the auth and clock state, the holds, re-sync and the counters. */
+    val status: StateFlow<UploadStatus> = _status.asStateFlow()
+
+    /**
+     * Legacy hook MonitorEngine mirrors into its state (retired with that mirror). Fed by the upload
+     * loop only, as before, so its four values always arrive in the loop's order.
+     */
+    var onStatus: ((outboxCount: Long, lastUploadMs: Long, kbps: Double, authFailed: Boolean) -> Unit)? = null
+
+    // The outbox cap and the re-sync windows, each behind its own lock (when both, always cap →
+    // resync). capMutex also covers the upload loop's outbox deletes, so an eviction's span and its
+    // delete always see the same oldest rows (DATA-19).
+    private val capMutex = Mutex()
+    private val resyncMutex = Mutex()
+    private var resyncState: ResyncState? = null   // guarded by resyncMutex; loaded lazily
 
     /**
      * Cached settings snapshot, kept fresh by collecting the DataStore flow (DATA-5/DATA-7):
@@ -106,12 +132,22 @@ class TelemetryReporter(
     @Volatile internal var clockBlame: ClockBlame? = null
         private set
 
+    /** The skew shown for the last time-rejected sign-in (nextAuthSkewMs); null once uploads succeed. */
+    @Volatile private var authSkewMs: Long? = null
+
     init {
         // Keep the settings snapshot fresh. DataStore emits the current value on collect, so the
         // gate is correct within milliseconds of construction (before that, report() drops — the
         // same conservative behavior as before, minus the multi-second first-loop-pass window).
         scope.launch {
             settings.persisted.collect { cachedSettings = it }
+        }
+        // The persisted all-time counters, so the status shows exactly what was counted.
+        scope.launch {
+            settings.outboxEvicted.collect { n -> publish { it.copy(outboxEvicted = n) } }
+        }
+        scope.launch {
+            settings.serverFaultSkips.collect { n -> publish { it.copy(serverFaultSkips = n) } }
         }
         // Single-writer drain from the channel into the outbox — never blocks callers.
         scope.launch {
@@ -124,8 +160,7 @@ class TelemetryReporter(
                     // uploader stopped (cloud off mid-flight, auth backoff) the outbox was unbounded.
                     if (++sinceCapCheck >= CAP_CHECK_EVERY) {
                         sinceCapCheck = 0
-                        val depth = db.outbox().count()
-                        if (depth > OUTBOX_MAX) db.outbox().dropOldest(depth - OUTBOX_MAX)
+                        capOutbox()
                     }
                 } catch (e: CancellationException) {
                     throw e   // never swallow cancellation
@@ -273,11 +308,106 @@ class TelemetryReporter(
         }
     }
 
+    private fun publish(update: (UploadStatus) -> UploadStatus): UploadStatus = _status.updateAndGet(update)
+
     /**
-     * Fold one response into the shared signing correction ([nextSigningOffsetMs]) and the clock blame
-     * ([nextClockBlame]), and log a rejected sign-in once per distinct reason. The independent clock is
-     * read at most once, and only when a rule needs it. Synchronized: the import and the upload loop
-     * both report here.
+     * The upload loop's view of the queue and the ingest stream's state. Also the only feed of the
+     * legacy [onStatus] hook, so the engine's mirror keeps receiving the loop's values in its order.
+     */
+    private fun publishQueue(depth: Int, s: IngestLoopState) {
+        val st = publish {
+            it.copy(
+                outboxDepth = depth,
+                lastUploadMs = lastUploadMs,
+                kbps = uploadRate.kbps(System.currentTimeMillis()),
+                authFailed = s.authFailed,
+                keyMissing = s.keyMissing,
+                hold = s.hold,
+            )
+        }
+        onStatus?.invoke(st.outboxDepth.toLong(), st.lastUploadMs, st.kbps, st.authFailed)
+    }
+
+    /**
+     * Transform the re-sync windows under their lock: one in-memory copy, loaded once (normalised by
+     * [decodeResync]), persisted on every change, and its summary published.
+     */
+    private suspend fun mutateResync(transform: (ResyncState) -> ResyncState): ResyncState = resyncMutex.withLock {
+        val now = System.currentTimeMillis()
+        val cur = resyncState ?: decodeResync(settings.loadResyncJson(), now)
+        val next = transform(cur)
+        resyncState = next
+        if (next != cur) settings.setResyncJson(encodeResync(next))
+        publish { it.copy(resync = resyncSummary(next, now)) }
+        next
+    }
+
+    private suspend fun readResync(): ResyncState = mutateResync { it }
+
+    /**
+     * Enforce [OUTBOX_MAX] (DATA-5), never silently (DATA-19): the sample-time span of the rows about
+     * to go is queued for a re-send from local history BEFORE they are deleted (a kill between the two
+     * costs a duplicate send, which the server dedups, never a lost re-send), and the rows actually
+     * deleted are counted (persisted, shown in Cloud sync). A re-send that can't be recorded keeps
+     * every row for now (no eviction without its record), and uploading carries on, which is what
+     * drains the queue. Serialized with every other outbox delete by [capMutex], so the span and the
+     * delete see the same oldest rows. The enqueue drain and the upload loop both call it. Returns the
+     * depth afterwards.
+     */
+    private suspend fun capOutbox(): Int = capMutex.withLock {
+        val depth = db.outbox().count()
+        if (depth <= OUTBOX_MAX) return@withLock depth
+        withContext(NonCancellable) {
+            val n = depth - OUTBOX_MAX
+            val span = db.outbox().oldestSpan(n)
+            val from = span.fromMs ?: return@withContext depth
+            val to = span.toMs ?: return@withContext depth
+            try {
+                mutateResync { addResyncWindow(it, ResyncWindow(from, to), System.currentTimeMillis()) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "outbox: over the cap, but the re-send could not be recorded — evicting nothing this time", e)
+                return@withContext depth
+            }
+            val dropped = db.outbox().dropOldest(n)
+            if (dropped > 0) {
+                settings.addOutboxEvicted(dropped.toLong())
+                Log.w(
+                    TAG,
+                    "outbox: full — evicted $dropped oldest samples; they are re-sent from local history " +
+                        "while usage logging keeps it",
+                )
+            }
+            depth - dropped
+        }
+    }
+
+    /**
+     * Apply one [ingestStep]'s outbox effects in the order it emitted them (a re-send is recorded
+     * before the delete it accompanies), as a unit with respect to stop(): a cancellation can't land
+     * between a skip's delete and its count, or between a re-send record and its delete. A skip counts
+     * the rows ACTUALLY deleted, so a head the cap evicted first counts nothing.
+     */
+    private suspend fun applyEffects(effects: List<OutboxEffect>) = withContext(NonCancellable) {
+        for (e in effects) {
+            when (e) {
+                is OutboxEffect.Resync -> mutateResync { addResyncWindow(it, e.window, System.currentTimeMillis()) }
+                is OutboxEffect.DeleteThrough -> capMutex.withLock { db.outbox().deleteUpTo(e.id) }
+                is OutboxEffect.SkipOne -> {
+                    val n = capMutex.withLock { db.outbox().deleteOne(e.id) }
+                    if (n > 0) settings.addServerFaultSkips(n.toLong())
+                }
+            }
+        }
+    }
+
+    /**
+     * The one outcome observer for every stream (ingest, import, config): folds a response into the
+     * shared signing correction ([nextSigningOffsetMs]), the clock blame ([nextClockBlame]) and the
+     * skew shown to the user ([nextAuthSkewMs]), publishes them, and logs a rejected sign-in once per
+     * distinct reason. The independent clock is read at most once, and only when a rule needs it.
+     * Synchronized: the import and the upload loop both report here.
      */
     @Synchronized
     private fun noteOutcome(o: PostOutcome) {
@@ -286,6 +416,9 @@ class TelemetryReporter(
         signingOffsetMs = nextSigningOffsetMs(prevOffsetMs, o) { phoneClockErr }
         val blame = nextClockBlame(clockBlame, o) { phoneClockErr }
         clockBlame = blame
+        val skew = nextAuthSkewMs(authSkewMs, o)
+        authSkewMs = skew
+        publish { it.copy(authSkewMs = skew, signingOffsetMs = signingOffsetMs, clockBlame = blame) }
         if (o.result == PostResult.AuthFailed) {
             val key = "${o.code}|${o.fromApi}|${o.authReason}|${o.detail}|$blame|${signingOffsetMs / 1000}"
             if (key != lastAuthLog) {
@@ -347,27 +480,34 @@ class TelemetryReporter(
         }
     }
 
+    /**
+     * The upload loop: an interpreter of [ingestStep]. It peeks a batch, POSTs it, feeds the outcome
+     * to the shared observer ([noteOutcome]) and to [ingestStep], applies the step's effects in the
+     * emitted order ([applyEffects]), and waits the step's delay. Every decision that can delete a
+     * sample is in [ingestStep], JVM-tested; the only other delete is the cap's eviction ([capOutbox]).
+     */
     private suspend fun uploadLoop() {
-        var backoff = 1000L
         var seq = 0
         // True while a started flush is draining the queue to empty (see shouldFlush). Stays true
         // across transient/auth retries so a failed batch's remainder never re-waits FLUSH_AGE_MS.
         var draining = false
-        // Poison circuit breakers (DATA-14, see decideUpload): one per stream — a reject of the
-        // config body says nothing about sample batches, and vice versa.
-        var ingestPoisonSkips = 0
+        // The ingest stream's whole decision state: its poison breaker (DATA-14), its server-fault
+        // bisection and one-skip breaker (DATA-22), auth, missing key, backoff and hold — see
+        // ingestStep. Memory only: a process restart starts over at a full batch with both breakers
+        // re-armed (patience).
+        var ingest = IngestLoopState()
+        // The last ingestStep message logged: each is logged once per change (see heldLog).
+        var lastLog: String? = null
+        // The config push: its own poison breaker (a reject of the config body says nothing about
+        // sample batches, and vice versa), and its own retry gate. A config the uploader keeps —
+        // Transient, AuthFailed, or a Poison the breaker holds — is not re-sent on every loop pass
+        // (that is a POST per drained batch, or per idle ~1.5 s pass); it follows the ingest backoff
+        // schedule (1 s doubling to 60 s, Retry-After a floor) on its own clock, so a held config can
+        // never throttle sample uploads.
         var configPoisonSkips = 0
         var heldConfig: String? = null   // the config the breaker is holding — logged once, not every pass
-        // The config push's own retry gate. A config the uploader keeps — Transient, AuthFailed, or a
-        // Poison the breaker holds — is not re-sent on every loop pass (that is a POST per drained
-        // batch, or per idle ~1.5 s pass); it follows the ingest backoff schedule (1 s doubling to
-        // 60 s) on its own clock, so a held config can never throttle sample uploads.
-        var configBackoff = 1000L
+        var configBackoff = INITIAL_BACKOFF_MS
         var configRetryAt = 0L   // SystemClock.elapsedRealtime(): monotonic, a wall-clock step can't strand it
-        // The ingest stream's server-fault bisection and its one-skip breaker (DATA-22, see
-        // stepHeadFault). Memory only: a process restart resets it to a full batch and a fresh
-        // streak (patience), and re-arms one skip, like the poison breaker.
-        var headFault = HeadFaultState(headId = null, limit = BATCH, streak = 0, firstFaultAtMs = null, skipsSinceOk = 0)
         while (true) {
             try {
                 // Hot path (DATA-7): read the flow-fed snapshot — no per-iteration Persisted decode.
@@ -388,35 +528,34 @@ class TelemetryReporter(
                         val outcome = postSigned(CloudConfig(base).configUrl, p.deviceId, cfg.toByteArray())
                         noteOutcome(outcome)
                         val result = outcome.result
-                        val d = decideUpload(result, configPoisonSkips, authFailed)
+                        val d = decideUpload(result, configPoisonSkips, ingest.authFailed)
                         configPoisonSkips = d.poisonSkipsSinceOk
                         when (d.step) {
                             BatchStep.DELETE_ACCEPTED -> {
                                 settings.clearPendingTempConfig()
-                                configBackoff = 1000L
+                                configBackoff = INITIAL_BACKOFF_MS
                             }
                             BatchStep.DELETE_POISON -> {
                                 Log.w(TAG, "config: server permanently rejected the temp-config push — dropping it (re-enqueued on the next threshold change)")
                                 settings.clearPendingTempConfig()
-                                configBackoff = 1000L
+                                configBackoff = INITIAL_BACKOFF_MS
                             }
                             BatchStep.BACK_OFF, BatchStep.BACK_OFF_AUTH -> {
                                 if (result == PostResult.Poison && heldConfig != cfg) {
                                     heldConfig = cfg
                                     Log.w(TAG, "config: rejected again with no 2xx since the last drop — keeping it pending (poison breaker open)")
                                 }
-                                configRetryAt = SystemClock.elapsedRealtime() + configBackoff
-                                configBackoff = (configBackoff * 2).coerceAtMost(60_000L)
+                                configRetryAt = SystemClock.elapsedRealtime() + retryDelayMs(configBackoff, outcome.retryAfterMs)
+                                configBackoff = nextBackoffMs(configBackoff)
                             }
                         }
                     }
                 }
-                // Cap the outbox — drop oldest rows if over limit.
-                val depth = db.outbox().count()
-                if (depth > OUTBOX_MAX) db.outbox().dropOldest(depth - OUTBOX_MAX)
+                // Cap the outbox: evict the oldest rows if over the limit, counted and re-queued.
+                val depth = capOutbox()
                 if (!conn.online.value || depth == 0) {
                     if (depth == 0) draining = false
-                    onStatus?.invoke(depth.toLong(), lastUploadMs, uploadRate.kbps(System.currentTimeMillis()), authFailed)
+                    publishQueue(depth, ingest)
                     delay(1500)
                     continue
                 }
@@ -425,12 +564,12 @@ class TelemetryReporter(
                 val oldestAgeMs = db.outbox().oldestEnqueuedAt()
                     ?.let { System.currentTimeMillis() - it }
                 if (!shouldFlush(depth, oldestAgeMs, draining)) {
-                    onStatus?.invoke(depth.toLong(), lastUploadMs, uploadRate.kbps(System.currentTimeMillis()), authFailed)
+                    publishQueue(depth, ingest)
                     delay(1500)
                     continue
                 }
                 draining = true
-                val rows = db.outbox().peek(minOf(BATCH, headFault.limit))
+                val rows = db.outbox().peek(minOf(UPLOAD_BATCH, ingest.fault.limit))
                 if (rows.isEmpty()) {
                     delay(1500)
                     continue
@@ -442,109 +581,51 @@ class TelemetryReporter(
                 val wire = gzip(body)
                 val outcome = postSigned(CloudConfig(base).ingestUrl, p.deviceId, body, wire)
                 noteOutcome(outcome)
-                val result = outcome.result
-                val (nextFault, faultAction) = stepHeadFault(
-                    headFault, rows.first().id, rows.size, result, SystemClock.elapsedRealtime(), BATCH,
-                    tailId = rows.last().id,
-                )
-                // A ServerFault always extends the streak unless the streak tripped, which clears it.
-                if (result == PostResult.ServerFault && nextFault.streak == 0 && faultAction == HeadFaultAction.NONE) {
-                    if (nextFault.limit < rows.size) {
-                        Log.w(
-                            TAG,
-                            "upload: batch seq=$seq (from outbox id ${rows.first().id}, ${rows.size} rows) drew server " +
-                                "faults for $FAULT_STREAK+ tries over ${FAULT_MIN_SPAN_MS / 60_000}+ min — " +
-                                "narrowing the batch to ${nextFault.limit} rows",
-                        )
-                    } else {
-                        Log.w(
-                            TAG,
-                            "upload: server still faulting on outbox id=${rows.first().id} (seq=$seq) with a sample " +
-                                "already skipped since the last 2xx — holding it (fault breaker open)",
-                        )
-                    }
+                val step = ingestStep(ingest, batchMeta(rows), outcome, SystemClock.elapsedRealtime(), System.currentTimeMillis())
+                ingest = step.state
+                val (memory, line) = heldLog(lastLog, step.log, outcome.result)
+                lastLog = memory
+                line?.let { Log.w(TAG, it + stepLogSuffix(seq, rows, step.effects)) }
+                applyEffects(step.effects)
+                if (outcome.result == PostResult.Ok) {
+                    val now = System.currentTimeMillis()
+                    lastUploadMs = now
+                    uploadRate.record(now, wire.size)
                 }
-                headFault = nextFault
-                val d = decideUpload(result, ingestPoisonSkips, authFailed)
-                ingestPoisonSkips = d.poisonSkipsSinceOk
-                authFailed = d.authFailed
-                when (d.step) {
-                    BatchStep.DELETE_ACCEPTED -> {
-                        db.outbox().deleteUpTo(rows.last().id)
-                        val now = System.currentTimeMillis()
-                        lastUploadMs = now
-                        uploadRate.record(now, wire.size)
-                        val remaining = db.outbox().count()
-                        if (remaining == 0) draining = false
-                        onStatus?.invoke(remaining.toLong(), lastUploadMs, uploadRate.kbps(now), authFailed)
-                        backoff = 1000L
-                    }
-                    BatchStep.DELETE_POISON -> {
-                        // The APP permanently rejects this batch (marker-carrying 400/413/422) and
-                        // the breaker allows one skip since the last 2xx — retrying it forever would
-                        // head-of-line block every later sample. When logging is on the telemetry
-                        // still lives in the Room samples table.
-                        Log.w(
-                            TAG,
-                            "upload: server permanently rejected batch seq=$seq " +
-                                "(${rows.size} rows, outbox ids ${rows.first().id}..${rows.last().id}) — skipping past it; " +
-                                "another reject before any 2xx will be held",
-                        )
-                        db.outbox().deleteUpTo(rows.last().id)
-                        val remaining = db.outbox().count()
-                        if (remaining == 0) draining = false
-                        onStatus?.invoke(
-                            remaining.toLong(), lastUploadMs,
-                            uploadRate.kbps(System.currentTimeMillis()), authFailed,
-                        )
-                        backoff = 1000L
-                    }
-                    BatchStep.BACK_OFF_AUTH -> {
-                        // Revoked device or >60 s clock skew: NEVER drop the rows — keep buffering
-                        // and backing off, but surface the auth state so the UI can show it
-                        // instead of "queued" forever.
-                        onStatus?.invoke(
-                            db.outbox().count().toLong(), lastUploadMs,
-                            uploadRate.kbps(System.currentTimeMillis()), authFailed,
-                        )
-                        delay(backoff)
-                        backoff = (backoff * 2).coerceAtMost(60_000L)
-                    }
-                    BatchStep.BACK_OFF -> if (faultAction == HeadFaultAction.SKIP_HEAD_ROW) {
-                        // DATA-22: this one sample has made the server crash (marked 5xx) for 5+
-                        // minutes at batch size 1, and no row was skipped since the last 2xx — skip
-                        // its OUTBOX row so it can't block every later sample. The next head goes
-                        // alone until a 2xx. Log identity and size only, never the payload. When
-                        // logging is on the sample still lives in the Room samples table.
-                        val head = rows.first()
-                        Log.w(
-                            TAG,
-                            "upload: server keeps faulting on one sample — skipping outbox id=${head.id} " +
-                                "(seq=$seq, ${head.payload.toByteArray().size} bytes)",
-                        )
-                        db.outbox().deleteUpTo(head.id)   // the head is the lowest id: exactly this row
-                        settings.addServerFaultSkips(1)
-                        val remaining = db.outbox().count()
-                        if (remaining == 0) draining = false
-                        onStatus?.invoke(
-                            remaining.toLong(), lastUploadMs,
-                            uploadRate.kbps(System.currentTimeMillis()), authFailed,
-                        )
-                        backoff = 1000L
-                    } else {
-                        if (result == PostResult.Poison) {
-                            Log.w(TAG, "upload: batch seq=$seq rejected again with no 2xx since the last skip — holding it (poison breaker open)")
-                        }
-                        delay(backoff)
-                        backoff = (backoff * 2).coerceAtMost(60_000L)
-                    }
-                }
+                val remaining = db.outbox().count()
+                if (remaining == 0) draining = false
+                publishQueue(remaining, ingest)
+                if (step.delayMs > 0) delay(step.delayMs)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                delay(backoff)
-                backoff = (backoff * 2).coerceAtMost(60_000L)
+                delay(ingest.backoffMs)
+                ingest = ingest.copy(backoffMs = nextBackoffMs(ingest.backoffMs))
             }
         }
     }
+}
+
+/**
+ * [ingestStep] repeats a held reason on every held step; the loop logs each message once per change.
+ * Given the last message logged ([lastLog]), this step's message ([log]) and its [result], returns the
+ * memory to keep and the line to log now (null = nothing). A step without a message ends the episode
+ * (a 2xx, an auth reject), except an outage blip ([PostResult.Transient]) or a fault short of a trip
+ * ([PostResult.ServerFault]), which say nothing new about the hold. Event messages (a skip, a
+ * narrowing) name their rows, so one event never repeats another's text.
+ */
+internal fun heldLog(lastLog: String?, log: String?, result: PostResult): Pair<String?, String?> = when {
+    log == null -> (if (result == PostResult.Transient || result == PostResult.ServerFault) lastLog else null) to null
+    log == lastLog -> lastLog to null
+    else -> log to log
+}
+
+/**
+ * What the loop appends to an [ingestStep] log line: the batch's seq, and for a server-fault skip the
+ * skipped row's payload size too (DATA-22: its id is already in the line). Identity and size only,
+ * never the payload.
+ */
+internal fun stepLogSuffix(seq: Int, rows: List<OutboxEntity>, effects: List<OutboxEffect>): String {
+    val skipped = effects.firstNotNullOfOrNull { e -> (e as? OutboxEffect.SkipOne)?.let { s -> rows.firstOrNull { it.id == s.id } } }
+    return if (skipped != null) " (seq=$seq, ${skipped.payload.toByteArray().size} bytes)" else " (seq=$seq)"
 }
