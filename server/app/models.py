@@ -1,7 +1,9 @@
 import math
 from typing import Annotated, Any, TypeVar
 
-from pydantic import AfterValidator, BaseModel, ValidationError, field_validator
+from pydantic import (
+    AfterValidator, BaseModel, Field, StrictBool, StrictInt, ValidationError, field_validator,
+)
 
 # Postgres storage bounds for device-pushed values. A value can pass the pydantic type and
 # still be unstorable: an int4 or float4 overflow (asyncpg's binary codecs refuse it) or a
@@ -168,6 +170,33 @@ class IngestEnvelope(BaseModel):
     # diagnostics — NOT used for dedup (the samples PK handles that).
     batch_seq: int
     samples: list[Any]
+    # The phone's charger snapshot (live batches only). Deliberately NOT validated here:
+    # it is parsed on its own in the router (PhonePowerIn), because a 422 from this field
+    # would make the phone delete the batch and lose its telemetry.
+    phone: Any = None
+
+
+class PhonePowerIn(BaseModel):
+    """The optional `phone` block of a live ingest batch: the phone's own charger state.
+    Required fields are strict (a wrong type invalidates the block, which the router then
+    ignores); the optional ones degrade to None, like the sample clamps."""
+    level: StrictInt = Field(ge=0, le=100)
+    plugged: StrictInt = Field(ge=0, le=15)
+    charge_mah: StrictInt | None = None
+    fault: StrictBool
+    fault_since_ms: StrictInt | None = None
+    at_ms: StrictInt = Field(ge=0, le=INT8_MAX)
+
+    @field_validator("charge_mah", mode="after")
+    @classmethod
+    def _clip_charge(cls, v: int | None) -> int | None:
+        return v if v is not None and 0 <= v <= 100_000 else None
+
+    @field_validator("fault_since_ms", mode="after")
+    @classmethod
+    def _clip_since(cls, v: int | None) -> int | None:
+        # plausible epoch ms: positive and before 2100-01-01 UTC
+        return v if v is not None and 0 < v < 4_102_444_800_000 else None
 
 
 class IngestResponse(BaseModel):

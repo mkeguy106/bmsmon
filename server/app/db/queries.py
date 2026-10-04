@@ -433,6 +433,20 @@ async def touch_device(conn, device_id: str, user_agent: str | None) -> None:
         "WHERE id = $1", device_id, user_agent)
 
 
+async def store_phone_power(conn, device_id: str, level: int, plugged: int,
+                            charge_mah: int | None, fault: bool,
+                            fault_since_ms: int | None) -> None:
+    """The phone's latest charger snapshot. phone_status_at is server time; the fault
+    start is clamped to it (a skewed phone clock can't date a fault in the future) and is
+    kept only while the fault is set."""
+    await conn.execute(
+        "UPDATE devices SET phone_level = $2, phone_plugged = $3, phone_charge_mah = $4, "
+        "phone_fault = $5, phone_status_at = now(), "
+        "phone_fault_since = CASE WHEN $5 AND $6::bigint IS NOT NULL "
+        "THEN LEAST(to_timestamp($6::bigint / 1000.0), now()) END "
+        "WHERE id = $1", device_id, level, plugged, charge_mah, fault, fault_since_ms)
+
+
 async def record_user_agent(conn, device_id: str, user_agent: str) -> None:
     """The app build behind an upload that is not live telemetry (a config push);
     last_seen_at is left alone."""

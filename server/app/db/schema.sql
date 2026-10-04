@@ -47,6 +47,14 @@ CREATE TABLE IF NOT EXISTS devices (
 -- DATA-28: the app build that last uploaded for this device (its User-Agent), shown on the
 -- admin device list. Written by queries.touch_device and queries.record_user_agent.
 SELECT pg_temp.add_column_if_missing('devices', 'user_agent', 'text');
+-- The phone's latest charger snapshot (the `phone` block of a live ingest batch).
+-- phone_status_at is SERVER time at write; phone_fault_since is clamped to <= it.
+SELECT pg_temp.add_column_if_missing('devices', 'phone_level', 'smallint');
+SELECT pg_temp.add_column_if_missing('devices', 'phone_plugged', 'smallint');
+SELECT pg_temp.add_column_if_missing('devices', 'phone_charge_mah', 'integer');
+SELECT pg_temp.add_column_if_missing('devices', 'phone_fault', 'boolean');
+SELECT pg_temp.add_column_if_missing('devices', 'phone_fault_since', 'timestamptz');
+SELECT pg_temp.add_column_if_missing('devices', 'phone_status_at', 'timestamptz');
 
 CREATE TABLE IF NOT EXISTS enrollment_codes (
   code_hash text PRIMARY KEY,
