@@ -62,7 +62,7 @@ private fun groupForAddress(groups: List<BatteryGroup>, address: String): Batter
 
 /**
  * Resolve which target owns the stage:
- *  - a low pack's seize wins ([seizeCandidate]: never off the base in use, never while charging);
+ *  - a low pack's seize wins ([seizeCandidate]: never off a base in use, never while charging);
  *  - then a manual pin (permanently if dynamic is off, else for PIN_HOLD_MS);
  *  - otherwise dynamic:
  *      1. a base discharging right now (the active chair),
@@ -112,23 +112,24 @@ fun resolveStage(i: StageInputs): StageTarget {
 /**
  * The pack the low-pack seize pulls onto the stage, or null (UI-19).
  *  - Candidates: reachable packs at or below [StageInputs.seizeThreshold] that are not charging. A
- *    pack taking charge is not draining, so there is nothing to warn about on the stage (its own
- *    notification still fires). Regen — charge-direction current within [REGEN_WINDOW_MS] of its
- *    base discharging — is driving, not charging, and still counts.
- *  - The seize never displaces the base in use: while a base is discharging, or inside the stage
- *    hold after its last discharge, only that base's packs may seize. That keeps the case the seize
- *    exists for — a low in-use base overriding a manual pin — and stops an idle spare on the shelf
- *    from taking the stage away from the chair being driven.
+ *    pack taking charge is not draining, so there is nothing to warn about: its capacity
+ *    notification is suppressed too. Regen — charge-direction current within [REGEN_WINDOW_MS] of
+ *    its base discharging — is driving, not charging, and still counts.
+ *  - The seize never displaces a base in use ([inUseGroupIds]): while any base is in use, only packs
+ *    on a base in use may seize. That keeps the case the seize exists for — a low in-use base
+ *    overriding a manual pin — and stops an idle spare on the shelf from taking the stage away from
+ *    the chair being driven. Every discharging base is in use, so a draining pack on a second
+ *    discharging base can't stay hidden off-stage.
  *  - Lowest SOC wins; the daily driver, then the address, break ties.
  */
 internal fun seizeCandidate(i: StageInputs): String? {
     val thr = i.seizeThreshold ?: return null
-    val inUse = inUseGroupId(i)
+    val inUse = inUseGroupIds(i)
     return i.fleet.entries
         .mapNotNull { (addr, s) ->
             val t = s.telemetry?.takeIf { s.reachable && it.soc <= thr } ?: return@mapNotNull null
             val g = groupForAddress(i.groups, addr)
-            if (inUse != null && g?.id != inUse) return@mapNotNull null
+            if (inUse.isNotEmpty() && g?.id !in inUse) return@mapNotNull null
             if (chargingNotRegen(t, g?.let { i.lastDischargeAt[it.id] }, i.now)) return@mapNotNull null
             addr to t.soc
         }
@@ -140,18 +141,25 @@ internal fun seizeCandidate(i: StageInputs): String? {
         ?.first
 }
 
-/** The base the chair is using: one discharging now (daily driver first), else the most recent
- *  discharge inside the stage hold — the same two rules that hold the stage in [resolveStage]. */
-private fun inUseGroupId(i: StageInputs): String? {
-    val discharging = i.groups.filter { groupActivity(it, i.fleet) == GroupActivity.Discharging }
-    (discharging.firstOrNull { it.id == i.dailyDriverId } ?: discharging.firstOrNull())?.let { return it.id }
-    return i.groups
-        .mapNotNull { g -> i.lastDischargeAt[g.id]?.let { g to it } }
-        .filter { i.now - it.second < i.holdMs }
-        .maxByOrNull { it.second }
-        ?.first?.id
+/** The bases in use: every base discharging now; if none is, the one with the newest discharge
+ *  strictly inside the stage hold — the hold rule of [resolveStage]. Empty when nothing is in use. */
+private fun inUseGroupIds(i: StageInputs): Set<String> {
+    val discharging = i.groups.filter { groupActivity(it, i.fleet) == GroupActivity.Discharging }.map { it.id }.toSet()
+    if (discharging.isNotEmpty()) return discharging
+    return setOfNotNull(
+        i.groups
+            .mapNotNull { g -> i.lastDischargeAt[g.id]?.let { g to it } }
+            .filter { i.now - it.second < i.holdMs }
+            .maxByOrNull { it.second }
+            ?.first?.id,
+    )
 }
 
+/**
+ * Charging, and not regen. A superset of [isRegen] on purpose: any charge-direction state or current
+ * within [REGEN_WINDOW_MS] of the base discharging counts as regen here, with no [REGEN_EPS] floor, so a
+ * low pack on a chair being driven errs toward seizing. Do not tighten it to match [isRegen].
+ */
 private fun chargingNotRegen(t: Telemetry, groupLastDischargeAt: Long?, now: Long): Boolean {
     val charging = t.state == BatteryState.Charging || t.current > CURRENT_EPS
     val regen = groupLastDischargeAt != null && now - groupLastDischargeAt < REGEN_WINDOW_MS

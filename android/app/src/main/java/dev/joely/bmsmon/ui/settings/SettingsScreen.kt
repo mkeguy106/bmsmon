@@ -664,8 +664,8 @@ private fun ColumnScope.AlertsContent(
         ToggleRow(
             "Pull low packs to stage",
             "When a pack drops to your pull level (below), it jumps onto the main stage — over a manual " +
-                "pin — so it can't drain unseen. It never displaces the base you're driving, and a " +
-                "charging pack never jumps. Alarms fire either way.",
+                "pin — so it can't drain unseen. An idle spare never displaces the base you're driving, " +
+                "and a charging pack never jumps. Alarms fire either way.",
             state.seizeLowToStage, onSetSeizeLowToStage,
         )
     }
@@ -726,7 +726,6 @@ private fun ColumnScope.AlertsContent(
         }
     }
 
-    val next = if (state.alertsOn) state.enabledThresholds.maxOrNull() else null
     Box(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
             .background(AlertCritical.copy(alpha = 0.07f))
@@ -734,10 +733,7 @@ private fun ColumnScope.AlertsContent(
             .padding(14.dp),
     ) {
         Text(
-            if (next != null)
-                "Next alert fires when any pack — on stage or not — drops to $next%." +
-                    (if (state.seizeLowToStage) " A pack at or below ${state.seizeSoc}% is pulled onto the stage." else "")
-            else "Low-battery alerts are off.",
+            alertSummaryLine(state.alertsOn, state.enabledThresholds, state.seizeThreshold),
             color = c.text2, fontSize = 12.sp, lineHeight = 17.sp,
         )
     }

@@ -168,9 +168,9 @@ data class UiState(
     val enabledThresholds: Set<Int> = DEFAULT_THRESHOLDS.toSet(),
     val acknowledgedThresholds: Set<Int> = emptySet(),
     val criticalThreshold: Int = DEFAULT_CRITICAL_THRESHOLD,
-    // When on (and alerts on), any reachable, non-charging pack at/below the seize level (`seizeSoc`)
-    // seizes the main stage — over a manual pin, never off the base in use (UI-19) — so a too-low
-    // pack can't hide off-stage.
+    // When on (and alerts on), a reachable, non-charging pack at/below the seize level (`seizeSoc`)
+    // seizes the main stage — over a manual pin, never off a base in use (UI-19, seizeCandidate) — so
+    // a too-low pack can't hide off-stage.
     val seizeLowToStage: Boolean = true,
     val seizeSoc: Int = DEFAULT_SEIZE_SOC,
     // temperature alerts (per-profile thresholds; unit reuses tempFahrenheit below)
@@ -228,8 +228,9 @@ data class UiState(
         get() = roster.groupById(dailyDriverId) ?: BatteryGroup(dailyDriverId, dailyDriverId, emptyList())
     val stageGroupId: String? get() = (stageTarget as? StageTarget.Base)?.groupId
 
-    /** SOC at/below which a reachable pack seizes the stage, or null when disabled. Shared rule
-     *  with the headless restore (T1.2) — see seizeThresholdFor. */
+    /** The seize level, or null while the seize is off (alerts or "Pull low packs to stage" off).
+     *  Shared rule with the headless restore (T1.2) — see seizeThresholdFor; which packs may seize
+     *  at it is seizeCandidate's rule (Fleet.kt). */
     val seizeThreshold: Int? get() = seizeThresholdFor(alertsOn, seizeLowToStage, seizeSoc)
 
     /** The user's capacity ladder, as the alerts and the SOC severity colors read it. */

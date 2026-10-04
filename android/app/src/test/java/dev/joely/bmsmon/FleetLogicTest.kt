@@ -117,11 +117,12 @@ class FleetLogicTest {
     }
 
     @Test fun unreachableLowPackDoesNotSeize() {
+        // Nothing is in use, so only reachability can keep this pack from seizing.
         val addr = roster.groupById("2024")!!.targets.first().address
         val fleet = mapOf(addr to BatteryStatus(tel(BatteryState.Idle).copy(soc = 8f), reachable = false)) +
-            fleetWith("2016" to BatteryState.Discharging)
+            fleetWith("2016" to BatteryState.Idle)
         val r = resolveStage(inputs(fleet, seizeThreshold = 30))
-        assertEquals(StageTarget.Base("2016"), r)  // no live SOC → normal resolution, not the dead pack
+        assertEquals(StageTarget.Base("2012"), r)  // no live SOC → normal resolution (all idle: stays put)
     }
 
     // --- UI-19: the seize never displaces the base in use, and a charging pack never seizes ---
@@ -197,9 +198,66 @@ class FleetLogicTest {
     }
 
     @Test fun nullSeizeThresholdDisablesSeize() {
-        val fleet = fleetWithSoc("2024" to 5f) + fleetWith("2016" to BatteryState.Discharging)
-        val r = resolveStage(inputs(fleet, seizeThreshold = null))
-        assertEquals(StageTarget.Base("2016"), r)  // seize off → the discharging base owns the stage
+        // Nothing is in use, so only the threshold can keep this 5 % pack from seizing.
+        val fleet = fleetWithSoc("2024" to 5f) + fleetWith("2016" to BatteryState.Idle)
+        assertEquals(StageTarget.Base("2024"), resolveStage(inputs(fleet, seizeThreshold = 30)))
+        assertEquals(StageTarget.Base("2012"), resolveStage(inputs(fleet, seizeThreshold = null)))  // stays put
+    }
+
+    // --- "base in use" is the SET of discharging bases (else the one held base) ---
+
+    /** Every pack of [gid] discharging at [soc]. */
+    private fun discharging(gid: String, soc: Float): Map<String, BatteryStatus> =
+        fleetWith(gid to BatteryState.Discharging).mapValues { it.value.copy(telemetry = it.value.telemetry!!.copy(soc = soc)) }
+
+    @Test fun aLowPackOnASecondDischargingBaseSeizes() {
+        // The daily driver is discharging too, but a draining pack on the other base must not stay hidden.
+        val fleet = discharging("2012", 50f) + discharging("2016", 20f)
+        assertEquals(StageTarget.Base("2016"), resolveStage(inputs(fleet, seizeThreshold = 30)))
+    }
+
+    @Test fun withTwoBasesDischargingAndBothLowTheLowestWins() {
+        assertEquals(
+            StageTarget.Base("2016"),
+            resolveStage(inputs(discharging("2012", 25f) + discharging("2016", 15f), seizeThreshold = 30)),
+        )
+        // A tie goes to the daily driver.
+        assertEquals(
+            StageTarget.Base("2012"),
+            resolveStage(inputs(discharging("2012", 20f) + discharging("2016", 20f), seizeThreshold = 30)),
+        )
+    }
+
+    @Test fun anIdleSpareStillNeverSeizesWhileTwoBasesDischarge() {
+        val fleet = discharging("2012", 50f) + discharging("2016", 60f) + fleetWithSoc("2024" to 10f)
+        assertEquals(StageTarget.Base("2012"), resolveStage(inputs(fleet, seizeThreshold = 30)))
+    }
+
+    @Test fun aLowPackOnTheHeldBaseSeizesOverAPin() {
+        // Parked 5 min ago, idle at 20 %: still the base in use, and it outranks the pin.
+        val fleet = fleetWithSoc("2016" to 20f) + fleetWith("2012" to BatteryState.Idle)
+        val r = resolveStage(
+            inputs(fleet, mapOf("2016" to now - 5 * 60_000L), manualStage = StageTarget.Base("2012"), seizeThreshold = 30),
+        )
+        assertEquals(StageTarget.Base("2016"), r)
+    }
+
+    @Test fun theBaseInUseSeizesEvenWhenAnIdleSpareIsLower() {
+        val fleet = discharging("2016", 25f) + fleetWithSoc("2024" to 10f) + fleetWith("2012" to BatteryState.Idle)
+        val r = resolveStage(inputs(fleet, manualStage = StageTarget.Base("2012"), seizeThreshold = 30))
+        assertEquals(StageTarget.Base("2016"), r)
+    }
+
+    @Test fun theSeizeRegenWindowEndsAtThirtySeconds() {
+        val regen = fleetWithSoc("2016" to 20f).mapValues {
+            it.value.copy(telemetry = it.value.telemetry!!.copy(state = BatteryState.Charging, current = 4f))
+        }
+        val fleet = regen + fleetWith("2012" to BatteryState.Idle)
+        fun at(lastDischargeAgoMs: Long) = resolveStage(
+            inputs(fleet, mapOf("2016" to now - lastDischargeAgoMs), manualStage = StageTarget.Base("2012"), seizeThreshold = 30),
+        )
+        assertEquals(StageTarget.Base("2016"), at(29_999L))   // still regen: driving, so it seizes
+        assertEquals(StageTarget.Base("2012"), at(30_000L))   // charging: no seize, the pin holds
     }
 
     // --- applyDisabled: single-writer reachability (a just-disconnected pack is unreachable

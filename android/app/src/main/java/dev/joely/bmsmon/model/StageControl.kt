@@ -8,7 +8,7 @@ package dev.joely.bmsmon.model
  * and the engine re-evaluated fleet-wide alerts only when a (possibly dark) stage pack reported.
  * These pure pieces let the process-lifetime MonitorEngine own all of it: it runs
  * [engineDecision] on every BLE event and tick; the ViewModel pushes [StageConfig] and mirrors
- * the result. Since UI-19 the seize has its own level and never displaces the base in use (see
+ * the result. Since UI-19 the seize has its own level and never displaces a base in use (see
  * seizeCandidate in Fleet.kt); its candidates are also narrowed to roster members and this
  * session's readings.
  */
