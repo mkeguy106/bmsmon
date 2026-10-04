@@ -5,7 +5,7 @@ data class UploadStatus(
     val outboxDepth: Int = 0,
     val lastUploadMs: Long = 0L,
     val kbps: Double = 0.0,
-    /** The last ingest response was a 401/403: samples are held until the server accepts this phone again. */
+    /** Since the last ingest 401/403, until the server next accepts (or permanently rejects) a batch: samples are held. */
     val authFailed: Boolean = false,
     /** The device key is missing (DATA-17): uploads hold until the phone is re-enrolled. */
     val keyMissing: Boolean = false,

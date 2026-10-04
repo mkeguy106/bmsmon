@@ -302,9 +302,13 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { it[K.PENDING_TEMP_CONFIG] = json }.let {}
     suspend fun clearPendingTempConfig() =
         context.dataStore.edit { it.remove(K.PENDING_TEMP_CONFIG) }.let {}
-    /** The re-sync windows blob. cloud/Resync.kt owns the format; this store only keeps the string. */
+    /**
+     * The re-sync windows blob, or null when none is stored. cloud/Resync.kt owns the format; this store
+     * only keeps the string. Unlike [load], a read failure THROWS (IOException) instead of reading as
+     * "none": the caller's next write would otherwise overwrite the saved windows with an empty state.
+     */
     suspend fun loadResyncJson(): String? =
-        context.dataStore.data.orEmptyOnIoError(::logReadFailure).first()[K.RESYNC_STATE]
+        context.dataStore.data.first()[K.RESYNC_STATE]
     suspend fun setResyncJson(json: String) =
         context.dataStore.edit { it[K.RESYNC_STATE] = json }.let {}
     /** [n] more outbox rows evicted at the cap — read-modify-write in one edit. */
