@@ -1,5 +1,7 @@
 package dev.joely.bmsmon.ui.settings
 
+import dev.joely.bmsmon.ui.Confirmations
+import dev.joely.bmsmon.ui.ConfirmDialog
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
@@ -342,6 +344,7 @@ private fun StatusHero(state: UiState, onToggleMonitoring: () -> Unit, big: Bool
     val border = if (on) RegenGreen.copy(alpha = 0.32f) else c.border
     val bases = state.roster.groups.size
     val packs = state.roster.batteries.size
+    var confirmStop by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth()
             .clip(RoundedCornerShape(if (big) 14.dp else 12.dp))
@@ -363,10 +366,13 @@ private fun StatusHero(state: UiState, onToggleMonitoring: () -> Unit, big: Bool
             )
         }
         if (on) {
-            PillButton("Stop", outlined = true, onClick = onToggleMonitoring)
+            PillButton("Stop", outlined = true, onClick = { confirmStop = true })
         } else {
             PillButton("Start", outlined = false, onClick = onToggleMonitoring)
         }
+    }
+    if (confirmStop) {
+        ConfirmDialog(Confirmations.stopMonitoring, onConfirm = onToggleMonitoring, onDismiss = { confirmStop = false })
     }
 }
 
@@ -1438,6 +1444,7 @@ private fun ColumnScope.DataLoggingContent(
     onClearLog: () -> Unit,
 ) {
     val c = Bm.colors
+    var confirmClear by remember { mutableStateOf(false) }
     GroupedCard {
         ToggleRow(
             "Usage logging",
@@ -1455,10 +1462,13 @@ private fun ColumnScope.DataLoggingContent(
     Box(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
             .border(1.dp, AlertCritical.copy(alpha = 0.55f), RoundedCornerShape(10.dp))
-            .clickable(onClick = onClearLog).padding(vertical = 12.dp),
+            .clickable { confirmClear = true }.padding(vertical = 12.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text("Clear data", color = AlertCritical, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+    }
+    if (confirmClear) {
+        ConfirmDialog(Confirmations.clearData, onConfirm = onClearLog, onDismiss = { confirmClear = false })
     }
     Text("Clearing removes logged history but not your settings.", color = c.text3, fontSize = 11.sp,
         modifier = Modifier.padding(start = 2.dp))

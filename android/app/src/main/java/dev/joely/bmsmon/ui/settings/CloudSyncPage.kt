@@ -1,5 +1,7 @@
 package dev.joely.bmsmon.ui.settings
 
+import dev.joely.bmsmon.ui.Confirmations
+import dev.joely.bmsmon.ui.ConfirmDialog
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -192,12 +194,13 @@ internal fun ColumnScope.CloudSyncContent(
     // --- Forget device (enrolled only) ---
     if (state.enrolled) {
         SectionLabel("Danger zone")
+        var confirmForget by remember { mutableStateOf(false) }
         Box(
             Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(10.dp))
                 .border(1.dp, AlertCritical.copy(alpha = 0.55f), RoundedCornerShape(10.dp))
-                .clickable(onClick = onForget)
+                .clickable { confirmForget = true }
                 .padding(vertical = 12.dp),
             contentAlignment = Alignment.Center,
         ) {
@@ -209,6 +212,9 @@ internal fun ColumnScope.CloudSyncContent(
             fontSize = 11.sp,
             modifier = Modifier.padding(start = 2.dp),
         )
+        if (confirmForget) {
+            ConfirmDialog(Confirmations.forgetDevice, onConfirm = onForget, onDismiss = { confirmForget = false })
+        }
     }
 }
 

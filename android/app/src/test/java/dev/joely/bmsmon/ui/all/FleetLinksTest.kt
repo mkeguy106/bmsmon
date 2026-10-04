@@ -1,0 +1,28 @@
+package dev.joely.bmsmon.ui.all
+
+import dev.joely.bmsmon.model.DEFAULT_ROSTER
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Test
+
+class FleetLinksTest {
+    private val all = DEFAULT_ROSTER.batteries.map { it.address.uppercase() }.toSet()
+
+    // Parked follow-up: the header used to decide from the FILTERED rows; with "Reachable" on, the
+    // disconnected packs are filtered out, so "Reconnect all" could never appear.
+    @Test fun theHeaderIsDecidedOnTheRosterNotTheFilteredList() {
+        assertEquals(FleetHeaderActions(disconnectAll = true, reconnectAll = false), fleetHeaderActions(DEFAULT_ROSTER, emptySet()))
+        assertEquals(FleetHeaderActions(disconnectAll = false, reconnectAll = true), fleetHeaderActions(DEFAULT_ROSTER, all))
+        assertEquals(FleetHeaderActions(disconnectAll = true, reconnectAll = true), fleetHeaderActions(DEFAULT_ROSTER, setOf(all.first())))
+    }
+
+    @Test fun addressesCompareCaseInsensitively() {
+        assertEquals(1, userDisconnectedCount(DEFAULT_ROSTER, setOf(DEFAULT_ROSTER.batteries.first().address.lowercase())))
+    }
+
+    @Test fun theStageChipNamesHowManyYouDisconnected() {
+        assertNull(disconnectedChipText(0))
+        assertEquals("1 PACK DISCONNECTED BY YOU · RECONNECT", disconnectedChipText(1))
+        assertEquals("3 PACKS DISCONNECTED BY YOU · RECONNECT", disconnectedChipText(3))
+    }
+}

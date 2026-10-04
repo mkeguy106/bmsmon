@@ -1,5 +1,9 @@
 package dev.joely.bmsmon.ui.all
 
+import dev.joely.bmsmon.ui.Confirmations
+import dev.joely.bmsmon.ui.ConfirmDialog
+import dev.joely.bmsmon.model.allTargets
+import dev.joely.bmsmon.model.addresses
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -146,6 +150,10 @@ fun AllBatteriesScreen(
     modifier: Modifier = Modifier,
 ) {
     val c = Bm.colors
+    var confirmDisconnectAll by remember { mutableStateOf(false) }
+    val stageAddrs = remember(state.stageTarget, state.roster) {
+        state.stageTarget.addresses(state.roster).map { it.uppercase() }.toSet()
+    }
     val groupViews = remember(state.roster) { state.roster.groupViews() }
     // Memoized on its actual inputs so the join/filter/sort pipeline doesn't re-run on every
     // recomposition (frame-rate animations like the charging bolt recompose this screen far more
@@ -168,14 +176,16 @@ fun AllBatteriesScreen(
             Text("All Batteries", color = c.text, fontSize = 21.sp, fontWeight = FontWeight.Bold)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (state.monitoring) {
-                    // Toggle to "Reconnect all" once every pack the user can act on is disconnected.
-                    val allDisabled = rows.isNotEmpty() && rows.all { it.target.address in state.disabled }
-                    if (allDisabled) {
+                    // Decided on the ROSTER, not the filtered rows: with "Reachable" on, disconnected
+                    // packs are filtered out, which used to hide "Reconnect all" entirely.
+                    val links = fleetHeaderActions(state.roster, state.disabled)
+                    if (links.reconnectAll) {
                         Text("Reconnect all", color = Bm.accent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.clickable(onClick = fleet.onReconnectAll).padding(4.dp))
-                    } else {
+                    }
+                    if (links.disconnectAll) {
                         Text("Disconnect all", color = Bm.power, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.clickable(onClick = fleet.onDisconnectAll).padding(4.dp))
+                            modifier = Modifier.clickable { confirmDisconnectAll = true }.padding(4.dp))
                     }
                 }
                 Box(
@@ -210,7 +220,7 @@ fun AllBatteriesScreen(
                 SwipeableBatteryRow(
                     row = row,
                     groups = groupViews.map { RowGroup(it.id, it.label) },
-                    isStage = row.group?.id == state.stageGroupId && state.monitoring,
+                    isStage = state.monitoring && row.target.address.uppercase() in stageAddrs,
                     isDailyDriver = row.group?.id == state.dailyDriverId,
                     disabled = row.target.address in state.disabled,
                     monitoring = state.monitoring,
@@ -227,6 +237,10 @@ fun AllBatteriesScreen(
                     onRenameGroup = { row.group?.let { g -> rosterEdit.onRenameGroup(g.id, it) } },
                 )
             }
+        }
+        if (confirmDisconnectAll) {
+            val linked = state.roster.allTargets().size - userDisconnectedCount(state.roster, state.disabled)
+            ConfirmDialog(Confirmations.disconnectAll(linked), onConfirm = fleet.onDisconnectAll, onDismiss = { confirmDisconnectAll = false })
         }
     }
 }
@@ -401,6 +415,10 @@ private fun BatteryRow(
     var groupPickOpen by remember { mutableStateOf(false) }
     var newGroupOpen by remember { mutableStateOf(false) }
     var renameGroupOpen by remember { mutableStateOf(false) }
+    var confirmDisconnect by remember { mutableStateOf(false) }
+    if (confirmDisconnect) {
+        ConfirmDialog(Confirmations.disconnectStagePack(row.target.name), onConfirm = onDisconnect, onDismiss = { confirmDisconnect = false })
+    }
 
     // The staged pack's row sits on an accent tint, not card2: its readable inks are re-checked
     // against that tint (UI-21), the same way the acknowledged-alert pill checks its red wash.
@@ -479,7 +497,13 @@ private fun BatteryRow(
             if (monitoring) {
                 Box(
                     Modifier.padding(start = 4.dp).size(30.dp).clip(RoundedCornerShape(8.dp))
-                        .clickable(onClick = if (disabled) onReconnect else onDisconnect),
+                        .clickable {
+                            when {
+                                disabled -> onReconnect()
+                                isStage -> confirmDisconnect = true   // UI-28: a stage pack stops alerting, so ask first
+                                else -> onDisconnect()
+                            }
+                        },
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(

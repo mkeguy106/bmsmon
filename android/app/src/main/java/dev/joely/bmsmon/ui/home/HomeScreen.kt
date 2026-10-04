@@ -1,5 +1,12 @@
 package dev.joely.bmsmon.ui.home
 
+import dev.joely.bmsmon.ui.all.userDisconnectedCount
+import dev.joely.bmsmon.ui.all.disconnectedChipText
+import dev.joely.bmsmon.ui.Confirmations
+import dev.joely.bmsmon.ui.ConfirmDialog
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -96,6 +103,18 @@ fun HomeScreen(
                 showAlert = alertPresentation(alert, Screen.Home) == AlertPresentation.STATUS_PILL,
                 locked = locked,
             )
+            // UI-28: user-disconnected packs no longer alert; keep that visible on the stage.
+            if (state.monitoring) {
+                disconnectedChipText(userDisconnectedCount(state.roster, state.disabled))?.let { text ->
+                    Text(
+                        text, color = Bm.warnText, fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 0.8.sp, fontFamily = MonoFont,
+                        modifier = Modifier.fillMaxWidth()
+                            .clickable(enabled = !locked, onClick = fleet.onReconnectAll)
+                            .padding(start = 18.dp, end = 18.dp, bottom = 6.dp),
+                    )
+                }
+            }
             HorizontalPager(state = pager, userScrollEnabled = !locked, modifier = Modifier.weight(1f)) { page ->
                 when (page) {
                     0 -> StageScreen(
@@ -289,6 +308,7 @@ private fun TopBar(
     locked: Boolean,
 ) {
     val c = Bm.colors
+    var confirmStop by remember { mutableStateOf(false) }
     // Utility row = pure identity (base name + pin) · page dots · actions. The live activity/mode
     // and alert now live one line down in StatusLine, so this row stays uncrowded and fixed-width.
     Box(Modifier.fillMaxWidth().background(c.bg).padding(start = 18.dp, top = 12.dp, end = 18.dp, bottom = 4.dp)) {
@@ -298,7 +318,10 @@ private fun TopBar(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Row(
-                if (locked) Modifier else Modifier.clickable(onClick = actions.onToggleMonitoring),
+                if (locked) Modifier else Modifier.clickable {
+                    // UI-28: starting is one tap; stopping (every alert goes quiet) asks first.
+                    if (state.monitoring) confirmStop = true else actions.onToggleMonitoring()
+                },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(
@@ -342,6 +365,9 @@ private fun TopBar(
         }
         // Page dots centered on the top-bar row (hidden while locked — the stage is frozen on page 0).
         if (!locked) PageDots(currentPage, Modifier.align(Alignment.Center))
+    }
+    if (confirmStop) {
+        ConfirmDialog(Confirmations.stopMonitoring, onConfirm = actions.onToggleMonitoring, onDismiss = { confirmStop = false })
     }
 }
 
