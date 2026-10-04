@@ -13,7 +13,6 @@ import dev.joely.bmsmon.data.Persisted
 import dev.joely.bmsmon.data.SettingsStore
 import dev.joely.bmsmon.data.db.BmsDatabase
 import dev.joely.bmsmon.data.db.OutboxEntity
-import dev.joely.bmsmon.model.Roster
 import dev.joely.bmsmon.model.Telemetry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -25,7 +24,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.updateAndGet
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -104,12 +103,6 @@ class TelemetryReporter(
 
     /** Live upload status for the UI: the queue, the auth and clock state, the holds, re-sync and the counters. */
     val status: StateFlow<UploadStatus> = _status.asStateFlow()
-
-    /**
-     * Legacy hook MonitorEngine mirrors into its state (retired with that mirror). Fed by the upload
-     * loop only, as before, so its four values always arrive in the loop's order.
-     */
-    var onStatus: ((outboxCount: Long, lastUploadMs: Long, kbps: Double, authFailed: Boolean) -> Unit)? = null
 
     // Every outbox delete, the cap and the re-sync windows (DATA-19, DATA-22): see OutboxLedger.
     private val ledger = OutboxLedger(
@@ -278,9 +271,6 @@ class TelemetryReporter(
         }
     }
 
-    /** Older entry point (MonitorEngine init, enroll), retired in Task 15; the re-sender reads the persisted roster itself. */
-    fun startImportIfNeeded(@Suppress("UNUSED_PARAMETER") roster: Roster) = queueImport()
-
     /** Forget every pending re-send (the device was forgotten; a new enrollment queues a fresh import). Join to order it before a following [queueImport]. */
     fun clearResync(): Job = scope.launch {
             try {
@@ -312,15 +302,14 @@ class TelemetryReporter(
         )
     }
 
-    private fun publish(update: (UploadStatus) -> UploadStatus): UploadStatus = _status.updateAndGet(update)
+    private fun publish(update: (UploadStatus) -> UploadStatus) = _status.update(update)
 
     /**
-     * The upload loop's view of the queue and the ingest stream's state. Also the only feed of the
-     * legacy [onStatus] hook, so the engine's mirror keeps receiving the loop's values in its order.
+     * The upload loop's view of the queue and the ingest stream's state.
      */
     private fun publishQueue(depth: Int, s: IngestLoopState) {
         depthKnown = true
-        val st = publish {
+        publish {
             it.copy(
                 outboxDepth = depth,
                 lastUploadMs = lastUploadMs,
@@ -330,7 +319,6 @@ class TelemetryReporter(
                 hold = s.hold,
             )
         }
-        onStatus?.invoke(st.outboxDepth.toLong(), st.lastUploadMs, st.kbps, st.authFailed)
     }
 
     /** Enforce the outbox cap through the ledger: every eviction is recorded first, then counted. Returns the depth. */

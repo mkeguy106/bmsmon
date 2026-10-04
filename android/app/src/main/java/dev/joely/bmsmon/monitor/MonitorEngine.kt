@@ -137,13 +137,6 @@ data class MonitorState(
     val tailRunEndByAddress: Map<String, Long> = emptyMap(),
     val rangeParamsByAddress: Map<String, RangeParams> = emptyMap(),
     val todayUsageByAddress: Map<String, TodayUsage> = emptyMap(),
-    // Cloud upload status, mirrored from the TelemetryReporter's onStatus hook. The engine owns
-    // that process-lifetime hook (it already owns the reporter), so no ViewModel is ever captured
-    // by it — the VM just mirrors these fields like the rest of the state.
-    val cloudOutboxDepth: Int = 0,
-    val cloudLastUploadMs: Long = 0,
-    val cloudUploadKbps: Float = 0f,
-    val cloudAuthFailed: Boolean = false,
 )
 
 /**
@@ -249,16 +242,9 @@ class MonitorEngine(
     }
 
     init {
-        // Surface upload status through MonitorState (UI-3). Registered before start() so the
-        // uploader can never fire into an unset hook, and never re-registered by UI lifecycles.
-        reporter?.onStatus = { depth, ts, kbps, authFailed ->
-            _state.update {
-                it.copy(
-                    cloudOutboxDepth = depth.toInt(), cloudLastUploadMs = ts,
-                    cloudUploadKbps = kbps.toFloat(), cloudAuthFailed = authFailed,
-                )
-            }
-        }
+        // The uploader is process-lifetime like the engine. The UI reads its status straight from
+        // TelemetryReporter.status, so nothing is mirrored here; start() also queues the history
+        // import when one is due.
         reporter?.start()
     }
 
@@ -270,11 +256,6 @@ class MonitorEngine(
     // The current roster drives the monitoring target set and group lookups (regen, last-discharge).
     // It's dynamic (the user can add/remove batteries) so the ViewModel pushes updates via setRoster.
     @Volatile private var roster: Roster = DEFAULT_ROSTER
-
-    init {
-        // roster is now initialized — fire import resume on every process start while enrolled && !importDone.
-        reporter?.startImportIfNeeded(roster)
-    }
 
     private fun now() = System.currentTimeMillis()
 
@@ -467,10 +448,6 @@ class MonitorEngine(
                     fleet = st.fleet.mapValues { (_, s) -> s.copy(reachable = false) },
                     stageTarget = st.stageTarget,
                     stagePinned = st.stagePinned,
-                    cloudOutboxDepth = st.cloudOutboxDepth,
-                    cloudLastUploadMs = st.cloudLastUploadMs,
-                    cloudUploadKbps = st.cloudUploadKbps,
-                    cloudAuthFailed = st.cloudAuthFailed,
                     rangeParamsByAddress = st.rangeParamsByAddress,
                 )
             }
