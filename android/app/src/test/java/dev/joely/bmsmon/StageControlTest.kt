@@ -259,4 +259,16 @@ class StageControlTest {
         assertFalse(hasDesiredLinks(Roster(), emptySet()))                          // empty roster
         assertEquals(all - all.first(), wantedAddrs(roster, setOf(all.first().lowercase())))
     }
+
+    // The engine threads its regen set into the notifier's evaluation.
+    @Test fun aLowPackMidRegenKeepsItsNotification() {
+        val a = addrs("2016").first()
+        val d = engineDecision(
+            roster, mapOf(a to live(12f, BatteryState.Charging)), nowE, nowMs, emptyMap(),
+            StageConfig(dailyDriverId = "2012"), StageTarget.Base("2012"), emptySet(), ladder, emptyMap(),
+            regenAddrs = setOf(a),
+        )
+        assertFalse(d.capacity!!.getValue(a).charging)
+        assertTrue(reconcileFleetNotifications(d.capacity!!, mapOf(a to 15)).cancel.isEmpty())
+    }
 }

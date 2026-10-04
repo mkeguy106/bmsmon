@@ -183,18 +183,24 @@ data class FleetCapacity(val evals: Map<String, AlertEval>, val chargeAt: Map<St
  * Fleet-wide capacity evaluation (moved verbatim out of MonitorEngine.evaluateAlerts): every
  * reachable pack in [fleet] — pass the freshness decision view, so seeds and silent packs are
  * already unreachable — is evaluated against [cfg] on its own, with the per-pack charging
- * hysteresis (UI-9) presented as `charging` so an Idle/Charging flap can't strobe notifications.
+ * hysteresis (UI-9) presented as `charging` so an Idle/Charging flap can't strobe notifications; a
+ * regen pack never counts as charging, nor arms that latch.
  */
 fun fleetCapacityEvals(
     fleet: Map<String, BatteryStatus>,
     cfg: AlertConfig,
     chargeAt: Map<String, Long>,
     nowMs: Long,
+    regenAddrs: Set<String> = emptySet(),
 ): FleetCapacity {
     val nextCharge = chargeAt.toMutableMap()
     val evals = fleet.mapNotNull { (addr, s) ->
         val tel = s.telemetry?.takeIf { s.reachable } ?: return@mapNotNull null
-        val charging = tel.state == BatteryState.Charging
+        // A pack inside its regen window ([regenAddrs]) is not on a charger, whatever its state
+        // field says: 16 % of production regen samples carry state=Charging, and counting one as
+        // charging cancelled a low pack's notification mid-drive, then re-alarmed it once the latch
+        // that frame armed had expired. Same rule as the stage's ack re-arm.
+        val charging = tel.state == BatteryState.Charging && addr !in regenAddrs
         val hold = nextChargeHold(
             charging = charging,
             discharging = tel.state == BatteryState.Discharging,

@@ -552,6 +552,7 @@ class MonitorEngine(
             disabled = disabledAddrs,
             alertCfg = alertConfig,
             chargeAt = packChargeAt,
+            regenAddrs = st.regenAddrs,
         )
         if (stageInitialized) applyStage(st, d)
         if (!st.monitoring) return

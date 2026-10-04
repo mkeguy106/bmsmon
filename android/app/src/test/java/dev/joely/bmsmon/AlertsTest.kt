@@ -274,4 +274,33 @@ class AlertsTest {
         val second = fleetCapacityEvals(idle, cfg(setOf(15), critical = 15), first.chargeAt, nowMs = 2_000L)
         assertTrue(second.evals.getValue("A").charging)   // latched: no cancel/re-notify strobe
     }
+
+    // --- Tier-2 follow-up: a regen burst reporting state=Charging is not a charger ---
+    // Production: 86 of 531 regen samples (16 %) carry BMS state=Charging.
+
+    @Test fun aRegenFrameReportingChargingStillAlerts() {
+        val fleet = mapOf("A" to BatteryStatus(capTel(12f, BatteryState.Charging), reachable = true))
+        val fc = fleetCapacityEvals(
+            fleet, cfg(setOf(30, 15), critical = 15), emptyMap(), nowMs = 1_000L, regenAddrs = setOf("A"),
+        )
+        val e = fc.evals.getValue("A")
+        assertFalse(e.charging)
+        assertEquals(15, e.activeThreshold)
+        assertEquals("and it never arms the charge latch", 0L, fc.chargeAt.getValue("A"))
+    }
+
+    // Review Focus 5: mid-drive, a low pack's notification must survive the burst untouched.
+    @Test fun regenBurstReportingChargingKeepsTheNotification() {
+        val cfg = cfg(setOf(30, 15), critical = 15)
+        val regen = mapOf("A" to BatteryStatus(capTel(12f, BatteryState.Charging), reachable = true))
+        val idle = mapOf("A" to BatteryStatus(capTel(12f, BatteryState.Idle), reachable = true))
+        val during = fleetCapacityEvals(regen, cfg, emptyMap(), nowMs = 1_000L, regenAddrs = setOf("A"))
+        val plan1 = reconcileFleetNotifications(during.evals, last = mapOf("A" to 15))
+        assertTrue(plan1.cancel.isEmpty())
+        assertTrue(plan1.notify.isEmpty())
+        val after = fleetCapacityEvals(idle, cfg, during.chargeAt, nowMs = 3_000L)
+        val plan2 = reconcileFleetNotifications(after.evals, plan1.newLast)
+        assertTrue(plan2.cancel.isEmpty())
+        assertTrue(plan2.notify.isEmpty())
+    }
 }

@@ -130,10 +130,12 @@ fun engineDecision(
     disabled: Set<String>,
     alertCfg: AlertConfig?,
     chargeAt: Map<String, Long>,
+    /** Packs inside their regen window: never "charging" for the notifier ([fleetCapacityEvals]). */
+    regenAddrs: Set<String> = emptySet(),
 ): EngineDecision {
     val view = decisionView(pruneToRoster(fleet, roster), nowElapsedMs)
     val stage = resolveEngineStage(roster, view, lastDischargeAt, stageCfg, current, nowMs)
-    val fc = alertCfg?.let { fleetCapacityEvals(view, it, chargeAt, nowMs) }
+    val fc = alertCfg?.let { fleetCapacityEvals(view, it, chargeAt, nowMs, regenAddrs) }
     return EngineDecision(
         stage = stage,
         stageAddrs = stageAddrsFor(stage.target, roster, disabled),
