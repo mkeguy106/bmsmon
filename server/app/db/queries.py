@@ -67,8 +67,10 @@ _INSERT_FIELDS = ["device_id", "address", "ts_ms", "ts", "state", "soc", "curren
 
 # Fleet-wide reads (share trail, history, rollup, GPS scrub) are driven per pack from the
 # small `batteries` registry (SRV-16), so every address that has a sample MUST have a
-# registry row. insert_samples is the only writer of samples and guarantees it below;
-# register_orphan_addresses (maintenance pass) backfills any row written another way.
+# registry row. insert_samples is the only writer of samples and guarantees it below,
+# unless its caller already registered every address (ingest: upsert_battery, in the same
+# transaction); register_orphan_addresses (maintenance pass) backfills any row written
+# another way.
 _REGISTER_ADDRESSES = """
 INSERT INTO batteries (address)
 SELECT DISTINCT a FROM unnest($1::text[]) AS a
@@ -79,21 +81,25 @@ ON CONFLICT (address) DO NOTHING
 logger = logging.getLogger(__name__)
 
 
-async def insert_samples(conn: asyncpg.Connection, rows: list[dict]) -> int:
+async def insert_samples(conn: asyncpg.Connection, rows: list[dict], *,
+                         registered: bool = False) -> int:
     """Insert sample rows; returns the count of rows actually inserted (duplicates
-    already present under the samples PK are skipped and NOT counted)."""
+    already present under the samples PK are skipped and NOT counted). registered=True:
+    the caller has already given every address a registry row in this transaction, so the
+    registry write is skipped."""
     if not rows:
         return 0
     ts_all = [r["ts_ms"] for r in rows]
     await ensure_partitions_for_range(conn, min(ts_all), max(ts_all))
-    # A registry failure must never fail the ingest: run it in a savepoint so a database
-    # error rolls back only the registry write (the maintenance backfill repairs the gap).
-    try:
-        async with conn.transaction():
-            await conn.execute(_REGISTER_ADDRESSES, sorted({r["address"] for r in rows}))
-    except Exception:
-        logger.warning("insert_samples: registry insert failed; samples still stored, "
-                       "maintenance will backfill")
+    if not registered:
+        # A registry failure must never fail the write: run it in a savepoint so a database
+        # error rolls back only the registry write (the maintenance backfill repairs it).
+        try:
+            async with conn.transaction():
+                await conn.execute(_REGISTER_ADDRESSES, sorted({r["address"] for r in rows}))
+        except Exception as e:
+            logger.warning("insert_samples: registry insert failed (%s); samples still "
+                           "stored, maintenance will backfill", type(e).__name__)
     cols = [[r[f] for r in rows] for f in _INSERT_FIELDS]
     return await conn.fetchval(_INSERT, *cols)
 

@@ -1,6 +1,7 @@
 """Fleet-wide reads (share trail, history, rollup, GPS scrub) are driven per pack from the
 batteries registry (SRV-16), so every address with a sample must have a registry row:
 insert_samples guarantees it, and the maintenance pass backfills rows written any other way."""
+import logging
 import time
 
 from app.db import queries as q
@@ -40,9 +41,25 @@ async def test_maintenance_runs_the_backfill(app):
     assert (await run_maintenance(app.state.pool))["registry"] == 1
 
 
-async def test_a_failing_registry_insert_never_fails_the_ingest(app, client, monkeypatch):
+async def test_a_failing_registry_insert_never_fails_the_write(app, monkeypatch, caplog):
+    caplog.set_level(logging.WARNING, logger="app.db.queries")
+    monkeypatch.setattr(q, "_REGISTER_ADDRESSES", "INSERT INTO no_such_table VALUES ($1::text[])")
+    async with app.state.pool.acquire() as conn:
+        async with conn.transaction():
+            rows = [q.sample_row(DEV, "AA:BB:CC", {"ts_ms": int(time.time() * 1000)})]
+            assert await q.insert_samples(conn, rows) == 1
+        assert await conn.fetchval("SELECT count(*) FROM samples") == 1
+    assert [r.getMessage() for r in caplog.records if r.name == "app.db.queries"] == [
+        "insert_samples: registry insert failed (UndefinedTableError); samples still stored, "
+        "maintenance will backfill"]
+
+
+async def test_ingest_registers_a_new_address_once(app, client, monkeypatch, caplog):
+    """Ingest registers through upsert_battery, so insert_samples skips its own (here
+    failing) registry write: no warning, and the new pack still has its registry row."""
     import json
-    from tests.test_ingest_jwt import _enroll_device, _keypair, _payload, _token
+    from tests.test_ingest_jwt import A, _enroll_device, _keypair, _payload, _token
+    caplog.set_level(logging.WARNING, logger="app.db.queries")
     monkeypatch.setattr(q, "_REGISTER_ADDRESSES", "INSERT INTO no_such_table VALUES ($1::text[])")
     priv, spki = _keypair()
     device_id = await _enroll_device(app, spki)
@@ -50,7 +67,7 @@ async def test_a_failing_registry_insert_never_fails_the_ingest(app, client, mon
     r = await client.post("/api/v1/ingest", content=body,
                           headers={"Authorization": f"Bearer {_token(priv, device_id, body)}",
                                    "Content-Type": "application/json"})
-    assert r.status_code == 200
-    assert r.json()["accepted"] == 1
+    assert r.status_code == 200 and r.json()["accepted"] == 1
     async with app.state.pool.acquire() as conn:
-        assert await conn.fetchval("SELECT count(*) FROM samples") == 1
+        assert await conn.fetchval("SELECT count(*) FROM batteries WHERE address = $1", A) == 1
+    assert "registry insert failed" not in caplog.text

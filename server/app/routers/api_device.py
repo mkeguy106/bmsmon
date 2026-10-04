@@ -339,7 +339,8 @@ async def ingest(request: Request, pool=Depends(get_pool)):
             for s in by_addr.values():
                 await q.upsert_battery(conn, s.address, s.advertised_name, s.alias,
                                        s.group_id, s.ts_ms)
-            accepted = await q.insert_samples(conn, rows)
+            # upsert_battery above registered every address: skip insert_samples' own write.
+            accepted = await q.insert_samples(conn, rows, registered=True)
         # devices.last_seen_at is the deadman's ingest signal (/api/v1/health/detail) and
         # the device list's "last upload". Only a LIVE batch (batch_seq >= 0) that got at
         # least one valid sample to the insert refreshes it: an all-dropped batch is a
