@@ -101,7 +101,7 @@ async def test_cli_restore(app, capsys):
 
 
 async def test_cli_delete_needs_confirmation(app, monkeypatch):
-    priv, spki, device_id = await _revoked_device(app)
+    _, _, device_id = await _revoked_device(app)
     monkeypatch.setattr("builtins.input", lambda _="": "n")
     assert await device_admin.main(["delete", device_id]) == 1
     assert await _row(app, device_id)
@@ -126,3 +126,44 @@ async def test_cli_delete_yes_flag(app):
     assert await device_admin.main(["delete", device_id, "--yes"]) == 0
     async with app.state.pool.acquire() as conn:
         assert await conn.fetchval("SELECT count(*) FROM devices") == 0
+
+
+async def test_cli_delete_of_a_code_enrolled_device_unbinds_its_code(app, client, monkeypatch):
+    import base64
+    from datetime import datetime, timedelta, timezone
+    from app.auth.enroll import hash_code
+    priv, spki = _keypair()
+    async with app.state.pool.acquire() as conn:
+        await q.create_enrollment_code(
+            conn, hash_code("DELCODE"), "admin@covert.life",
+            datetime.now(timezone.utc) + timedelta(minutes=10))
+    r = await client.post("/api/v1/enroll", json={
+        "code": "DELCODE", "install_uuid": "inst-del",
+        "public_key_spki_b64": base64.b64encode(spki).decode()})
+    assert r.status_code == 200
+    device_id = r.json()["device_id"]
+    body = json.dumps(_payload()).encode()
+    r = await client.post("/api/v1/ingest", content=body, headers={
+        "Authorization": f"Bearer {_token(priv, device_id, body)}"})
+    assert r.status_code == 200
+    async with app.state.pool.acquire() as conn:
+        bound = await conn.fetchval(
+            "SELECT device_id::text FROM enrollment_codes WHERE code_hash=$1", hash_code("DELCODE"))
+    assert bound == device_id
+    monkeypatch.setattr("builtins.input", lambda _="": "y")
+    assert await device_admin.main(["delete", device_id]) == 0
+    async with app.state.pool.acquire() as conn:
+        assert await conn.fetchval("SELECT count(*) FROM devices WHERE id=$1", device_id) == 0
+        rows = await conn.fetch(
+            "SELECT device_id FROM enrollment_codes WHERE code_hash=$1", hash_code("DELCODE"))
+        assert len(rows) == 1 and rows[0]["device_id"] is None
+        assert await conn.fetchval("SELECT count(*) FROM samples") == 1
+
+
+async def test_cli_rejects_a_non_uuid_id_with_a_usage_error(app, capsys):
+    import pytest
+    with pytest.raises(SystemExit) as e:
+        await device_admin.main(["delete", "not-a-uuid"])
+    assert e.value.code == 2
+    err = capsys.readouterr().err
+    assert "not a device id" in err and "Traceback" not in err

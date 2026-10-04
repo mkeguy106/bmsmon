@@ -440,8 +440,14 @@ async def restore_device(conn, device_id) -> bool:
 
 
 async def delete_device_row(conn, device_id) -> bool:
-    """Hard-delete the device row only; samples keep their device_id. CLI use only."""
-    row = await conn.fetchrow("DELETE FROM devices WHERE id=$1 RETURNING id", device_id)
+    """Hard-delete the device row only; samples keep their device_id. CLI use only.
+
+    Enrollment codes that the device claimed are kept; they are first detached from it
+    (device_id set to NULL) in the same transaction as the delete."""
+    async with conn.transaction():
+        await conn.execute(
+            "UPDATE enrollment_codes SET device_id = NULL WHERE device_id = $1", device_id)
+        row = await conn.fetchrow("DELETE FROM devices WHERE id=$1 RETURNING id", device_id)
     return row is not None
 
 
