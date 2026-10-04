@@ -16,6 +16,7 @@ import dev.joely.bmsmon.data.formatDbSizeMb
 import dev.joely.bmsmon.ble.profile.BatteryProfile
 import dev.joely.bmsmon.ble.profile.ProfileRegistry
 import dev.joely.bmsmon.cloud.CloudJson
+import dev.joely.bmsmon.cloud.UploadStatus
 import dev.joely.bmsmon.ble.profile.RedodoBekenProfile
 import dev.joely.bmsmon.model.ACK_REARM_MARGIN_PCT
 import dev.joely.bmsmon.model.AlertConfig
@@ -207,15 +208,12 @@ data class UiState(
     val apiBaseUrl: String? = null,
     val enrolled: Boolean = false,
     val gpsEnabled: Boolean = false,
-    val cloudOutboxDepth: Int = 0,
-    val cloudLastUploadMs: Long = 0,
-    val cloudUploadKbps: Float = 0f,
-    val cloudAuthFailed: Boolean = false,
-    /** Samples the uploader skipped because the server kept crashing on them (DATA-22), all time. */
-    val cloudServerFaultSkips: Long = 0L,
-    val importDone: Boolean = false,
-    val importTotal: Int = 0,
-    val importSent: Int = 0,
+    /**
+     * Live cloud upload status, straight from the TelemetryReporter (not mirrored through the engine):
+     * the queue, the sign-in and clock state, the holds, the re-send of local history, and the
+     * all-time eviction (DATA-19) and server-fault skip (DATA-22) counters.
+     */
+    val cloud: UploadStatus = UploadStatus(),
 ) {
     val isDark get() = mode == Mode.Dark
     val dailyDriver: BatteryGroup
@@ -605,7 +603,6 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     gpsEnabled = p.gpsEnabled ?: p.cloudEnabled,
                     apiBaseUrl = p.apiBaseUrl,
                     enrolled = p.enrolled,
-                    importDone = p.importDone,
                     sortKey = p.sortKey?.let { runCatching { SortKey.valueOf(it) }.getOrNull() } ?: s.sortKey,
                     filters = p.filters?.mapNotNull { runCatching { FilterKey.valueOf(it) }.getOrNull() }?.toSet()
                         ?: s.filters,
@@ -639,11 +636,12 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             updateSensor()
         }
         // Mirror the engine's state into the UI while we're alive — the engine is the single
-        // source of truth for the fleet (reachability included), the stage (T1.2) and the cloud
-        // upload status; the VM never mutates the fleet or resolves the stage itself. While
-        // monitoring is off the engine keeps the last-known fleet marked unreachable, so packs
-        // render dimmed as DISCONNECTED (no demo data); on a fresh launch (engine fleet empty) the
-        // VM's persisted seed is kept instead. (The old 30 s re-resolve ticker is gone: the
+        // source of truth for the fleet (reachability included) and the stage (T1.2); the cloud
+        // upload status is read from the reporter below. The VM never mutates the fleet or
+        // resolves the stage itself. While monitoring is off the engine keeps the last-known
+        // fleet marked unreachable, so packs render dimmed as DISCONNECTED (no demo data); on a
+        // fresh launch (engine fleet empty) the VM's persisted seed is kept instead. (The old
+        // 30 s re-resolve ticker is gone: the
         // engine's own STAGE_TICK_MS tick expires pins and holds, headless or not.)
         viewModelScope.launch {
             engine.state.collect { es ->
@@ -652,10 +650,6 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     val mirrored = s.copy(
                         monitoring = es.monitoring,
                         screenHoldAllowed = es.holdScreen,
-                        cloudOutboxDepth = es.cloudOutboxDepth,
-                        cloudLastUploadMs = es.cloudLastUploadMs,
-                        cloudUploadKbps = es.cloudUploadKbps,
-                        cloudAuthFailed = es.cloudAuthFailed,
                         stageTarget = es.stageTarget,
                         pinned = es.stagePinned,
                         nowElapsedMs = SystemClock.elapsedRealtime(),
@@ -692,10 +686,11 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
-        // The uploader can skip a sample at any time while this VM is alive, so mirror the
-        // persisted count live rather than reading it once at load.
+        // Upload status comes from the reporter itself (the process-lifetime uploader), live: the
+        // sign-in, key and clock states (DATA-17/20), the holds, the re-send of local history and the
+        // persisted eviction / skip counters (DATA-19/22).
         viewModelScope.launch {
-            store.serverFaultSkips.collect { n -> _state.update { it.copy(cloudServerFaultSkips = n) } }
+            getApplication<BmsApp>().reporter.status.collect { st -> _state.update { it.copy(cloud = st) } }
         }
         startFreshnessTicker()
     }

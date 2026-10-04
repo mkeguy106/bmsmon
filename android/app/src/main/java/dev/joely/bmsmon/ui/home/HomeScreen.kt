@@ -347,17 +347,18 @@ private fun TopBar(
     }
 }
 
-/** Tiny cloud-upload status in the stage's bottom-right: live KB/s while uploading, else synced/queued. */
+/**
+ * Tiny cloud-upload status beside the stage label ([uploadBadge]): the most urgent upload state in
+ * words, in a color readable in both themes (UI-21) — the muted states use text2, not the faint text3.
+ */
 @Composable
 private fun UploadBadge(state: UiState, modifier: Modifier = Modifier) {
-    val c = Bm.colors
-    val kbps = state.cloudUploadKbps
-    val (text, color) = when {
-        state.cloudAuthFailed -> "↑ auth failed" to Bm.criticalText
-        kbps > 0.05f -> "↑ %.1f KB/s".format(kbps) to Bm.goodText
-        state.cloudOutboxDepth > 0 -> "↑ ${state.cloudOutboxDepth} queued" to Bm.warnText
-        state.cloudLastUploadMs > 0L -> "↑ synced" to c.text3
-        else -> "↑ idle" to c.text3
+    val (text, tone) = uploadBadge(state.cloud)
+    val color = when (tone) {
+        BadgeTone.CRITICAL -> Bm.criticalText
+        BadgeTone.WARN -> Bm.warnText
+        BadgeTone.GOOD -> Bm.goodText
+        BadgeTone.MUTED -> Bm.colors.text2
     }
     Text(
         text, color = color, fontSize = 9.5.sp, fontWeight = FontWeight.Medium,

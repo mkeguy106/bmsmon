@@ -31,9 +31,10 @@ import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import dev.joely.bmsmon.UiState
 import dev.joely.bmsmon.ui.CloudActions
 import dev.joely.bmsmon.ui.theme.AlertCritical
-import dev.joely.bmsmon.ui.theme.AlertWarn
 import dev.joely.bmsmon.ui.theme.Bm
 import org.json.JSONObject
+import java.text.DateFormat
+import java.util.Date
 
 /** The Cloud sync status line for DATA-22 skips — null (no line at all) until at least one. */
 internal fun serverFaultSkipsLine(skipped: Long): String? = when {
@@ -64,29 +65,20 @@ internal fun ColumnScope.CloudSyncContent(
             fontWeight = FontWeight.SemiBold,
         )
         if (state.enrolled) {
+            val s = state.cloud
             Text(
-                "Outbox: ${state.cloudOutboxDepth} samples",
+                "Outbox: ${s.outboxDepth} samples",
                 color = c.text2,
                 fontSize = 12.sp,
                 modifier = Modifier.padding(top = 6.dp),
             )
-            if (state.cloudAuthFailed) {
-                Text(
-                    "Upload auth failed — device revoked or phone clock skewed. Data is buffered locally.",
-                    color = AlertCritical,
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(top = 4.dp),
-                )
-            }
-            serverFaultSkipsLine(state.cloudServerFaultSkips)?.let { line ->
-                Text(line, color = AlertWarn, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
-            }
-            Text(
-                if (!state.importDone) "Importing history…" else "History imported",
-                color = c.text2,
-                fontSize = 12.sp,
-                modifier = Modifier.padding(top = 4.dp),
-            )
+            // Most actionable first; the sign-in state outranks the hold (which can lag).
+            authLine(s)?.let { StatusText(it, Bm.criticalText) }
+            clockCorrectionLine(s)?.let { StatusText(it, c.text2) }
+            holdLine(s)?.let { StatusText(it, Bm.warnText) }
+            serverFaultSkipsLine(s.serverFaultSkips)?.let { StatusText(it, Bm.warnText) }
+            evictedLine(s.outboxEvicted)?.let { StatusText(it, Bm.warnText) }
+            resyncLine(s.resync, ::formatResyncTime, System.currentTimeMillis())?.let { StatusText(it, c.text2) }
         }
     }
 
@@ -212,3 +204,12 @@ internal fun ColumnScope.CloudSyncContent(
         )
     }
 }
+
+@Composable
+private fun StatusText(text: String, color: Color) {
+    Text(text, color = color, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+}
+
+/** Where the re-send resumes, in the phone's own date and time format (the user reads European formats). */
+private fun formatResyncTime(ms: Long): String =
+    DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(ms))
