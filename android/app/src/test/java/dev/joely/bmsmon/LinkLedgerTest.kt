@@ -245,6 +245,28 @@ class LinkLedgerTest {
         assertTrue(ledger.backoffSnapshot().isEmpty())                 // a stale drop writes no backoff
     }
 
+    // Final wave: a pack disabled while its attempt was queued is skipped, never connected. That ends
+    // the attempt without a failure or backoff, so Reconnect retries it at the very next plan.
+    @Test fun aSkippedAttemptEndsWithoutAFailureOrBackoff() {
+        val ledger = LinkLedger<String>()
+        val id = ledger.beginConnect(a)
+        assertTrue(ledger.connectSkipped(a, id))
+        assertTrue(ledger.connectingAddrs.isEmpty())
+        assertTrue(ledger.backoffSnapshot().isEmpty())
+        // Three skips in a row still count as no failure: the next real failure is the first.
+        repeat(2) { ledger.connectSkipped(a, ledger.beginConnect(a)) }
+        assertEquals(false, ledger.connectFailed(a, ledger.beginConnect(a), spec, failThreshold = 2, now = 0L))
+    }
+
+    @Test fun aStaleSkipLeavesTheCurrentAttemptInFlight() {
+        val ledger = LinkLedger<String>()
+        val first = ledger.beginConnect(a)
+        ledger.drop(a)
+        ledger.beginConnect(a)
+        assertFalse(ledger.connectSkipped(a, first))
+        assertEquals(setOf(a), ledger.connectingAddrs)
+    }
+
     @Test fun reconnectDelayIsShortUntilAGarbageDrop() {
         assertEquals(RECONNECT_BACKOFF_MS, reconnectDelayMs(0, spec))
         assertEquals(5_000L, reconnectDelayMs(1, spec))

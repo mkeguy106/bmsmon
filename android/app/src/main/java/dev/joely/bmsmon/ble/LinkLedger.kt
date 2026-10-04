@@ -104,6 +104,18 @@ class LinkLedger<S : Any> {
         return fc >= failThreshold
     }
 
+    /**
+     * Attempt [id] never connected: its pack was disabled or removed after the plan launched it
+     * (ConnectGate's `attemptConnect` re-checks just before connecting). Ends the attempt without
+     * counting a failure or setting a backoff — nothing was tried — so a pack enabled again is
+     * retried at the next plan. False (and nothing changes) for a stale attempt.
+     */
+    fun connectSkipped(addr: String, id: Long): Boolean {
+        if (connecting[addr] != id) return false
+        connecting.remove(addr)
+        return true
+    }
+
     /** A frame from attempt [id]'s poll loop: true when it belongs to the held link (deliver it). */
     fun pollFrame(addr: String, id: Long, decoded: Boolean): Boolean {
         val h = held[addr]?.takeIf { it.id == id } ?: return false

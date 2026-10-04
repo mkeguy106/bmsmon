@@ -106,6 +106,8 @@ class BmsRepository(
     private sealed class LoopEvent {
         data class ConnectSuccess(val addr: String, val attempt: Long, val session: BleSession) : LoopEvent()
         data class ConnectFailure(val addr: String, val attempt: Long) : LoopEvent()
+        /** The pack was disabled or removed before the attempt connected: nothing was opened. */
+        data class ConnectSkipped(val addr: String, val attempt: Long) : LoopEvent()
         /** [tel] is null when the response didn't decode — still delivered for the decode_fail log. */
         data class PollFrame(val addr: String, val attempt: Long, val raw: ByteArray, val tel: Telemetry?) : LoopEvent()
         data class PollDrop(val addr: String, val attempt: Long) : LoopEvent()
@@ -157,6 +159,8 @@ class BmsRepository(
         // `stageInitialized = true` is guaranteed to see the stage written before it — never the
         // old empty set with the barrier already released.
         stageInitialized = true  // the launch stage is now known; the barrier can admit it
+        // A pack promoted while its connect is queued takes the stage permit now (ConnectGate).
+        gate.stageChanged()
         wake()
     }
 
@@ -253,10 +257,14 @@ class BmsRepository(
     // ---- control loop: the only coroutine that mutates per-pack state ----
 
     /**
+     * This generation's control loop. Its engine callbacks are captured per generation (BLE-21), like
+     * its channel and wake (BLE-5): an old loop still draining after a stop()→start() can only call
+     * back into the session that started it.
+     *
      * @param ch          this generation's event channel — never read from the [resultChannel] property.
      * @param wake        this generation's wake signal — never read from the [currentWake] property.
-     * @param onPoll      this generation's engine callbacks (BLE-21): an old loop still draining after
-     * @param onReachable a stop()→start() can only call back into the session that started it.
+     * @param onPoll      this generation's frame callback.
+     * @param onReachable this generation's link up/down callback.
      */
     private suspend fun controlLoop(
         childScope: CoroutineScope,
@@ -332,30 +340,41 @@ class BmsRepository(
                 }
                 // A pack REMOVED from the roster (not merely disabled) leaves nothing behind: drop()
                 // keeps a pack's failure count, backoff and garbage streak, which a re-added pack
-                // would otherwise inherit. Any link it had is already gone (no longer desired, so
-                // dropped just above) — this also covers a pack that was only backing off.
-                for (addr in lastRoster - roster) links.forget(addr)?.close()
+                // would otherwise inherit. Its link and workers are normally gone already (no longer
+                // desired, so dropped just above) — cancelled here too, so the teardown is whole
+                // without leaning on the planner. This also covers a pack that was only backing off.
+                for (addr in lastRoster - roster) {
+                    pollJobs.remove(addr)?.cancel()
+                    connectJobs.remove(addr)?.cancel()
+                    links.forget(addr)?.close()
+                }
                 lastRoster = roster
 
                 // 4. Kick off connect attempts the planner requested. Each gets an attempt id
                 // (BLE-15); its outcome only counts while that id is the pack's current attempt.
                 for (addr in plan.toConnect) {
-                    val target = allTargets.firstOrNull { it.address == addr } ?: continue
+                    if (allTargets.none { it.address == addr }) continue
                     val attempt = links.beginConnect(addr)
-                    val profile = ProfileRegistry.profileFor(target.name) ?: RedodoBekenProfile
-                    val highPriority = addr in stageAddrs
+                    val profile = profileOf(addr)
                     // Workers capture THIS generation's ch + wake (BLE-5): outcomes can only ever
                     // land on — and wake — the loop that launched them.
                     connectJobs[addr] = childScope.launch {
-                        val session = BleSession(context, addr, profile, highPriority = highPriority)
+                        val session = BleSession(context, addr, profile, highPriority = addr in stageAddrs)
                         var handed = false
                         try {
-                            // BLE-16: a background attempt may hold at most one of the two permits.
-                            val ok = gate.withPermit(stage = highPriority) { session.connect(profile.connectTimeoutMs) }
-                            if (ok) {
-                                handed = ch.trySend(LoopEvent.ConnectSuccess(addr, attempt, session)).isSuccess
-                            } else {
-                                ch.trySend(LoopEvent.ConnectFailure(addr, attempt))
+                            // BLE-16: a background attempt may hold at most one of the two permits,
+                            // and the class is the stage's at admission, not at launch. Holding the
+                            // permit, right before connectGatt, the pack must still be wanted: a
+                            // setDisabled after this plan — or while it sat queued — connects nothing.
+                            val outcome = attemptConnect(gate, { addr in stageAddrs }, { isWanted(addr) }) {
+                                session.setHighPriority(addr in stageAddrs)
+                                session.connect(profile.connectTimeoutMs)
+                            }
+                            when (outcome) {
+                                ConnectOutcome.CONNECTED ->
+                                    handed = ch.trySend(LoopEvent.ConnectSuccess(addr, attempt, session)).isSuccess
+                                ConnectOutcome.FAILED -> ch.trySend(LoopEvent.ConnectFailure(addr, attempt))
+                                ConnectOutcome.SKIPPED -> ch.trySend(LoopEvent.ConnectSkipped(addr, attempt))
                             }
                         } catch (e: CancellationException) {
                             throw e
@@ -392,6 +411,11 @@ class BmsRepository(
         }
     }
 
+    /** Still in the roster and not user-disconnected: the only packs BLE may open a link to. Reads
+     *  the same @Volatile fields the plan step uses. */
+    private fun isWanted(addr: String): Boolean =
+        addr !in disabledAddrs && allTargets.any { it.address == addr }
+
     /** The profile for [addr] (by its target name), defaulting to the one validated profile. */
     private fun profileOf(addr: String): BatteryProfile =
         ProfileRegistry.profileFor(allTargets.firstOrNull { it.address == addr }?.name) ?: RedodoBekenProfile
@@ -420,8 +444,7 @@ class BmsRepository(
                     // holding + polling it until the next plan tick, and don't report it
                     // reachable. Reads the same @Volatile fields the control loop's plan step
                     // uses; this runs on the control-loop coroutine (single-writer preserved).
-                    val wanted = event.addr !in disabledAddrs &&
-                        allTargets.any { it.address == event.addr }
+                    val wanted = isWanted(event.addr)
                     when (links.connectSucceeded(event.addr, event.attempt, event.session, wanted, now)) {
                         ConnectVerdict.HOLD -> {
                             connectJobs.remove(event.addr)
@@ -453,6 +476,10 @@ class BmsRepository(
                         safely("onReachable ${event.addr}") { onReachable(event.addr, false) }
                     }
                 }
+                // Disabled or removed before it connected: the attempt ends without counting a
+                // failure — the next plan drops nothing for it and, if it is wanted again, retries it.
+                is LoopEvent.ConnectSkipped ->
+                    if (links.connectSkipped(event.addr, event.attempt)) connectJobs.remove(event.addr)
                 is LoopEvent.PollFrame ->
                     // A stale session's frame (its link was dropped or replaced) is not delivered:
                     // it would mark a disconnected pack live (BLE-15).
