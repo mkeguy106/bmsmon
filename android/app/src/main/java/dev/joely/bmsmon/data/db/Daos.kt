@@ -6,11 +6,13 @@ import androidx.room.Query
 import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
-/** Lean projection for the range learner — avoids materializing full 22-column rows.
+/** Lean projection for the range learner — avoids materializing full 22-column rows. [id] is the
+ *  keyset tie-break for [RANGE_PAGE_SQL].
  *
  *  Carries [currentA], NOT the BMS `state` field: on this hardware state lags current at the
- *  boundaries of a discharge run, so gating on it loses real energy (see RangeLearn.accumulate). */
+ *  boundaries of a discharge run, so gating on it loses real energy (see RangeLearn.kt). */
 data class RangeRowColumns(
+    val id: Long,
     val tsMs: Long,
     val currentA: Float?,
     val powerW: Float?,
@@ -118,6 +120,15 @@ internal const val ROLLUP_PAGE_SQL =
         "FROM samples WHERE sessionId = :sessionId AND id > :afterId AND linkEvent IS NULL " +
         "ORDER BY id ASC LIMIT :limit"
 
+/** One keyset page of a pack's telemetry rows for the range learner (BLE-25), in (tsMs, id) order —
+ *  the order the old whole-window list was read in. index_samples_address_tsMs is (address, tsMs,
+ *  rowid), so this is an index range seek walked in order with no sort (RangeSqlTest pins the plan).
+ *  The walk starts at (sinceMs, Long.MIN_VALUE): see forEachTsKeysetPage. */
+internal const val RANGE_PAGE_SQL =
+    "SELECT id, tsMs, currentA, powerW, lat, lon, gpsAccuracyM, regen FROM samples " +
+        "WHERE address = :address AND tsMs >= :afterTs AND (tsMs > :afterTs OR id > :afterId) " +
+        "AND linkEvent IS NULL ORDER BY tsMs ASC, id ASC LIMIT :limit"
+
 @Dao
 interface SampleDao {
     @Insert suspend fun insert(sample: SampleEntity): Long
@@ -148,11 +159,9 @@ interface SampleDao {
     @Query("SELECT * FROM samples WHERE address = :address AND tsMs >= :sinceMs AND linkEvent IS NULL ORDER BY tsMs ASC")
     suspend fun since(address: String, sinceMs: Long): List<SampleEntity>
 
-    @Query(
-        "SELECT tsMs, currentA, powerW, lat, lon, gpsAccuracyM, regen FROM samples " +
-            "WHERE address = :address AND tsMs >= :sinceMs AND linkEvent IS NULL ORDER BY tsMs ASC"
-    )
-    suspend fun rangeRowsSince(address: String, sinceMs: Long): List<RangeRowColumns>
+    /** Blocking — the range pager calls it in a loop on IO (BLE-25); never call on Main. */
+    @Query(RANGE_PAGE_SQL)
+    fun rangePage(address: String, afterTs: Long, afterId: Long, limit: Int): List<RangeRowColumns>
 
     @Query("DELETE FROM samples WHERE tsMs < :cutoffMs")
     suspend fun deleteOlderThan(cutoffMs: Long): Int

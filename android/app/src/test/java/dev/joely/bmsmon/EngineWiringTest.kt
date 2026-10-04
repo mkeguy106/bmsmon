@@ -121,4 +121,11 @@ class EngineWiringTest {
             .substringBefore("@Volatile private var gpsWanted")
         assertTrue(body.contains("runCatching { repository.importCsvOnce("))
     }
+
+    // BLE-25: the range pass streams Room pages; it never loads a pack's whole window as a list.
+    @Test fun theRangePassStreamsTheWindow() {
+        val pass = flat.substringAfter("private suspend fun rangePass()").substringBefore("private fun recomputeLastDischarge(")
+        assertTrue(pass.contains("repository.forEachRangeRow(addr, since)"))
+        assertFalse(pass.contains("repository.rangeRows("))
+    }
 }

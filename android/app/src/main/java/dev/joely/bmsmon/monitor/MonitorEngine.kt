@@ -27,6 +27,7 @@ import dev.joely.bmsmon.model.DEFAULT_GROUP_ID
 import dev.joely.bmsmon.model.DEFAULT_ROSTER
 import dev.joely.bmsmon.model.EngineDecision
 import dev.joely.bmsmon.model.PackRange
+import dev.joely.bmsmon.model.RangeAccumulator
 import dev.joely.bmsmon.model.RangeParams
 import dev.joely.bmsmon.model.RangeRow
 import dev.joely.bmsmon.model.SEED_RANGE_PARAMS
@@ -1107,15 +1108,19 @@ class MonitorEngine(
         val since = if (learn) now - 14L * 86_400_000L else midnight
         for (b in roster.batteries) {
             val addr = b.address
-            val rows = repository.rangeRows(addr, since).map {
-                RangeRow(it.tsMs, it.currentA, it.powerW, it.lat, it.lon, it.gpsAccuracyM, it.regen)
+            // BLE-25: stream the window through the accumulator in bounded keyset pages — the learn
+            // pass used to hold a stage pack's whole 14 days (~800 k rows, ~140 MB at peak) in the
+            // monitor's own process. One accumulator serves both the learn and today's usage.
+            val acc = RangeAccumulator(zone)
+            repository.forEachRangeRow(addr, since) {
+                acc.add(RangeRow(it.tsMs, it.currentA, it.powerW, it.lat, it.lon, it.gpsAccuracyM, it.regen))
             }
-            if (rows.isEmpty()) continue
+            if (acc.rows == 0) continue
             if (learn) {
-                val params = learnRangeParams(rows, zone, now)
+                val params = learnRangeParams(acc, now)
                 _state.update { it.copy(rangeParamsByAddress = it.rangeParamsByAddress + (addr to params)) }
             }
-            val today = todayUsage(rows, zone, now)
+            val today = todayUsage(acc, now)
             _state.update { it.copy(todayUsageByAddress = it.todayUsageByAddress + (addr to today)) }
         }
         if (learn) runCatching { settings.setRangeParams(_state.value.rangeParamsByAddress) }
