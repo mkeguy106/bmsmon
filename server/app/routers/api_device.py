@@ -304,7 +304,7 @@ async def _store_phone_power(conn, request: Request, device_id: str, raw: object
             return
         async with conn.transaction():
             await q.store_phone_power(conn, device_id, p.level, p.plugged, p.charge_mah,
-                                      p.fault, p.fault_since_ms)
+                                      p.fault, p.fault_since_ms, p.at_ms)
         cache[device_id] = (p.fault, p.plugged, now)
         if p.fault and not (prev and prev[0]):
             logger.info("phone charger fault started device=%s level=%d plugged=%d",
@@ -312,7 +312,10 @@ async def _store_phone_power(conn, request: Request, device_id: str, raw: object
         elif prev and prev[0] and not p.fault:
             logger.info("phone charger fault cleared device=%s", device_id)
     except Exception:
-        logger.warning("phone power snapshot failed for %s", device_id, exc_info=True)
+        if _may_log_reject(request, device_id, "phone:write"):
+            logger.warning("phone power snapshot failed for %s (repeats for this device "
+                           "suppressed for %.0f s)", device_id, REJECT_LOG_INTERVAL_S,
+                           exc_info=True)
 
 
 @router.post("/ingest", response_model=IngestResponse)

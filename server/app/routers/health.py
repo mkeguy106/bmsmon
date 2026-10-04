@@ -22,20 +22,19 @@ from app.db.partitions import next_month_partition_name
 from app.db.pool import get_pool
 from app.db.rollup import get_high_water_ms
 from app.observability import (DEFAULT_HEALTH_CHECKS, HEALTH_CHECKS, PHONE_FAULT_CONFIRM_S,
-                               PHONE_STATUS_FRESH_S, evaluate_health)
+                               evaluate_health)
 
 router = APIRouter(prefix="/api/v1")
 
 # One round trip: the newest non-revoked phone status, plus whether ANY non-revoked device
-# has a fresh fault that has persisted long enough (a NULL fault_since counts from the
-# status time). $1 = now as a timestamptz, so the SQL and the body share one clock.
+# has a reported fault that has persisted long enough (a NULL fault_since counts from the
+# status time). Staleness never clears a fault: a silent phone keeps its last verdict. $1 = now as a timestamptz, so the SQL and the body share one clock.
 _PHONE_SQL = """
 SELECT d.phone_level, d.phone_plugged, d.phone_fault, d.phone_fault_since, d.phone_status_at,
        EXISTS (SELECT 1 FROM devices f
                WHERE NOT f.revoked AND f.phone_fault
-                 AND f.phone_status_at >= $1::timestamptz - make_interval(secs => $2::float8)
                  AND coalesce(f.phone_fault_since, f.phone_status_at)
-                     <= $1::timestamptz - make_interval(secs => $3::float8)) AS confirmed
+                     <= $1::timestamptz - make_interval(secs => $2::float8)) AS confirmed
 FROM devices d
 WHERE NOT d.revoked AND d.phone_status_at IS NOT NULL
 ORDER BY d.phone_status_at DESC
@@ -73,8 +72,7 @@ async def health_detail(request: Request,
                                       next_month_partition_name(now_ms))
         indexes = await online_index_status(conn)
         now_ts = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
-        row = await conn.fetchrow(_PHONE_SQL, now_ts, PHONE_STATUS_FRESH_S,
-                                  PHONE_FAULT_CONFIRM_S)
+        row = await conn.fetchrow(_PHONE_SQL, now_ts, PHONE_FAULT_CONFIRM_S)
     phone = None if row is None else {
         "level": row["phone_level"], "plugged": row["phone_plugged"],
         "fault": bool(row["phone_fault"]), "fault_since_ms": _ms(row["phone_fault_since"]),

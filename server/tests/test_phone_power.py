@@ -126,6 +126,64 @@ async def test_future_fault_since_is_clamped(app, client, dev):
     assert ok is True
 
 
+@pytest.mark.parametrize("shift_ms", [3_600_000, -3_600_000, 0])
+async def test_fault_age_is_independent_of_phone_clock_skew(app, client, dev, shift_ms):
+    priv, did = dev
+    at = int(time.time() * 1000) + shift_ms
+    await _post(client, priv, did, _block(at_ms=at, fault=True, fault_since_ms=at - 400_000))
+    async with app.state.pool.acquire() as conn:
+        age = await conn.fetchval(
+            "SELECT extract(epoch FROM now() - phone_fault_since) FROM devices WHERE id = $1", did)
+    assert abs(age - 400) <= 2
+
+
+async def test_fault_since_after_at_is_clamped_to_now(app, client, dev):
+    priv, did = dev
+    at = int(time.time() * 1000)
+    await _post(client, priv, did, _block(at_ms=at, fault=True, fault_since_ms=at + 600_000))
+    async with app.state.pool.acquire() as conn:
+        age = await conn.fetchval(
+            "SELECT extract(epoch FROM now() - phone_fault_since) FROM devices WHERE id = $1", did)
+    assert 0 <= age <= 2
+
+
+async def test_the_phones_exact_block_is_stored(app, client, dev):
+    # The literal bytes android CloudJsonTest pins for the phone block.
+    priv, did = dev
+    body = ('{"batch_seq":7,"samples":[' + json.dumps(_payload()["samples"][0]) + '],"phone":{"level":42,"plugged":4,'
+            '"charge_mah":1234,"fault":true,"fault_since_ms":1700000000000,"at_ms":1700000060000}}'
+            ).encode()
+    r = await client.post("/api/v1/ingest", content=body,
+                          headers={"Authorization": f"Bearer {_token(priv, did, body)}",
+                                   "Content-Type": "application/json"})
+    assert r.status_code == 200 and r.json()["accepted"] == 1
+    row = await _row(app, did)
+    assert (row["phone_level"], row["phone_plugged"], row["phone_charge_mah"],
+            row["phone_fault"]) == (42, 4, 1234, True)
+    async with app.state.pool.acquire() as conn:
+        age = await conn.fetchval(
+            "SELECT extract(epoch FROM now() - phone_fault_since) FROM devices WHERE id = $1", did)
+    assert abs(age - 60) <= 2
+
+
+async def _detail(app, client):
+    from tests.test_health_detail import _key, URL
+    async with app.state.pool.acquire() as conn:
+        h = await _key(conn)
+    return await client.get(URL + "?checks=phone_power", headers=h)
+
+
+async def test_ingested_fault_six_minutes_old_pages_and_two_minutes_does_not(app, client, dev):
+    priv, did = dev
+    now = int(time.time() * 1000)
+    await _post(client, priv, did, _block(at_ms=now, fault=True, fault_since_ms=now - 360_000))
+    r = await _detail(app, client)
+    assert r.status_code == 503 and r.json()["failing"] == ["phone_power"]
+    app.state.phone_power_cache.clear()
+    await _post(client, priv, did, _block(at_ms=now, fault=True, fault_since_ms=now - 120_000))
+    assert (await _detail(app, client)).status_code == 200
+
+
 async def test_fault_since_is_stored_and_cleared_with_the_fault(app, client, dev):
     priv, did = dev
     since = int(time.time() * 1000) - 600_000
@@ -179,3 +237,16 @@ async def test_schema_applies_twice(app):
     assert {c["column_name"] for c in cols} == {
         "phone_level", "phone_plugged", "phone_charge_mah", "phone_fault",
         "phone_fault_since", "phone_status_at"}
+
+
+async def test_a_persistent_write_failure_logs_once(app, client, dev, monkeypatch, caplog):
+    from app.db import queries as q
+
+    async def boom(*a, **k):
+        raise RuntimeError("db hiccup")
+    monkeypatch.setattr(q, "store_phone_power", boom)
+    caplog.set_level(logging.WARNING, logger="app.routers.api_device")
+    priv, did = dev
+    for _ in range(3):
+        await _post(client, priv, did, _block())
+    assert len([r for r in caplog.records if "phone power snapshot failed" in r.getMessage()]) == 1

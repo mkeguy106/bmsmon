@@ -105,7 +105,8 @@ def evaluate_health(*, now_ms: int, last_ingest_ms: int | None, rollup_high_wate
     not ask for it). A missing signal (no upload ever, no rollup yet) is a failure, never a
     pass. `phone` describes the non-revoked device with the newest phone_status_at
     (level, plugged, fault, fault_since_ms, status_ms, or None) plus `fault_confirmed`, the
-    database's verdict across ALL non-revoked devices."""
+    database's verdict across ALL non-revoked devices. Staleness never clears a fault;
+    status_age_s and limits.phone_status_fresh_s are informational."""
     ingest_age = None if last_ingest_ms is None else max(0, (now_ms - last_ingest_ms) // 1000)
     rollup_lag = (None if rollup_high_water_ms <= 0
                   else max(0, (now_ms - rollup_high_water_ms) // 1000))
@@ -123,11 +124,11 @@ def evaluate_health(*, now_ms: int, last_ingest_ms: int | None, rollup_high_wate
         failing.append("phone_power")
     status_age = (None if not phone or phone.get("status_ms") is None
                   else max(0, (now_ms - phone["status_ms"]) // 1000))
-    fresh = status_age is not None and status_age <= PHONE_STATUS_FRESH_S
     phone_power = {
-        "fault": bool(phone and phone.get("fault") and fresh),
-        # The verdict `failing` uses: a fresh fault persisted PHONE_FAULT_CONFIRM_S on ANY
-        # non-revoked device. `fault` above describes only the newest device's report.
+        "fault": bool(phone and phone.get("fault")),
+        # The verdict `failing` uses: a reported fault persisted PHONE_FAULT_CONFIRM_S on ANY
+        # non-revoked device, however old the report (a silent phone is ingest's job).
+        # `fault` above is only the newest device's latest reported fault.
         "fault_confirmed": bool(phone and phone.get("fault_confirmed")),
         "fault_since_ms": phone.get("fault_since_ms") if phone else None,
         "level": phone.get("level") if phone else None,

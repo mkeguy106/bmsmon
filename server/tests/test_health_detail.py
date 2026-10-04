@@ -329,12 +329,23 @@ async def test_phone_power_null_since_counts_from_status_time(app, client):
     assert (await _phone_get(client, h)).status_code == 200
 
 
-async def test_phone_power_stale_fault_is_ok(app, client):
+async def test_phone_power_stale_confirmed_fault_still_fails(app, client):
+    # A phone that stops reporting keeps its last verdict; silence is the ingest deadman's job.
     async with app.state.pool.acquire() as conn:
         h = await _key(conn)
-        await _phone(conn, status_ago=700)
+        await _phone(conn, status_ago=7000, since_ago=7400)
     r = await _phone_get(client, h)
-    assert r.status_code == 200 and r.json()["phone_power"]["fault"] is False
+    body = r.json()
+    assert r.status_code == 503 and body["failing"] == ["phone_power"]
+    assert body["phone_power"]["fault"] is True and body["phone_power"]["fault_confirmed"] is True
+    assert body["phone_power"]["status_age_s"] >= 7000
+
+
+async def test_phone_power_stale_young_fault_is_ok(app, client):
+    async with app.state.pool.acquire() as conn:
+        h = await _key(conn)
+        await _phone(conn, status_ago=700, since_ago=120)
+    assert (await _phone_get(client, h)).status_code == 200
 
 
 async def test_phone_power_no_fault_is_ok(app, client):
