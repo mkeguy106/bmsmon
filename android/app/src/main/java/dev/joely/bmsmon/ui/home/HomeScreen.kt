@@ -59,16 +59,19 @@ import dev.joely.bmsmon.ui.theme.AlertWarn
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
 import dev.joely.bmsmon.ui.theme.readableInkOnWash
+import dev.joely.bmsmon.Screen
+import dev.joely.bmsmon.ui.AlertPresentation
+import dev.joely.bmsmon.ui.alertPresentation
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun HomeScreen(
     state: UiState,
+    alert: StageAlert,
     topBar: TopBarActions,
     fleet: FleetActions,
     rosterEdit: RosterActions,
-    onAcknowledge: (StageAlert) -> Unit,
     onHomePageChanged: (Int) -> Unit,
     locked: Boolean,
 ) {
@@ -79,7 +82,6 @@ fun HomeScreen(
     val scope = rememberCoroutineScope()
     // Remember the current page so the detail screen's back button can restore it.
     LaunchedEffect(pager.currentPage) { onHomePageChanged(pager.currentPage) }
-    val alert = state.stageAlert()
     // While locked, force the stage (page 0) and keep it there.
     LaunchedEffect(locked) { if (locked) pager.scrollToPage(0) }
 
@@ -91,7 +93,7 @@ fun HomeScreen(
             StatusLine(
                 state = state,
                 alert = alert,
-                showAlert = pager.currentPage == 0 && alert.present && !alert.flashing,
+                showAlert = alertPresentation(alert, Screen.Home) == AlertPresentation.STATUS_PILL,
                 locked = locked,
             )
             HorizontalPager(state = pager, userScrollEnabled = !locked, modifier = Modifier.weight(1f)) { page ->
@@ -126,10 +128,6 @@ fun HomeScreen(
                 }
             }
         }
-        // A flashing (un-acknowledged) alert still takes over the whole stage. The acknowledged
-        // strip and the cloud-upload status now live in the StatusLine directly under the top bar,
-        // so neither overlaps the utility row any more.
-        if (pager.currentPage == 0 && alert.flashing) DangerOverlay(alert, onAcknowledge)
     }
 }
 
@@ -259,14 +257,14 @@ internal const val ACK_PILL_WASH_ALPHA = 0.10f
 
 /** The acknowledged-alert form of the status line: a red strip naming the alert + its reading. */
 @Composable
-private fun AlertPill(alert: StageAlert) {
+internal fun AlertPill(alert: StageAlert, modifier: Modifier = Modifier) {
     val c = Bm.colors
     val wash = AlertCritical.copy(alpha = ACK_PILL_WASH_ALPHA)
     // UI-21: the icon and headline are text on the red wash, not on bg — so the readable red is checked
     // against the wash itself (light theme: 4.07:1 on the wash otherwise). Wash and border stay raw red.
     val ink = readableInkOnWash(Bm.criticalText, wash, c.bg)
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+        modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
             .background(wash)
             .border(1.dp, AlertCritical.copy(alpha = 0.55f), RoundedCornerShape(10.dp))
             .padding(horizontal = 12.dp, vertical = 8.dp),

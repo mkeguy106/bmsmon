@@ -1,0 +1,18 @@
+package dev.joely.bmsmon.ui
+
+import dev.joely.bmsmon.Screen
+import dev.joely.bmsmon.StageAlert
+
+enum class AlertPresentation { NONE, OVERLAY, STATUS_PILL, BANNER }
+
+/**
+ * Where the stage alert shows (UI-18). A flashing alert is the full-screen overlay on EVERY screen
+ * (it never yanks navigation — the user may be mid-edit); once acknowledged it is the status-line
+ * pill on Home (both pager pages) and a banner everywhere else, until the condition clears.
+ */
+fun alertPresentation(alert: StageAlert, screen: Screen): AlertPresentation = when {
+    alert.flashing -> AlertPresentation.OVERLAY
+    !alert.present -> AlertPresentation.NONE
+    screen == Screen.Home -> AlertPresentation.STATUS_PILL
+    else -> AlertPresentation.BANNER
+}
