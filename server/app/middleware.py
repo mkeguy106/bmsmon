@@ -37,8 +37,9 @@ SERVER_TIME_HEADER = "X-Bmsmon-Server-Time-Ms"
 _SERVER_TIME = SERVER_TIME_HEADER.lower().encode("latin-1")
 
 
-def _now_ms_bytes() -> bytes:
-    return str(int(time.time() * 1000)).encode("latin-1")
+def _now_ms() -> str:
+    """The X-Bmsmon-Server-Time-Ms value: the server's clock in epoch milliseconds."""
+    return str(int(time.time() * 1000))
 
 
 # Response-start messages: plain HTTP, the WebSocket 101 accept, and a WebSocket denial
@@ -69,7 +70,7 @@ class ApiMarkerMiddleware:
                            if k.lower() not in (_MARKER[0], _SERVER_TIME)]
                 headers.append(_MARKER)
                 if stamp_time:
-                    headers.append((_SERVER_TIME, _now_ms_bytes()))
+                    headers.append((_SERVER_TIME, _now_ms().encode("latin-1")))
                 message = {**message, "headers": headers}
             await send(message)
 
@@ -146,7 +147,7 @@ def error_headers(path: str) -> dict[str, str]:
     if path.startswith("/share/"):
         headers.update(SHARE_SEC_HEADERS)
     if path.startswith("/api/"):
-        headers[SERVER_TIME_HEADER] = str(int(time.time() * 1000))
+        headers[SERVER_TIME_HEADER] = _now_ms()
     return headers
 
 

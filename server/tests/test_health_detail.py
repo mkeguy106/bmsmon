@@ -108,7 +108,7 @@ async def test_auth_failures_are_reported(app, client):
         h = await _key(conn)
         await _device_seen(conn, 5)
         await _rollup_ran(conn)
-    app.state.auth_stats.record_failure("clock_skew", -700)
+    app.state.auth_stats.record_failure(DEV, "clock_skew", -700)
     body = (await client.get(URL, headers=h)).json()
     assert body["auth_fail_5m"] == 1 and body["last_auth_fail"]["reason"] == "clock_skew"
 
@@ -129,7 +129,7 @@ def test_absurd_skew_is_clamped_where_it_is_stored():
     from app.observability import AuthStats, SKEW_CLAMP_S
     s = AuthStats()
     s.record_ok(10 ** 4300)
-    s.record_failure("clock_skew", -(10 ** 4300))
+    s.record_failure(DEV, "clock_skew", -(10 ** 4300))
     assert s.last_ok_skew_s == SKEW_CLAMP_S
     assert s.last_failure["skew_s"] == -SKEW_CLAMP_S
 

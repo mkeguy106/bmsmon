@@ -67,7 +67,7 @@ def _note_auth_failure(request: Request, device_id: str, reason: str, message: s
                        skew_s: int | None) -> None:
     """A KNOWN device failed auth: count it for /api/v1/health/detail and log it with the
     skew and the app build, at most once per device per reason per REJECT_LOG_INTERVAL_S."""
-    request.app.state.auth_stats.record_failure(reason, skew_s)
+    request.app.state.auth_stats.record_failure(device_id, reason, skew_s)
     if _may_log_reject(request, device_id, f"auth:{reason}"):
         logger.warning(
             "device auth failed for %s: %s (%s); skew %s; ua %r "

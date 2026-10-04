@@ -7,6 +7,10 @@ from typing import Callable
 
 # auth_fail_5m in /api/v1/health/detail.
 AUTH_FAIL_WINDOW_S = 300
+# Failures kept per device and in all, oldest dropped first: memory stays bounded however
+# fast failures arrive, and auth_fail_5m saturates at these counts.
+AUTH_FAIL_MAX_PER_DEVICE = 100
+AUTH_FAIL_MAX_TOTAL = 5000
 USER_AGENT_MAX_LEN = 200
 # A forged token's iat can make the skew an absurd integer; store a bounded one so it can
 # always be serialised (10 years, far past any real clock disagreement).
@@ -22,7 +26,8 @@ def clean_user_agent(raw: str | None) -> str | None:
     USER_AGENT_MAX_LEN characters, None when nothing is left."""
     if not raw:
         return None
-    s = "".join(ch for ch in raw if " " <= ch <= "~").strip()[:USER_AGENT_MAX_LEN]
+    # Stripped after the cut too, so a cut that lands on a space leaves no trailing one.
+    s = "".join(ch for ch in raw if " " <= ch <= "~").strip()[:USER_AGENT_MAX_LEN].rstrip()
     return s or None
 
 
@@ -33,27 +38,50 @@ class AuthStats:
 
     def __init__(self, clock: Callable[[], float] = time.time) -> None:
         self._clock = clock
-        self._failures: deque[float] = deque()
+        self._failures: dict[str, deque[float]] = {}  # device id -> times, oldest first
+        self._total = 0
         self.last_failure: dict | None = None
         self.last_ok_skew_s: int | None = None
 
-    def record_failure(self, reason: str, skew_s: int | None) -> None:
+    def record_failure(self, device_id: str, reason: str, skew_s: int | None) -> None:
         now = self._clock()
-        self._failures.append(now)
         self._prune(now)
-        self.last_failure = {"reason": reason, "at_ms": int(now * 1000), "skew_s": None if skew_s is None else _clamp_skew(skew_s)}
+        times = self._failures.setdefault(device_id, deque())
+        times.append(now)
+        self._total += 1
+        if len(times) > AUTH_FAIL_MAX_PER_DEVICE:
+            times.popleft()
+            self._total -= 1
+        while self._total > AUTH_FAIL_MAX_TOTAL:
+            self._drop_oldest()
+        self.last_failure = {"reason": reason, "at_ms": int(now * 1000),
+                             "skew_s": None if skew_s is None else _clamp_skew(skew_s)}
 
     def record_ok(self, skew_s: int) -> None:
         self.last_ok_skew_s = _clamp_skew(skew_s)
 
     def failures_in_window(self) -> int:
         self._prune(self._clock())
-        return len(self._failures)
+        return self._total
+
+    def _drop_oldest(self) -> None:
+        device_id = min(self._failures, key=lambda d: self._failures[d][0])
+        self._failures[device_id].popleft()
+        self._total -= 1
+        if not self._failures[device_id]:
+            del self._failures[device_id]
 
     def _prune(self, now: float) -> None:
         cutoff = now - AUTH_FAIL_WINDOW_S
-        while self._failures and self._failures[0] <= cutoff:
-            self._failures.popleft()
+        for device_id in list(self._failures):
+            times = self._failures[device_id]
+            while times and times[0] <= cutoff:
+                times.popleft()
+                self._total -= 1
+            if not times:
+                del self._failures[device_id]
+
+
 # The rollup runs every 15 min and trails now by at most ~50 min; 3 h means it stopped.
 ROLLUP_LAG_MAX_S = 3 * 3600
 # The server accepts a 600 s disagreement (auth/device_jwt.py); page well before that.

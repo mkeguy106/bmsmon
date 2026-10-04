@@ -48,6 +48,41 @@ async def test_unknown_device_is_named_but_not_counted(app, client):
     assert app.state.auth_stats.failures_in_window() == 0
 
 
+async def test_unknown_devices_are_logged_once_a_minute_in_all(app, client, caplog):
+    caplog.set_level(logging.WARNING, logger=LOG)
+    priv, _ = _keypair()
+    for _ in range(2):  # a different random id each time: still one line
+        r = await client.post("/api/v1/ingest", content=b"{}",
+                              headers=_auth(_token(priv, str(uuid.uuid4()), b"{}")))
+        assert r.status_code == 401
+    lines = [rec for rec in caplog.records
+             if rec.name == LOG and "unknown device" in rec.getMessage()]
+    assert len(lines) == 1
+
+
+async def test_no_token_reaches_the_log(app, client, caplog):
+    """Every logged refusal of a known device: wrong key, clock skew, replay, body
+    mismatch. Neither a token nor its signature segment may appear in any log line."""
+    caplog.set_level(logging.DEBUG)
+    priv, spki = _keypair()
+    other, _ = _keypair()
+    device_id = await _enroll_device(app, spki)
+    body = json.dumps(_payload()).encode()
+    now = int(time.time())
+    wrong_key = _token(other, device_id, body)
+    skewed = _token_at(priv, device_id, body, iat=now - 3600, exp=now - 3540)
+    replayed = _token(priv, device_id, body)
+    mismatched = _token(priv, device_id, body)
+    for tok, content in ((wrong_key, body), (skewed, body), (replayed, body), (replayed, body),
+                         (mismatched, body + b" ")):
+        await client.post("/api/v1/ingest", content=content, headers=_auth(tok))
+    reasons = {rec.getMessage().split(": ", 1)[1].split(" ", 1)[0]
+               for rec in caplog.records if rec.name == LOG and "auth failed for" in rec.getMessage()}
+    assert reasons == {"bad_signature", "clock_skew", "replay", "body_mismatch"}
+    for tok in (wrong_key, skewed, replayed, mismatched):
+        assert tok not in caplog.text and tok.rsplit(".", 1)[1] not in caplog.text
+
+
 async def test_revoked_device_is_counted_and_logged(app, client, caplog):
     caplog.set_level(logging.WARNING, logger=LOG)
     priv, spki = _keypair()
