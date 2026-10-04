@@ -1342,6 +1342,19 @@ private fun ColumnScope.BatterySaverContent(
                 "saving. Turn on only if you can still read it in daylight.",
             state.lockDimScreen, onSetLockDimScreen,
         )
+        if (state.chargerFault) {
+            RowHairline(inset = 0.dp)
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Charger connected but the battery is draining \u2014 the screen is allowed to sleep",
+                    color = Bm.warnText,
+                    fontSize = 12.sp, lineHeight = 16.sp,
+                )
+            }
+        }
     }
 
     if (state.lockDimScreen) {

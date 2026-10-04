@@ -188,6 +188,7 @@ data class UiState(
     // Mirrored from MonitorState (engine is the single writer): is the phone on external power and
     // above the low-battery latch? Gates keepScreenOn AND locked in App.kt — see PowerPolicy.
     val screenHoldAllowed: Boolean = false,
+    val chargerFault: Boolean = false,    // mirrored from the engine; read-only line in Battery saver
     val tempFahrenheit: Boolean = true,
     val detailAddress: String? = null,
     val reviewAddress: String? = null,     // pack open in the Health & Usage Review screen
@@ -656,6 +657,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     val mirrored = s.copy(
                         monitoring = es.monitoring,
                         screenHoldAllowed = es.holdScreen,
+                        chargerFault = es.chargerFault,
                         stageTarget = es.stageTarget,
                         pinned = es.stagePinned,
                         nowElapsedMs = SystemClock.elapsedRealtime(),

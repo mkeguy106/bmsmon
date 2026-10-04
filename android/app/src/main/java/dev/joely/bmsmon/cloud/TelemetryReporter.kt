@@ -98,6 +98,11 @@ class TelemetryReporter(
     appContext: Context,
     private val db: BmsDatabase,
     private val settings: SettingsStore,
+    /**
+     * The phone's power snapshot for live ingest batches, or null when there is none (monitoring
+     * off, no reading yet). Called once per live batch; a throw is treated as null.
+     */
+    private val phonePower: () -> PhonePowerJson? = { null },
 ) {
     // Everything a coroutine launched from `init` touches is declared ABOVE `init`: Kotlin runs
     // initializers in declaration order, and the IO drain can start before a later one runs.
@@ -518,7 +523,8 @@ class TelemetryReporter(
                 seq += 1
                 // The SAME body bytes are used for both signing and POSTing; gzip ONCE so the
                 // rate indicator records the actual wire bytes, not the plaintext size.
-                val body = CloudJson.encodeBatch(seq, rows.map { it.payload })
+                val phone = runCatching(phonePower).getOrNull()
+                val body = CloudJson.encodeBatch(seq, rows.map { it.payload }, phone)
                 val wire = gzip(body)
                 val outcome = postSigned(CloudConfig(base).ingestUrl, p.deviceId, body, wire)
                 noteOutcome(outcome)

@@ -31,6 +31,36 @@ class CloudJsonTest {
         assertEquals("""{"batch_seq":7,"samples":[{"ts_ms":1,"address":"A"}]}""", str)
     }
 
+    private val phone = PhonePowerJson(
+        level = 42, plugged = 4, charge_mah = 1234, fault = true, fault_since_ms = 1_700_000_000_000L,
+        at_ms = 1_700_000_060_000L,
+    )
+
+    @Test fun encodeBatch_carries_the_phone_block_on_live_batches() {
+        val str = String(CloudJson.encodeBatch(0, listOf("""{"ts_ms":1,"address":"A"}"""), phone))
+        assertEquals(
+            """{"batch_seq":0,"samples":[{"ts_ms":1,"address":"A"}],"phone":{"level":42,"plugged":4,""" +
+                """"charge_mah":1234,"fault":true,"fault_since_ms":1700000000000,"at_ms":1700000060000}}""",
+            str,
+        )
+    }
+
+    @Test fun encodeBatch_never_carries_the_phone_block_on_resync_or_import_batches() {
+        val str = String(CloudJson.encodeBatch(-1, listOf("""{"ts_ms":1,"address":"A"}"""), phone))
+        assertEquals("""{"batch_seq":-1,"samples":[{"ts_ms":1,"address":"A"}]}""", str)
+    }
+
+    @Test fun encodeBatch_without_a_snapshot_is_unchanged() {
+        val str = String(CloudJson.encodeBatch(3, emptyList(), null))
+        assertEquals("""{"batch_seq":3,"samples":[]}""", str)
+    }
+
+    @Test fun phone_block_omits_null_counter_and_fault_since() {
+        val str = String(CloudJson.encodeBatch(1, emptyList(), phone.copy(charge_mah = null, fault = false, fault_since_ms = null)))
+        assertTrue(!str.contains("charge_mah") && !str.contains("fault_since_ms"))
+        assertTrue(str.contains(""""fault":false"""))
+    }
+
     @Test fun sampleJson_includes_gps_when_present() {
         val s = CloudJson.sampleJson(
             tsMs = 1L, address = "A", advertisedName = null, alias = null, groupId = null,

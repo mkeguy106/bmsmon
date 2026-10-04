@@ -14,6 +14,7 @@ import dev.joely.bmsmon.location.driveLocation
 import dev.joely.bmsmon.motion.MotionSource
 import dev.joely.bmsmon.ble.profile.ProfileRegistry
 import dev.joely.bmsmon.ble.profile.RedodoBekenProfile
+import dev.joely.bmsmon.cloud.PhonePowerJson
 import dev.joely.bmsmon.cloud.TelemetryReporter
 import dev.joely.bmsmon.data.FailureLogThrottle
 import dev.joely.bmsmon.data.SettingsStore
@@ -69,6 +70,9 @@ import dev.joely.bmsmon.model.MotionReading
 import dev.joely.bmsmon.model.foldMotion
 import dev.joely.bmsmon.model.gpsShouldRun
 import dev.joely.bmsmon.model.isRegen
+import dev.joely.bmsmon.model.ChargeReading
+import dev.joely.bmsmon.model.ChargerFaultState
+import dev.joely.bmsmon.model.foldChargerFault
 import dev.joely.bmsmon.model.powerDecision
 import dev.joely.bmsmon.model.seedLowPower
 import dev.joely.bmsmon.power.PowerMonitor
@@ -96,6 +100,25 @@ import kotlinx.coroutines.launch
  */
 internal fun isNewFixForPack(lastUploadedFixMs: Long?, fixTimeMs: Long): Boolean =
     lastUploadedFixMs == null || fixTimeMs > lastUploadedFixMs
+
+/** The phone's own power at [atWallMs] (epoch ms), as the engine's power loop last folded it. */
+data class PhonePowerSnapshot(
+    val levelPct: Int,
+    val plugged: Int,
+    val chargeMah: Int?,
+    val fault: Boolean,
+    val faultSinceWallMs: Long?,
+    val atWallMs: Long,
+)
+
+internal fun PhonePowerSnapshot.toJson() = PhonePowerJson(
+    level = levelPct.coerceIn(0, 100),
+    plugged = plugged,
+    charge_mah = chargeMah,
+    fault = fault,
+    fault_since_ms = faultSinceWallMs,
+    at_ms = atWallMs,
+)
 
 /**
  * The BLE-derived state the engine maintains, independent of any UI lifecycle. Mirrored into the
@@ -131,6 +154,11 @@ data class MonitorState(
     val holdScreen: Boolean = false,
     val gpsBalanced: Boolean = false,
     val lowPower: Boolean = false,
+    // Charger fault (2026-10-04): the phone reports a source connected while its real charge keeps
+    // falling. Single writer: the power loop. Releases the screen hold only (see powerDecision).
+    val chargerFault: Boolean = false,
+    // Latest phone-power snapshot for upload; null while monitoring is off or before a reading.
+    val phonePower: PhonePowerSnapshot? = null,
     val tailMinByAddress: Map<String, Float> = emptyMap(),
     // End ts of the last charge run each pack's tail EMA folded — run-identity dedup for the tail
     // learner (persisted, so neither a blip's 6-h re-scan nor an engine restart re-folds a run).
@@ -844,7 +872,16 @@ class MonitorEngine(
         powerMonitor.start()
         powerJob = scope.launch {
             var first = true
+            var faultState = ChargerFaultState()
+            var lastFoldedAt = 0L
             powerMonitor.status.collect { ps ->
+                // No real reading yet (the monitor's SAFE_DEFAULT, stamped 0): never fold or upload
+                // a made-up "unplugged, 100%"; it would reset the fold and clear the low-power latch.
+                if (ps.atElapsedMs <= 0L) return@collect
+                // A reading older than the last folded one (a racing ticker and receiver) is
+                // ignored, not folded: time running backwards would reset the detector.
+                if (ps.atElapsedMs < lastFoldedAt) return@collect
+                lastFoldedAt = ps.atElapsedMs
                 // runCatching: an uncaught throw here would kill the whole process (no
                 // CoroutineExceptionHandler on this scope) — and with it the foreground service,
                 // which ActivityManager may then not reschedule for up to an hour. A null-Looper
@@ -857,13 +894,41 @@ class MonitorEngine(
                     // hold the screen in exactly the window the latch protects.
                     val was = if (first) seedLowPower(ps.levelPct) else _state.value.lowPower
                     first = false
+                    val wasFault = faultState.fault
+                    faultState = foldChargerFault(
+                        faultState,
+                        ChargeReading(ps.atElapsedMs, ps.onExternal, ps.chargeMah),
+                    )
+                    if (faultState.fault != wasFault) {
+                        Log.i(
+                            TAG,
+                            "charger fault ${if (faultState.fault) "started" else "cleared"} " +
+                                "(level ${ps.levelPct}%, charge ${ps.chargeMah} mAh)",
+                        )
+                    }
                     val d = powerDecision(
                         onExternal = ps.onExternal,
                         levelPct = ps.levelPct,
                         wasLowPower = was,
+                        chargerFault = faultState.fault,
+                    )
+                    val nowWall = System.currentTimeMillis()
+                    val snapshot = PhonePowerSnapshot(
+                        levelPct = ps.levelPct,
+                        plugged = ps.plugged,
+                        chargeMah = ps.chargeMah,
+                        fault = faultState.fault,
+                        faultSinceWallMs = faultState.faultSinceElapsedMs?.let { nowWall - (ps.atElapsedMs - it) },
+                        atWallMs = nowWall,
                     )
                     _state.update {
-                        it.copy(holdScreen = d.holdScreen, gpsBalanced = d.gpsBalanced, lowPower = d.lowPower)
+                        it.copy(
+                            holdScreen = d.holdScreen,
+                            gpsBalanced = d.gpsBalanced,
+                            lowPower = d.lowPower,
+                            chargerFault = faultState.fault,
+                            phonePower = snapshot,
+                        )
                     }
                     applyLocationMode(d.gpsBalanced)
                 }
@@ -871,11 +936,15 @@ class MonitorEngine(
         }
     }
 
+    /** The phone-power block for the next live upload batch; null while monitoring is off or unread. */
+    fun phonePowerJson(): PhonePowerJson? = _state.value.phonePower?.toJson()
+
     private fun stopPowerLoop() {
         powerJob?.cancel()
         powerJob = null
         powerMonitor.stop()
         applyLocationMode(false)
+        _state.update { it.copy(chargerFault = false, phonePower = null) }
     }
 
     /**
