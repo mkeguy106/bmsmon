@@ -255,3 +255,136 @@ async def test_a_dropped_batch_does_not_use_up_the_write_throttle(app, client):
     assert await _last_seen(app, device_id) is None
     assert (await _ingest(client, priv, device_id, [_sample()])).json()["accepted"] == 1
     assert await _last_seen(app, device_id) is not None
+
+
+# phone_power: a selectable check (?checks=), off by default so the deadman is unchanged.
+
+async def _phone(conn, *, fault=True, status_ago=60, since_ago=400, revoked=False,
+                 dev=DEV, uuid="uuid-dd", level=80, plugged=4):
+    await conn.execute(
+        "INSERT INTO devices (id, install_uuid, public_key_spki, last_seen_at, revoked, "
+        "phone_level, phone_plugged, phone_fault, phone_status_at, phone_fault_since) "
+        "VALUES ($1, $2, $3, now(), $4, $7, $8, $9, now() - make_interval(secs => $6), "
+        "now() - make_interval(secs => $5::float8))",
+        dev, uuid, b"\x00", revoked, since_ago, status_ago, level, plugged, fault)
+    if since_ago is None:
+        await conn.execute("UPDATE devices SET phone_fault_since = NULL WHERE id = $1", dev)
+
+
+async def _phone_get(client, h, query="?checks=phone_power"):
+    return await client.get(URL + query, headers=h)
+
+
+async def test_default_checks_ignore_a_phone_fault(app, client):
+    async with app.state.pool.acquire() as conn:
+        h = await _key(conn)
+        await _phone(conn)
+        await _rollup_ran(conn)
+    r = await client.get(URL, headers=h)
+    body = r.json()
+    assert r.status_code == 200 and body["failing"] == []
+    assert body["phone_power"]["fault"] is True
+    assert body["limits"]["phone_status_fresh_s"] == 600
+
+
+async def test_phone_power_no_devices_is_ok(app, client):
+    async with app.state.pool.acquire() as conn:
+        h = await _key(conn)
+    r = await _phone_get(client, h)
+    assert r.status_code == 200 and r.json()["failing"] == []
+    assert r.json()["phone_power"] == {"fault": False, "fault_since_ms": None, "level": None,
+                                       "plugged": None, "status_age_s": None}
+
+
+async def test_phone_power_fresh_old_fault_fails(app, client):
+    async with app.state.pool.acquire() as conn:
+        h = await _key(conn)
+        await _phone(conn)
+    r = await _phone_get(client, h)
+    body = r.json()
+    assert r.status_code == 503 and body["failing"] == ["phone_power"]
+    assert body["phone_power"]["fault"] is True
+    assert body["phone_power"]["level"] == 80 and body["phone_power"]["plugged"] == 4
+    assert 55 <= body["phone_power"]["status_age_s"] <= 70
+    assert body["phone_power"]["fault_since_ms"] is not None
+
+
+async def test_phone_power_young_fault_is_ok(app, client):
+    async with app.state.pool.acquire() as conn:
+        h = await _key(conn)
+        await _phone(conn, since_ago=120)
+    r = await _phone_get(client, h)
+    assert r.status_code == 200 and r.json()["failing"] == []
+
+
+async def test_phone_power_null_since_counts_from_status_time(app, client):
+    async with app.state.pool.acquire() as conn:
+        h = await _key(conn)
+        await _phone(conn, since_ago=None, status_ago=400)
+    assert (await _phone_get(client, h)).status_code == 503
+    async with app.state.pool.acquire() as conn:
+        await conn.execute("UPDATE devices SET phone_status_at = now() - interval '100 seconds'")
+    assert (await _phone_get(client, h)).status_code == 200
+
+
+async def test_phone_power_stale_fault_is_ok(app, client):
+    async with app.state.pool.acquire() as conn:
+        h = await _key(conn)
+        await _phone(conn, status_ago=700)
+    r = await _phone_get(client, h)
+    assert r.status_code == 200 and r.json()["phone_power"]["fault"] is False
+
+
+async def test_phone_power_no_fault_is_ok(app, client):
+    async with app.state.pool.acquire() as conn:
+        h = await _key(conn)
+        await _phone(conn, fault=False)
+    assert (await _phone_get(client, h)).status_code == 200
+
+
+async def test_phone_power_ignores_revoked_devices(app, client):
+    async with app.state.pool.acquire() as conn:
+        h = await _key(conn)
+        await _phone(conn, revoked=True)
+    r = await _phone_get(client, h)
+    assert r.status_code == 200 and r.json()["phone_power"]["status_age_s"] is None
+
+
+async def test_phone_power_any_faulted_device_fails_even_if_not_newest(app, client):
+    async with app.state.pool.acquire() as conn:
+        h = await _key(conn)
+        await _phone(conn)
+        await _phone(conn, fault=False, status_ago=5, dev="00000000-0000-0000-0000-0000000000de",
+                     uuid="uuid-de")
+    r = await _phone_get(client, h)
+    assert r.status_code == 503 and r.json()["failing"] == ["phone_power"]
+
+
+async def test_checks_combined(app, client):
+    async with app.state.pool.acquire() as conn:
+        h = await _key(conn)
+        await _phone(conn)
+        await _rollup_ran(conn)
+    r = await _phone_get(client, h, "?checks=ingest,phone_power")
+    assert r.status_code == 503 and r.json()["failing"] == ["phone_power"]
+    async with app.state.pool.acquire() as conn:
+        await conn.execute("UPDATE devices SET last_seen_at = now() - interval '2 hours'")
+    r = await _phone_get(client, h, "?checks=ingest,phone_power")
+    assert r.json()["failing"] == ["ingest", "phone_power"]
+    assert (await _phone_get(client, h, "?checks=rollup")).status_code == 200
+
+
+async def test_unknown_check_is_422(app, client):
+    async with app.state.pool.acquire() as conn:
+        h = await _key(conn)
+    assert (await _phone_get(client, h, "?checks=ingest,bogus")).status_code == 422
+    assert (await _phone_get(client, h, "?checks=")).status_code == 422
+
+
+async def test_max_ingest_age_still_only_tightens_with_checks(app, client):
+    async with app.state.pool.acquire() as conn:
+        h = await _key(conn)
+        await _phone(conn, fault=False)
+        await conn.execute("UPDATE devices SET last_seen_at = now() - interval '5 seconds'")
+    assert (await _phone_get(client, h, "?checks=ingest&max_ingest_age_s=0")).status_code == 503
+    assert (await _phone_get(client, h, "?checks=ingest&max_ingest_age_s=999999")).status_code == 200

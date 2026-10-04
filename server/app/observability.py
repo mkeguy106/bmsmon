@@ -88,24 +88,49 @@ ROLLUP_LAG_MAX_S = 3 * 3600
 CLOCK_SKEW_MAX_S = 120
 
 
+PHONE_STATUS_FRESH_S = 600
+PHONE_FAULT_CONFIRM_S = 300
+HEALTH_CHECKS = ("ingest", "rollup", "partition", "clock", "phone_power")
+DEFAULT_HEALTH_CHECKS = ("ingest", "rollup", "partition", "clock")
+
+
 def evaluate_health(*, now_ms: int, last_ingest_ms: int | None, rollup_high_water_ms: int,
                     next_month_partition: bool, auth_fail_5m: int,
                     last_auth_fail: dict | None, last_ok_skew_s: int | None,
-                    online_indexes: dict[str, bool], ingest_limit_s: int) -> dict:
-    """The /api/v1/health/detail body. ok is False when any check fails. A missing signal
-    (no upload ever, no rollup yet) is a failure, never a pass."""
+                    online_indexes: dict[str, bool], ingest_limit_s: int,
+                    checks: tuple[str, ...] = DEFAULT_HEALTH_CHECKS,
+                    phone: dict | None = None) -> dict:
+    """The /api/v1/health/detail body. ok is False when any SELECTED check fails (`checks`;
+    the default is the four deadman checks, so phone_power never affects a caller that does
+    not ask for it). A missing signal (no upload ever, no rollup yet) is a failure, never a
+    pass. `phone` describes the non-revoked device with the newest phone_status_at
+    (level, plugged, fault, fault_since_ms, status_ms, or None) plus `fault_confirmed`, the
+    database's verdict across ALL non-revoked devices."""
     ingest_age = None if last_ingest_ms is None else max(0, (now_ms - last_ingest_ms) // 1000)
     rollup_lag = (None if rollup_high_water_ms <= 0
                   else max(0, (now_ms - rollup_high_water_ms) // 1000))
     failing: list[str] = []
-    if ingest_age is None or ingest_age > ingest_limit_s:
+    if "ingest" in checks and (ingest_age is None or ingest_age > ingest_limit_s):
         failing.append("ingest")
-    if rollup_lag is None or rollup_lag > ROLLUP_LAG_MAX_S:
+    if "rollup" in checks and (rollup_lag is None or rollup_lag > ROLLUP_LAG_MAX_S):
         failing.append("rollup")
-    if not next_month_partition:
+    if "partition" in checks and not next_month_partition:
         failing.append("partition")
-    if last_ok_skew_s is not None and abs(last_ok_skew_s) > CLOCK_SKEW_MAX_S:
+    if ("clock" in checks and last_ok_skew_s is not None
+            and abs(last_ok_skew_s) > CLOCK_SKEW_MAX_S):
         failing.append("clock")
+    if "phone_power" in checks and phone and phone.get("fault_confirmed"):
+        failing.append("phone_power")
+    status_age = (None if not phone or phone.get("status_ms") is None
+                  else max(0, (now_ms - phone["status_ms"]) // 1000))
+    fresh = status_age is not None and status_age <= PHONE_STATUS_FRESH_S
+    phone_power = {
+        "fault": bool(phone and phone.get("fault") and fresh),
+        "fault_since_ms": phone.get("fault_since_ms") if phone else None,
+        "level": phone.get("level") if phone else None,
+        "plugged": phone.get("plugged") if phone else None,
+        "status_age_s": status_age,
+    }
     return {
         "ok": not failing,
         "failing": failing,
@@ -119,5 +144,7 @@ def evaluate_health(*, now_ms: int, last_ingest_ms: int | None, rollup_high_wate
         "next_month_partition": next_month_partition,
         "online_indexes": online_indexes,
         "limits": {"ingest_age_s": ingest_limit_s, "rollup_lag_s": ROLLUP_LAG_MAX_S,
-                   "clock_skew_s": CLOCK_SKEW_MAX_S},
+                   "clock_skew_s": CLOCK_SKEW_MAX_S,
+                   "phone_status_fresh_s": PHONE_STATUS_FRESH_S},
+        "phone_power": phone_power,
     }
