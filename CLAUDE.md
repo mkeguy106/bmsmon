@@ -797,7 +797,7 @@ N% fires **at** N%, `<=`) and `model/TempAlerts.kt` (cold→hot zone ladder: cau
 critical/cutoff, **critical fires before the BMS cutoff**). The unified `stageAlert()` shows the
 **worst** of the two. Capacity/temperature settings live in `Settings › Alerts` and
 `Settings › Temperature`; the stage's worst pack drives the in-app overlay, and every alarming
-stage pack gets its own headless temperature notification (below). The overlay is hosted at App level (`ui/AlertPresentation.kt`): a flashing alert covers every screen; once acknowledged it is the status-line pill on Home and a banner elsewhere. Stage and list SOC numbers take the user's ladder severity (`socSeverityFor`, the alerts' own rule) with a LOW/CRIT word, and the severity and other readable text tokens are contrast-corrected per theme to ≥4.5:1 against the surfaces they sit on (`readableOn`); the dim secondary tokens (e.g. `text3`, 2.46:1 in the light theme) are not part of that claim.
+stage pack gets its own headless temperature notification (below). The overlay is hosted at App level (`ui/AlertPresentation.kt`): a flashing alert covers every screen; once acknowledged it is the status-line pill on Home and a banner elsewhere. A confirmation dialog or the scan sheet opens in its own window above the overlay, so while an alert flashes either one closes (`dismissTransientsFor`); both can be opened again. Stage and list SOC numbers take the user's ladder severity (`socSeverityFor`, the alerts' own rule) with a LOW/CRIT word, and the severity and other readable text tokens are contrast-corrected per theme to ≥4.5:1 against the surfaces they sit on (`readableOn`); the dim secondary tokens (e.g. `text3`, 2.46:1 in the light theme) are not part of that claim.
 
 **Capacity alerts are fleet-wide, not stage-only.** Because only one base occupies the stage at a
 time, a low pack that isn't on the stage used to be invisible — a pack could drain to damage
@@ -826,8 +826,8 @@ the stage's ack re-arm below), so a regen burst reporting `state=Charging` no lo
 pack's notification mid-drive and re-alarms it once the charge latch expires.
 
 **Low pack seizes the stage (safety override).** `resolveStage()` (`model/Fleet.kt`) has a pre-emptive branch, before the manual-pin check, that stages the base of the pack picked by `seizeCandidate()`.
-- **Candidates.** A candidate is a reachable, alert-driving pack at or below the **seize level**, which is not charging. Regen within `REGEN_WINDOW_MS` of its base discharging counts as driving, not charging.
-- **Base in use.** The seize never displaces the base in use: a base discharging now (daily driver first), or the base that discharged most recently within the stage hold. While one is in use, only its packs may seize. That keeps the core case: a low in-use base overrides a manual pin.
+- **Candidates.** A candidate is a reachable, alert-driving pack at or below the **seize level**, which is not charging. Regen within `REGEN_WINDOW_MS` of its base discharging counts as driving, not charging. This regen test is deliberately looser than `isRegen` (no current floor), so it errs toward seizing.
+- **Bases in use.** The seize never displaces a base in use. The bases in use are every base with a pack discharging now; when none is, the one base whose newest discharge is strictly inside the stage hold. While any base is in use, only packs on a base in use may seize. That keeps the core case, a low in-use base overriding a manual pin, and keeps an idle spare on the shelf from taking the stage from the chair being driven, while a draining pack on a second discharging base still seizes.
 - **Ties.** Lowest SOC wins; the daily driver, then the address, break ties.
 - **The level.** The seize level is `seizeThresholdFor()` (`model/StageControl.kt`, shared with the headless restore). It is its own setting, `seize_soc`: one of 10/15/20/25/30 (`SEIZE_SOC_OPTIONS`), default 30; a stored value rounds up to the next offered level. It is separate from the notification ladder, so an early-warning rung never moves the stage. It applies only when both `alertsOn` and "Pull low packs to stage" are on.
 - **Recovery.** On recovery the branch yields and normal pin/auto resolution takes back over.
@@ -853,17 +853,18 @@ paid ~470 B of JWT/header overhead each and defeated gzip on tiny bodies (~9× b
 with the GPS dedup below). Every sample is still uploaded; worst-case live-feed latency is ~15 s.
 
 **Upload recovery.**
-- **Evictions.** Nothing leaves the outbox silently. A cap eviction (`OUTBOX_MAX` 200 k, cut back by a chunk so it does not repeat on every insert) is counted (`outbox_evicted`, shown in Cloud sync). A poison skip or a one-row fault skip is logged and counted.
+- **Evictions.** Nothing leaves the outbox silently. A cap eviction (`OUTBOX_MAX` 200 k, cut back by a chunk so it does not repeat on every insert) is counted (`outbox_evicted`, shown in Cloud sync). A one-row fault skip is logged and counted (`server_fault_skips`, shown once above 0). A poison skip is logged and parked for a re-send; it has no counter.
 - **Re-sync from local history.** Each of those records its sample-time span as a re-sync window (`cloud/Resync.kt`, persisted as `resync_state`). A second loop re-sends windows from the Room `samples` table (`RESYNC_PAGE_SQL`, keyset on `(tsMs, id)`, `RESYNC_PAGE` 500 rows per POST):
   - GPS is included, sent once per pack per fix.
   - It uses `batch_seq = -1`: stored, never WS-published.
   - It runs only while the live outbox is below `MIN_BATCH`.
   - It uses the same poison breaker and fault bisection as ingest. Bisection runs over stream positions, and a faulting row is parked for 6 h.
   - Skipped batches and rows wait 6 h before their re-send.
-  - The one-shot history import is just the window `[0, now]`; its Cloud sync line reads "queued", not "sent".
+  - The one-shot history import is a re-sync window like any other, `[0, now]`. Cloud sync shows it through the re-send line ("Re-sending local history…"), and `importDone` means the import is queued, not sent.
+  - Re-enrolling and Forget device mark the import due before they clear the pending windows, under the import lock, so an interrupted reset fails toward a re-import (the server dedups) rather than losing recorded re-sends.
 - **Missing key.** A missing Keystore key (a device-to-device transfer) is `PostResult.KeyMissing`. It holds every row and shows "re-enroll required"; re-enrolling re-keys the same install.
 - **Enrollment errors.** A failed enroll says what went wrong (unreachable server, invalid or expired code, rejected key, revoked device, rate limit, server trouble) and restores the previous key state.
-- **Clock correction.** The skew is read from the server's `X-Bmsmon-Server-Time-Ms` (else `Date`) on an app-marked 401/403 whose reason is `clock_skew` (or carries none). A skew over 30 s is shown, and a correction is applied to token `iat`/`exp` (in memory, capped at ±1 h) only when an independent clock vouches for the phone's own: the platform's network time, else a fresh satellite fix. Otherwise nothing is corrected and the status says which clock looks off ("phone clock looks off" / "can't tell which clock is off" / server behind). A 2xx re-anchors a correction already in force and clears it once the clocks agree; it never starts one.
+- **Clock correction.** The skew is read from the server's `X-Bmsmon-Server-Time-Ms` (else `Date`) on an app-marked 401/403 whose reason is `clock_skew` (or carries none). A skew over 30 s is shown, and a correction is applied to token `iat`/`exp` (in memory, capped at ±1 h) only when an independent clock vouches for the phone's own: the platform's network time, else a fresh satellite fix. Otherwise nothing is corrected and the status says which clock looks off ("phone clock looks off" / "can't tell which clock is off" / server behind). A 2xx re-anchors a correction already in force and clears it once the clocks agree; it never starts one. Re-anchoring without the independent clock may move a correction at most 30 s from the value the clock last vouched for; past that the clock must vouch again, or the correction clears and uploads hold.
 - **Build identity.** Uploads and enrollment send `User-Agent: bmsmon-android/<versionName> (<git sha>; sdk <n>)`.
 - **Config push.** It is compare-and-clear: a config enqueued mid-flight survives. Non-finite range bands are left out.
 
@@ -1104,6 +1105,8 @@ to uploaded telemetry samples — **only when the fix is new for that pack** (de
 path only (`CloudJson.roundCoord`). Local Room logging keeps full precision on every sample. GPS
 rides the same offline-durable outbox, so offline driving is buffered and synced on reconnect. `gpsEnabled` defaults **on with cloud sync**
 (reducer `p.gpsEnabled ?: p.cloudEnabled`), toggled in Cloud sync settings ("Send GPS location").
+A first enrollment turns it on; re-enrolling an enrolled phone (a missing key, a rejected sign-in) keeps
+the user's setting (`gpsAfterEnroll`).
 The engine's effective GPS-active = `monitoring && gpsEnabled && enrolled && cloudEnabled`.
 Needs `ACCESS_FINE/COARSE_LOCATION` + `ACCESS_BACKGROUND_LOCATION` + a `location` FGS type
 (`MonitoringService` ORs `FOREGROUND_SERVICE_TYPE_LOCATION` only when GPS-active AND location is
@@ -1117,7 +1120,7 @@ onto a new sample.
 next to the stage label, only when cloud sync is enrolled: `↑ X.X KB/s` (green) while uploading,
 `↑ synced` when caught up, `↑ N queued` (amber) when buffering/offline. The rate comes from
 `cloud/UploadRate.kt` (a pure, unit-tested 5 s rolling window of gzipped wire bytes →
-smoothed KB/s). Most urgent first: `↑ re-enroll`, `↑ clock skew`, `↑ auth failed` (red), `↑ held · N` (amber, a breaker is holding), then rate / queued / re-sending / retry later / synced (`ui/home/UploadBadge.kt`). The status comes from `TelemetryReporter.status` (`UploadStatus`), which the ViewModel collects directly.
+smoothed KB/s). Most urgent first: `↑ re-enroll`, `↑ clock skew`, `↑ auth failed` (red), `↑ held · N queued` (amber, a breaker is holding), then rate / queued / re-sending / retry later / synced (`ui/home/UploadBadge.kt`). The status comes from `TelemetryReporter.status` (`UploadStatus`), which the ViewModel collects directly.
 
 **Discharge estimate (miles + time remaining).** The stage shows a base-level learned
 high/low line — `~37–49 mi · ~8–12h use · ~4–8 days` — under the rings whenever the staged
