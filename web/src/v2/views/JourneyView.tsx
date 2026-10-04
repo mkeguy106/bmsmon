@@ -405,7 +405,9 @@ export function JourneyView({ data, base, theme, unit: _unit, mobile, mapMetric,
             <>
               {st.dateMode === "day" ? (
                 <EfficiencyCard summary={eff} live={isLive} charging={charging} distUnit={distUnit}
-                  lastKnown={view?.usableLastKnown ?? null} />
+                  lastKnown={view?.usableLastKnown ?? null}
+                  noProjection={!isLive ? null : (view?.livePacks.length ?? 0) === 0 ? "offline"
+                    : view?.usableWh == null ? "no-capacity" : null} />
               ) : (
                 <div className="card mono" style={{ fontSize: 12, color: "var(--text-4)" }}>
                   Select a single day to see efficiency.

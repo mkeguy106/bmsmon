@@ -38,6 +38,20 @@ describe("EfficiencyCard live projection", () => {
   });
 });
 
+// Final review minor 9: a live window with no projection says why, the way Command does.
+describe("EfficiencyCard with no projection at all", () => {
+  const none = summary({ milesAtTodayRate: null, milesAtUsualRate: null });
+  const withReason = (r: "offline" | "no-capacity" | null) =>
+    renderToStaticMarkup(
+      <EfficiencyCard summary={none} live charging={false} distUnit="mi" noProjection={r} />)
+      .replace(/<!-- -->/g, "");
+  it("says Base offline or No capacity reading", () => {
+    expect(withReason("offline")).toContain("Base offline");
+    expect(withReason("no-capacity")).toContain("No capacity reading");
+    expect(withReason(null)).not.toContain("Base offline");
+  });
+});
+
 // Final review (widened Task 9): the "left at" projections are floored, never rounded up.
 describe("EfficiencyCard projections are floored", () => {
   it("whole miles at 10 or more, tenths below, both floored", () => {

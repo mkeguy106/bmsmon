@@ -33,10 +33,12 @@ function Cell({ label, value }: { label: string; value: string }) {
 /** A projected distance, floored (never shown above the projection): tenths under 10. */
 const mi = (n: number) => floorFixed(n, n < 10 ? 1 : 0);
 
-export function EfficiencyCard({ summary, live, charging, distUnit, lastKnown = null }: {
+export function EfficiencyCard({ summary, live, charging, distUnit, lastKnown = null, noProjection = null }: {
   summary: EfficiencySummary; live: boolean; charging: boolean; distUnit: DistUnit;
   /** A last-known pack inside the usable energy behind the projection (baseView). */
   lastKnown?: LastKnownRef | null;
+  /** Why a live window has no projection at all, said the way Command says it. */
+  noProjection?: "offline" | "no-capacity" | null;
 }) {
   const { costPerMile, band, status, seed, drainedPct, wh, activeMiles,
     milesAtTodayRate, milesAtUsualRate, todayRateWithheld } = summary;
@@ -88,6 +90,10 @@ export function EfficiencyCard({ summary, live, charging, distUnit, lastKnown = 
       {live && (charging ? (
         <div className="mono" style={{ fontSize: 12, color: "var(--text-4)" }}>
           Charging — see recharge plan
+        </div>
+      ) : milesAtTodayRate == null && milesAtUsualRate == null && noProjection ? (
+        <div className="mono" style={{ fontSize: 12, color: "var(--text-4)" }}>
+          {noProjection === "offline" ? "Base offline" : "No capacity reading"}
         </div>
       ) : (milesAtTodayRate != null || milesAtUsualRate != null) && (
         <div className="mono" style={{ fontSize: 13, color: "var(--text-2)" }}>
