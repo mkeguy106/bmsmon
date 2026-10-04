@@ -3,8 +3,12 @@
 Distinct from /api/v1/health, which stays a bare DB ping because Docker's healthcheck and
 autoheal use it: a phone that stopped uploading must never get the API restarted. This
 answers 200 only while telemetry is arriving and the background jobs keep up, else 503
-naming the failing checks. Gated by a read-only API key (app/auth/api_key.py): the age of
-the last upload says when the chair's phone is offline, which is not for the public."""
+naming the failing checks. "Telemetry is arriving" means samples are being STORED: the
+ingest check reads devices.last_seen_at, which only a live ingest batch that keeps at least
+one valid sample refreshes (routers/api_device.py), never a batch whose every sample was
+dropped, a history import or a config push. Gated by a read-only API key
+(app/auth/api_key.py): the age of the last upload says when the chair's phone is offline,
+which is not for the public."""
 import time
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -27,7 +31,8 @@ async def health_detail(request: Request,
                         _key=Depends(require_api_key), pool=Depends(get_pool)):
     """max_ingest_age_s can only TIGHTEN the ingest limit (it proves the alarm path end to
     end); it can never hide a failure. Ingest age comes from devices.last_seen_at, which
-    authenticated uploads refresh at most once a minute."""
+    only a live upload that stores at least one valid sample refreshes, at most once a
+    minute."""
     now_ms = int(time.time() * 1000)
     async with pool.acquire() as conn:
         last_seen = await conn.fetchval(

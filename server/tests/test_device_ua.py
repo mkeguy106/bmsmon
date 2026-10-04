@@ -36,7 +36,7 @@ async def test_user_agent_is_cleaned_and_a_missing_one_keeps_the_last(app, clien
     async with app.state.pool.acquire() as conn:
         ua = await conn.fetchval("SELECT user_agent FROM devices WHERE id = $1", device_id)
     assert ua.startswith("ua-x") and len(ua) == 200
-    # /config touches unthrottled; an empty User-Agent must not wipe the stored one
+    # /config records the build on every push; an empty User-Agent must not wipe it
     assert (await _post(client, priv, device_id, "/api/v1/config", _cfg(), "")).status_code == 200
     async with app.state.pool.acquire() as conn:
         assert await conn.fetchval("SELECT user_agent FROM devices WHERE id = $1", device_id) == ua

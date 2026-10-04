@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS devices (
   revoked boolean NOT NULL DEFAULT false
 );
 -- DATA-28: the app build that last uploaded for this device (its User-Agent), shown on the
--- admin device list. Written by queries.touch_device.
+-- admin device list. Written by queries.touch_device and queries.record_user_agent.
 SELECT pg_temp.add_column_if_missing('devices', 'user_agent', 'text');
 
 CREATE TABLE IF NOT EXISTS enrollment_codes (

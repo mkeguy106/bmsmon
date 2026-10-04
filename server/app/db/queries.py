@@ -420,11 +420,18 @@ async def list_devices(conn) -> list[dict]:
 
 
 async def touch_device(conn, device_id: str, user_agent: str | None) -> None:
-    """Bookkeeping on an authenticated upload: last_seen_at, and the app build that sent it
-    (DATA-28). A request without a User-Agent keeps the previous value."""
+    """A live upload stored telemetry: last_seen_at (the deadman's ingest signal, see
+    routers/api_device.py) and the app build that sent it (DATA-28). A request without a
+    User-Agent keeps the previous value."""
     await conn.execute(
         "UPDATE devices SET last_seen_at = now(), user_agent = COALESCE($2, user_agent) "
         "WHERE id = $1", device_id, user_agent)
+
+
+async def record_user_agent(conn, device_id: str, user_agent: str) -> None:
+    """The app build behind an upload that is not live telemetry (a config push);
+    last_seen_at is left alone."""
+    await conn.execute("UPDATE devices SET user_agent = $2 WHERE id = $1", device_id, user_agent)
 
 
 async def revoke_device(conn, device_id) -> None:

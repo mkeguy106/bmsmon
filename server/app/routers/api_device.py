@@ -259,15 +259,23 @@ async def enroll(body: EnrollBody, request: Request, pool=Depends(get_pool)):
     return EnrollResponse(device_id=str(device_id))
 
 
-async def _touch(conn, request: Request, device_id: str) -> None:
-    """Record last_seen_at + the app build (DATA-28). Pure bookkeeping: any error is logged
-    and swallowed, and the savepoint keeps a failure from aborting a caller's transaction."""
+async def _touch(conn, request: Request, device_id: str, *, seen: bool) -> None:
+    """Device bookkeeping: the app build that sent the request (DATA-28) and, with
+    seen=True, devices.last_seen_at. last_seen_at is the deadman's ingest signal
+    (/api/v1/health/detail) and the device list's "last upload", so only a live ingest
+    batch that stored samples passes seen=True. Pure bookkeeping: any error is logged and
+    swallowed, and the savepoint keeps a failure from aborting a caller's transaction."""
+    user_agent = clean_user_agent(request.headers.get("user-agent"))
+    if not seen and user_agent is None:
+        return  # nothing to record
     try:
         async with conn.transaction():
-            await q.touch_device(conn, device_id,
-                                 clean_user_agent(request.headers.get("user-agent")))
+            if seen:
+                await q.touch_device(conn, device_id, user_agent)
+            else:
+                await q.record_user_agent(conn, device_id, user_agent)
     except Exception:
-        logger.warning("touch_device failed for %s", device_id, exc_info=True)
+        logger.warning("device bookkeeping failed for %s", device_id, exc_info=True)
 
 
 @router.post("/ingest", response_model=IngestResponse)
@@ -332,12 +340,16 @@ async def ingest(request: Request, pool=Depends(get_pool)):
                 await q.upsert_battery(conn, s.address, s.advertised_name, s.alias,
                                        s.group_id, s.ts_ms)
             accepted = await q.insert_samples(conn, rows)
-        # last_seen_at is informational (device-list display). Batches land every ~15-20 s,
-        # so an unconditional UPDATE is a dead tuple per batch for a value nobody reads at
-        # that resolution — throttle to once per device per interval (timestamp becomes
-        # approximate within ~60 s, which is fine).
-        if request.app.state.device_touch.should_touch(device_id):
-            await _touch(conn, request, device_id)
+        # devices.last_seen_at is the deadman's ingest signal (/api/v1/health/detail) and
+        # the device list's "last upload". Only a LIVE batch (batch_seq >= 0) that got at
+        # least one valid sample to the insert refreshes it: an all-dropped batch is a
+        # pipeline losing data, and an import is old history. A batch of duplicates still
+        # counts (accepted == 0, but a healthy re-send). Throttled to once per device per
+        # minute: batches land every ~15 s and each UPDATE is a dead tuple. The throttle is
+        # consulted only for a qualifying batch, so a dropped one can't use up the window.
+        if (env.batch_seq >= 0 and rows
+                and request.app.state.device_touch.should_touch(device_id)):
+            await _touch(conn, request, device_id, seen=True)
     # batch_seq < 0 (-1) marks a historical-import batch (see IngestEnvelope): store it,
     # but don't flood the live WS dashboards with thousands of stale frames (WEB-5).
     if env.batch_seq >= 0:
@@ -373,5 +385,7 @@ async def config(request: Request, pool=Depends(get_pool)):
         # (ranges None) leaves the stored rows untouched.
         for row in ranges:
             await q.upsert_range_config(conn, device_id, row.model_dump())
-        await _touch(conn, request, device_id)
+        # The app build only: a config push is not telemetry, so it never moves the
+        # deadman's last_seen_at.
+        await _touch(conn, request, device_id, seen=False)
     return ConfigResponse(dropped=len(rejects))

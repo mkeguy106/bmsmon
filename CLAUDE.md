@@ -1633,7 +1633,7 @@ answers **200 when every check passes and 503 otherwise**, `Cache-Control: no-st
 
 | Check | Fails when |
 |---|---|
-| `ingest` | No non-revoked device has uploaded for `BMSMON_DEADMAN_INGEST_S` (default **1800 s**), measured from `devices.last_seen_at`, which uploads refresh at most once a minute. No upload ever also fails. |
+| `ingest` | No non-revoked device has uploaded for `BMSMON_DEADMAN_INGEST_S` (default **1800 s**), measured from `devices.last_seen_at`, which only a live upload that stores at least one valid sample refreshes (at most once a minute). A batch whose every sample is dropped, a history import (`batch_seq` < 0) and a config push never refresh it. No upload ever also fails. |
 | `rollup` | The 30-min rollup's high-water mark is more than 3 h behind, or it has never run. |
 | `partition` | Next month's `samples` partition is missing. |
 | `clock` | The last verified token's `server − iat` skew exceeds ±120 s. |
