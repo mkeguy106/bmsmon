@@ -168,6 +168,25 @@ internal fun parkResyncRow(s: ResyncState, expected: ResyncWindow, tsMs: Long, i
     return addResyncWindow(advanced, ResyncWindow(tsMs, tsMs, notBeforeMs = nowMs + RESYNC_PARK_MS), nowMs)
 }
 
+/**
+ * The server permanently rejected a re-sent page ([firstTsMs]..[lastTsMs], ending at [lastId]): step
+ * [expected] past it ([exhausted]: it was the window's last page) and park the page's span for a retry
+ * after [RESYNC_PARK_MS], until Room ages it out. The re-send's version of the ingest stream's poison
+ * skip, which parks its batch the same way: a rejected sample is retried later, never abandoned.
+ */
+internal fun parkResyncPage(
+    s: ResyncState,
+    expected: ResyncWindow,
+    firstTsMs: Long,
+    lastTsMs: Long,
+    lastId: Long,
+    exhausted: Boolean,
+    nowMs: Long,
+): ResyncState {
+    val advanced = advanceResync(s, expected, lastTsMs, lastId, exhausted)
+    return addResyncWindow(advanced, ResyncWindow(firstTsMs, lastTsMs, notBeforeMs = nowMs + RESYNC_PARK_MS), nowMs)
+}
+
 internal fun resyncSummary(s: ResyncState, nowMs: Long): ResyncSummary {
     val live = pruneExpired(s.windows, nowMs)
     val ready = live.filter { !it.isParked(nowMs) }

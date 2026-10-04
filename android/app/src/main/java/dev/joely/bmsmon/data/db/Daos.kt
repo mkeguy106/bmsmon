@@ -129,6 +129,14 @@ internal const val RANGE_PAGE_SQL =
         "WHERE address = :address AND tsMs >= :afterTs AND (tsMs > :afterTs OR id > :afterId) " +
         "AND linkEvent IS NULL ORDER BY tsMs ASC, id ASC LIMIT :limit"
 
+/** One keyset page of local samples inside a re-sync window, oldest first (DATA-19). (tsMs, id) is
+ *  index_samples_tsMs order (the index carries the rowid), so this is a range seek with no sort —
+ *  ResyncSqlTest pins the plan. One page per POST, the cursor persisted in the window between them.
+ *  Link-event rows are included: the cloud keeps them too. */
+internal const val RESYNC_PAGE_SQL =
+    "SELECT * FROM samples WHERE tsMs <= :toMs AND tsMs >= :afterTs AND (tsMs > :afterTs OR id > :afterId) " +
+        "ORDER BY tsMs ASC, id ASC LIMIT :limit"
+
 @Dao
 interface SampleDao {
     @Insert suspend fun insert(sample: SampleEntity): Long
@@ -170,8 +178,9 @@ interface SampleDao {
 
     @Query("DELETE FROM samples") suspend fun clear()
 
-    @Query("SELECT * FROM samples WHERE id > :afterId ORDER BY id ASC LIMIT :limit")
-    suspend fun pageAfter(afterId: Long, limit: Int): List<SampleEntity>
+    /** One bounded page of a re-sync window (DATA-19); see [RESYNC_PAGE_SQL]. */
+    @Query(RESYNC_PAGE_SQL)
+    suspend fun resyncPage(toMs: Long, afterTs: Long, afterId: Long, limit: Int): List<SampleEntity>
 }
 
 @Dao

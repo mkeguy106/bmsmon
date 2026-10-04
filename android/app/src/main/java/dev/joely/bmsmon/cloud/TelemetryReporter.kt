@@ -6,13 +6,14 @@ import android.util.Log
 import java.io.ByteArrayOutputStream
 import java.security.PrivateKey
 import java.util.zip.GZIPOutputStream
+import dev.joely.bmsmon.data.FailureLogThrottle
 import dev.joely.bmsmon.data.Persisted
 import dev.joely.bmsmon.data.SettingsStore
 import dev.joely.bmsmon.data.db.BmsDatabase
 import dev.joely.bmsmon.data.db.OutboxEntity
+import dev.joely.bmsmon.model.DEFAULT_ROSTER
 import dev.joely.bmsmon.model.Roster
 import dev.joely.bmsmon.model.Telemetry
-import dev.joely.bmsmon.model.batteryAt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -25,12 +26,13 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
 private const val TAG = "TelemetryReporter"
-private const val IMPORT_PAGE = 500
 
 /**
  * Batch accumulation (bandwidth): don't POST the moment the outbox is non-empty — that turned
@@ -81,10 +83,15 @@ class TelemetryReporter(
     private val enqueueChannel = Channel<OutboxEntity>(Channel.UNLIMITED)
     @Volatile private var started = false
     @Volatile var lastUploadMs = 0L
-    @Volatile private var importStarted = false
     private var uploaderJob: Job? = null
+    private var resyncJob: Job? = null
     private val uploadRate = UploadRate()
-    var onImportProgress: ((Long) -> Unit)? = null
+    // The upload loop's last measured outbox depth gates the re-sender; until it has measured once, wait.
+    @Volatile private var depthKnown = false
+    // Serialises queueing the history import, so concurrent callers add its window once.
+    private val importMutex = Mutex()
+    // queueImport's failure log, rate-limited (the re-sync loop retries it every pass while it fails).
+    private val importFailures = FailureLogThrottle()
 
     private val _status = MutableStateFlow(UploadStatus())
 
@@ -108,6 +115,16 @@ class TelemetryReporter(
         },
         warn = { msg, e -> Log.w(TAG, msg, e) },
         onResync = { summary -> publish { it.copy(resync = summary) } },
+        elapsed = SystemClock::elapsedRealtime,
+    )
+
+    // Re-sends skipped and evicted samples, and the history import, from local Room history (DATA-19).
+    private val resync = ResyncSender(
+        readWindows = { ledger.readResync() },
+        mutateWindows = { transform -> ledger.mutateResync(transform) },
+        readPage = { toMs, afterTs, afterId, limit -> db.samples().resyncPage(toMs, afterTs, afterId, limit) },
+        warn = { msg, e -> Log.w(TAG, msg, e) },
+        elapsedNow = SystemClock::elapsedRealtime,
     )
 
     /**
@@ -218,95 +235,71 @@ class TelemetryReporter(
         enqueueChannel.trySend(OutboxEntity(payload = payload, enqueuedAt = tsMs))
     }
 
-    /** Start the uploader loop. Idempotent — safe to call multiple times. */
+    /** Start the uploader and the re-sync loop, and queue the history import if it is due. Idempotent. */
     fun start() {
         if (started) return
         started = true
         uploaderJob = scope.launch { uploadLoop() }
+        resyncJob = scope.launch { resyncLoop() }
+        queueImport()
     }
 
-    /** Cancel the uploader loop (drain continues so enqueued rows persist). */
+    /** Cancel both loops (the drain continues so enqueued rows persist). */
     fun stop() {
         uploaderJob?.cancel()
+        resyncJob?.cancel()
         started = false
     }
 
     /**
-     * One-time resumable historical importer. Pages through all rows in [samples] after the
-     * stored watermark, POSTs them as signed import batches (seq = -1), and marks [importDone]
-     * when the table is drained. Idempotent on the server (ON CONFLICT DO NOTHING). Throttled
-     * below the live uploader path. Safe to cancel and re-launch — the watermark persists.
+     * The one-shot history import, now a re-sync window (DATA-19): everything in local history up to
+     * now, GPS included, sent under the same fault handling as any re-send, and yielding to live data
+     * like one (it no longer holds the live upload behind it). A phone upgraded mid-import re-sends from
+     * the start; the server dedups what it already has. Safe to call repeatedly; a store failure is
+     * logged and retried by the re-sync loop.
      */
-    suspend fun runImport(roster: Roster) {
-        val p = settings.load()
-        if (!p.enrolled || p.importDone || p.deviceId == null || p.apiBaseUrl == null) return
-        var after = p.importWatermark
-        val ingestUrl = CloudConfig(p.apiBaseUrl).ingestUrl
-        var poisonSkips = 0   // the import's own poison circuit breaker (DATA-14, see decideUpload)
-        var heldPageAfter: Long? = null   // the page the breaker is holding — logged once, not every 5 s retry
-        while (true) {
+    fun queueImport() {
+        scope.launch {
             try {
-                val page = db.samples().pageAfter(after, IMPORT_PAGE)
-                if (page.isEmpty()) {
-                    settings.setImportDone(true)
-                    break
-                }
-                val rows = page.map { e ->
-                    val bat = roster.batteryAt(e.address)
-                    CloudJson.sampleJson(
-                        e.tsMs, e.address, bat?.advertisedName, bat?.alias, bat?.groupId,
-                        e.state, e.soc, e.currentA, e.powerW, e.voltageV, e.tempC, e.mosfetTempC,
-                        e.soh, e.fullChargeAh, e.remainingAh, e.cycles,
-                        e.cellMinV, e.cellMaxV, e.regen, e.linkEvent,
-                    )
-                }
-                // seq = -1 marks this as an import batch; the server ignores seq ordering for imports.
-                val body = CloudJson.encodeBatch(seq = -1, rows = rows)
-                val outcome = postSigned(ingestUrl, p.deviceId, body)
-                noteOutcome(outcome)
-                val result = outcome.result
-                val d = decideUpload(result, poisonSkips, authFailed = false)
-                poisonSkips = d.poisonSkipsSinceOk
-                when (d.step) {
-                    BatchStep.DELETE_ACCEPTED -> {}
-                    BatchStep.DELETE_POISON ->
-                        // Permanently rejected page: skip it so the import can't stall forever.
-                        // The rows themselves stay in the local Room samples table.
-                        Log.w(TAG, "import: server permanently rejected page after id=$after (${page.size} rows) — skipping")
-                    BatchStep.BACK_OFF, BatchStep.BACK_OFF_AUTH -> {
-                        if (result == PostResult.Poison && heldPageAfter != after) {
-                            heldPageAfter = after
-                            Log.w(TAG, "import: page after id=$after rejected again with no 2xx since the last skip — holding it (poison breaker open)")
-                        }
-                        delay(5000)
-                        continue
-                    }
-                }
-                after = page.last().id
-                settings.setImportWatermark(after)
-                onImportProgress?.invoke(after)
-                delay(750)
+                queueImportIfDue()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                delay(5000)
+                logImportFailure(e)
             }
         }
     }
 
-    /**
-     * Launch [runImport] on the reporter's own process-lifetime scope if it hasn't been started yet
-     * this process and the persisted flags indicate it's needed. Safe to call multiple times —
-     * [importStarted] prevents a concurrent double-run within a process; the watermark + importDone
-     * flag make it resumable across process deaths.
-     */
-    fun startImportIfNeeded(roster: Roster) {
+    /** Older entry point (MonitorEngine init, enroll), retired in Task 15; the re-sender reads the persisted roster itself. */
+    fun startImportIfNeeded(@Suppress("UNUSED_PARAMETER") roster: Roster) = queueImport()
+
+    /** Forget every pending re-send (the device was forgotten; a new enrollment queues a fresh import). */
+    fun clearResync() {
         scope.launch {
-            val p = settings.load()
-            if (!p.enrolled || p.importDone || importStarted) return@launch
-            importStarted = true
-            try { runImport(roster) } finally { importStarted = false }
+            try {
+                ledger.mutateResync { ResyncState() }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "re-sync: could not clear the pending re-sends", e)
+            }
         }
+    }
+
+    /** Add the import window once, if enrolled and not yet queued. Throws on a store error (nothing is marked done). */
+    private suspend fun queueImportIfDue() = importMutex.withLock {
+        val p = settings.load()
+        if (!p.enrolled || p.importDone) return@withLock
+        val now = System.currentTimeMillis()
+        ledger.mutateResync { addResyncWindow(it, importWindow(now), now) }
+        settings.setImportDone(true)
+    }
+
+    private fun logImportFailure(e: Exception) = synchronized(importFailures) {
+        warnThrottled(
+            importFailures, SystemClock.elapsedRealtime(), { msg, t -> Log.w(TAG, msg, t) },
+            "re-sync: could not queue the history import — retrying", e,
+        )
     }
 
     private fun publish(update: (UploadStatus) -> UploadStatus): UploadStatus = _status.updateAndGet(update)
@@ -316,6 +309,7 @@ class TelemetryReporter(
      * legacy [onStatus] hook, so the engine's mirror keeps receiving the loop's values in its order.
      */
     private fun publishQueue(depth: Int, s: IngestLoopState) {
+        depthKnown = true
         val st = publish {
             it.copy(
                 outboxDepth = depth,
@@ -329,20 +323,15 @@ class TelemetryReporter(
         onStatus?.invoke(st.outboxDepth.toLong(), st.lastUploadMs, st.kbps, st.authFailed)
     }
 
-    /** The re-sync windows, through the ledger (persist first, then assign; a read error abandons). */
-    private suspend fun mutateResync(transform: (ResyncState) -> ResyncState): ResyncState = ledger.mutateResync(transform)
-
-    private suspend fun readResync(): ResyncState = ledger.readResync()
-
     /** Enforce the outbox cap through the ledger: every eviction is recorded first, then counted. Returns the depth. */
     private suspend fun capOutbox(): Int = ledger.capOutbox()
 
     /**
-     * The one outcome observer for every stream (ingest, import, config): folds a response into the
+     * The one outcome observer for every stream (ingest, re-sync, config): folds a response into the
      * shared signing correction ([nextSigningOffsetMs]), the clock blame ([nextClockBlame]) and the
      * skew shown to the user ([nextAuthSkewMs]), publishes them, and logs a rejected sign-in once per
      * distinct reason. The independent clock is read at most once, and only when a rule needs it.
-     * Synchronized: the import and the upload loop both report here.
+     * Synchronized: the re-sync and the upload loop both report here.
      */
     @Synchronized
     private fun noteOutcome(o: PostOutcome) {
@@ -519,6 +508,52 @@ class TelemetryReporter(
             } catch (e: Exception) {
                 delay(ingest.backoffMs)
                 ingest = ingest.copy(backoffMs = nextBackoffMs(ingest.backoffMs))
+            }
+        }
+    }
+
+    /**
+     * The re-sync loop (DATA-19): the [ResyncSender] sends one page of local history per pass, as a
+     * signed `batch_seq = -1` ingest batch, while the live queue is caught up ([shouldResync]: fresh data
+     * first). Every response goes through the shared outcome observer ([noteOutcome]). It never deletes
+     * a Room sample or an outbox row. While the history import is not yet queued (a store failure when it
+     * was asked for), each pass retries it.
+     */
+    private suspend fun resyncLoop() {
+        while (true) {
+            try {
+                val p = cachedSettings
+                val base = p?.apiBaseUrl
+                val deviceId = p?.deviceId
+                if (p == null || !p.cloudEnabled || !p.enrolled || deviceId == null || base == null) {
+                    delay(RESYNC_IDLE_MS)
+                    continue
+                }
+                if (!p.importDone) {
+                    try {
+                        queueImportIfDue()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        logImportFailure(e)
+                    }
+                }
+                val depth = if (depthKnown) _status.value.outboxDepth else Int.MAX_VALUE
+                val wait = resync.pass(
+                    roster = p.roster ?: DEFAULT_ROSTER,
+                    withGps = p.gpsEnabled ?: p.cloudEnabled,
+                    liveDepth = depth,
+                    online = conn.online.value,
+                ) { body ->
+                    val outcome = postSigned(CloudConfig(base).ingestUrl, deviceId, body)
+                    noteOutcome(outcome)
+                    outcome
+                }
+                if (wait > 0) delay(wait)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                delay(RESYNC_IDLE_MS)   // the sender handles its own failures; this is a last guard
             }
         }
     }

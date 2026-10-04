@@ -165,6 +165,38 @@ class OutboxLedgerTest {
         assertTrue(logs.any { "count is short" in it })
     }
 
+    // Offline at the cap, every ~1.5 s pass evicts a few rows: one line per minute, not one per pass
+    // (logcat also holds the motion instrumentation). Every evicted row is still counted.
+    @Test fun aPhoneOfflineAtTheCapLogsItsEvictionsAtMostOncePerMinute() = runBlocking {
+        var clock = 0L
+        val l = OutboxLedger(outbox, store, warn = { m, _ -> logs += m }, now = { NOW }, maxRows = 5, elapsed = { clock })
+        var ts = NOW - 100_000
+        outbox.fill(*LongArray(5) { ts++ })
+        repeat(80) {                                        // two minutes of passes, each two rows over the cap
+            outbox.fill(ts++, ts++)
+            l.capOutbox()
+            clock += 1_500
+        }
+        assertEquals(160L, store.evicted)
+        val lines = logs.filter { "evicted" in it }
+        assertEquals(2, lines.size)                         // the first pass, then one summary at 60 s
+        assertTrue(lines[0], lines[0].startsWith("outbox: full — evicted 2 oldest samples"))
+        assertTrue(lines[1], lines[1].startsWith("outbox: full — evicted 80 oldest samples") && "40 passes" in lines[1])
+    }
+
+    @Test fun aStoreThatCannotRecordTheReSendLogsAtMostOncePerMinute() = runBlocking {
+        var clock = 0L
+        val l = OutboxLedger(outbox, store, warn = { m, _ -> logs += m }, now = { NOW }, maxRows = 5, elapsed = { clock })
+        store.readFailures = Int.MAX_VALUE
+        outbox.fill(NOW - 7_000, NOW - 6_000, NOW - 5_000, NOW - 4_000, NOW - 3_000, NOW - 2_000)
+        repeat(80) {
+            assertEquals(6, l.capOutbox())
+            clock += 1_500
+        }
+        assertEquals(2, logs.size)
+        assertTrue(logs.all { "could not be recorded" in it })
+    }
+
     // The loop's deletes take the cap's lock: an accepted batch deleted between the cap's span and its
     // drop would make the drop take newer rows the recorded window doesn't cover.
     @Test fun theCapAndAnAcceptedDeleteNeverInterleave() = runBlocking {

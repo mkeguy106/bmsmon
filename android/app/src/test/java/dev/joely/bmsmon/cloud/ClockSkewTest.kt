@@ -215,7 +215,7 @@ class ClockSkewTest {
             code.filter { "tokenTimeMs(" in it },
         )
         assertTrue(code.contains("http.newCall(req).execute().use { outcomeOf(it, sentAt, System.currentTimeMillis()) }"))
-        // Every signed POST's outcome is folded in: the config push, ingest and the import.
+        // Every signed POST's outcome is folded in: the config push, ingest and the re-sync (the import's).
         val joined = code.joinToString(" ")
         assertEquals(4, Regex("postSigned\\(").findAll(joined).count())   // the definition + 3 calls
         assertEquals(3, Regex("val outcome = postSigned\\(").findAll(joined).count())

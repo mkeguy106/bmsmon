@@ -1,5 +1,6 @@
 package dev.joely.bmsmon.cloud
 
+import dev.joely.bmsmon.data.FailureLogThrottle
 import dev.joely.bmsmon.data.db.OutboxDao
 import dev.joely.bmsmon.data.db.OutboxEntity
 import kotlinx.coroutines.CancellationException
@@ -59,12 +60,22 @@ internal class OutboxLedger(
     private val onResync: (ResyncSummary) -> Unit = {},
     private val now: () -> Long = System::currentTimeMillis,
     private val maxRows: Int = OUTBOX_MAX,
+    /** Monotonic ms for the log throttles (SystemClock.elapsedRealtime in the app). */
+    private val elapsed: () -> Long = { System.nanoTime() / 1_000_000L },
 ) {
     // capMutex covers the cap's eviction AND every other outbox delete, so an eviction's span and its
     // delete always see the same oldest rows. resyncMutex covers the windows. When both, always cap → resync.
     private val capMutex = Mutex()
     private val resyncMutex = Mutex()
     private var resyncState: ResyncState? = null   // guarded by resyncMutex; when set, exactly what the store holds
+
+    // Offline at the cap, every ~1.5 s upload-loop pass evicts a few rows, and a failing store fails every
+    // pass: one line a minute each, not one per pass (logcat also holds the motion instrumentation). Only
+    // capOutbox touches these, under capMutex, so each throttle has one consumer at a time.
+    private val evictionLog = FailureLogThrottle()
+    private val recordFailures = FailureLogThrottle()
+    private val countFailures = FailureLogThrottle()
+    private var evictedSinceLine = 0L
 
     /**
      * Transform the re-sync windows under their lock: loaded once (normalised by [decodeResync]), then
@@ -106,26 +117,45 @@ internal class OutboxLedger(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                warn("outbox: over the cap, but the re-send could not be recorded — evicting nothing this time", e)
+                warnThrottled(
+                    recordFailures, elapsed(), warn,
+                    "outbox: over the cap, but the re-send could not be recorded — evicting nothing this time", e,
+                )
                 return@withContext depth
             }
             val dropped = outbox.dropOldest(n)
             if (dropped > 0) {
-                warn(
-                    "outbox: full — evicted $dropped oldest samples; they are re-sent from local history " +
-                        "while usage logging keeps it",
-                    null,
-                )
+                logEviction(dropped)
                 try {
                     store.addOutboxEvicted(dropped.toLong())
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    warn("outbox: evicted $dropped samples, but saving the eviction count failed — the count is short", e)
+                    warnThrottled(
+                        countFailures, elapsed(), warn,
+                        "outbox: evicted samples, but saving the eviction count failed — the count is short", e,
+                    )
                 }
             }
             depth - dropped
         }
+    }
+
+    /** The eviction's line, at most one a minute: the rows evicted since the last line, all of them counted. */
+    private fun logEviction(dropped: Int) {
+        evictedSinceLine += dropped
+        val passes = when (val a = evictionLog.onFailure(elapsed())) {
+            is FailureLogThrottle.Action.Full -> 1 + a.unreported
+            is FailureLogThrottle.Action.Summary -> a.count
+            FailureLogThrottle.Action.Suppress -> return
+        }
+        warn(
+            "outbox: full — evicted $evictedSinceLine oldest samples" +
+                (if (passes > 1) " over $passes passes since the last report" else "") +
+                "; they are re-sent from local history while usage logging keeps it",
+            null,
+        )
+        evictedSinceLine = 0L
     }
 
     /**
@@ -192,6 +222,26 @@ internal class OutboxLedger(
         line?.let { warn(it + stepLogSuffix(seq, rows, step.effects), null) }
         applied.failure?.let { warn("upload: seq=$seq updated the outbox, but saving its skip count failed — the count is short", it) }
         return IngestRun(step.state, memory, step.delayMs, took = true)
+    }
+}
+
+/**
+ * A WARN that can repeat as fast as its loop runs, through [throttle] ([FailureLogThrottle]): the first of
+ * a burst with its [cause], then at most one counted line per interval carrying the latest cause's text.
+ */
+internal fun warnThrottled(
+    throttle: FailureLogThrottle,
+    nowElapsedMs: Long,
+    warn: (String, Throwable?) -> Unit,
+    what: String,
+    cause: Throwable?,
+) {
+    when (val a = throttle.onFailure(nowElapsedMs)) {
+        is FailureLogThrottle.Action.Full ->
+            warn(if (a.unreported == 0) what else "$what (${a.unreported} earlier times went unreported)", cause)
+        is FailureLogThrottle.Action.Summary ->
+            warn("$what (${a.count} times since the last report${cause?.let { "; latest: $it" } ?: ""})", null)
+        FailureLogThrottle.Action.Suppress -> Unit
     }
 }
 

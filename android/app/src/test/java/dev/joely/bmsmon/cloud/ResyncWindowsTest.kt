@@ -86,6 +86,23 @@ class ResyncWindowsTest {
         )
     }
 
+    // The re-send's poison skip: step past the rejected page and park its span for a later retry.
+    @Test fun aRejectedPageIsSteppedOverAndItsSpanParked() {
+        val w = ResyncWindow(now - 9_000, now - 1_000)
+        val s = parkResyncPage(state(w), w, firstTsMs = now - 9_000, lastTsMs = now - 6_000, lastId = 42, exhausted = false, nowMs = now)
+        assertEquals(
+            listOf(
+                ResyncWindow(now - 9_000, now - 6_000, notBeforeMs = now + RESYNC_PARK_MS),
+                w.copy(afterTs = now - 6_000, afterId = 42),
+            ),
+            s.windows,
+        )
+        assertEquals(w.copy(afterTs = now - 6_000, afterId = 42), nextEligibleWindow(s, now))
+        // The window's last (short) page: the window is done, only the parked span remains.
+        val done = parkResyncPage(state(w), w, now - 3_000, now - 1_000, lastId = 9, exhausted = true, nowMs = now)
+        assertEquals(listOf(ResyncWindow(now - 3_000, now - 1_000, notBeforeMs = now + RESYNC_PARK_MS)), done.windows)
+    }
+
     @Test fun reParkingAParkedRowRestartsItLater() {
         val p = ResyncWindow(now - 7_000, now - 7_000, notBeforeMs = now - 1)
         val s = parkResyncRow(state(p), p, tsMs = now - 7_000, id = 40, nowMs = now)
