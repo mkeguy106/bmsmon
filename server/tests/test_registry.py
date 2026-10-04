@@ -38,3 +38,19 @@ async def test_maintenance_runs_the_backfill(app):
     async with app.state.pool.acquire() as conn:
         await _orphan(conn, int(time.time() * 1000))
     assert (await run_maintenance(app.state.pool))["registry"] == 1
+
+
+async def test_a_failing_registry_insert_never_fails_the_ingest(app, client, monkeypatch):
+    import json
+    from tests.test_ingest_jwt import _enroll_device, _keypair, _payload, _token
+    monkeypatch.setattr(q, "_REGISTER_ADDRESSES", "INSERT INTO no_such_table VALUES ($1::text[])")
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    body = json.dumps(_payload()).encode()
+    r = await client.post("/api/v1/ingest", content=body,
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body)}",
+                                   "Content-Type": "application/json"})
+    assert r.status_code == 200
+    assert r.json()["accepted"] == 1
+    async with app.state.pool.acquire() as conn:
+        assert await conn.fetchval("SELECT count(*) FROM samples") == 1

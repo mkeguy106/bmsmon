@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 
 import asyncpg
@@ -74,6 +75,9 @@ ON CONFLICT (address) DO NOTHING
 """
 
 
+logger = logging.getLogger(__name__)
+
+
 async def insert_samples(conn: asyncpg.Connection, rows: list[dict]) -> int:
     """Insert sample rows; returns the count of rows actually inserted (duplicates
     already present under the samples PK are skipped and NOT counted)."""
@@ -81,7 +85,14 @@ async def insert_samples(conn: asyncpg.Connection, rows: list[dict]) -> int:
         return 0
     ts_all = [r["ts_ms"] for r in rows]
     await ensure_partitions_for_range(conn, min(ts_all), max(ts_all))
-    await conn.execute(_REGISTER_ADDRESSES, sorted({r["address"] for r in rows}))
+    # A registry failure must never fail the ingest: run it in a savepoint so a database
+    # error rolls back only the registry write (the maintenance backfill repairs the gap).
+    try:
+        async with conn.transaction():
+            await conn.execute(_REGISTER_ADDRESSES, sorted({r["address"] for r in rows}))
+    except Exception:
+        logger.warning("insert_samples: registry insert failed; samples still stored, "
+                       "maintenance will backfill")
     cols = [[r[f] for r in rows] for f in _INSERT_FIELDS]
     return await conn.fetchval(_INSERT, *cols)
 
