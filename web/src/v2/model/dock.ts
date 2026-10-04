@@ -12,6 +12,8 @@ export interface DockCap {
   pct: number | null; detail: string; band: "ok" | "warn" | "crit";
   /** The bound is a pack's last-known reading (it is not live), so the true value may be lower. */
   lastKnown: boolean;
+  /** No pack of the base is live: the bound is history, rendered muted, never in an alert colour. */
+  offline: boolean;
 }
 
 /** Pair capacity: the weaker pack ends the trip; per-pack detail keeps A/B visible. The bound
@@ -29,12 +31,18 @@ export function dockCapacity(packs: BasePack[]): DockCap {
     : "";
   // Band from the RAW min soc (pre-rounding) so CAP and socColor agree at boundaries.
   const band = rawMin == null || rawMin > 30 ? "ok" : rawMin > 15 ? "warn" : "crit";
-  return { pct, detail, band, lastKnown: rawMin != null && packs.some((p) => !p.connected) };
+  return {
+    pct, detail, band,
+    lastKnown: rawMin != null && packs.some((p) => !p.connected),
+    offline: !packs.some((p) => p.connected),
+  };
 }
 
-/** One flow line: direction from the summed pair current, magnitude vs the 600 W full scale. */
-export function dockFlow(packs: BasePack[]): DockFlow {
+/** One flow line: direction from the summed pair current, magnitude vs the 600 W full scale.
+ *  Null when no pack is live: there is no flow to report, and "0 W IDLE" would read live. */
+export function dockFlow(packs: BasePack[]): DockFlow | null {
   const live = packs.filter((p) => p.connected);
+  if (live.length === 0) return null;
   const current = live.reduce((s, p) => s + (p.item.current_a ?? 0), 0);
   const watts = Math.round(Math.abs(live.reduce((s, p) => s + (p.item.power_w ?? 0), 0)));
   const frac = Math.min(1, watts / PAIR_FLOW_FULL_W);

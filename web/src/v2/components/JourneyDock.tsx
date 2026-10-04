@@ -56,11 +56,15 @@ export function JourneyDock({ summary, packs, distUnit }: {
       <div style={rowStyle}>
         <span style={eyebrow}>CAP</span>
         <div style={barStyle}>
-          {cap.pct != null && <Fill frac={cap.pct / 100} background={CAP_FILL[cap.band]} />}
+          {/* No live pack: the last-known bound is history, so it is muted (as the rail mutes
+              a stale SOC), never an ok/warn/crit colour that reads live. */}
+          {cap.pct != null && (
+            <Fill frac={cap.pct / 100} background={cap.offline ? "var(--text-4)" : CAP_FILL[cap.band]} />
+          )}
         </div>
         {/* "≤": the bound is a pack's last-known reading; still wired in series, it can only
             have discharged since (WEB-14). */}
-        <span style={valStyle}
+        <span style={{ ...valStyle, ...(cap.offline && { color: "var(--text-3)" }) }}
           title={cap.lastKnown ? "Includes a pack's last-known reading: it may be lower now" : undefined}>
           {cap.pct != null ? `${cap.lastKnown ? "≤" : ""}${cap.pct}%` : "—"}
           {cap.detail && <small style={{ color: "var(--text-3)", fontWeight: 400, fontSize: 10 }}> {cap.detail}</small>}
@@ -69,11 +73,15 @@ export function JourneyDock({ summary, packs, distUnit }: {
       <div style={rowStyle}>
         <span style={eyebrow}>FLOW</span>
         <div style={barStyle}>
-          {flow.kind !== "idle" && <Fill frac={flow.frac} background={FLOW_FILL[flow.kind]} />}
+          {flow && flow.kind !== "idle" && <Fill frac={flow.frac} background={FLOW_FILL[flow.kind]} />}
         </div>
         <span style={valStyle}>
-          {flow.watts} W
-          <small style={{ color: "var(--text-3)", fontWeight: 400, fontSize: 10 }}> {FLOW_LABEL[flow.kind]}</small>
+          {flow ? (
+            <>
+              {flow.watts} W
+              <small style={{ color: "var(--text-3)", fontWeight: 400, fontSize: 10 }}> {FLOW_LABEL[flow.kind]}</small>
+            </>
+          ) : "—"}
         </span>
       </div>
     </div>
