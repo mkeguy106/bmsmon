@@ -262,7 +262,7 @@ async def enroll(body: EnrollBody, request: Request, pool=Depends(get_pool)):
 async def _touch(conn, request: Request, device_id: str, *, seen: bool) -> None:
     """Device bookkeeping: the app build that sent the request (DATA-28) and, with
     seen=True, devices.last_seen_at. last_seen_at is the deadman's ingest signal
-    (/api/v1/health/detail) and the device list's "last upload", so only a live ingest
+    (/api/v1/health/detail) and the device list's last-upload time, so only a live ingest
     batch that stored samples passes seen=True. Pure bookkeeping: any error is logged and
     swallowed, and the savepoint keeps a failure from aborting a caller's transaction."""
     user_agent = clean_user_agent(request.headers.get("user-agent"))
@@ -342,7 +342,7 @@ async def ingest(request: Request, pool=Depends(get_pool)):
             # upsert_battery above registered every address: skip insert_samples' own write.
             accepted = await q.insert_samples(conn, rows, registered=True)
         # devices.last_seen_at is the deadman's ingest signal (/api/v1/health/detail) and
-        # the device list's "last upload". Only a LIVE batch (batch_seq >= 0) that got at
+        # the device list's last-upload time. Only a LIVE batch (batch_seq >= 0) that got at
         # least one valid sample to the insert refreshes it: an all-dropped batch is a
         # pipeline losing data, and an import is old history. A batch of duplicates still
         # counts (accepted == 0, but a healthy re-send). Throttled to once per device per
