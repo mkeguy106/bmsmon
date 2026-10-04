@@ -102,12 +102,12 @@ function remainingAh(i: FleetItem): number | null {
   return ah != null && Number.isFinite(ah) && ah >= 0 ? ah : null;
 }
 
-/** Synced params only when every band edge is finite and > 0, else the seed. range.ts gives
+/** Synced params only when every band edge is finite and > 0 with lo <= hi, else the seed. range.ts gives
  *  no estimate for a bad band, and a pack missing from the min could be the weaker one. */
 function validParams(p: RangeParams | undefined): RangeParams {
   if (p == null) return SEED_RANGE_PARAMS;
   const ok = [p.whPerDay, p.activeW, p.whPerMile].every((b) =>
-    b != null && Number.isFinite(b.lo) && Number.isFinite(b.hi) && b.lo > 0 && b.hi > 0);
+    b != null && Number.isFinite(b.lo) && Number.isFinite(b.hi) && b.lo > 0 && b.hi > 0 && b.lo <= b.hi);
   return ok ? p : SEED_RANGE_PARAMS;
 }
 

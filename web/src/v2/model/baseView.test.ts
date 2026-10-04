@@ -80,6 +80,8 @@ describe("baseView range", () => {
       { ...SEED_RANGE_PARAMS, whPerDay: { lo: 78, hi: NaN } },
       { ...SEED_RANGE_PARAMS, activeW: { lo: -5, hi: 97.5 } },
       { ...SEED_RANGE_PARAMS, whPerMile: { lo: 51, hi: Infinity } },
+      { ...SEED_RANGE_PARAMS, whPerMile: { lo: 80, hi: 40 } },   // inverted band
+      { ...SEED_RANGE_PARAMS, whPerDay: { lo: 200, hi: 100 } },
     ];
     for (const p of bad) {
       const v = baseView(base({ remaining_ah: 10 }, { remaining_ah: 55 }), ctx({ rangeParams: new Map([["A", p]]) }));
