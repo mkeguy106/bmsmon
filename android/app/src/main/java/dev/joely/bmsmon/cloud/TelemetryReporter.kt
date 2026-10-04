@@ -94,6 +94,11 @@ class TelemetryReporter(
     private val reportingEnabled: Boolean
         get() = cachedSettings.let { it != null && it.cloudEnabled && it.enrolled && it.deviceId != null }
 
+    // DATA-20: the clock correction on token iat/exp, learned from the app's own responses
+    // (nextSigningOffsetMs). Shared by every stream; memory only. Never applied to a sample's time.
+    @Volatile private var signingOffsetMs = 0L
+    @Volatile private var lastAuthLog: String? = null
+
     init {
         // Keep the settings snapshot fresh. DataStore emits the current value on collect, so the
         // gate is correct within milliseconds of construction (before that, report() drops — the
@@ -214,7 +219,9 @@ class TelemetryReporter(
                 }
                 // seq = -1 marks this as an import batch; the server ignores seq ordering for imports.
                 val body = CloudJson.encodeBatch(seq = -1, rows = rows)
-                val result = postSigned(ingestUrl, p.deviceId, body).result
+                val outcome = postSigned(ingestUrl, p.deviceId, body)
+                noteOutcome(outcome)
+                val result = outcome.result
                 val d = decideUpload(result, poisonSkips, authFailed = false)
                 poisonSkips = d.poisonSkipsSinceOk
                 when (d.step) {
@@ -260,6 +267,34 @@ class TelemetryReporter(
     }
 
     /**
+     * Fold one response into the shared signing correction ([nextSigningOffsetMs]), and log a rejected
+     * sign-in once per distinct reason. Synchronized: the import and the upload loop both report here.
+     */
+    @Synchronized
+    private fun noteOutcome(o: PostOutcome) {
+        val prevOffsetMs = signingOffsetMs
+        signingOffsetMs = nextSigningOffsetMs(prevOffsetMs, o)
+        if (o.result == PostResult.AuthFailed) {
+            val key = "${o.code}|${o.fromApi}|${o.authReason}|${o.detail}|${signingOffsetMs / 1000}"
+            if (key != lastAuthLog) {
+                lastAuthLog = key
+                Log.w(
+                    TAG,
+                    "upload: HTTP ${o.code} from ${if (o.fromApi) "the api" else "an intermediary"}: " +
+                        "${o.authReason ?: "-"} (${o.detail ?: "-"}); " +
+                        "server clock minus phone clock ${o.skewMs?.let { "${it / 1000} s" } ?: "unknown"}; " +
+                        "signing correction now ${signingOffsetMs / 1000} s",
+                )
+            }
+        } else if (o.result == PostResult.Ok) {
+            lastAuthLog = null
+            if (prevOffsetMs != 0L && signingOffsetMs == 0L) {
+                Log.i(TAG, "upload: the server's clock agrees with this phone again — signing correction cleared")
+            }
+        }
+    }
+
+    /**
      * Sign [body] with the device key and POST [wire] (its gzipped form) to [url]. Classified by
      * HTTP status, plus what the response said beyond it ([outcomeOf]). [wire] defaults to gzipping
      * here; the upload loop passes it precomputed so the same bytes feed both the request body and
@@ -276,8 +311,10 @@ class TelemetryReporter(
         return try {
             // Sign the PLAINTEXT body (the server's body-hash is over the decompressed JSON), then
             // send the gzipped wire bytes as a transport layer (~85% saved on this repetitive JSON).
+            // The token is dated on the server's clock when one has been learned (DATA-20); the skew
+            // is still measured against this phone's own clock.
             val sentAt = System.currentTimeMillis()
-            val token = Jwt.signEs256(key, deviceId, body, sentAt)
+            val token = Jwt.signEs256(key, deviceId, body, tokenTimeMs(sentAt, signingOffsetMs))
             val req = Request.Builder()
                 .url(url)
                 .header("Authorization", "Bearer $token")
@@ -330,7 +367,9 @@ class TelemetryReporter(
                 // the config stays pending instead of being thrown away.
                 if (conn.online.value && SystemClock.elapsedRealtime() >= configRetryAt) {
                     p.pendingTempConfig?.let { cfg ->
-                        val result = postSigned(CloudConfig(base).configUrl, p.deviceId, cfg.toByteArray()).result
+                        val outcome = postSigned(CloudConfig(base).configUrl, p.deviceId, cfg.toByteArray())
+                        noteOutcome(outcome)
+                        val result = outcome.result
                         val d = decideUpload(result, configPoisonSkips, authFailed)
                         configPoisonSkips = d.poisonSkipsSinceOk
                         when (d.step) {
@@ -383,7 +422,9 @@ class TelemetryReporter(
                 // rate indicator records the actual wire bytes, not the plaintext size.
                 val body = CloudJson.encodeBatch(seq, rows.map { it.payload })
                 val wire = gzip(body)
-                val result = postSigned(CloudConfig(base).ingestUrl, p.deviceId, body, wire).result
+                val outcome = postSigned(CloudConfig(base).ingestUrl, p.deviceId, body, wire)
+                noteOutcome(outcome)
+                val result = outcome.result
                 val (nextFault, faultAction) = stepHeadFault(
                     headFault, rows.first().id, rows.size, result, SystemClock.elapsedRealtime(), BATCH,
                     tailId = rows.last().id,
