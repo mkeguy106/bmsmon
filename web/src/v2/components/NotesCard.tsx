@@ -1,18 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { getNotes, putNote } from "../../api";
-
-type SaveState = "idle" | "saving" | "saved" | "failed";
+import {
+  NOTE_MAX_CHARS, NOTE_STATUS, failureKind, noteSaveBlocked, type NoteSaveState,
+} from "../model/formErrors";
 
 /**
  * Editable per-base notes, backed by GET/POST /web/notes. On mount (and when
  * `baseId` changes) the note for `baseId` is loaded; edits debounce ~800 ms
  * before a `putNote`. The local text is authoritative while editing — a late
- * GET never clobbers in-progress typing (guarded by `dirty`).
+ * GET never clobbers in-progress typing (guarded by `dirty`). The textarea holds the server's
+ * NOTE_MAX_CHARS cap and counts toward it; a note the server refuses (422) says so instead of
+ * "retry", since the same text would fail again.
  */
 export function NotesCard({ baseId }: { baseId: string }) {
   const [text, setText] = useState("");
-  const [status, setStatus] = useState<SaveState>("idle");
+  const [status, setStatus] = useState<NoteSaveState>("idle");
   const dirty = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Tracks the not-yet-fired debounced save so it can be flushed (instead of
@@ -51,23 +54,29 @@ export function NotesCard({ baseId }: { baseId: string }) {
   const onChange = (v: string) => {
     setText(v);
     dirty.current = true;
-    setStatus("saving");
     if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
+    pendingSave.current = null;
+    // Over the cap (maxLength stops typing past it; this covers anything that slips by):
+    // the server would refuse it, so nothing is sent until it is trimmed.
+    if (noteSaveBlocked(v)) { setStatus("refused"); return; }
+    setStatus("saving");
     const target = baseId;
     pendingSave.current = { base: target, body: v };
     timer.current = setTimeout(() => {
       putNote(target, v)
         .then(() => { if (mounted.current && target === baseId) setStatus("saved"); })
-        .catch(() => { if (mounted.current && target === baseId) setStatus("failed"); });
+        .catch((e) => {
+          if (mounted.current && target === baseId) {
+            setStatus(failureKind(e) === "refused" ? "refused" : "failed");
+          }
+        });
       pendingSave.current = null;
     }, 800);
   };
 
-  const statusText =
-    status === "saving" ? "saving…" :
-    status === "saved" ? "saved" :
-    status === "failed" ? "save failed — retry" : "";
-  const statusColor = status === "failed" ? "var(--live)" : "var(--text-4)";
+  const statusText = NOTE_STATUS[status];
+  const statusColor = status === "failed" || status === "refused" ? "var(--live)" : "var(--text-4)";
 
   return (
     <div className="card">
@@ -80,8 +89,13 @@ export function NotesCard({ baseId }: { baseId: string }) {
         onChange={(e) => onChange(e.target.value)}
         placeholder="Maintenance log, install notes, quirks…"
         rows={4}
+        maxLength={NOTE_MAX_CHARS}
         style={textareaStyle}
       />
+      <div className="mono" style={{ fontSize: 10, textAlign: "right", marginTop: 4,
+        color: text.length >= NOTE_MAX_CHARS ? "var(--warn)" : "var(--text-4)" }}>
+        {text.length}/{NOTE_MAX_CHARS}
+      </div>
     </div>
   );
 }

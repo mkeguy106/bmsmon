@@ -1,15 +1,15 @@
-import type { Base, BasePack, BaseStatus } from "../fleet";
-import { DAILY_DRIVER_BASE, baseLastSeenMs, isCharging } from "../fleet";
+import type { ReactNode } from "react";
+import type { Base, BaseStatus } from "../fleet";
+import { DAILY_DRIVER_BASE } from "../fleet";
 import { Ago } from "../../components/Ago";
-import type { FleetItem } from "../../types";
-import { estimatePackRange, minRange, SEED_RANGE_PARAMS, type PackRange, type RangeParams } from "../../range";
+import type { BaseView, FlowDir, PackView, RangeState, ThermalView } from "../model/baseView";
 import type { TripSummary } from "../model/journey";
 import type { StageReason } from "../model/stageBase";
 import { Ring } from "./Ring";
-import { StatTile, CellTiles, Chip } from "./Atoms";
+import { StatTile, CellTiles, Chip, LastKnownNote } from "./Atoms";
 import { sohColor } from "../colors";
-
-const THERMAL_C = 44;
+import { fmtDist, type DistUnit } from "../../units";
+import { floorBand } from "../../range";
 
 const STATUS_COLOR: Record<BaseStatus, string> = {
   "in-use": "var(--ok)", charging: "var(--warn)", backup: "var(--ok)",
@@ -18,6 +18,10 @@ const STATUS_COLOR: Record<BaseStatus, string> = {
 const STATUS_TAG: Record<BaseStatus, string> = {
   "in-use": "IN USE", charging: "CHARGING", backup: "BACKUP",
   spares: "SPARES", offline: "OFFLINE",
+};
+
+const FLOW_LABEL: Record<FlowDir, string> = {
+  draw: "DRAW NOW", charge: "CHARGE IN", regen: "REGEN IN", idle: "FLOW",
 };
 
 function roleText(base: Base): string {
@@ -41,20 +45,26 @@ function num(v: number | null | undefined, digits = 0): string {
   return v == null || !Number.isFinite(v) ? "—" : v.toFixed(digits);
 }
 
-function PackCard({ item, letter, tempF }: { item: FleetItem; letter: string; tempF: boolean }) {
-  const connected = true; // rendered only for connected packs (offline handled by ring opacity upstream)
+/** One pack. A pack that is not live keeps its LAST-KNOWN reading, muted and timestamped
+ *  (the rule the rail, the Health hero and v1 follow): hiding it hid the weaker pack (WEB-14). */
+function PackCard({ pack, tempF }: { pack: PackView; tempF: boolean }) {
+  const { item, letter, live } = pack;
   return (
-    <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 12 }}>
+    <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 12,
+      opacity: live ? 1 : 0.55 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span className="mono" style={{ fontSize: 12, fontWeight: 600 }}>{item.alias ?? `Pack ${letter}`}</span>
         <span style={{ width: 8, height: 8, borderRadius: "50%", background: sohColor(item.soh) }}
           title={item.soh != null ? `SOH ${Math.round(item.soh)}%` : "SOH —"} />
       </div>
       <div style={{ display: "flex", justifyContent: "center" }}>
-        <Ring soc={item.soc} power={item.power_w} current={item.current_a} connected={connected} size={132} />
+        <Ring soc={item.soc} power={item.power_w} current={item.current_a} connected={live} size={132} />
       </div>
-      <div className="mono" style={{ fontSize: 12, textAlign: "center", color: "var(--text-3)" }}>
-        {num(item.power_w)} W · {num(item.current_a, 1)} A
+      <div className="mono" style={{ fontSize: 12, textAlign: "center",
+        color: live ? "var(--text-3)" : "var(--text-4)" }}>
+        {live
+          ? `${num(item.power_w)} W · ${num(item.current_a, 1)} A`
+          : <>DISCONNECTED · last seen <Ago tsMs={item.ts_ms} /></>}
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
         <StatTile label="Capacity" value={`${num(item.remaining_ah, 1)}/${num(item.full_charge_ah, 0)} Ah`} />
@@ -67,7 +77,7 @@ function PackCard({ item, letter, tempF }: { item: FleetItem; letter: string; te
   );
 }
 
-function FlowTile({ label, value, sub }: { label: string; value: string; sub?: string }) {
+function FlowTile({ label, value, sub }: { label: string; value: string; sub?: ReactNode }) {
   return (
     <div className="card" style={{ padding: 12, flex: 1 }}>
       <div className="eyebrow">{label}</div>
@@ -77,50 +87,53 @@ function FlowTile({ label, value, sub }: { label: string; value: string; sub?: s
   );
 }
 
-export function CommandStage({ base, reason = null, onClearPin, rangeParams, tempF, mobile, drivenToday }: {
-  base: Base; reason?: StageReason | null; onClearPin?: () => void;
-  rangeParams: Map<string, RangeParams>; tempF: boolean; mobile: boolean;
-  drivenToday: TripSummary;
-}) {
-  const live = base.packs.filter((p) => p.connected);
-  const charging = base.status === "charging";
-  const hot = live.some((p) => (p.item.temp_c ?? -Infinity) >= THERMAL_C);
+/** The temperature banner, from the same synced zone ladder as the Alerts view (WEB-31). */
+function ThermalBanner({ t, tempF }: { t: ThermalView; tempF: boolean }) {
+  const color = t.severity === "critical" ? "var(--live)" : "var(--warn)";
+  return (
+    <div className="card" role="status" style={{ padding: "10px 14px", borderColor: color,
+      display: "flex", flexDirection: "column", gap: 4 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span style={{ width: 8, height: 8, borderRadius: "50%", background: color, flexShrink: 0 }} />
+        <span className="mono" style={{ fontSize: 12, fontWeight: 600, color }}>
+          {t.title} · pack {t.letter} at {fmtTemp(t.tempC, tempF)}
+        </span>
+      </div>
+      <span style={{ fontSize: 12, color: "var(--text-2)" }}>{t.msg}</span>
+    </div>
+  );
+}
 
-  // Base-level flow: total watts across the connected pair.
-  const totalW = live.reduce((s, p) => s + Math.abs(p.item.power_w ?? 0), 0);
-  const flowLabel = base.status === "in-use" ? "DRAW NOW" : charging ? "CHARGE IN" : "FLOW";
-  const flowValue = live.length === 0 ? "—" : `${Math.round(totalW)} W`;
-
-  // Runtime band (weaker pack bounds) from range.ts, or time-to-full when charging.
-  const ranges: PackRange[] = live
-    .map((p) => estimatePackRange(isCharging(p.item), p.item.remaining_ah,
-      rangeParams.get(p.item.address) ?? SEED_RANGE_PARAMS))
-    .filter((r): r is PackRange => r != null);
-  const etaFull = live.reduce<number | null>((mx, p) => {
-    const e = p.item.eta_full_min;
-    return e != null && Number.isFinite(e) ? Math.max(mx ?? 0, e) : mx;
-  }, null);
-  let runtimeLabel = "EST. RUNTIME";
-  let runtimeValue = "—";
-  if (charging) {
-    runtimeLabel = "TIME TO FULL";
-    runtimeValue = fmtEta(etaFull);
-  } else if (ranges.length > 0) {
-    const r = minRange(ranges);
-    runtimeValue = `~${Math.round(r.activeHLo)}–${Math.round(r.activeHHi)}h`;
+/** Runtime band (the weaker pack bounds it; floored, never shown above the estimate) or
+ *  time-to-full while charging, flagged partial while a pack's own time to full is unknown. */
+function runtimeTile(range: RangeState): { label: string; value: string; sub?: ReactNode } {
+  if (range.kind === "charging") {
+    const p = range.partial;
+    return {
+      label: "TIME TO FULL", value: fmtEta(range.etaFullMin),
+      sub: p ? <>partial · excl. {p.letter} · last seen <Ago tsMs={p.tsMs} /></> : undefined,
+    };
   }
+  if (range.kind !== "estimate") return { label: "EST. RUNTIME", value: "—" };
+  const r = range.range;
+  return {
+    label: "EST. RUNTIME", value: `~${floorBand(r.activeHLo, r.activeHHi, 1)}h`,
+    sub: range.lastKnown ? <LastKnownNote lk={range.lastKnown} /> : undefined,
+  };
+}
+
+export function CommandStage({ base, view, reason = null, onClearPin, tempF, distUnit, mobile, drivenToday }: {
+  base: Base; view: BaseView; reason?: StageReason | null; onClearPin?: () => void;
+  tempF: boolean; distUnit: DistUnit; mobile: boolean; drivenToday: TripSummary;
+}) {
+  // From the view, like the watts it labels: base.status reads a regen burst as charging.
+  const flowLabel = FLOW_LABEL[view.flowDir ?? "idle"];
+  const flowValue = view.flowW == null ? "—" : `${Math.round(view.flowW)} W`;
+  const runtime = runtimeTile(view.range);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      {hot && (
-        <div className="card" style={{ padding: "10px 14px", borderColor: "var(--warn)",
-          display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--warn)" }} />
-          <span className="mono" style={{ fontSize: 12, color: "var(--warn)" }}>
-            Thermal warning — a staged pack is at or above {fmtTemp(THERMAL_C, tempF)}
-          </span>
-        </div>
-      )}
+      {view.thermal && <ThermalBanner t={view.thermal} tempF={tempF} />}
 
       <div className="card" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
         {/* Wraps: with PINNED + AUTO (or LOW) the row is wider than a 390 px phone. */}
@@ -150,24 +163,24 @@ export function CommandStage({ base, reason = null, onClearPin, rangeParams, tem
           </span>
         </div>
 
+        {view.range.kind === "offline" && (
+          <div className="mono" style={{ fontSize: 13, color: "var(--text-4)" }}>
+            Base {base.id} is disconnected.
+            {view.range.lastSeenMs != null && <> Last seen <Ago tsMs={view.range.lastSeenMs} />.</>}
+          </div>
+        )}
+
         {/* Real phone widths cannot fit two full pack columns side by side — stack them. */}
         <div style={{ display: "flex", gap: 20, flexDirection: mobile ? "column" : "row" }}>
-          {live.length === 0 ? (
-            <div className="mono" style={{ fontSize: 13, color: "var(--text-4)", padding: "24px 0" }}>
-              Base {base.id} is disconnected.
-              {baseLastSeenMs(base) != null && <> Last seen <Ago tsMs={baseLastSeenMs(base)!} />.</>}
-            </div>
-          ) : (
-            live.map((p) => <PackCard key={p.item.address} item={p.item} letter={p.letter} tempF={tempF} />)
-          )}
+          {view.packs.map((p) => <PackCard key={p.item.address} pack={p} tempF={tempF} />)}
         </div>
 
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
           <FlowTile label={flowLabel} value={flowValue} />
-          <FlowTile label={runtimeLabel} value={runtimeValue} />
+          <FlowTile label={runtime.label} value={runtime.value} sub={runtime.sub} />
           <FlowTile label="DRIVEN TODAY"
-            value={drivenToday.miles > 0.05 ? `${drivenToday.activeMiles.toFixed(1)} mi` : "—"}
-            sub={drivenToday.transitMiles > 0.05 ? `+${drivenToday.transitMiles.toFixed(1)} transit` : undefined} />
+            value={drivenToday.miles > 0.05 ? fmtDist(drivenToday.activeMiles, distUnit) : "—"}
+            sub={drivenToday.transitMiles > 0.05 ? `+${fmtDist(drivenToday.transitMiles, distUnit)} transit` : undefined} />
         </div>
       </div>
     </div>

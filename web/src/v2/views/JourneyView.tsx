@@ -2,7 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { TempUnit } from "../../temp";
 import { useLocalStorage } from "../../useLocalStorage";
-import { isCharging, type Base } from "../fleet";
+import type { Base } from "../fleet";
 import type { FleetData } from "../useFleetData";
 import { useTrack } from "../useTrack";
 import { useCartoKey } from "../useCartoKey";
@@ -18,11 +18,12 @@ import { Ago } from "../../components/Ago";
 import { JourneyMap } from "../components/JourneyMap";
 import { EnergyDistanceChart } from "../components/EnergyDistanceChart";
 import { EfficiencyCard } from "../components/EfficiencyCard";
-import { efficiencySummary } from "../model/efficiency";
-import { SEED_RANGE_PARAMS } from "../../range";
+import { efficiencySummary, everyPackLive, projectionLive } from "../model/efficiency";
+import { baseView } from "../model/baseView";
 import { Ring } from "../components/Ring";
 import { Segmented } from "../components/Segmented";
 import { JourneyDock } from "../components/JourneyDock";
+import { fmtDist, type DistUnit } from "../../units";
 import { ShareDialog } from "../components/ShareDialog";
 
 // ── Persisted control state ────────────────────────────────────────────────
@@ -126,9 +127,9 @@ const overlayChrome: CSSProperties = {
   borderRadius: 6, padding: "6px 10px", fontSize: 11, letterSpacing: ".12em", zIndex: 1000,
 };
 
-export function JourneyView({ data, base, theme, unit: _unit, mobile, mapMetric }: {
+export function JourneyView({ data, base, theme, unit: _unit, mobile, mapMetric, distUnit }: {
   data: FleetData; base: Base | null; theme: "dark" | "light"; unit: TempUnit; mobile: boolean;
-  mapMetric: "power" | "soc";
+  mapMetric: "power" | "soc"; distUnit: DistUnit;
 }) {
   const [dateSt, setDate] = useLocalStorage<JourneyDate>(
     "bmsmon-v2-journey", defaultJourneyDate, journeyDateCodec, "session");
@@ -220,18 +221,23 @@ export function JourneyView({ data, base, theme, unit: _unit, mobile, mapMetric 
   const cur = hi != null ? points[hi] : undefined;
   const curKind: SegKind = hi != null ? segKinds[hi] ?? "idle" : "idle";
 
-  // ── Efficiency: this outing's real cost/mile vs the learned band (+ live projection). ──
-  const connected = base?.packs.filter((p) => p.connected) ?? [];
-  const anyCharging = connected.some((p) => isCharging(p.item));
+  // ── Efficiency: this outing's real cost/mile vs the learned band (+ live projection),
+  //    from the base view-model: usable energy is the series bound over live and
+  //    last-known packs (WEB-15), and the memo inputs are stable. Temperature isn't read
+  //    here, so no temperature config is passed. ──
+  const view = useMemo(
+    () => (base ? baseView(base, { rangeParams: data.rangeParams, tempConfig: null }) : null),
+    [base, data.rangeParams]);
+  const charging = view?.charging ?? false;
   const eff = useMemo(() => efficiencySummary({
     points, activeMiles: summary.activeMiles,
-    packParams: connected.map((p) => data.rangeParams.get(p.item.address) ?? SEED_RANGE_PARAMS),
-    remainingAh: connected
-      .map((p) => p.item.remaining_ah)
-      .filter((ah): ah is number => ah != null && Number.isFinite(ah) && ah > 0),
-    charging: anyCharging, live: isLive,
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [points, summary.activeMiles, connected, data.rangeParams, anyCharging, isLive]);
+    packParams: view?.packParams ?? [], usableWh: view?.usableWh ?? null,
+    charging,
+    // No live pack: no projection, matching Command's offline state.
+    live: projectionLive(isLive, view),
+    // Today's rate only while every pack is live and in the track (final review C1).
+    packCount: view?.packs.length ?? 0, everyPackLive: everyPackLive(view),
+  }), [points, summary.activeMiles, view, charging, isLive]);
 
   const mapHeight = 480;
 
@@ -342,7 +348,7 @@ export function JourneyView({ data, base, theme, unit: _unit, mobile, mapMetric 
               </span>
             )}
           </div>
-          <JourneyDock summary={summary} packs={base?.packs ?? []} />
+          <JourneyDock summary={summary} packs={base?.packs ?? []} distUnit={distUnit} />
         </>
       ) : (
         <>
@@ -384,10 +390,10 @@ export function JourneyView({ data, base, theme, unit: _unit, mobile, mapMetric 
               {/* Trip strip */}
               <div className="card" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 <div className="eyebrow" style={{ color: "var(--text-4)" }}>TRIP</div>
-                <Readout label="DISTANCE" value={`${summary.miles.toFixed(1)} mi`} />
+                <Readout label="DISTANCE" value={fmtDist(summary.miles, distUnit)} />
                 <div style={{ display: "flex", gap: 16 }}>
-                  <Readout label="ACTIVE" value={`${summary.activeMiles.toFixed(1)} mi`} />
-                  <Readout label="TRANSIT" value={`${summary.transitMiles.toFixed(1)} mi`} />
+                  <Readout label="ACTIVE" value={fmtDist(summary.activeMiles, distUnit)} />
+                  <Readout label="TRANSIT" value={fmtDist(summary.transitMiles, distUnit)} />
                 </div>
                 <Readout label="PEAK" value={`${Math.round(summary.peakW)} W`} />
               </div>
@@ -398,7 +404,10 @@ export function JourneyView({ data, base, theme, unit: _unit, mobile, mapMetric 
           {hasTrip ? (
             <>
               {st.dateMode === "day" ? (
-                <EfficiencyCard summary={eff} live={isLive} charging={anyCharging} />
+                <EfficiencyCard summary={eff} live={isLive} charging={charging} distUnit={distUnit}
+                  lastKnown={view?.usableLastKnown ?? null}
+                  noProjection={!isLive ? null : (view?.livePacks.length ?? 0) === 0 ? "offline"
+                    : view?.usableWh == null ? "no-capacity" : null} />
               ) : (
                 <div className="card mono" style={{ fontSize: 12, color: "var(--text-4)" }}>
                   Select a single day to see efficiency.
@@ -409,12 +418,12 @@ export function JourneyView({ data, base, theme, unit: _unit, mobile, mapMetric 
                 <div className="eyebrow" style={{ color: "var(--text-4)", marginBottom: 10 }}>
                   ENERGY OVER DISTANCE
                 </div>
-                <EnergyDistanceChart energy={energy} cursorIndex={hi} distUnit="mi" onHover={setHoverIndex} />
+                <EnergyDistanceChart energy={energy} cursorIndex={hi} distUnit={distUnit} onHover={setHoverIndex} />
                 {hi != null ? (
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 20, marginTop: 12 }}>
                     <Readout label="SOC" value={cur?.soc != null ? `${Math.round(cur.soc)}%` : "—"} />
                     <Readout label="DRAW" value={`${Math.round(Math.abs(cur?.power_w ?? 0))} W`} />
-                    <Readout label="DIST" value={`${(cumMi[hi] ?? 0).toFixed(2)} mi`} />
+                    <Readout label="DIST" value={fmtDist(cumMi[hi] ?? 0, distUnit, 2)} />
                     <Readout label="STATE" value={STATE_LABEL[curKind]} />
                   </div>
                 ) : (

@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FleetItem, Sample } from "./types";
-import { connectLive } from "./ws";
+import type { ProbeResult, Session } from "./liveLink";
+import { connectLive, STABLE_MS } from "./ws";
 
 const STALE_MS = 60_000;
+/** reconnectDelayMs(0, 1): the first backoff step, with the jitter pinned at its top. */
 const RECONNECT_MS = 1_500;
+const SNAPSHOT = { type: "snapshot", fleet: [{ address: "A", ts_ms: 1, soc: 50 }] };
 
 // Minimal mock WebSocket. Instances are recorded so tests can assert exactly
 // how many sockets were constructed (the WEB-2 leak symptom is an extra one).
@@ -18,7 +21,7 @@ class MockWebSocket {
   readyState = MockWebSocket.CONNECTING;
   onopen: (() => void) | null = null;
   onmessage: ((e: { data: string }) => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((e?: { code: number }) => void) | null = null;
   onerror: (() => void) | null = null;
   closeCalls = 0;
 
@@ -36,8 +39,11 @@ class MockWebSocket {
 
   // -- test helpers ---------------------------------------------------------
   fireOpen() { this.readyState = MockWebSocket.OPEN; this.onopen?.(); }
-  fireClose() { this.readyState = MockWebSocket.CLOSED; this.onclose?.(); }
+  /** 1006 (abnormal closure) is what a browser reports for a dropped or refused socket. */
+  fireClose(code = 1006) { this.readyState = MockWebSocket.CLOSED; this.onclose?.({ code }); }
   fireMessage(msg: unknown) { this.onmessage?.({ data: JSON.stringify(msg) }); }
+  /** open + first snapshot: a healthy connection. */
+  goLive() { this.fireOpen(); this.fireMessage(SNAPSHOT); }
 }
 
 let visibilityHandler: (() => void) | null = null;
@@ -45,20 +51,25 @@ let now = 0;
 
 // Advance both fake performance.now() and the fake timer queue together.
 const advance = (ms: number) => { now += ms; vi.advanceTimersByTime(ms); };
+// Let resolved probe promises run their .then callbacks.
+const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
 
 const sockets = () => MockWebSocket.instances;
 const lastSocket = () => MockWebSocket.instances[MockWebSocket.instances.length - 1];
 
-function setup() {
+function setup(probe: () => Promise<ProbeResult> = () => Promise.resolve({ type: "basic", status: 200 })) {
   const snapshots: FleetItem[][] = [];
   const samples: Sample[] = [];
   const statuses: boolean[] = [];
+  const sessions: Session[] = [];
+  const probeSpy = vi.fn(probe);
   const stop = connectLive(
     (f) => snapshots.push(f),
     (s) => samples.push(s),
     (c) => statuses.push(c),
+    { onSession: (s) => sessions.push(s), probe: probeSpy, random: () => 1 },
   );
-  return { snapshots, samples, statuses, stop };
+  return { snapshots, samples, statuses, sessions, probe: probeSpy, stop };
 }
 
 beforeEach(() => {
@@ -86,36 +97,40 @@ afterEach(() => {
 });
 
 describe("connectLive", () => {
-  it("connects, dispatches messages, and reports status", () => {
+  it("reports live on the first snapshot, not on open, and dispatches messages (WEB-26)", () => {
     const { snapshots, samples, statuses, stop } = setup();
     expect(sockets()).toHaveLength(1);
     expect(sockets()[0].url).toBe("ws://test.local/ws");
 
     sockets()[0].fireOpen();
-    expect(statuses).toEqual([true]);
+    expect(statuses).toEqual([]); // accepted, but nothing delivered yet
 
-    sockets()[0].fireMessage({ type: "snapshot", fleet: [{ address: "A", ts_ms: 1, soc: 50 }] });
+    sockets()[0].fireMessage(SNAPSHOT);
+    expect(statuses).toEqual([true]);
     expect(snapshots).toEqual([[{ address: "A", ts_ms: 1, soc: 50 }]]);
+    sockets()[0].fireMessage(SNAPSHOT);
+    expect(statuses).toEqual([true]); // once per connection
 
     sockets()[0].fireMessage({ type: "sample", address: "A", ts_ms: 2, soc: 51 });
     expect(samples).toEqual([{ address: "A", ts_ms: 2, soc: 51 }]); // "type" stripped
 
     sockets()[0].fireMessage({ type: "ping" }); // keepalive: no dispatch
-    expect(snapshots).toHaveLength(1);
+    expect(snapshots).toHaveLength(2);
     expect(samples).toHaveLength(1);
     stop();
   });
 
-  it("reconnects after the socket drops", () => {
+  it("reconnects on the first backoff step after a healthy socket drops", () => {
     const { statuses, samples, stop } = setup();
-    sockets()[0].fireOpen();
+    sockets()[0].goLive();
+    advance(STABLE_MS);
     sockets()[0].fireClose();
     expect(statuses).toEqual([true, false]);
+    advance(RECONNECT_MS - 1);
     expect(sockets()).toHaveLength(1); // reconnect is scheduled, not immediate
-
-    advance(RECONNECT_MS);
+    advance(1);
     expect(sockets()).toHaveLength(2);
-    sockets()[1].fireOpen();
+    sockets()[1].goLive();
     expect(statuses).toEqual([true, false, true]);
 
     sockets()[1].fireMessage({ type: "sample", address: "A", ts_ms: 3, soc: 49 });
@@ -123,10 +138,159 @@ describe("connectLive", () => {
     stop();
   });
 
+  // Final review minor 2: a server that crashes right after the snapshot must not be retried
+  // at the base step forever.
+  it("a socket that dies soon after its snapshot keeps the backoff growing", () => {
+    const { stop } = setup();
+    sockets()[0].goLive();
+    advance(STABLE_MS - 1);
+    sockets()[0].fireClose();        // failures 0 -> 1: next wait is the 3 s step
+    advance(RECONNECT_MS);
+    expect(sockets()).toHaveLength(1);
+    advance(RECONNECT_MS);
+    expect(sockets()).toHaveLength(2);
+    sockets()[1].goLive();
+    sockets()[1].fireClose();        // failures 1 -> 2: 6 s step
+    advance(6_000 - 1);
+    expect(sockets()).toHaveLength(2);
+    advance(1);
+    expect(sockets()).toHaveLength(3);
+    stop();
+  });
+
+  it("a socket that stays up for STABLE_MS resets the backoff to the base step", () => {
+    const { stop } = setup();
+    for (let i = 0; i < 3; i++) { lastSocket().fireClose(); advance(60_000); }
+    lastSocket().goLive();
+    advance(STABLE_MS);
+    const n = sockets().length;
+    lastSocket().fireClose();
+    advance(RECONNECT_MS);
+    expect(sockets()).toHaveLength(n + 1);
+    stop();
+  });
+
+  // Final review minor 1: replacing a zombie socket must drop LIVE until the new one delivers.
+  it("replacing a zombie socket on refocus reports not-live until the new socket delivers", () => {
+    const { statuses, stop } = setup();
+    sockets()[0].goLive();
+    expect(statuses).toEqual([true]);
+    advance(STALE_MS + 1);
+    visibilityHandler!();
+    expect(sockets()).toHaveLength(2);
+    expect(statuses).toEqual([true, false]);   // REST fallback may run meanwhile
+    sockets()[1].goLive();
+    expect(statuses).toEqual([true, false, true]);
+    stop();
+  });
+
+  // Re-review minor: open() on refocus detaches the old socket's onclose, so the stable-uptime
+  // reset must also apply there — a failure count from before hours of good uptime must not
+  // make the first retry after the machine wakes wait a grown backoff.
+  it("replacing a socket that stayed healthy for STABLE_MS starts the next failure at the base step", () => {
+    const { stop } = setup();
+    for (let i = 0; i < 3; i++) { lastSocket().fireClose(); advance(60_000); }
+    lastSocket().goLive();
+    advance(STABLE_MS + STALE_MS + 1);      // healthy long enough, then went quiet (zombie)
+    visibilityHandler!();                    // refocus replaces it
+    const n = sockets().length;
+    lastSocket().fireClose();                // the replacement fails at once
+    advance(3_000);                          // base step (1.5–3 s), not the grown 24 s
+    expect(sockets()).toHaveLength(n + 1);
+    stop();
+  });
+
+  it("backs off exponentially while sockets keep failing, caps at 60 s, and resets on a snapshot", () => {
+    const { statuses, stop } = setup();
+    // Each socket closes without delivering anything (random pinned to 1: the top of each step).
+    for (const [i, wait] of [3_000, 6_000, 12_000, 24_000, 48_000, 60_000, 60_000].entries()) {
+      lastSocket().fireClose();
+      advance(wait - 1);
+      expect(sockets()).toHaveLength(i + 1);
+      advance(1);
+      expect(sockets()).toHaveLength(i + 2);
+    }
+    expect(statuses).toEqual([]); // nothing was ever reported live
+    lastSocket().goLive(); // a snapshot that then stays up resets the backoff
+    advance(STABLE_MS);
+    lastSocket().fireClose();
+    advance(RECONNECT_MS);
+    expect(sockets()).toHaveLength(9);
+    stop();
+  });
+
+  // Review Focus: the server accepts, then closes 4401 at once (no identity). Not live, and
+  // the verdict is immediate rather than waiting out the backoff for a probe.
+  it("reads a 4401 close as an expired session at once, never live, with no probe", () => {
+    const { statuses, sessions, probe, stop } = setup();
+    sockets()[0].fireOpen();
+    sockets()[0].fireClose(4401);
+    expect(sessions).toEqual(["expired"]);
+    expect(statuses).toEqual([]);
+    expect(probe).not.toHaveBeenCalled();
+    stop();
+  });
+
+  it("treats a 1011 close (server error, database unavailable) as transient: backs off, never expired", async () => {
+    const { sessions, probe, statuses, stop } = setup(() => Promise.resolve({ type: "basic", status: 503 }));
+    sockets()[0].fireOpen();
+    sockets()[0].fireClose(1011);
+    expect(sessions).toEqual([]);
+    advance(3_000);
+    expect(sockets()).toHaveLength(2); // normal backoff step
+    lastSocket().fireClose(1011);
+    advance(6_000);
+    lastSocket().fireClose(1011);
+    expect(probe).toHaveBeenCalledTimes(1);
+    await flush();
+    expect(sessions).toEqual(["unreachable"]); // a 503 probe is never "expired"
+    expect(statuses).toEqual([]);
+    stop();
+  });
+
+  it("reads a 4403 close as signed in but not allowed", () => {
+    const { sessions, stop } = setup();
+    sockets()[0].fireOpen();
+    sockets()[0].fireClose(4403);
+    expect(sessions).toEqual(["forbidden"]);
+    stop();
+  });
+
+  it("probes the session after three sockets in a row deliver nothing", async () => {
+    const { sessions, probe, stop } = setup(() => Promise.resolve({ type: "opaqueredirect", status: 0 }));
+    sockets()[0].fireClose();
+    advance(3_000);
+    sockets()[1].fireClose();
+    advance(6_000);
+    expect(probe).not.toHaveBeenCalled();
+    sockets()[2].fireClose();
+    expect(probe).toHaveBeenCalledTimes(1);
+    await flush();
+    expect(sessions).toEqual(["expired"]);
+    stop();
+  });
+
+  it("reports the session ok again once a socket delivers a snapshot", () => {
+    const { sessions, stop } = setup();
+    sockets()[0].fireClose(4401);
+    advance(3_000);
+    sockets()[1].goLive();
+    expect(sessions).toEqual(["expired", "ok"]);
+    stop();
+  });
+
+  it("keeps a single probe in flight", () => {
+    const { probe, stop } = setup(() => new Promise<ProbeResult>(() => {}));
+    for (const wait of [3_000, 6_000, 12_000, 24_000]) { lastSocket().fireClose(); advance(wait); }
+    lastSocket().fireClose();
+    expect(probe).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
   it("visibility recovery does not leak an extra socket when the old onclose fires late (WEB-2)", () => {
     const { statuses, samples, stop } = setup();
     const old = sockets()[0];
-    old.fireOpen();
+    old.goLive();
     // Capture the handlers as they are when the close/message events are
     // already in flight (a real socket's queued events keep their callbacks).
     const oldClose = old.onclose;
@@ -141,7 +305,7 @@ describe("connectLive", () => {
     expect(old.closeCalls).toBeGreaterThanOrEqual(1);
     expect(sockets()).toHaveLength(2);
     const fresh = lastSocket();
-    fresh.fireOpen();
+    fresh.goLive();
     const statusCount = statuses.length;
 
     // THE BUG: the OLD socket's onclose fires asynchronously, after the new
@@ -166,7 +330,8 @@ describe("connectLive", () => {
   it("a replaced socket's onmessage does not dispatch (no duplicate stream)", () => {
     const { samples, stop } = setup();
     const first = sockets()[0];
-    first.fireOpen();
+    first.goLive();
+    advance(STABLE_MS);
     const firstMessage = first.onmessage; // in-flight callback reference
 
     // Normal drop → scheduled reconnect → replacement socket.
@@ -174,7 +339,7 @@ describe("connectLive", () => {
     advance(RECONNECT_MS);
     expect(sockets()).toHaveLength(2);
     const second = sockets()[1];
-    second.fireOpen();
+    second.goLive();
 
     second.fireMessage({ type: "sample", address: "A", ts_ms: 20, soc: 70 });
     expect(samples).toEqual([{ address: "A", ts_ms: 20, soc: 70 }]);
@@ -213,12 +378,66 @@ describe("connectLive", () => {
   it("stop() closes the socket and prevents any further reconnects", () => {
     const { statuses, stop } = setup();
     const sock = sockets()[0];
-    sock.fireOpen();
+    sock.goLive();
     stop();
     expect(sock.closeCalls).toBe(1);
     sock.fireClose(); // late close event after teardown
     expect(statuses).toEqual([true]); // no status flicker after stop
     advance(RECONNECT_MS * 2);
     expect(sockets()).toHaveLength(1); // nothing reconnected
+  });
+
+  // A slow probe must not paint a recovered link as broken: report("ok") fires only on a
+  // socket's first snapshot, so a late verdict would otherwise stick while LIVE is lit.
+  it("drops a probe verdict that lands after a socket delivered a snapshot", async () => {
+    let resolve: (p: ProbeResult) => void = () => {};
+    const { sessions, statuses, stop } = setup(() => new Promise<ProbeResult>((r) => { resolve = r; }));
+    for (const wait of [3_000, 6_000]) { lastSocket().fireClose(); advance(wait); }
+    lastSocket().fireClose(); // third failure: the probe is now in flight
+    advance(12_000);
+    lastSocket().goLive(); // the link recovers before the probe answers
+    expect(statuses).toEqual([true]);
+    resolve("network-error");
+    await flush();
+    expect(sessions).toEqual([]); // never "unreachable" while data flows
+    stop();
+  });
+
+  it("drops it even when the socket that recovered has closed again since", async () => {
+    let resolve: (p: ProbeResult) => void = () => {};
+    const { sessions, stop } = setup(() => new Promise<ProbeResult>((r) => { resolve = r; }));
+    for (const wait of [3_000, 6_000]) { lastSocket().fireClose(); advance(wait); }
+    lastSocket().fireClose();
+    advance(12_000);
+    lastSocket().goLive();
+    lastSocket().fireClose(); // healthy, then dropped: a snapshot still arrived after the probe began
+    resolve({ type: "opaqueredirect", status: 0 });
+    await flush();
+    expect(sessions).toEqual([]);
+    stop();
+  });
+
+  it("still reports a probe verdict when no snapshot arrived in the meantime", async () => {
+    let resolve: (p: ProbeResult) => void = () => {};
+    const { sessions, stop } = setup(() => new Promise<ProbeResult>((r) => { resolve = r; }));
+    for (const wait of [3_000, 6_000]) { lastSocket().fireClose(); advance(wait); }
+    lastSocket().fireClose();
+    advance(12_000);
+    lastSocket().fireClose(); // the next socket fails too
+    resolve("network-error");
+    await flush();
+    expect(sessions).toEqual(["unreachable"]);
+    stop();
+  });
+
+  it("stop() drops a session verdict that lands afterwards", async () => {
+    let resolve: (p: ProbeResult) => void = () => {};
+    const { sessions, stop } = setup(() => new Promise<ProbeResult>((r) => { resolve = r; }));
+    for (const wait of [3_000, 6_000]) { lastSocket().fireClose(); advance(wait); }
+    lastSocket().fireClose(); // third failure: the probe is now in flight
+    stop();
+    resolve("network-error");
+    await flush();
+    expect(sessions).toEqual([]);
   });
 });

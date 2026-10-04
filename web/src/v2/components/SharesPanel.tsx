@@ -1,5 +1,6 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { getShares, revokeShare, type ShareRow } from "../../api";
+import { revokeShareConfirm } from "../../adminConfirm";
 import { lastOpened, remainingShort, shareStatus } from "../model/shares";
 
 const errKind = (e: unknown): "auth" | "net" =>
@@ -26,10 +27,13 @@ export function SharesPanel() {
     .catch((e) => setLoadErr(errKind(e)));
   useEffect(() => { refresh(); }, []);
 
-  const revoke = (id: number) => revokeShare(id)
-    .then(() => { setActionErr(null); refresh(); })
-    .catch((e) => setActionErr(errKind(e) === "auth" ? AUTH_MSG
-      : "Couldn't revoke the share — check the connection and try again."));
+  const revoke = (s: ShareRow) => {
+    if (!window.confirm(revokeShareConfirm(s.name))) return;
+    revokeShare(s.id)
+      .then(() => { setActionErr(null); refresh(); })
+      .catch((e) => setActionErr(errKind(e) === "auth" ? AUTH_MSG
+        : "Couldn't revoke the share — check the connection and try again."));
+  };
 
   const statusCell = (s: ShareRow) => {
     const st = shareStatus(s, nowMs);
@@ -70,7 +74,7 @@ export function SharesPanel() {
                 </td>
                 <td style={{ textAlign: "right" }}>
                   {shareStatus(s, nowMs) === "active" && (
-                    <button style={btn} onClick={() => revoke(s.id)}>Revoke</button>
+                    <button style={btn} onClick={() => revoke(s)}>Revoke</button>
                   )}
                 </td>
               </tr>

@@ -1,6 +1,7 @@
 import { memo, useMemo } from "react";
 import type { MouseEvent } from "react";
 import type { EnergyPoint } from "../model/journey";
+import { distLabel, toDist as toUnit, type DistUnit } from "../../units";
 
 // Fixed viewBox: the SVG scales to its container via width:100%, preserving aspect ratio.
 const VB_W = 600;
@@ -9,7 +10,6 @@ const PAD_L = 44; // room for y-axis (W) labels
 const PAD_R = 12;
 const PAD_T = 10;
 const PAD_B = 24; // room for x-axis (distance) labels
-const MI_TO_KM = 1.60934;
 
 const plotW = VB_W - PAD_L - PAD_R;
 const plotH = VB_H - PAD_T - PAD_B;
@@ -24,12 +24,12 @@ interface Geom {
 }
 
 /** All the track-derived geometry — everything except the playback cursor. */
-function computeGeom(energy: EnergyPoint[], distUnit: "mi" | "km"): Geom | null {
+function computeGeom(energy: EnergyPoint[], distUnit: DistUnit): Geom | null {
   // Insufficient-data guard: need at least 2 points to draw a line.
   if (energy.length < 2) return null;
 
-  const unitLabel = distUnit === "km" ? "km" : "mi";
-  const toDist = (mi: number) => (distUnit === "km" ? mi * MI_TO_KM : mi);
+  const unitLabel = distLabel(distUnit);
+  const toDist = (mi: number) => toUnit(mi, distUnit);
   const ds = energy.map((e) => toDist(e.d));
 
   // ---- X domain: cumulative distance, converted to the display unit. ----
@@ -171,7 +171,7 @@ function nearestIndex(xs: number[], vbX: number): number {
 export function EnergyDistanceChart({ energy, cursorIndex, distUnit, onHover }: {
   energy: EnergyPoint[];
   cursorIndex: number | null;
-  distUnit: "mi" | "km";
+  distUnit: DistUnit;
   onHover?: (index: number | null) => void;
 }) {
   const geom = useMemo(() => computeGeom(energy, distUnit), [energy, distUnit]);

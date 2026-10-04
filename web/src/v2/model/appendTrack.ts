@@ -9,7 +9,7 @@ import type { TrackPoint } from "../track";
 
 const eqPoint = (a: TrackPoint, b: TrackPoint): boolean =>
   a.t === b.t && a.lat === b.lat && a.lon === b.lon &&
-  a.power_w === b.power_w && a.current_a === b.current_a && a.soc === b.soc;
+  a.power_w === b.power_w && a.current_a === b.current_a && a.soc === b.soc && a.packs === b.packs;
 
 /**
  * Merge an incremental refetch into the previous track.

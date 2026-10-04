@@ -26,6 +26,7 @@ function PackRow({ pack, onStage }: { pack: BasePack; onStage: () => void }) {
     <button
       type="button"
       onClick={onStage}
+      title={connected ? undefined : "Last-known reading: this pack is not reporting"}
       style={{
         display: "flex", alignItems: "center", gap: 8, width: "100%",
         padding: "6px 4px", border: "none", borderRadius: 6, background: "transparent",
@@ -36,11 +37,13 @@ function PackRow({ pack, onStage }: { pack: BasePack; onStage: () => void }) {
       onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
     >
       <span className="mono" style={{ fontSize: 11, width: 12, color: "var(--text-3)" }}>{letter}</span>
+      {/* An offline pack keeps its LAST-KNOWN SOC, muted (WEB-29). */}
       <span style={{ flex: 1 }}>
-        <Bar frac={connected && soc != null ? soc / 100 : 0} color={socColor(soc, connected)} />
+        <Bar frac={soc != null ? soc / 100 : 0} color={socColor(soc, connected)} />
       </span>
-      <span className="mono" style={{ fontSize: 11, width: 34, textAlign: "right", color: "var(--text-2)" }}>
-        {connected && soc != null ? `${Math.round(soc)}%` : "—"}
+      <span className="mono" style={{ fontSize: 11, width: 34, textAlign: "right",
+        color: connected ? "var(--text-2)" : "var(--text-4)" }}>
+        {soc != null ? `${Math.round(soc)}%` : "—"}
       </span>
       <span style={{ width: 8, height: 8, borderRadius: "50%", background: sohColor(item.soh) }}
         title={item.soh != null ? `SOH ${Math.round(item.soh)}%` : "SOH —"} />

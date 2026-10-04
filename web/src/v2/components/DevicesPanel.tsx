@@ -1,5 +1,6 @@
 import { useEffect, useState, type CSSProperties } from "react";
-import { getDevices, mintCode, revokeDevice } from "../../api";
+import { getDevices, mintCode, restoreDevice, revokeDevice } from "../../api";
+import { deviceName, restoreDeviceConfirm, revokeDeviceConfirm } from "../../adminConfirm";
 import type { DeviceRow } from "../../types";
 
 // Distinguish an expired/insufficient SSO session (the api helpers throw Error(String(status))
@@ -15,7 +16,9 @@ const btn: CSSProperties = {
   fontSize: 12, padding: "6px 12px", borderRadius: 7, cursor: "pointer",
 };
 
-/** v2 device admin (enroll / list / revoke), ported from v1 AdminDevices. Rendered inside Settings. */
+/** v2 device admin (enroll / list / revoke / restore), ported from v1 AdminDevices. Rendered
+ *  inside Settings. Revoke and restore are confirmed first, naming the device and the
+ *  consequence (WEB-21): revoking the chair's phone stops all telemetry. */
 export function DevicesPanel() {
   const [devices, setDevices] = useState<DeviceRow[]>([]);
   const [loadErr, setLoadErr] = useState<"auth" | "net" | null>(null);
@@ -32,10 +35,25 @@ export function DevicesPanel() {
     .then((r) => { setCode(r.code); setActionErr(null); })
     .catch((e) => setActionErr(errKind(e) === "auth" ? AUTH_MSG
       : "Couldn't mint an enroll code — check the connection and try again."));
-  const revoke = (id: string) => revokeDevice(id)
-    .then(() => { setActionErr(null); refresh(); })
-    .catch((e) => setActionErr(errKind(e) === "auth" ? AUTH_MSG
-      : "Couldn't revoke the device — check the connection and try again."));
+  const revoke = (d: DeviceRow) => {
+    if (!window.confirm(revokeDeviceConfirm(d, devices, Date.now()))) return;
+    revokeDevice(d.id)
+      .then(() => { setActionErr(null); refresh(); })
+      .catch((e) => setActionErr(errKind(e) === "auth" ? AUTH_MSG
+        : "Couldn't revoke the device — check the connection and try again."));
+  };
+  const restore = (d: DeviceRow) => {
+    if (!window.confirm(restoreDeviceConfirm(d))) return;
+    restoreDevice(d.id)
+      .then(() => { setActionErr(null); refresh(); })
+      .catch((e) => {
+        const gone = e instanceof Error && e.message === "404";
+        setActionErr(errKind(e) === "auth" ? AUTH_MSG
+          : gone ? "That device no longer exists — the list has been refreshed."
+          : "Couldn't restore the device — check the connection and try again.");
+        if (gone) refresh();
+      });
+  };
 
   // Encode { base, code } so the phone gets the server URL AND the one-time code in one scan.
   // qrcode is imported LAZILY here (its ~168 kB source otherwise lands in the shared chunk
@@ -89,17 +107,24 @@ export function DevicesPanel() {
           <thead>
             <tr style={{ textAlign: "left" }}>
               <th className="eyebrow" style={{ fontWeight: 400, paddingBottom: 6 }}>LABEL</th>
-              <th className="eyebrow" style={{ fontWeight: 400 }}>LAST SEEN</th>
+              <th className="eyebrow" style={{ fontWeight: 400 }}>LAST UPLOAD</th>
               <th />
             </tr>
           </thead>
           <tbody>
             {devices.map((d) => (
-              <tr key={d.id} style={{ borderTop: "1px solid var(--border)", opacity: d.revoked ? 0.4 : 1 }}>
-                <td style={{ padding: "8px 0", color: "var(--text)" }}>{d.label ?? d.install_uuid}</td>
-                <td className="mono" style={{ color: "var(--text-3)" }}>{d.last_seen_at ?? "—"}</td>
+              <tr key={d.id} style={{ borderTop: "1px solid var(--border)" }}>
+                <td style={{ padding: "8px 0", color: "var(--text)", opacity: d.revoked ? 0.5 : 1 }}>
+                  {deviceName(d)}
+                  {d.revoked && <span className="mono" style={{ color: "var(--live)", fontSize: 10, marginLeft: 8 }}>REVOKED</span>}
+                </td>
+                <td className="mono" style={{ color: "var(--text-3)", opacity: d.revoked ? 0.5 : 1 }}>
+                  {d.last_seen_at ?? "—"}
+                </td>
                 <td style={{ textAlign: "right" }}>
-                  {!d.revoked && <button style={btn} onClick={() => revoke(d.id)}>Revoke</button>}
+                  {d.revoked
+                    ? <button style={btn} onClick={() => restore(d)}>Restore</button>
+                    : <button style={btn} onClick={() => revoke(d)}>Revoke</button>}
                 </td>
               </tr>
             ))}

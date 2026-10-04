@@ -82,7 +82,14 @@ export const mintCode = async (): Promise<{ code: string; expires_at: string }> 
 };
 
 export const revokeDevice = (id: string): Promise<unknown> =>
-  fetch(`/web/devices/${id}`, { method: "DELETE" }).then(j);
+  fetch(`/web/devices/${encodeURIComponent(id)}`, { method: "DELETE" }).then(j);
+
+/** Un-revoke a device (admin): its existing key can upload again, no re-enrollment.
+ *  POST /web/devices/{id}/restore answers {restored: id}; 404 for an unknown device. */
+export const restoreDevice = async (id: string): Promise<void> => {
+  const r = await fetch(`/web/devices/${encodeURIComponent(id)}/restore`, { method: "POST" }).then(j);
+  if (!isObj(r) || r.restored !== id) throw new Error("malformed /web/devices restore response");
+};
 
 export const getHistory = async (hours = 24): Promise<{ series: HistSeries[] }> => {
   const r = await fetch(`/web/history?hours=${hours}`).then(j);

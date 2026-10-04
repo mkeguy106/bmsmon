@@ -6,6 +6,8 @@ import { useWinWidth } from "./useWinWidth";
 import { resolveMobile } from "./settings";
 import { Nav } from "./components/Nav";
 import { TopBar } from "./components/TopBar";
+import { ConnectionBanner } from "./components/ConnectionBanner";
+import { connectionBanner } from "./model/connection";
 import { BAR_H, BottomTabs } from "./components/BottomTabs";
 import { CommandView } from "./views/CommandView";
 import { HealthView } from "./views/HealthView";
@@ -78,18 +80,23 @@ export default function App() {
   }, [alerts, data.staleAddrs]);
   const ack = useCallback((a: V2Alert) => setAcked((p) => ackAlert(p, a)), []);
   const unacked = unackedCount(alerts, acked);
+  const banner = connectionBanner(data.session);
 
   const content =
-    view === "command" ? <CommandView data={data} stage={stage} mobile={mobile} onOpen={setView} tempF={tempF} /> :
+    view === "command" ? (
+      <CommandView data={data} stage={stage} mobile={mobile} onOpen={setView} tempF={tempF}
+        tempConfig={tempConfig} distUnit={settings.distUnit} />
+    ) :
     view === "health" ? <HealthView data={data} heroBase={stage.staged} unit={settings.tempUnitPref} mobile={mobile} /> :
     view === "journey" ? (
       <Suspense fallback={<ViewLoading />}>
-        <JourneyView data={data} base={stage.staged} theme={resolvedTheme} unit={settings.tempUnitPref} mobile={mobile} mapMetric={settings.mapMetricPref} />
+        <JourneyView data={data} base={stage.staged} theme={resolvedTheme} unit={settings.tempUnitPref}
+          mobile={mobile} mapMetric={settings.mapMetricPref} distUnit={settings.distUnit} />
       </Suspense>
     ) :
     view === "history" ? <HistoryView data={data} unit={settings.tempUnitPref} mobile={mobile} /> :
     view === "alerts" ? <AlertsView alerts={alerts} acked={acked} onAck={ack} /> :
-    <SettingsView />;
+    <SettingsView settings={settings} patch={patch} />;
 
   const journeyMobile = mobile && view === "journey";
 
@@ -100,9 +107,10 @@ export default function App() {
           onSelect={setView} onToggleCollapse={() => setCollapsed((c) => !c)} />
       )}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
-        <TopBar view={view} live={data.live} gps={data.gps} synced={data.live}
+        <TopBar view={view} live={data.live} gps={data.gps} synced={data.synced}
           themeMode={settings.themeMode} mobile={mobile}
           onCycleTheme={cycleTheme} onToggleDevice={toggleDevice} onSelectView={setView} />
+        {banner && <ConnectionBanner banner={banner} />}
         <main style={journeyMobile
           ? { padding: `0 0 calc(${BAR_H}px + env(safe-area-inset-bottom))`, flex: 1,
               display: "flex", flexDirection: "column", minHeight: 0 }

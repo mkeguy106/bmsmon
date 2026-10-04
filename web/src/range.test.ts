@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  SEED_RANGE_PARAMS, estimatePackRange, formatRangeLine, minRange, selectRangeParams,
-  type PackRange, type RangeConfigRow, type RangeParams,
+  SEED_RANGE_PARAMS, estimatePackRange, floorBand, floorFixed, formatRangeLine, minRange,
+  selectRangeParams, type PackRange, type RangeConfigRow, type RangeParams,
 } from "./range";
 
 // SHARED VECTORS: android RangeEstimateTest.kt asserts the same numbers — keep in sync.
@@ -42,14 +42,36 @@ describe("minRange", () => {
   });
 });
 
+// Every figure is FLOORED: a range, runtime or mileage is never shown above its estimate.
+// Rounding to nearest showed 49.78 mi as "50" and 0.6 h of use as "1h" (67% high near empty).
 describe("formatRangeLine", () => {
-  it("whole miles/hours/days", () => {
+  it("whole miles/hours/days, floored", () => {
     expect(formatRangeLine({ milesLo: 37.33, milesHi: 49.78, activeHLo: 8.96, activeHHi: 12.8, wallHLo: 119.47, wallHHi: 215.04 }))
-      .toBe("~37–50 mi · ~9–13h use · ~5–9 days");
+      .toBe("~37–49 mi · ~8–12h use · ~4–8 days");
   });
-  it("decimal miles when low, hours under 48h", () => {
+  it("decimal miles when low, decimal hours under an hour, hours under 48h", () => {
     expect(formatRangeLine({ milesLo: 1.5, milesHi: 2.4, activeHLo: 0.4, activeHHi: 0.6, wallHLo: 34.2, wallHHi: 42.1 }))
-      .toBe("~1.5–2.4 mi · ~0–1h use · ~34–42h");
+      .toBe("~1.5–2.4 mi · ~0.4–0.6h use · ~34–42h");
+  });
+  it("converts only the distance to km", () => {
+    expect(formatRangeLine({ milesLo: 37.33, milesHi: 49.78, activeHLo: 8.96, activeHHi: 12.8, wallHLo: 119.47, wallHHi: 215.04 }, "km"))
+      .toBe("~60–80 km · ~8–12h use · ~4–8 days");
+  });
+  it("never rounds a figure up, at either end or across the decimal switch", () => {
+    expect(formatRangeLine({ milesLo: 30.9, milesHi: 37.6, activeHLo: 1.99, activeHHi: 2.99, wallHLo: 47.9, wallHHi: 47.99 }))
+      .toBe("~30–37 mi · ~1–2h use · ~47–47h");
+    expect(formatRangeLine({ milesLo: 8.99, milesHi: 9.96, activeHLo: 0.99, activeHHi: 0.999, wallHLo: 100, wallHHi: 167.9 }))
+      .toBe("~8.9–9.9 mi · ~0.9–0.9h use · ~4–6 days");
+  });
+});
+
+describe("floorBand / floorFixed", () => {
+  it("floors to the shown precision", () => {
+    expect(floorFixed(37.6)).toBe("37");
+    expect(floorFixed(9.96, 1)).toBe("9.9");
+    expect(floorFixed(0, 1)).toBe("0.0");
+    expect(floorBand(1.55, 2.47, 10)).toBe("1.5–2.4");
+    expect(floorBand(12.9, 19.99, 10)).toBe("12–19");
   });
 });
 

@@ -1,8 +1,12 @@
 // Discharge-remaining estimate — line-for-line TypeScript twin of the Android pure formula
 // (android/.../model/RangeEstimate.kt). Keep the math identical; both test suites share the
 // same vectors. Documented divergence: the web shows the history band without the live tilt
-// (the tilt inputs live in the phone's Room DB). Design:
+// (the tilt inputs live in the phone's Room DB). Second divergence: every displayed figure is
+// FLOORED (floorFixed/floorBand), never rounded to nearest, so no range, runtime or mileage
+// reads higher than its estimate; the phone's formatter still rounds. Design:
 // docs/superpowers/specs/2026-07-11-discharge-estimate-design.md
+
+import { distLabel, toDist, type DistUnit } from "./units";
 
 export const NOMINAL_PACK_V = 12.8;
 
@@ -85,14 +89,27 @@ export function minRange(ranges: PackRange[]): PackRange {
   }));
 }
 
-/** "~37–50 mi · ~9–13h use · ~5–9 days" (days when the low bound exceeds 48 h, else hours). */
-export function formatRangeLine(r: PackRange): string {
-  const miles = r.milesHi < 10
-    ? `~${r.milesLo.toFixed(1)}–${r.milesHi.toFixed(1)} mi`
-    : `~${Math.round(r.milesLo)}–${Math.round(r.milesHi)} mi`;
-  const use = `~${Math.round(r.activeHLo)}–${Math.round(r.activeHHi)}h use`;
+/** [n] FLOORED to [dp] decimals. A range, runtime or mileage figure is never shown above its
+ *  estimate: rounding to nearest showed 37.6 mi as "38" and 0.6 h of use as "1h". */
+export function floorFixed(n: number, dp: 0 | 1 = 0): string {
+  const f = dp === 1 ? 10 : 1;
+  return (Math.floor(n * f) / f).toFixed(dp);
+}
+
+/** "lo–hi", both floored: tenths while the high end is under [decimalsBelow], else whole. */
+export function floorBand(lo: number, hi: number, decimalsBelow: number): string {
+  const dp = hi < decimalsBelow ? 1 : 0;
+  return `${floorFixed(lo, dp)}–${floorFixed(hi, dp)}`;
+}
+
+/** "~37–49 mi · ~8–12h use · ~4–8 days" (days when the low bound exceeds 48 h, else hours).
+ *  Every figure is floored (floorFixed); distance gets tenths under 10, hours under 1.
+ *  [unit] converts the distance only; the bands stay in miles (units.ts). */
+export function formatRangeLine(r: PackRange, unit: DistUnit = "mi"): string {
+  const miles = `~${floorBand(toDist(r.milesLo, unit), toDist(r.milesHi, unit), 10)} ${distLabel(unit)}`;
+  const use = `~${floorBand(r.activeHLo, r.activeHHi, 1)}h use`;
   const wall = r.wallHLo > 48
-    ? `~${Math.round(r.wallHLo / 24)}–${Math.round(r.wallHHi / 24)} days`
-    : `~${Math.round(r.wallHLo)}–${Math.round(r.wallHHi)}h`;
+    ? `~${floorBand(r.wallHLo / 24, r.wallHHi / 24, 0)} days`
+    : `~${floorBand(r.wallHLo, r.wallHHi, 1)}h`;
   return `${miles} · ${use} · ${wall}`;
 }

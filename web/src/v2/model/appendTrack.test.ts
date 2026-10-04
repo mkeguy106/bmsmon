@@ -36,6 +36,12 @@ describe("appendTrack", () => {
     expect(appendTrack(prev, inc, 15_000)).toBe(prev);
   });
 
+  it("a seam bucket that a second pack has now reported in is replaced, not kept", () => {
+    const prev = [pt(0), { ...pt(15_000, 2), packs: 1 }];
+    const inc = [{ ...pt(15_000, 2), packs: 2 }];
+    expect(appendTrack(prev, inc, 15_000)).toEqual([pt(0), { ...pt(15_000, 2), packs: 2 }]);
+  });
+
   it("incoming overlapping more than the seam: cuts prev at the incoming's first t", () => {
     const prev = [pt(0), pt(15_000, 2), pt(30_000, 3)];
     const inc = [pt(15_000, 9), pt(30_000, 9), pt(45_000, 9)]; // starts BEFORE seamT

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createStore } from "./store";
+import { isPackStale } from "./freshness";
 
 describe("store", () => {
   it("keeps the newest sample per address", () => {
@@ -25,8 +26,9 @@ describe("store", () => {
       temp_c: null, soh: null, cycles: null, eta_full_min: null,
     });
     const a = s.getFleet()["A"];
-    expect(a.ts_ms).toBe(200); // staleness tracking still advances
+    expect(a.ts_ms).toBe(100); // WEB-22: freshness stays the TELEMETRY time
     expect(a.link_event).toBe("Disconnected");
+    expect(a.link_ts_ms).toBe(200);
     expect(a.soc).toBe(72); // last-known telemetry preserved
     expect(a.voltage_v).toBe(13.28);
     expect(a.temp_c).toBe(21);
@@ -47,8 +49,69 @@ describe("store", () => {
     s.applySample({ address: "A", ts_ms: 150, soc: 99 }); // older normal -> ignored
     expect(s.getFleet()["A"].soc).toBe(60);
     s.applySample({ address: "A", ts_ms: 150, link_event: "Disconnected", soc: null }); // older link event -> ignored
-    expect(s.getFleet()["A"].link_event).toBeUndefined();
+    expect(s.getFleet()["A"].link_event).toBeNull();
     expect(s.getFleet()["A"].ts_ms).toBe(200);
+  });
+
+  it("newer telemetry clears the link event", () => {
+    const s = createStore();
+    s.applySample({ address: "A", ts_ms: 100, soc: 60 });
+    s.applySample({ address: "A", ts_ms: 200, link_event: "Disconnected" });
+    s.applySample({ address: "A", ts_ms: 300, soc: 59 });
+    const a = s.getFleet()["A"];
+    expect(a.link_event).toBeNull();
+    expect(a.link_ts_ms).toBeNull();
+    expect(a.ts_ms).toBe(300);
+  });
+
+  // Review Focus: a reading delayed in the phone's outbox lands after the disconnect it
+  // predates. It is still the newest telemetry, but the pack must stay disconnected.
+  it("an older reading that arrives after a Disconnected keeps the pack disconnected", () => {
+    const s = createStore();
+    s.applySample({ address: "A", ts_ms: 100, soc: 60 });
+    s.applySample({ address: "A", ts_ms: 200, link_event: "Disconnected" });
+    s.applySample({ address: "A", ts_ms: 150, soc: 58 });
+    const a = s.getFleet()["A"];
+    expect(a.soc).toBe(58);
+    expect(a.ts_ms).toBe(150);
+    expect(a.link_event).toBe("Disconnected");
+    expect(a.link_ts_ms).toBe(200);
+  });
+
+  // A reading and a Disconnected stamped the same millisecond: the tie goes to "gone",
+  // whichever of the two arrives first, so the pack never reads live off a tie.
+  it("a Disconnected at the same ms as a reading wins, in either arrival order", () => {
+    const first = createStore();
+    first.applySample({ address: "A", ts_ms: 100, soc: 60 });
+    first.applySample({ address: "A", ts_ms: 200, link_event: "Disconnected" });
+    first.applySample({ address: "A", ts_ms: 200, soc: 58 }); // same-ms reading lands after
+    expect(first.getFleet()["A"].soc).toBe(58);
+    expect(first.getFleet()["A"].link_event).toBe("Disconnected");
+    expect(isPackStale(first.getFleet()["A"], 200)).toBe(true);
+
+    const second = createStore();
+    second.applySample({ address: "A", ts_ms: 200, soc: 58 });
+    second.applySample({ address: "A", ts_ms: 200, link_event: "Disconnected" }); // same-ms event lands after
+    expect(second.getFleet()["A"].soc).toBe(58);
+    expect(second.getFleet()["A"].link_event).toBe("Disconnected");
+    expect(second.getFleet()["A"].link_ts_ms).toBe(200);
+    expect(isPackStale(second.getFleet()["A"], 200)).toBe(true);
+  });
+
+  it("drops a link event for a pack it has no telemetry for", () => {
+    const s = createStore();
+    s.applySample({ address: "A", ts_ms: 100, link_event: "Connected" });
+    expect(s.getFleet()["A"]).toBeUndefined();
+  });
+
+  // The WS reconnect / REST fallback re-applies the server snapshot, whose rows are
+  // telemetry only (fleet_snapshot skips link rows) — it must not undo a newer disconnect.
+  it("a snapshot at the same telemetry time keeps a newer Disconnected", () => {
+    const s = createStore();
+    s.applySnapshot([{ address: "A", ts_ms: 100, soc: 60, link_event: null, alias: "2012 · A" }]);
+    s.applySample({ address: "A", ts_ms: 200, link_event: "Disconnected" });
+    s.applySnapshot([{ address: "A", ts_ms: 100, soc: 60, link_event: null, alias: "2012 · A" }]);
+    expect(s.getFleet()["A"].link_event).toBe("Disconnected");
   });
 
   it("notifies subscribers on change", () => {

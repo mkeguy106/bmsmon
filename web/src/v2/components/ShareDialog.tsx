@@ -1,5 +1,7 @@
 import { useState, type CSSProperties } from "react";
 import { createShare } from "../../api";
+import { backdropDismisses } from "../../adminConfirm";
+import { SHARE_CREATE_ERROR, failureKind } from "../model/formErrors";
 
 const DURATIONS = [
   { value: "1h", label: "1 hour" },
@@ -36,15 +38,13 @@ export function ShareDialog({ onClose }: { onClose: () => void }) {
           copy(full);
         }
       })
-      .catch((e) => setErr(
-        e instanceof Error && (e.message === "401" || e.message === "403")
-          ? "Not authorized — your session may have expired (admin required)."
-          : "Couldn't create the share link — check the connection and try again."))
+      // A 422 is a name the server refuses: say what to change, not "check the connection".
+      .catch((e) => setErr(SHARE_CREATE_ERROR[failureKind(e)]))
       .finally(() => setBusy(false));
   };
 
   return (
-    <div style={backdrop} onClick={onClose}>
+    <div style={backdrop} onClick={backdropDismisses(url, busy) ? onClose : undefined}>
       <div style={card} onClick={(e) => e.stopPropagation()}>
         <div className="eyebrow" style={{ marginBottom: 12 }}>Share live location</div>
         {url == null ? (
@@ -64,7 +64,7 @@ export function ShareDialog({ onClose }: { onClose: () => void }) {
             </div>
             {err && <div style={{ color: "var(--live)", fontSize: 12, marginBottom: 10 }}>{err}</div>}
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-              <button style={btn} onClick={onClose}>Cancel</button>
+              <button style={btn} disabled={busy} onClick={onClose}>Cancel</button>
               <button style={{ ...btn, background: "var(--ok)", color: "#fff", border: "none" }}
                 disabled={busy || name.trim() === ""} onClick={create}>
                 {busy ? "Creating…" : "Create link"}

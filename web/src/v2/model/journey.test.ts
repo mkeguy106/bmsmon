@@ -94,6 +94,13 @@ describe("mergeBaseTracks", () => {
     });
     expect(mergeBaseTracks([mk("A"), mk("B")])[0].acc).toBeNull();
   });
+
+  // Journey's cost-per-mile needs to know a bucket is missing a pack (efficiency.ts).
+  it("counts the packs that reported in each bucket", () => {
+    const a: Track = { address: "A", points: [p({ t: 0 }), p({ t: 15_000 })] };
+    const b: Track = { address: "B", points: [p({ t: 15_000 })] };
+    expect(mergeBaseTracks([a, b]).map((m) => m.packs)).toEqual([1, 2]);
+  });
 });
 
 describe("energySeries", () => {

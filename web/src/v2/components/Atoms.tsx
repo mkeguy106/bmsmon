@@ -1,6 +1,8 @@
 import type { ReactNode } from "react";
 import { deltaMv } from "../fleet";
 import type { FleetItem } from "../../types";
+import { Ago } from "../../components/Ago";
+import type { LastKnownRef } from "../model/baseView";
 
 export function Bar({ frac, color }: { frac: number; color: string }) {
   return <div style={{ height: 4, background: "var(--track)", borderRadius: 3 }}>
@@ -12,6 +14,10 @@ export function StatTile({ label, value, sub }: { label: string; value: string; 
     <div className="mono" style={{ fontSize: 16, marginTop: 4 }}>{value}</div>
     {sub && <div className="mono" style={{ fontSize: 11, color: "var(--text-4)" }}>{sub}</div>}
   </div>;
+}
+/** "incl. A · last seen 3m ago": a base-level figure that includes a pack's last-known reading. */
+export function LastKnownNote({ lk }: { lk: LastKnownRef }) {
+  return <>incl. {lk.letter} · last seen <Ago tsMs={lk.tsMs} /></>;
 }
 export function Chip({ tone = "var(--text-3)", children }: { tone?: string; children: ReactNode }) {
   return <span className="mono" style={{ fontSize: 10, letterSpacing: ".08em", padding: "2px 6px",
