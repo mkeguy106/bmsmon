@@ -1335,11 +1335,17 @@ with its age in the badge (amber) instead of vanishing; Command mirrors this wit
 ages on offline bases. **Efficiency card (2026-07-16, desktop, replaced the playback scrubber):**
 the old play/scrub bar only animated a dot along the visible track, so it's gone. In its slot
 `EfficiencyCard.tsx` (pure `model/efficiency.ts` + tests) shows the viewed outing's real
-cost-per-mile — `outingWh` (∫|power| over discharging buckets, Δt capped at 60 s) ÷
-`summary.activeMiles` — against the learned `whPerMile` band (summed across the base's packs to
+cost-per-mile — `outingWh` (∫|power| over discharging buckets, Δt capped at 60 s; a bucket that
+fewer of the base's packs reported in is scaled up to the whole base, since the series pair carries
+one current) ÷ `summary.activeMiles` — against the learned `whPerMile` band (summed across the base's packs to
 match the merged track's base-total power basis). Live "today" window → **"CAN YOU MAKE IT?"**
 with `~X mi left at today's rate · ~Y at your usual` (the base's usable energy ÷ each rate: pack
-count × the weaker pack's remaining Ah × 12.8 V, live or last known, because the pair is in series);
+count × the weaker pack's remaining Ah × 12.8 V, live or last known, because the pair is in series).
+**Today's rate shows only while every pack of the base is live AND the merged track covers every
+pack** (`trackCoversEveryPack`): with a pack out of range its share of the cost was missing from
+the track while the energy still counted it, so the figure read up to 2× high. Otherwise the card
+shows `~Y mi left at your usual rate` and says why today's rate is missing. Every projected figure
+is floored, never rounded up;
 past day → **"THIS OUTING"** with DRIVEN/USED/DRAINED. Gated below `MIN_OUTING_MI` (0.5),
 projection suppressed while charging, and the band chip reads **"vs seed est."** (never a false
 comparison) until a pack has `learnedDays > 0`. Point inspection survives as **hover** on the
@@ -1444,28 +1450,43 @@ range card and the Journey efficiency card show about the staged base:
 - The stage thermal banner follows the phone-synced temperature zones on both sides (`tempZone`,
   rank ≥ 1, live packs).
 - The Journey dock's CAP line follows the same bound (`model/dock.ts`, shown as "≤NN%" when the
-  bound is a last-known reading).
+  bound is a last-known reading). With no live pack, CAP is muted (never an alert colour) and FLOW
+  reads "—", not "0 W IDLE".
+- The stage's time to full is flagged "partial" while a pack is not live (its own time to full is
+  not in the figure), and its flow label (DRAW NOW / CHARGE IN / REGEN IN / FLOW) comes from the
+  same live packs as the watts.
+- Range, runtime and mileage figures are floored everywhere (`floorFixed`/`floorBand` in
+  `web/src/range.ts`), never rounded up: 37.6 mi reads "37", 0.6 h of use "0.6h". The phone's
+  formatter still rounds to nearest.
 - The recharge plan (`model/recharge.ts`) anchors each "ready by" to its sample's `ts_ms`. It keeps
-  a charging spare that went out of range, muted, as "last seen … · due / was due full …".
+  a charging spare that went out of range, muted, as "last seen … · est. full …", never implying it
+  is full.
 - The fleet rail shows an offline pack's last-known SOC, muted.
 
 **Pack freshness** is one function, `web/src/freshness.ts` (`STALE_MS` 90 s, shared by v1 and v2).
 A BLE link event never refreshes a pack's freshness, and a "Disconnected" newer than the newest
-telemetry reads stale at once. `store.ts` keeps `link_event`/`link_ts_ms` only while they are newer
-than the telemetry.
+telemetry reads stale at once. `store.ts` keeps `link_event`/`link_ts_ms` only while they are not
+older than the telemetry (a tie at the same ms goes to "gone"). Staleness is judged in the same
+render as the fleet (`web/src/useStaleAddrs.ts`), so no stale pack paints live, not even for a frame.
 
 **The live link** (`web/src/ws.ts` + pure `web/src/liveLink.ts`):
 - It reports LIVE from its first snapshot, not on socket open.
 - It reconnects with exponential backoff and jitter (1.5 s, doubling to 60 s, reset by a snapshot).
 - A 4401/4403 close, or three silent sockets followed by a `GET /web/alert-config` probe that does
-  not follow redirects, becomes a session verdict.
+  not follow redirects, becomes a session verdict. A probe that answers after a socket has
+  delivered a snapshot is dropped: the link recovered while it was in flight.
 - v2 then shows a banner under the TopBar on every layout: "Session expired" / "Not authorized"
   with Reload, or "Can't reach the server".
 
 The header's SYNCED pill means at least one pack has fresh telemetry.
 
 Settings has one owner, the App. `web/src/v2/singleOwner.test.ts` pins `useV2Settings`,
-`useFleetData`, `useV2Configs` and `useStageBase` to `App.tsx`.
+`useFleetData`, `useV2Configs` and `useStageBase` to `App.tsx`, as a call and as an import under
+any name.
+
+Notes hold the server's 4000-character cap (`maxLength` and a counter), and a 422 from notes, share
+links or API keys reads as a validation message, never "retry" or "check the connection"
+(`web/src/v2/model/formErrors.ts`).
 
 Admin revokes (device, share link, API key) ask first, naming the target and what stops
 (`web/src/adminConfirm.ts`). A revoked device can be restored from Settings › Devices, and the share
