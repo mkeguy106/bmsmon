@@ -18,7 +18,15 @@ class PostResultTest {
     @Test fun successIsOk() {
         assertEquals(PostResult.Ok, classifyPost(200, fromApi = true))
         assertEquals(PostResult.Ok, classifyPost(204, fromApi = true))
-        assertEquals(PostResult.Ok, classifyPost(200, fromApi = false))   // C2: 2xx -> Ok regardless
+    }
+
+    // Ok deletes the batch, so it needs the app's marker too: an unmarked 2xx came from something in
+    // front of the app (a captive portal, a misrouted proxy) that never saw the rows.
+    @Test fun anUnmarked2xxIsTransient() {
+        assertEquals(PostResult.Transient, classifyPost(200, fromApi = false))
+        for (code in 200..299) {
+            assertEquals("code $code", PostResult.Transient, classifyPost(code, fromApi = false))
+        }
     }
 
     @Test fun networkFailureIsTransient() {

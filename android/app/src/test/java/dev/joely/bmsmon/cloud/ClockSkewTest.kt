@@ -99,8 +99,8 @@ class ClockSkewTest {
         assertEquals(42_000L, next(42_000L, unmarked401.copy(authReason = null, skewMs = 0L), notRead))
         assertEquals(42_000L, next(42_000L, unmarked401.copy(code = 403, authReason = null), notRead))
         // Nor can an unmarked 2xx clear or move it.
-        val unmarkedOk = PostOutcome(PostResult.Ok, code = 200, fromApi = false, skewMs = 0L)
-        assertEquals(585_000L, next(585_000L, unmarkedOk, notRead))
+        val unmarked2xx = PostOutcome(classifyPost(200, fromApi = false), code = 200, fromApi = false, skewMs = 0L)
+        assertEquals(585_000L, next(585_000L, unmarked2xx, notRead))
     }
 
     // A 2xx proves the corrected token was accepted; the server clock it reports keeps the correction
@@ -172,7 +172,7 @@ class ClockSkewTest {
     @Test fun theBlameIsSetAndClearedExactlyWhenTheShownSkewIs() {
         val outcomes = listOf(
             marked401(-700_000L), marked401(5_000L), marked401(null), marked401(-700_000L, reason = null),
-            marked401(-700_000L, reason = "unknown_or_revoked_device"), markedOk(0L), PostOutcome(PostResult.Ok),
+            marked401(-700_000L, reason = "unknown_or_revoked_device"), markedOk(0L), PostOutcome(PostResult.Ok, fromApi = true),
             PostOutcome(PostResult.Transient), PostOutcome(PostResult.AuthFailed, code = 401, skewMs = -700_000L),
         )
         for (prev in listOf<Long?>(null, -700_000L)) {

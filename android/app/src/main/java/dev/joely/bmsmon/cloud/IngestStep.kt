@@ -36,13 +36,13 @@ internal fun batchMeta(rows: List<OutboxEntity>): BatchMeta {
     )
 }
 
-/** What the loop must do to the outbox after a response. Applied together, never split by a stop. */
+/** What the loop must do to the outbox after a response. Applied together and in order, never split by a stop. */
 internal sealed interface OutboxEffect {
     /** Delete every outbox row with id <= [id]: the batch was accepted, or skipped as poison. */
     data class DeleteThrough(val id: Long) : OutboxEffect
     /** Delete exactly this row (DATA-22 skip); count the rows actually deleted. */
     data class SkipOne(val id: Long) : OutboxEffect
-    /** Re-send these samples from local history later. */
+    /** Re-send these samples later from local history, while usage logging keeps it. */
     data class Resync(val window: ResyncWindow) : OutboxEffect
 }
 
@@ -63,6 +63,10 @@ internal data class IngestLoopState(
 
 internal data class IngestStepResult(
     val state: IngestLoopState,
+    /**
+     * Applied in this order. A [OutboxEffect.Resync] comes before the delete it accompanies, so a kill
+     * between the two stores fails toward a duplicate send (the server dedups), never a lost re-send.
+     */
     val effects: List<OutboxEffect>,
     /** 0 = go straight on to the next batch. */
     val delayMs: Long,
@@ -76,10 +80,11 @@ internal data class IngestStepResult(
  * to the user, and the re-send of anything skipped. Pure, so every path that can delete a sample is
  * JVM-tested; the loop only peeks, POSTs, applies [IngestStepResult.effects] and waits.
  *
- * A row leaves the outbox on exactly three paths: a 2xx (the batch is accepted), the poison breaker's
+ * A response removes rows on exactly three paths: a marked 2xx (the batch is accepted), the poison breaker's
  * one skip since the last 2xx, and [stepHeadFault]'s one-row skip. Nothing an outage can produce — no
  * response, an unmarked response, a marked 503, a 401/403, a missing key, a fault streak short of its
- * span — reaches any of them. Each skip parks its samples for a re-send from local history.
+ * span — reaches any of them. Each skip parks its samples for a re-send from local history (while
+ * usage logging keeps it). The outbox cap's eviction of the oldest rows is the loop's, not a response's.
  *
  * [nowElapsedMs] (monotonic) drives the fault span; [nowWallMs] dates a parked re-send.
  */
@@ -116,13 +121,13 @@ internal fun ingestStep(
         BatchStep.DELETE_POISON -> IngestStepResult(
             next.copy(backoffMs = INITIAL_BACKOFF_MS, hold = UploadHold.NONE),
             listOf(
-                OutboxEffect.DeleteThrough(b.lastId),
                 OutboxEffect.Resync(ResyncWindow(b.minTsMs, b.maxTsMs, notBeforeMs = parkUntil)),
+                OutboxEffect.DeleteThrough(b.lastId),
             ),
             delayMs = 0L,
             log = "upload: server permanently rejected ${b.size} rows (outbox ids ${b.firstId}..${b.lastId}) — " +
-                "skipping past them; they are re-sent from local history later, and another reject " +
-                "before any 2xx is held",
+                "skipping past them; they are re-sent later from local history, while usage logging keeps it, " +
+                "and another reject before any 2xx is held",
         )
         BatchStep.BACK_OFF_AUTH -> IngestStepResult(
             next.copy(backoffMs = nextBackoffMs(s.backoffMs)),
@@ -138,12 +143,12 @@ internal fun ingestStep(
             IngestStepResult(
                 next.copy(backoffMs = INITIAL_BACKOFF_MS, hold = UploadHold.SERVER_FAULTING),
                 listOf(
-                    OutboxEffect.SkipOne(b.firstId),
                     OutboxEffect.Resync(ResyncWindow(b.headTsMs, b.headTsMs, notBeforeMs = parkUntil)),
+                    OutboxEffect.SkipOne(b.firstId),
                 ),
                 delayMs = 0L,
                 log = "upload: server keeps faulting on one sample — skipping outbox id=${b.firstId}; " +
-                    "it is re-sent from local history later",
+                    "it is re-sent later from local history, while usage logging keeps it",
             )
         } else {
             val hold = when {

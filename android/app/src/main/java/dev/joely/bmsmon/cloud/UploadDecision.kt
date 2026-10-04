@@ -5,7 +5,7 @@ import okhttp3.OkHttpClient
 
 /** What the uploader does with the batch (or import page, or config push) it just POSTed. */
 internal enum class BatchStep {
-    /** 2xx — the server has the rows: delete them, reset backoff. */
+    /** A marked 2xx ([PostResult.Ok]) — the server has the rows: delete them, reset backoff. */
     DELETE_ACCEPTED,
     /** First app-level permanent reject since the last 2xx — delete (skip) the batch so it can't head-of-line block. */
     DELETE_POISON,
