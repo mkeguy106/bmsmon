@@ -82,6 +82,11 @@ class Settings:
     # NEVER deleted — battery history is kept forever; only location data expires. Default
     # 1095 days (3 years). Set <= 0 to disable scrubbing entirely (keep GPS forever).
     gps_retention_days: int = int(os.environ.get("BMSMON_GPS_RETENTION_DAYS", "1095"))
+    # SEC-23/SRV-17: GET /api/v1/health/detail fails its "ingest" check (503 -> the uptime
+    # monitor pages) once no non-revoked device has uploaded for this many seconds. The
+    # phone uploads every ~15 s while monitoring; 30 min rides out a deploy or a short
+    # connectivity gap and still catches a server-side ingest failure within one outing.
+    deadman_ingest_s: int = int(os.environ.get("BMSMON_DEADMAN_INGEST_S", "1800"))
     # In local dev (no Authentik in front), trust a synthetic identity so /web/* works.
     # Guarded: only honored when DATABASE_URL points at a local dev DB — see
     # auth.authentik.dev_trust_active().

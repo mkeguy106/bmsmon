@@ -16,7 +16,7 @@ from app.db.pool import create_pool
 from app.db.queries import scrub_expired_gps
 from app.db.rollup import run_rollup_pass
 from app.maintenance import MAINTENANCE_INITIAL_DELAY_S, maintenance_loop
-from app.routers import api_device, api_widget, share, web, ws
+from app.routers import api_device, api_widget, health, share, web, ws
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +257,7 @@ def create_app() -> FastAPI:
                                            window_s=INGEST_WINDOW_S)
     app.include_router(api_device.router)
     app.include_router(api_widget.router)
+    app.include_router(health.router)
     app.include_router(web.router)
     app.include_router(ws.router)
     # Per-IP limiter for the public /share zone. A guest page polls every 4 s = 15/min,

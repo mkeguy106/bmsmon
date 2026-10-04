@@ -5,6 +5,8 @@ import time
 from typing import Callable
 
 import jwt
+
+from app.observability import SKEW_CLAMP_S
 from cryptography.hazmat.primitives.serialization import load_der_public_key
 
 # SRV-19: how far the server's clock may disagree with the phone's before a genuine token
@@ -51,7 +53,9 @@ def skew_of(claims: dict) -> int:
     Integer arithmetic on purpose: verify_token has already checked that iat is a finite
     number, and float() of a huge integer iat would overflow, so this can never fail on an
     accepted token."""
-    return round(time.time()) - int(claims["iat"])
+    # Clamped: a validly-signed token may still carry an absurd iat, and an unbounded int
+    # cannot be logged or serialised (str() of 4301+ digits raises).
+    return max(-SKEW_CLAMP_S, min(SKEW_CLAMP_S, round(time.time()) - int(claims["iat"])))
 
 
 def body_hash(body: bytes) -> str:
