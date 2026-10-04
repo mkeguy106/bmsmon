@@ -33,10 +33,45 @@ function callSites(hook: string): string[] {
     .sort();
 }
 
+/** [src] imports [hook] as a value under any local name: `{ hook }` or `{ hook as alias }`.
+ *  An alias evades the call-site regex (`useS()`), so importing the hook at all is the
+ *  tripwire. A type-only import (`import type {…}` or `{ type X }`) cannot call it. */
+function importsHook(src: string, hook: string): boolean {
+  for (const m of code(src).matchAll(/import\s+(type\s+)?\{([^}]*)\}\s*from/g)) {
+    if (m[1]) continue;
+    for (const spec of m[2].split(",")) {
+      const s = spec.trim();
+      if (s.startsWith("type ")) continue;
+      if (s.split(/\s+as\s+/)[0].trim() === hook) return true;
+    }
+  }
+  return false;
+}
+
+/** Files (relative to src/v2) that import [hook] as a value. */
+const importers = (hook: string): string[] => sources(V2)
+  .filter((f) => importsHook(readFileSync(f, "utf8"), hook))
+  .map((f) => relative(V2, f))
+  .sort();
+
 describe("v2 app-wide state has exactly one owner", () => {
   for (const hook of ["useV2Settings", "useFleetData", "useV2Configs", "useStageBase"]) {
     it(`${hook} is called only by App.tsx`, () => {
       expect(callSites(hook)).toEqual(["App.tsx"]);
     });
+    it(`${hook} is imported only by App.tsx, under any name`, () => {
+      expect(importers(hook)).toEqual(["App.tsx"]);
+    });
   }
+});
+
+describe("importsHook", () => {
+  it("sees a plain or aliased value import, not a type-only one", () => {
+    expect(importsHook(`import { useV2Settings } from "./useV2Settings";`, "useV2Settings")).toBe(true);
+    expect(importsHook(`import { useV2Settings as useS } from "./useV2Settings";`, "useV2Settings")).toBe(true);
+    expect(importsHook(`import {\n  type V2Settings,\n  useV2Settings as s,\n} from "../useV2Settings";`, "useV2Settings")).toBe(true);
+    expect(importsHook(`import type { FleetData } from "../useFleetData";`, "useFleetData")).toBe(false);
+    expect(importsHook(`import { type FleetData } from "../useFleetData";`, "useFleetData")).toBe(false);
+    expect(importsHook(`// import { useFleetData } from "../useFleetData";`, "useFleetData")).toBe(false);
+  });
 });
