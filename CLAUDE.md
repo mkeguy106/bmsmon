@@ -1609,9 +1609,11 @@ Security model (`server/app/auth/api_key.py`), mirroring the share-token one:
 - `Cache-Control: no-store` on every response.
 
 **Staleness and the status ladder are evaluated server-side** (`STALE_MS = 90_000`,
-`_status()`), mirroring `web/src/freshness.ts` and `fleet.ts` `baseStatus`, so there is
-one implementation of "is this pack live" rather than one per client. Keep the three in step
-if the threshold ever moves. Disconnected packs keep their last-known telemetry and are
+`_status()`), mirroring `web/src/freshness.ts` and `fleet.ts` `baseStatus` on the 90 s age rule. Keep the
+three in step if the threshold ever moves. They are not identical: the web also reads a newer
+"Disconnected" link event as stale at once, and the server cannot see link events
+(`fleet_snapshot` excludes link rows), so the widget can show a pack as live for up to 90 s
+after the web already treats it as stale. Disconnected packs keep their last-known telemetry and are
 flagged `connected: false` instead of being dropped — the widget dims rather than blanks,
 matching the WebUI and Android All-Batteries behaviour.
 
