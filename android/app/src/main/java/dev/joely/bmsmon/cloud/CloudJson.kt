@@ -104,7 +104,7 @@ object CloudJson {
                 charge_lock_cold_c = env.chargeLockColdC, charge_lock_hot_c = env.chargeLockHotC,
                 charge_resume_cold_c = env.chargeResumeColdC,
                 seize_soc = seizeSoc, alerts_on = alertsOn,
-                ranges = ranges?.takeIf { it.isNotEmpty() }?.map { (addr, r) ->
+                ranges = ranges?.filterValues { it.isFinite() }?.takeIf { it.isNotEmpty() }?.map { (addr, r) ->
                     RangeConfigJson(
                         addr,
                         r.whPerDay.lo, r.whPerDay.hi,
@@ -116,6 +116,10 @@ object CloudJson {
             ),
         )
 }
+
+/** DATA-25: kotlinx JSON throws on NaN/Infinity; a non-finite learned band is left out of the push. */
+private fun RangeParams.isFinite(): Boolean =
+    listOf(whPerDay.lo, whPerDay.hi, activeW.lo, activeW.hi, whPerMile.lo, whPerMile.hi).all { it.isFinite() }
 
 @Serializable
 data class TempConfigJson(
@@ -132,7 +136,7 @@ data class TempConfigJson(
     val charge_lock_cold_c: Int? = null,
     val charge_lock_hot_c: Int? = null,
     val charge_resume_cold_c: Int? = null,
-    // Device-level capacity alert seize threshold (highest enabled ladder rung) + master on/off.
+    // Device-level low-pack seize level (UI-19: its own setting, 10–30) + capacity alerts on/off.
     // Rides the same one-way config push; the server upserts it into device_alert_config and the
     // WebUI mirrors it to drive its own low-pack stage seize. Null on temp-only pushes.
     val seize_soc: Int? = null,

@@ -1,5 +1,10 @@
 package dev.joely.bmsmon.ui.all
 
+import dev.joely.bmsmon.ui.Confirmations
+import dev.joely.bmsmon.ui.ConfirmDialog
+import dev.joely.bmsmon.ui.LocalDismissTransients
+import dev.joely.bmsmon.model.allTargets
+import dev.joely.bmsmon.model.addresses
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -43,6 +48,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -65,6 +71,7 @@ import kotlinx.coroutines.launch
 import dev.joely.bmsmon.FilterKey
 import dev.joely.bmsmon.SortKey
 import dev.joely.bmsmon.UiState
+import dev.joely.bmsmon.model.AlertConfig
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.BmsTarget
@@ -80,7 +87,10 @@ import dev.joely.bmsmon.ui.RosterActions
 import dev.joely.bmsmon.ui.rememberBoltAlpha
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
-import dev.joely.bmsmon.ui.theme.socSeverity
+import dev.joely.bmsmon.ui.theme.readableInkOnWash
+import dev.joely.bmsmon.ui.theme.socSeverityFor
+import dev.joely.bmsmon.ui.theme.tag
+import dev.joely.bmsmon.ui.theme.textColor
 import kotlin.math.roundToInt
 
 /** A row's group context: id+label, or null when the battery is ungrouped. */
@@ -142,6 +152,10 @@ fun AllBatteriesScreen(
     modifier: Modifier = Modifier,
 ) {
     val c = Bm.colors
+    var confirmDisconnectAll by remember { mutableStateOf(false) }
+    val stageAddrs = remember(state.stageTarget, state.roster) {
+        state.stageTarget.addresses(state.roster).map { it.uppercase() }.toSet()
+    }
     val groupViews = remember(state.roster) { state.roster.groupViews() }
     // Memoized on its actual inputs so the join/filter/sort pipeline doesn't re-run on every
     // recomposition (frame-rate animations like the charging bolt recompose this screen far more
@@ -163,15 +177,17 @@ fun AllBatteriesScreen(
         ) {
             Text("All Batteries", color = c.text, fontSize = 21.sp, fontWeight = FontWeight.Bold)
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (state.monitoring) {
-                    // Toggle to "Reconnect all" once every pack the user can act on is disconnected.
-                    val allDisabled = rows.isNotEmpty() && rows.all { it.target.address in state.disabled }
-                    if (allDisabled) {
+                run {
+                    // Decided on the ROSTER, not the filtered rows: with "Reachable" on, disconnected
+                    // packs are filtered out, which used to hide "Reconnect all" entirely.
+                    val links = fleetHeaderActions(state.roster, state.disabled, state.monitoring)
+                    if (links.reconnectAll) {
                         Text("Reconnect all", color = Bm.accent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.clickable(onClick = fleet.onReconnectAll).padding(4.dp))
-                    } else {
+                    }
+                    if (links.disconnectAll) {
                         Text("Disconnect all", color = Bm.power, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.clickable(onClick = fleet.onDisconnectAll).padding(4.dp))
+                            modifier = Modifier.clickable { confirmDisconnectAll = true }.padding(4.dp))
                     }
                 }
                 Box(
@@ -206,11 +222,12 @@ fun AllBatteriesScreen(
                 SwipeableBatteryRow(
                     row = row,
                     groups = groupViews.map { RowGroup(it.id, it.label) },
-                    isStage = row.group?.id == state.stageGroupId && state.monitoring,
+                    isStage = state.monitoring && row.target.address.uppercase() in stageAddrs,
                     isDailyDriver = row.group?.id == state.dailyDriverId,
-                    disabled = row.target.address in state.disabled,
+                    disabled = isUserDisconnected(row.target.address, state.disabled),
                     monitoring = state.monitoring,
                     fresh = freshness(row.status, state.nowElapsedMs),
+                    alertConfig = state.alertConfig,
                     onOpenDetail = { fleet.onOpenDetail(row.target.address) },
                     onPin = { if (row.group != null) fleet.onPinBase(row.group.id) else fleet.onPinSingle(row.target.address) },
                     onDisconnect = { fleet.onDisconnect(row.target.address) },
@@ -222,6 +239,10 @@ fun AllBatteriesScreen(
                     onRenameGroup = { row.group?.let { g -> rosterEdit.onRenameGroup(g.id, it) } },
                 )
             }
+        }
+        if (confirmDisconnectAll) {
+            val linked = state.roster.allTargets().size - userDisconnectedCount(state.roster, state.disabled)
+            ConfirmDialog(Confirmations.disconnectAll(linked), onConfirm = fleet.onDisconnectAll, onDismiss = { confirmDisconnectAll = false })
         }
     }
 }
@@ -263,6 +284,7 @@ private fun SwipeableBatteryRow(
     disabled: Boolean,
     monitoring: Boolean,
     fresh: Freshness,
+    alertConfig: AlertConfig,
     onOpenDetail: () -> Unit,
     onPin: () -> Unit,
     onDisconnect: () -> Unit,
@@ -279,7 +301,7 @@ private fun SwipeableBatteryRow(
     SwipeLeftToDelete(onTriggered = { confirmDelete = true }) {
         BatteryRow(
             row = row, groups = groups, isStage = isStage, isDailyDriver = isDailyDriver,
-            disabled = disabled, monitoring = monitoring, fresh = fresh,
+            disabled = disabled, monitoring = monitoring, fresh = fresh, alertConfig = alertConfig,
             onOpenDetail = onOpenDetail, onPin = onPin,
             onDisconnect = onDisconnect, onReconnect = onReconnect,
             onRemoveRequest = { confirmDelete = true },
@@ -288,7 +310,10 @@ private fun SwipeableBatteryRow(
         )
     }
 
-    if (confirmDelete) {
+    // Like every confirmation, it closes while the alert overlay is up ([LocalDismissTransients]).
+    if (confirmDelete && LocalDismissTransients.current) {
+        LaunchedEffect(Unit) { confirmDelete = false }
+    } else if (confirmDelete) {
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
             containerColor = c.card,
@@ -359,6 +384,9 @@ private fun SwipeLeftToDelete(onTriggered: () -> Unit, content: @Composable () -
     }
 }
 
+/** Opacity of the accent tint the staged pack's row is drawn on (over the page bg). */
+internal const val STAGE_ROW_WASH_ALPHA = 0.08f
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun BatteryRow(
@@ -369,6 +397,7 @@ private fun BatteryRow(
     disabled: Boolean,
     monitoring: Boolean,
     fresh: Freshness,
+    alertConfig: AlertConfig,
     onOpenDetail: () -> Unit,
     onPin: () -> Unit,
     onDisconnect: () -> Unit,
@@ -391,23 +420,36 @@ private fun BatteryRow(
     var groupPickOpen by remember { mutableStateOf(false) }
     var newGroupOpen by remember { mutableStateOf(false) }
     var renameGroupOpen by remember { mutableStateOf(false) }
+    var confirmDisconnect by remember { mutableStateOf(false) }
+    if (confirmDisconnect) {
+        ConfirmDialog(Confirmations.disconnectStagePack(row.target.name), onConfirm = onDisconnect, onDismiss = { confirmDisconnect = false })
+    }
 
+    // The staged pack's row sits on an accent tint, not card2: its readable inks are re-checked
+    // against that tint (UI-21), the same way the acknowledged-alert pill checks its red wash.
+    val rowWash = if (isStage) Bm.accent.copy(alpha = STAGE_ROW_WASH_ALPHA) else null
+    val bg = c.bg
+    fun ink(color: Color) = rowWash?.let { readableInkOnWash(color, it, bg) } ?: color
     val (stateLabel, stateColor) = when {
         disabled -> "Disconnected" to c.text3
         !live -> (freshnessLabel(fresh, monitoring) ?: "—") to c.text3
-        t?.state == BatteryState.Discharging -> "Discharging" to Bm.power
-        t?.state == BatteryState.Charging -> "Charging" to Bm.accent
+        t?.state == BatteryState.Discharging -> "Discharging" to ink(Bm.powerText)
+        t?.state == BatteryState.Charging -> "Charging" to ink(Bm.accentText)
         t?.state == BatteryState.Idle -> "Idle" to c.text2
         else -> "—" to c.text3
     }
     val borderColor = if (isStage) Bm.accent else c.border
-    val socColor = if (t != null) socSeverity(t.soc, Bm.accent) else c.text3
+    // UI-21: severity on the user's own ladder (the alerts' rule, not fixed 15/30 bands), readable in
+    // either theme, with a LOW/CRIT word wherever the severity hue shows. A dimmed (non-LIVE) row keeps
+    // both at half alpha, as the hue always was, beside its "Last seen…" status, so it never reads as live.
+    val severity = t?.let { socSeverityFor(it.soc, alertConfig) }
+    val socColor = severity?.textColor()?.let(::ink) ?: c.text3
 
     Column(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(9.dp))
-            .background(if (isStage) Bm.accent.copy(alpha = 0.08f) else c.card2)
+            .background(rowWash ?: c.card2)
             .border(1.dp, borderColor, RoundedCornerShape(9.dp))
             .combinedClickable(onClick = onOpenDetail, onLongClick = { menuOpen = true })
             .padding(horizontal = 12.dp, vertical = 9.dp),
@@ -450,10 +492,23 @@ private fun BatteryRow(
             Text(if (t != null) "${t.soc.roundToInt()}%" else "—",
                 color = socColor, fontFamily = MonoFont, fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.alpha(if (dim) 0.5f else 1f).padding(start = 8.dp))
+            // The non-colour cue: on a light theme LOW amber and normal orange differ by hue alone.
+            severity?.tag()?.let { tag ->
+                Text(
+                    tag, color = socColor, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.6.sp,
+                    modifier = Modifier.alpha(if (dim) 0.5f else 1f).padding(start = 4.dp),
+                )
+            }
             if (monitoring) {
                 Box(
                     Modifier.padding(start = 4.dp).size(30.dp).clip(RoundedCornerShape(8.dp))
-                        .clickable(onClick = if (disabled) onReconnect else onDisconnect),
+                        .clickable {
+                            when {
+                                disabled -> onReconnect()
+                                isStage -> confirmDisconnect = true   // UI-28: a stage pack stops alerting, so ask first
+                                else -> onDisconnect()
+                            }
+                        },
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(

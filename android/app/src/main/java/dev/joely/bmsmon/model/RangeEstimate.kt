@@ -1,7 +1,7 @@
 package dev.joely.bmsmon.model
 
 import java.util.Locale
-import kotlin.math.roundToInt
+import kotlin.math.floor
 
 /**
  * Discharge-remaining estimate (miles + active-use hours + wall-clock time to empty), high/low
@@ -107,20 +107,28 @@ fun minRange(ranges: List<PackRange>): PackRange = ranges.reduce { a, b ->
     )
 }
 
-/** "~37–50 mi · ~9–13h use · ~5–9 days" (days when the low bound exceeds 48 h, else hours). */
+/** [n] FLOORED to [dp] decimals (web twin: `floorFixed`). A range, runtime or mileage figure is
+ *  never shown above its estimate: rounding to nearest showed 37.6 mi as "38". */
+internal fun floorFixed(n: Float, dp: Int = 0): String {
+    val f = if (dp == 1) 10f else 1f
+    return String.format(Locale.US, "%.${dp}f", floor(n * f) / f)
+}
+
+/** "lo–hi", both floored: tenths while the high end is under [decimalsBelow], else whole. */
+internal fun floorBand(lo: Float, hi: Float, decimalsBelow: Float): String {
+    val dp = if (hi < decimalsBelow) 1 else 0
+    return "${floorFixed(lo, dp)}–${floorFixed(hi, dp)}"
+}
+
+/** "~37–49 mi · ~8–12h use · ~4–8 days" (days when the low bound exceeds 48 h, else hours).
+ *  Every figure is floored, never rounded; distance gets tenths under 10, hours under 1. */
 fun formatRangeLine(r: PackRange): String {
-    val miles = if (r.milesHi < 10f) {
-        "~${fmt1(r.milesLo)}–${fmt1(r.milesHi)} mi"
-    } else {
-        "~${r.milesLo.roundToInt()}–${r.milesHi.roundToInt()} mi"
-    }
-    val use = "~${r.activeHLo.roundToInt()}–${r.activeHHi.roundToInt()}h use"
+    val miles = "~${floorBand(r.milesLo, r.milesHi, 10f)} mi"
+    val use = "~${floorBand(r.activeHLo, r.activeHHi, 1f)}h use"
     val wall = if (r.wallHLo > 48f) {
-        "~${(r.wallHLo / 24f).roundToInt()}–${(r.wallHHi / 24f).roundToInt()} days"
+        "~${floorBand(r.wallHLo / 24f, r.wallHHi / 24f, 0f)} days"
     } else {
-        "~${r.wallHLo.roundToInt()}–${r.wallHHi.roundToInt()}h"
+        "~${floorBand(r.wallHLo, r.wallHHi, 1f)}h"
     }
     return "$miles · $use · $wall"
 }
-
-private fun fmt1(v: Float) = String.format(Locale.US, "%.1f", v)

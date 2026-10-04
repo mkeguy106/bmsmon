@@ -84,6 +84,19 @@ class CloudJsonTest {
         assertTrue(s.contains("\"updated_at_ms\":123"))
     }
 
+    // UI-19: seize_soc now carries the seize's own level instead of the ladder top; the wire shape
+    // is unchanged — an int, alongside the alerts_on flag, both present on every capacity push.
+    @Test fun tempConfig_carries_seize_level_and_alerts_on() {
+        val s = CloudJson.encodeTempConfig(
+            profileId = "redodo-beken-12v100",
+            t = dev.joely.bmsmon.model.TempThresholds(),
+            env = dev.joely.bmsmon.model.TempEnvelope(),
+            unit = "F", updatedAtMs = 123L, seizeSoc = 20, alertsOn = false,
+        )
+        assertTrue(s.contains("\"seize_soc\":20"))
+        assertTrue(s.contains("\"alerts_on\":false"))
+    }
+
     @Test fun tempConfig_includes_ranges_when_present() {
         val s = CloudJson.encodeTempConfig(
             profileId = "redodo-beken-12v100",
@@ -213,5 +226,29 @@ class CloudJsonTest {
         assertFalse(s.contains("motion_confidence"))
         assertFalse(s.contains("motion_still"))
         assertFalse(s.contains("motion_at_ms"))
+    }
+
+    // DATA-25: a pack whose learned band is non-finite is left out of the push; it never throws.
+    @Test fun tempConfig_omits_a_pack_with_a_non_finite_band() {
+        val good = dev.joely.bmsmon.model.RangeParams(
+            whPerDay = dev.joely.bmsmon.model.Band(78f, 182f),
+            activeW = dev.joely.bmsmon.model.Band(52.5f, 97.5f),
+            whPerMile = dev.joely.bmsmon.model.Band(15f, 25f),
+            learnedDays = 6, updatedMs = 456L,
+        )
+        val s = CloudJson.encodeTempConfig(
+            profileId = "redodo-beken-12v100",
+            t = dev.joely.bmsmon.model.TempThresholds(),
+            env = dev.joely.bmsmon.model.TempEnvelope(),
+            unit = "F", updatedAtMs = 123L,
+            ranges = mapOf(
+                "C8:47:80:15:25:01" to good,
+                "C8:47:80:15:07:DE" to good.copy(whPerMile = dev.joely.bmsmon.model.Band(Float.NaN, 25f)),
+                "C8:47:80:15:62:1B" to good.copy(activeW = dev.joely.bmsmon.model.Band(1f, Float.POSITIVE_INFINITY)),
+            ),
+        )
+        assertTrue(s.contains("C8:47:80:15:25:01"))
+        assertFalse(s.contains("C8:47:80:15:07:DE"))
+        assertFalse(s.contains("C8:47:80:15:62:1B"))
     }
 }

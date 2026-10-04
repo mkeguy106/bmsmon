@@ -4,6 +4,7 @@ import dev.joely.bmsmon.data.FailureLogThrottle
 import dev.joely.bmsmon.data.FailureLogThrottle.Action.Full
 import dev.joely.bmsmon.data.FailureLogThrottle.Action.Summary
 import dev.joely.bmsmon.data.FailureLogThrottle.Action.Suppress
+import dev.joely.bmsmon.data.warnThrottled
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -71,5 +72,22 @@ class FailureLogThrottleTest {
             val flush = t.onFailure(now + 10 * interval) as Full
             assertEquals("seed $seed", failures, counted + flush.unreported)
         }
+    }
+
+    // The shared helper the cloud loops log through (the ledger's cap, the re-sender, the reporter's loops).
+    @Test fun warnThrottledLogsTheFirstWithItsCauseThenOneCountedLineAMinute() {
+        val t = FailureLogThrottle(interval)
+        val lines = mutableListOf<Pair<String, Throwable?>>()
+        val boom = IllegalStateException("boom")
+        for (k in 0..100) warnThrottled(t, k * 1_500L, { m, e -> lines += m to e }, "re-sync: pass failed", boom)
+        assertEquals(listOf("re-sync: pass failed" to boom), lines.take(1))
+        assertEquals(
+            listOf("re-sync: pass failed (40 times since the last report; latest: java.lang.IllegalStateException: boom)" to null),
+            lines.drop(1).take(1),
+        )
+        assertEquals(3, lines.size)                         // at 0 s, 60 s and 120 s over 150 s of 1.5 s failures
+        // After a quiet minute, the next is in full again and carries what the last line never reported.
+        warnThrottled(t, 300_000L, { m, e -> lines += m to e }, "re-sync: pass failed", boom)
+        assertEquals("re-sync: pass failed (20 earlier times went unreported)" to boom, lines.last())
     }
 }

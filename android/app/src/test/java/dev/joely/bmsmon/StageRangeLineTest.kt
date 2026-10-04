@@ -19,7 +19,7 @@ class StageRangeLineTest {
             StageItem(tel, regen = false, connected = true, range = range),
             StageItem(tel, regen = false, connected = true, range = worse),
         ))
-        assertEquals("~30–45 mi · ~8–12h use · ~5–8 days", line)
+        assertEquals("~30–45 mi · ~8–12h use · ~4–8 days", line)
     }
 
     @Test fun nullWhenAnyPackDisconnected() {

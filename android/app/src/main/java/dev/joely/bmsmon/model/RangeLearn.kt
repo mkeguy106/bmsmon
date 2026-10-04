@@ -8,11 +8,11 @@ import kotlin.math.sqrt
 
 /**
  * Learns the per-pack discharge-range parameter bands from the local 14-day sample history.
- * Pure — the engine maps Room rows to [RangeRow] and calls this off the poll path.
+ * Pure — the engine streams Room pages through a [RangeAccumulator] off the poll path (BLE-25).
  * Design: docs/superpowers/specs/2026-07-11-discharge-estimate-design.md
  */
 
-/** One telemetry row, pre-filtered to linkEvent == null (recentSamples does that).
+/** One telemetry row, pre-filtered to linkEvent == null (the range page query does that).
  *
  *  Deliberately carries [currentA] and NOT the BMS `state` field — see [DISCHARGE_EPS]. */
 data class RangeRow(
@@ -101,7 +101,7 @@ fun percentile(sortedValues: List<Float>, p: Float): Float {
     return sortedValues[lo] + frac * (sortedValues[hi] - sortedValues[lo])
 }
 
-private data class DayStats(
+internal data class DayStats(
     var coverageS: Float = 0f,
     var disWh: Float = 0f,
     var disS: Float = 0f,
@@ -116,21 +116,6 @@ private fun distanceM(lat1: Double, lon1: Double, lat2: Double, lon2: Double): F
 }
 
 private data class Fix(val tsMs: Long, val lat: Double, val lon: Double, val discharging: Boolean)
-
-/** One representative fix per 30-s bucket (the bucket's first accuracy-gated GPS row). */
-private fun bucketedFixes(rows: List<RangeRow>): List<Fix> {
-    val out = ArrayList<Fix>()
-    var lastBucket = Long.MIN_VALUE
-    for (r in rows) {
-        if (r.lat == null || r.lon == null) continue
-        if ((r.gpsAccuracyM ?: Float.MAX_VALUE) >= WIN_MAX_ACCURACY_M) continue
-        val bucket = r.tsMs / WIN_BUCKET_MS
-        if (bucket == lastBucket) continue
-        lastBucket = bucket
-        out.add(Fix(r.tsMs, r.lat, r.lon, r.isDischarging))
-    }
-    return out
-}
 
 private data class WinSeg(val tsMs: Long, val dM: Float, val vel: Float, val discharging: Boolean)
 
@@ -175,13 +160,35 @@ private fun rejectSpikes(fixes: List<Fix>): List<Fix> {
     return out
 }
 
-private fun accumulate(rows: List<RangeRow>, zone: ZoneId): Map<LocalDate, DayStats> {
-    val days = HashMap<LocalDate, DayStats>()
-    for (i in 1 until rows.size) {
-        val prev = rows[i - 1]
-        val cur = rows[i]
+/**
+ * Streaming form of the learner's per-day accumulation (BLE-25). The 6-hourly learn pass used to
+ * materialize a pack's whole 14-day window as a list (~800 k rows for a stage pack, ~140 MB at its
+ * peak, in the safety monitor's own process); the engine now pages the window through [add], and
+ * this keeps only per-day sums plus one GPS fix per 30-s bucket. Rows must arrive oldest first,
+ * ties in id order — the order the list form was given. The rules are the list form's, verbatim:
+ * burn from consecutive pairs, chair distance from bucketed fixes after spike rejection.
+ */
+class RangeAccumulator(val zone: ZoneId) {
+    private val days = HashMap<LocalDate, DayStats>()
+    private val fixes = ArrayList<Fix>()
+    private var prev: RangeRow? = null
+    private var lastBucket = Long.MIN_VALUE
+
+    /** Rows folded so far. */
+    var rows = 0
+        private set
+
+    fun add(cur: RangeRow) {
+        rows++
+        val p = prev
+        prev = cur
+        if (p != null) foldBurn(p, cur)
+        foldFix(cur)
+    }
+
+    private fun foldBurn(prev: RangeRow, cur: RangeRow) {
         val dt = (cur.tsMs - prev.tsMs) / 1000f
-        if (dt < BURN_DT_MIN_S || dt > BURN_DT_MAX_S) continue
+        if (dt < BURN_DT_MIN_S || dt > BURN_DT_MAX_S) return
         val day = Instant.ofEpochMilli(cur.tsMs).atZone(zone).toLocalDate()
         val s = days.getOrPut(day) { DayStats() }
         s.coverageS += dt
@@ -191,17 +198,38 @@ private fun accumulate(rows: List<RangeRow>, zone: ZoneId): Map<LocalDate, DaySt
             s.disS += dt
         }
     }
-    // Chair distance: windowed displacement at chair speeds WHILE DISCHARGING. In the van or
-    // on a train the chair draws nothing, so GPS movement without discharge is a vehicle ride
-    // and teaches no miles, whatever its speed.
-    for (seg in windowedSegments(rejectSpikes(bucketedFixes(rows)))) {
-        if (!seg.discharging) continue
-        if (seg.vel < CHAIR_MIN_SPEED_MPS || seg.vel > CHAIR_MAX_SPEED_MPS) continue
-        val day = Instant.ofEpochMilli(seg.tsMs).atZone(zone).toLocalDate()
-        days.getOrPut(day) { DayStats() }.driveM += seg.dM
+
+    /** One representative fix per 30-s bucket (the bucket's first accuracy-gated GPS row). */
+    private fun foldFix(r: RangeRow) {
+        val lat = r.lat ?: return
+        val lon = r.lon ?: return
+        if ((r.gpsAccuracyM ?: Float.MAX_VALUE) >= WIN_MAX_ACCURACY_M) return
+        val bucket = r.tsMs / WIN_BUCKET_MS
+        if (bucket == lastBucket) return
+        lastBucket = bucket
+        fixes.add(Fix(r.tsMs, lat, lon, r.isDischarging))
     }
-    return days
+
+    /** Per-day stats with the chair distance folded in. A pure read — the distance pass runs over
+     *  copies, so reading twice (learn + today) never double-counts. */
+    internal fun days(): Map<LocalDate, DayStats> {
+        val out = HashMap<LocalDate, DayStats>(days.size * 2)
+        for ((d, s) in days) out[d] = s.copy()
+        // Chair distance: windowed displacement at chair speeds WHILE DISCHARGING. In the van or
+        // on a train the chair draws nothing, so GPS movement without discharge is a vehicle ride
+        // and teaches no miles, whatever its speed.
+        for (seg in windowedSegments(rejectSpikes(fixes))) {
+            if (!seg.discharging) continue
+            if (seg.vel < CHAIR_MIN_SPEED_MPS || seg.vel > CHAIR_MAX_SPEED_MPS) continue
+            val day = Instant.ofEpochMilli(seg.tsMs).atZone(zone).toLocalDate()
+            out.getOrPut(day) { DayStats() }.driveM += seg.dM
+        }
+        return out
+    }
 }
+
+private fun accumulate(rows: List<RangeRow>, zone: ZoneId): RangeAccumulator =
+    RangeAccumulator(zone).also { acc -> rows.forEach { acc.add(it) } }
 
 /** A band plus whether it was actually learned — false means [bandOf] returned the seed. */
 private data class BandResult(val band: Band, val learned: Boolean)
@@ -222,10 +250,14 @@ private fun bandOf(values: List<Float>, seed: Band): BandResult {
 }
 
 /** Distill [rows] (14-day window, ascending, one pack) into learned parameter bands. */
-fun learnRangeParams(rows: List<RangeRow>, zone: ZoneId, nowMs: Long): RangeParams {
-    val today = Instant.ofEpochMilli(nowMs).atZone(zone).toLocalDate()
+fun learnRangeParams(rows: List<RangeRow>, zone: ZoneId, nowMs: Long): RangeParams =
+    learnRangeParams(accumulate(rows, zone), nowMs)
+
+/** The learn pass over an already-fed [acc] (BLE-25: the engine streams Room pages into it). */
+fun learnRangeParams(acc: RangeAccumulator, nowMs: Long): RangeParams {
+    val today = Instant.ofEpochMilli(nowMs).atZone(acc.zone).toLocalDate()
     // Today is still accumulating — a half day would bias every per-day statistic low.
-    val days = accumulate(rows, zone).filterKeys { it != today }
+    val days = acc.days().filterKeys { it != today }
     val qualifying = days.values.filter { it.coverageS >= MIN_DAY_COVERAGE_S }
     val whPerDay = qualifying.map { it.disWh }
     val activeW = qualifying.filter { it.disS / 3600f >= MIN_DAY_DIS_H }
@@ -251,9 +283,14 @@ fun learnRangeParams(rows: List<RangeRow>, zone: ZoneId, nowMs: Long): RangePara
 }
 
 /** Today's burn so far (since local midnight) — the live-tilt input. */
-fun todayUsage(rows: List<RangeRow>, zone: ZoneId, nowMs: Long): TodayUsage {
+fun todayUsage(rows: List<RangeRow>, zone: ZoneId, nowMs: Long): TodayUsage =
+    todayUsage(accumulate(rows, zone), nowMs)
+
+/** Today's burn from an already-fed [acc] (BLE-25). */
+fun todayUsage(acc: RangeAccumulator, nowMs: Long): TodayUsage {
+    val zone = acc.zone
     val today = Instant.ofEpochMilli(nowMs).atZone(zone).toLocalDate()
-    val stats = accumulate(rows, zone)[today] ?: DayStats()
+    val stats = acc.days()[today] ?: DayStats()
     val midnight = today.atStartOfDay(zone).toInstant().toEpochMilli()
     return TodayUsage(
         disWh = stats.disWh,

@@ -14,12 +14,14 @@ import dev.joely.bmsmon.model.Band
 import dev.joely.bmsmon.model.Battery
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.DEFAULT_DIM_LEVEL
+import dev.joely.bmsmon.model.DEFAULT_SEIZE_SOC
 import dev.joely.bmsmon.model.Group
 import dev.joely.bmsmon.model.RangeParams
 import dev.joely.bmsmon.model.Roster
 import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.Telemetry
 import dev.joely.bmsmon.model.TempThresholds
+import dev.joely.bmsmon.model.normalizeSeizeSoc
 import androidx.datastore.preferences.core.Preferences
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -78,7 +80,6 @@ data class Persisted(
     val deviceId: String?,
     val enrolled: Boolean,
     val gpsEnabled: Boolean?,
-    val importWatermark: Long,
     val importDone: Boolean,
     val tempThresholdsByProfile: Map<String, TempThresholds>,
     val chargeTailMinByAddress: Map<String, Float> = emptyMap(),
@@ -89,6 +90,8 @@ data class Persisted(
     val tempGaugeSide: String?,
     val cloudSyncAlerts: Boolean,
     val pendingTempConfig: String?,
+    /** The low-pack seize level (UI-19), normalized on read; [DEFAULT_SEIZE_SOC] when never set. */
+    val seizeSoc: Int = DEFAULT_SEIZE_SOC,
 )
 
 /** Persists user preferences (colors, appearance override, BMS addresses) via DataStore. */
@@ -109,6 +112,7 @@ class SettingsStore(private val context: Context) {
         val THRESHOLDS = stringSetPreferencesKey("alert_thresholds")
         val CRITICAL_THRESHOLD = intPreferencesKey("alert_critical_threshold")
         val SEIZE_LOW_TO_STAGE = booleanPreferencesKey("seize_low_to_stage")
+        val SEIZE_SOC = intPreferencesKey("seize_soc")
         val KEEP_SCREEN_ON = booleanPreferencesKey("keep_screen_on")
         val SORT_KEY = stringPreferencesKey("all_sort")
         val FILTERS = stringSetPreferencesKey("all_filters")
@@ -133,7 +137,6 @@ class SettingsStore(private val context: Context) {
         val DEVICE_ID = stringPreferencesKey("device_id")
         val ENROLLED = booleanPreferencesKey("enrolled")
         val GPS_ENABLED = booleanPreferencesKey("gps_enabled")
-        val IMPORT_WATERMARK = longPreferencesKey("import_watermark")
         val IMPORT_DONE = booleanPreferencesKey("import_done")
         val INSTALL_UUID = stringPreferencesKey("install_uuid")
         val TEMP_THRESHOLDS = stringPreferencesKey("temp_thresholds_by_profile")
@@ -146,6 +149,8 @@ class SettingsStore(private val context: Context) {
         val CLOUD_SYNC_ALERTS = booleanPreferencesKey("cloud_sync_alerts")
         val PENDING_TEMP_CONFIG = stringPreferencesKey("pending_temp_config")
         val SERVER_FAULT_SKIPS = longPreferencesKey("server_fault_skips")
+        val RESYNC_STATE = stringPreferencesKey("resync_state")
+        val OUTBOX_EVICTED = longPreferencesKey("outbox_evicted")
     }
 
     suspend fun load(): Persisted =
@@ -171,6 +176,12 @@ class SettingsStore(private val context: Context) {
     val serverFaultSkips: Flow<Long> =
         context.dataStore.data.retryOnIoError(onError = ::logReadFailure)
             .map { it[K.SERVER_FAULT_SKIPS] ?: 0L }
+            .distinctUntilChanged()
+
+    /** Live all-time count of outbox rows evicted at the cap (DATA-19), for the Cloud sync page. */
+    val outboxEvicted: Flow<Long> =
+        context.dataStore.data.retryOnIoError(onError = ::logReadFailure)
+            .map { it[K.OUTBOX_EVICTED] ?: 0L }
             .distinctUntilChanged()
 
     private fun decode(p: Preferences): Persisted {
@@ -213,7 +224,6 @@ class SettingsStore(private val context: Context) {
             deviceId = p[K.DEVICE_ID],
             enrolled = p[K.ENROLLED] ?: false,
             gpsEnabled = p[K.GPS_ENABLED],
-            importWatermark = p[K.IMPORT_WATERMARK] ?: 0L,
             importDone = p[K.IMPORT_DONE] ?: false,
             tempThresholdsByProfile = p[K.TEMP_THRESHOLDS]?.let(::decodeTempThresholds) ?: emptyMap(),
             chargeTailMinByAddress = p[K.CHARGE_TAIL_MIN]?.let(::decodeChargeTail) ?: emptyMap(),
@@ -224,6 +234,7 @@ class SettingsStore(private val context: Context) {
             tempGaugeSide = p[K.TEMP_GAUGE_SIDE],
             cloudSyncAlerts = p[K.CLOUD_SYNC_ALERTS] ?: true,
             pendingTempConfig = p[K.PENDING_TEMP_CONFIG],
+            seizeSoc = normalizeSeizeSoc(p[K.SEIZE_SOC]),
         )
     }
 
@@ -245,6 +256,7 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { it[K.CRITICAL_THRESHOLD] = t }.let {}
     suspend fun setSeizeLowToStage(on: Boolean) =
         context.dataStore.edit { it[K.SEIZE_LOW_TO_STAGE] = on }.let {}
+    suspend fun setSeizeSoc(v: Int) = context.dataStore.edit { it[K.SEIZE_SOC] = normalizeSeizeSoc(v) }.let {}
     suspend fun setKeepScreenOn(on: Boolean) = context.dataStore.edit { it[K.KEEP_SCREEN_ON] = on }.let {}
     suspend fun setSort(name: String) = context.dataStore.edit { it[K.SORT_KEY] = name }.let {}
     suspend fun setFilters(names: Set<String>) = context.dataStore.edit { it[K.FILTERS] = names }.let {}
@@ -271,7 +283,6 @@ class SettingsStore(private val context: Context) {
     suspend fun setDeviceId(id: String) = context.dataStore.edit { it[K.DEVICE_ID] = id }.let {}
     suspend fun setEnrolled(on: Boolean) = context.dataStore.edit { it[K.ENROLLED] = on }.let {}
     suspend fun setGpsEnabled(on: Boolean) = context.dataStore.edit { it[K.GPS_ENABLED] = on }.let {}
-    suspend fun setImportWatermark(v: Long) = context.dataStore.edit { it[K.IMPORT_WATERMARK] = v }.let {}
     suspend fun setImportDone(on: Boolean) = context.dataStore.edit { it[K.IMPORT_DONE] = on }.let {}
     suspend fun setTempThresholds(map: Map<String, TempThresholds>) =
         context.dataStore.edit { it[K.TEMP_THRESHOLDS] = encodeTempThresholds(map) }.let {}
@@ -292,11 +303,27 @@ class SettingsStore(private val context: Context) {
     suspend fun setCloudSyncAlerts(on: Boolean) = context.dataStore.edit { it[K.CLOUD_SYNC_ALERTS] = on }.let {}
     suspend fun setPendingTempConfig(json: String) =
         context.dataStore.edit { it[K.PENDING_TEMP_CONFIG] = json }.let {}
-    suspend fun clearPendingTempConfig() =
-        context.dataStore.edit { it.remove(K.PENDING_TEMP_CONFIG) }.let {}
-    /** One more sample skipped for a persistent server fault (DATA-22) — read-modify-write in one edit. */
-    suspend fun incrementServerFaultSkips() =
-        context.dataStore.edit { it[K.SERVER_FAULT_SKIPS] = (it[K.SERVER_FAULT_SKIPS] ?: 0L) + 1 }.let {}
+    /** Clear the pending config push only if it is still the one that was sent (DATA-18); true if it was removed. */
+    suspend fun clearPendingTempConfigIf(sent: String): Boolean {
+        var removed = false
+        context.dataStore.edit { removed = it.removeIfEquals(K.PENDING_TEMP_CONFIG, sent) }
+        return removed
+    }
+    /**
+     * The re-sync windows blob, or null when none is stored. cloud/Resync.kt owns the format; this store
+     * only keeps the string. Unlike [load], a read failure THROWS (IOException) instead of reading as
+     * "none": the caller's next write would otherwise overwrite the saved windows with an empty state.
+     */
+    suspend fun loadResyncJson(): String? =
+        context.dataStore.data.first()[K.RESYNC_STATE]
+    suspend fun setResyncJson(json: String) =
+        context.dataStore.edit { it[K.RESYNC_STATE] = json }.let {}
+    /** [n] more outbox rows evicted at the cap — read-modify-write in one edit. */
+    suspend fun addOutboxEvicted(n: Long) =
+        context.dataStore.edit { it[K.OUTBOX_EVICTED] = (it[K.OUTBOX_EVICTED] ?: 0L) + n }.let {}
+    /** [n] more samples skipped for a persistent server fault (DATA-22) — read-modify-write in one edit. */
+    suspend fun addServerFaultSkips(n: Long) =
+        context.dataStore.edit { it[K.SERVER_FAULT_SKIPS] = (it[K.SERVER_FAULT_SKIPS] ?: 0L) + n }.let {}
 
     suspend fun installUuid(): String {
         val existing = context.dataStore.data.first()[K.INSTALL_UUID]

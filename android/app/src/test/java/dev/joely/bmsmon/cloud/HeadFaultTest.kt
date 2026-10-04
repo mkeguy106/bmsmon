@@ -50,7 +50,7 @@ class HeadFaultTest {
         val s = fresh().faults(head = 1, sent = 200, times = listOf(0, 100 * sec, 200 * sec))
         val (next, action) = s.step(head = 1, sent = 200, r = PostResult.ServerFault, at = 5 * min)
         assertEquals(HeadFaultAction.NONE, action)
-        assertEquals(HeadFaultState(headId = 1, limit = 100, streak = 0, firstFaultAtMs = null), next)
+        assertEquals(HeadFaultState(headId = 1, limit = 100, streak = 0, firstFaultAtMs = null, searchEndId = 200), next)
     }
 
     @Test fun aLongSpanNeedsTheCountToo() {
@@ -316,5 +316,104 @@ class HeadFaultTest {
         assertEquals((1L..39L).toSet(), run.accepted)
         assertEquals(41L, run.queue.first())
         assertEquals(500 - 40, run.queue.size)
+    }
+
+    // --- DATA-22 minor: a 2xx inside a narrowing search must not undo the halving ---
+
+    /**
+     * Drain a queue of outbox [ids] (ascending; the uploader's ids need not be contiguous) with one bad
+     * row the way the upload loop does, passing each batch's real last id; count trips until a row is
+     * skipped, and check that the skipped row is the bad one.
+     */
+    private fun tripsToIsolate(ids: List<Long>, bad: Long): Int {
+        val queue = ArrayDeque(ids)
+        var s = fresh()
+        var t = 0L
+        var trips = 0
+        var posts = 0
+        while (queue.isNotEmpty() && posts++ < 10_000) {
+            val sent = queue.take(minOf(max, s.limit))
+            val r = if (bad in sent) PostResult.ServerFault else PostResult.Ok
+            val (next, action) = stepHeadFault(s, sent.first(), sent.size, r, t, max, tailId = sent.last())
+            if (r == PostResult.ServerFault && next.streak == 0) trips++
+            if (r == PostResult.Ok) repeat(sent.size) { queue.removeFirst() }
+            if (action == HeadFaultAction.SKIP_HEAD_ROW) {
+                assertEquals("the skipped row is the bad row", listOf(bad), sent)
+                return trips
+            }
+            s = next
+            t += min
+        }
+        error("bad row $bad was never isolated")
+    }
+
+    @Test fun isolationTakesOneTripPerHalvingWhereverTheBadRowSits() {
+        for (bad in listOf(1L, 2L, 99L, 100L, 101L, 150L, 199L, 200L, 333L, 777L, 1000L)) {
+            val trips = tripsToIsolate(ids = (1L..1000L).toList(), bad = bad)
+            assertTrue("bad row $bad took $trips trips", trips <= 9)
+        }
+    }
+
+    // Outbox ids have gaps (rows deleted out of order, an AUTOINCREMENT that skipped): the search keys on
+    // each batch's real last id, so it converges just as fast and still skips only the bad row.
+    @Test fun isolationIsAsFastWithGapsInTheOutboxIds() {
+        val ids = (1L..1000L).map { it * 3 + (it % 7) * 100_000 }.sorted()
+        for (i in listOf(0, 1, 98, 99, 100, 149, 199, 200, 332, 776, 999)) {
+            val trips = tripsToIsolate(ids = ids, bad = ids[i])
+            assertTrue("bad row ${ids[i]} took $trips trips", trips <= 9)
+        }
+    }
+
+    // A poison skip or a cap eviction can remove the suspect range, leaving the head past its end. That
+    // end no longer bounds anything: the next trip records its own batch, so its search holds the limit.
+    @Test fun aSuspectRangeTheHeadHasPassedIsDropped() {
+        val searching = HeadFaultState(headId = 1, limit = 100, streak = 0, firstFaultAtMs = null, searchEndId = 100)
+        // Rows 1..100 left the outbox without a 2xx (skipped or evicted); the head is now 101.
+        val s = searching.faults(head = 101, sent = 100, times = listOf(0, 2 * min, 4 * min))
+        assertNull(s.searchEndId)
+        val (tripped, _) = s.step(head = 101, sent = 100, r = PostResult.ServerFault, at = 5 * min)
+        assertEquals(50, tripped.limit)
+        assertEquals(200L, tripped.searchEndId)
+        // A 2xx on the clean first half keeps narrowing instead of doubling back.
+        val (next, _) = stepHeadFault(tripped, 101, 50, PostResult.Ok, 6 * min, max, tailId = 150)
+        assertEquals(50, next.limit)
+        assertEquals(200L, next.searchEndId)
+    }
+
+    @Test fun aHalvingRecordsTheSuspectRangeAndKeepsTheNarrowerEnd() {
+        val s = fresh().faults(head = 1, sent = 200, times = listOf(0, 2 * min, 4 * min))
+        val (halved, _) = s.step(head = 1, sent = 200, r = PostResult.ServerFault, at = 5 * min)
+        assertEquals(200L, halved.searchEndId)
+        val s2 = halved.faults(head = 150, sent = 100, times = listOf(6 * min, 8 * min, 10 * min))
+        val (again, _) = s2.step(head = 150, sent = 100, r = PostResult.ServerFault, at = 11 * min)
+        assertEquals(50, again.limit)
+        assertEquals(200L, again.searchEndId)
+    }
+
+    @Test fun anOkBeforeTheSuspectRangeEndsHoldsTheLimit() {
+        val searching = HeadFaultState(headId = 1, limit = 100, streak = 0, firstFaultAtMs = null, searchEndId = 200)
+        val (next, _) = stepHeadFault(searching, 1, 100, PostResult.Ok, 0L, max, tailId = 100)
+        assertEquals(HeadFaultState(headId = 1, limit = 100, streak = 0, firstFaultAtMs = null, searchEndId = 200), next)
+    }
+
+    @Test fun anOkThatCoversTheWholeSuspectRangeEndsTheSearchAndDoubles() {
+        val searching = HeadFaultState(headId = 101, limit = 100, streak = 0, firstFaultAtMs = null, searchEndId = 200)
+        val (next, _) = stepHeadFault(searching, 101, 100, PostResult.Ok, 0L, max, tailId = 200)
+        assertEquals(HeadFaultState(headId = 101, limit = 200, streak = 0, firstFaultAtMs = null, searchEndId = null), next)
+    }
+
+    @Test fun aTripAtOneRowConcludesTheSearch() {
+        val s = HeadFaultState(headId = 7, limit = 1, streak = 0, firstFaultAtMs = null, searchEndId = 9)
+            .faults(head = 7, sent = 1, times = listOf(0, 2 * min, 4 * min))
+        val (after, action) = s.step(head = 7, sent = 1, r = PostResult.ServerFault, at = 5 * min)
+        assertEquals(HeadFaultAction.SKIP_HEAD_ROW, action)
+        assertNull(after.searchEndId)
+    }
+
+    @Test fun aMissingKeyNeitherResetsNorAdvancesTheStreak() {
+        val two = fresh().faults(head = 1, sent = 200, times = listOf(0, 1 * min))
+        val (next, action) = two.step(head = 1, sent = 200, r = PostResult.KeyMissing, at = 2 * min)
+        assertEquals(HeadFaultAction.NONE, action)
+        assertEquals(two, next)
     }
 }

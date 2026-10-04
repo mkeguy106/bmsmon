@@ -71,7 +71,10 @@ object DeviceKeys {
         gen.generateKeyPair()
     }
 
-    fun privateKey(): PrivateKey = (ks().getEntry(ALIAS, null) as KeyStore.PrivateKeyEntry).privateKey
+    /** The signing key, or null when the Keystore has none (DATA-17: a transferred phone keeps its
+     *  enrollment but never its key). */
+    fun privateKeyOrNull(): PrivateKey? =
+        (ks().getEntry(ALIAS, null) as? KeyStore.PrivateKeyEntry)?.privateKey
 
     fun publicKey(): PublicKey = ks().getCertificate(ALIAS).publicKey
 

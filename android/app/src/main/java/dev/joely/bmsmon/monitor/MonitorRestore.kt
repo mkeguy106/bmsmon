@@ -13,6 +13,8 @@ import dev.joely.bmsmon.model.StageConfig
 import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.TempThresholds
 import dev.joely.bmsmon.model.TempUnit
+import dev.joely.bmsmon.model.drivesAlerts
+import dev.joely.bmsmon.model.freshness
 import dev.joely.bmsmon.model.groupById
 import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.model.seizeThresholdFor
@@ -78,7 +80,7 @@ fun restorePlan(p: Persisted): RestorePlan? {
             dailyDriverId = dailyDriverId,
             dynamicEnabled = p.dynamicStage ?: true,
             holdMs = (p.stageHoldMinutes ?: DEFAULT_STAGE_HOLD_MIN) * 60_000L,
-            seizeThreshold = seizeThresholdFor(p.alertsOn, p.seizeLowToStage, enabled),
+            seizeThreshold = seizeThresholdFor(p.alertsOn, p.seizeLowToStage, p.seizeSoc),
         ),
         alertConfig = AlertConfig(
             alertsOn = p.alertsOn,
@@ -98,21 +100,31 @@ fun restorePlan(p: Persisted): RestorePlan? {
 }
 
 /**
- * The ongoing notification's content text for one engine state. Pure so the
- * de-churn contract (BLE-11: only re-post when this string actually changes —
- * `distinctUntilChanged` in [MonitoringService]) is unit-testable.
+ * The ongoing notification's content text for one engine state at [nowElapsedMs] (the monotonic
+ * clock the frame stamps use). Pure so the de-churn contract (BLE-11: only re-post when this string
+ * actually changes — `distinctUntilChanged` in [MonitoringService]) is unit-testable.
+ *
+ * Counts only packs whose reading may drive alerts — this session's LIVE or STALE reading
+ * ([drivesAlerts]): a pack still showing its restored seed, or silent past the freshness backstop,
+ * is not "connected", and its SOC is never "lowest". A STALE pack (two missed polls) still counts,
+ * so a background pack's routine miss doesn't re-post the notification.
  */
-fun monitoringNotificationText(st: MonitorState): String {
-    val reachable = st.fleet.values.filter { it.reachable && it.telemetry != null }
+fun monitoringNotificationText(st: MonitorState, nowElapsedMs: Long): String {
+    if (!st.linksWanted) return if (st.rosterEmpty) "No packs configured" else "All packs disconnected"
+    val reading = st.fleet.values.filter { it.telemetry != null && freshness(it, nowElapsedMs).drivesAlerts() }
     return when {
-        reachable.isEmpty() -> "Connecting…"
+        reading.isEmpty() -> "Connecting…"
         else -> {
-            val low = reachable.minOf { it.telemetry!!.soc }.roundToInt()
-            val n = reachable.size
+            val low = reading.minOf { it.telemetry!!.soc }.roundToInt()
+            val n = reading.size
             "$n ${if (n == 1) "pack" else "packs"} connected · lowest $low%"
         }
     }
 }
+
+/** BLE-27: hold the CPU (the service's PARTIAL_WAKE_LOCK) only while monitoring has a pack to poll —
+ *  "Disconnect all" leaves the engine running with nothing to do. */
+fun wantsCpuWakeLock(st: MonitorState): Boolean = st.monitoring && st.linksWanted
 
 /** `Intent.ACTION_BOOT_COMPLETED` / `ACTION_MY_PACKAGE_REPLACED`, as literals so the rule stays
  *  JVM-pure (pinned to the platform by BootRestoreTest). Not LOCKED_BOOT_COMPLETED: settings and

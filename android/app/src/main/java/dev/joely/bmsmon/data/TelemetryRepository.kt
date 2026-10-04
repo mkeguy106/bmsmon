@@ -32,6 +32,9 @@ private const val ROLLUP_PAGE = 1_000
 /** Rows per timeline page (DATA-15). */
 private const val TIMELINE_PAGE = 2_000
 
+/** Rows per range-learner page (BLE-25): ~0.5 MB held at once instead of a pack's whole window. */
+private const val RANGE_PAGE = 5_000
+
 /**
  * Run a logging call whose own failure must not escape — formatting a stack trace can itself throw
  * (an OOM, for one), and on the writer loop and the orphan sweep an escape from the catch block
@@ -264,9 +267,16 @@ class TelemetryRepository(private val db: BmsDatabase) {
     suspend fun recentSamples(address: String, sinceMs: Long): List<SampleEntity> =
         db.samples().since(address, sinceMs)
 
-    /** Lean 7-column rows for the range learner (linkEvent rows excluded), oldest first. */
-    suspend fun rangeRows(address: String, sinceMs: Long): List<RangeRowColumns> =
-        db.samples().rangeRowsSince(address, sinceMs)
+    /** The range learner's rows for one pack since [sinceMs] (link rows excluded), oldest first,
+     *  streamed in [RANGE_PAGE]-row (tsMs, id) keyset pages on IO (BLE-25) — never the whole window
+     *  at once. [consume] runs on the IO thread. */
+    suspend fun forEachRangeRow(address: String, sinceMs: Long, consume: (RangeRowColumns) -> Unit): Unit =
+        withContext(Dispatchers.IO) {
+            forEachTsKeysetPage(RANGE_PAGE, sinceMs, { afterTs, afterId, limit ->
+                ensureActive()   // a plain blocking pager: stop as soon as the caller is cancelled
+                db.samples().rangePage(address, afterTs, afterId, limit)
+            }, RangeRowColumns::tsMs, RangeRowColumns::id, consume)
+        }
 
     /** One session's peak-pooled timeline, streamed in bounded pages on IO (DATA-15) — replaces the
      *  whole-session load (a multi-day legacy session is hundreds of thousands of full rows). */

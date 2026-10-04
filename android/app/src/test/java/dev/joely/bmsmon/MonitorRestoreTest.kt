@@ -6,17 +6,22 @@ import dev.joely.bmsmon.model.Battery
 import dev.joely.bmsmon.model.DEFAULT_DIM_LEVEL
 import dev.joely.bmsmon.model.DEFAULT_GROUP_ID
 import dev.joely.bmsmon.model.DEFAULT_ROSTER
+import dev.joely.bmsmon.model.DEFAULT_SEIZE_SOC
 import dev.joely.bmsmon.model.DEFAULT_STAGE_HOLD_MIN
 import dev.joely.bmsmon.model.Group
 import dev.joely.bmsmon.model.Roster
+import dev.joely.bmsmon.model.STAGE_POLL_MS
 import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.Telemetry
 import dev.joely.bmsmon.model.TempUnit
+import dev.joely.bmsmon.model.allTargets
+import dev.joely.bmsmon.model.hasDesiredLinks
 import dev.joely.bmsmon.model.stageAddrsFor
 import dev.joely.bmsmon.monitor.MonitorState
 import dev.joely.bmsmon.monitor.RestorePlan
 import dev.joely.bmsmon.monitor.monitoringNotificationText
 import dev.joely.bmsmon.monitor.restorePlan
+import dev.joely.bmsmon.monitor.wantsCpuWakeLock
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -47,6 +52,7 @@ class MonitorRestoreTest {
         seizeLowToStage: Boolean = true,
         dynamicStage: Boolean? = null,
         stageHoldMinutes: Int? = null,
+        seizeSoc: Int = DEFAULT_SEIZE_SOC,
     ) = Persisted(
         accentArgb = null, powerArgb = null, manualMode = false, darkMode = false,
         dailyDriverId = dailyDriverId, lastStage = lastStage, dynamicStage = dynamicStage,
@@ -61,9 +67,10 @@ class MonitorRestoreTest {
         gpsPauseParked = gpsPauseParked,
         disabledAddrs = disabledAddrs, cloudEnabled = cloudEnabled, apiBaseUrl = null,
         deviceId = null, enrolled = enrolled, gpsEnabled = gpsEnabled,
-        importWatermark = 0L, importDone = false, tempThresholdsByProfile = emptyMap(),
+        importDone = false, tempThresholdsByProfile = emptyMap(),
         tempAlertsEnabled = tempAlertsEnabled, showTempGauge = true, tempGaugeSide = null,
         cloudSyncAlerts = true, pendingTempConfig = null,
+        seizeSoc = seizeSoc,
     )
 
     private fun tel(soc: Float) = Telemetry(
@@ -239,51 +246,138 @@ class MonitorRestoreTest {
 
     @Test
     fun `headless seize threshold uses the same rule as the app`() {
-        assertEquals(30, restorePlan(persisted())!!.stageConfig.seizeThreshold)   // default ladder top
-        assertEquals(50, restorePlan(persisted(enabledThresholds = setOf(50, 20)))!!.stageConfig.seizeThreshold)
+        assertEquals(30, restorePlan(persisted())!!.stageConfig.seizeThreshold)                              // default seize level
+        assertEquals(30, restorePlan(persisted(enabledThresholds = setOf(50, 20)))!!.stageConfig.seizeThreshold) // the ladder no longer moves it
+        assertEquals(20, restorePlan(persisted(seizeSoc = 20))!!.stageConfig.seizeThreshold)
         assertNull(restorePlan(persisted(seizeLowToStage = false))!!.stageConfig.seizeThreshold)
         assertNull(restorePlan(persisted(alertsOn = false))!!.stageConfig.seizeThreshold)
     }
 
-    // --- monitoringNotificationText (BLE-11 de-churn: text only changes when this changes) ---
+    // UI-19: the foreground app (UiState.seizeThreshold → the pushed StageConfig) and a sticky or
+    // boot restore resolve the same seize level from the same settings, so both seize identically.
+    @Test
+    fun `the app and the headless restore resolve the same seize level`() {
+        for (alertsOn in listOf(true, false)) for (pull in listOf(true, false)) for (soc in listOf(10, 12, 20, 30, 60)) {
+            val thresholds = setOf(60, 30, 5)
+            val headless = restorePlan(
+                persisted(alertsOn = alertsOn, seizeLowToStage = pull, seizeSoc = soc, enabledThresholds = thresholds),
+            )!!.stageConfig.seizeThreshold
+            val app = UiState(alertsOn = alertsOn, seizeLowToStage = pull, seizeSoc = soc, enabledThresholds = thresholds)
+                .seizeThreshold
+            assertEquals("alertsOn=$alertsOn pull=$pull soc=$soc", headless, app)
+        }
+    }
+
+    // --- monitoringNotificationText (BLE-11 de-churn; counts only this session's readings) ---
+
+    private val nowE = 5_000_000L
+
+    /** A pack heard from 1 s ago at the stage cadence. */
+    private fun liveStatus(soc: Float) = BatteryStatus(
+        telemetry = tel(soc), reachable = true, lastFrameAtElapsedMs = nowE - 1_000L, frameIntervalMs = STAGE_POLL_MS,
+    )
 
     @Test
     fun `no reachable packs reads connecting`() {
-        assertEquals("Connecting…", monitoringNotificationText(MonitorState()))
+        assertEquals("Connecting…", monitoringNotificationText(MonitorState(), nowE))
         // Unreachable / telemetry-less packs don't count.
         val st = MonitorState(
             fleet = mapOf(
-                "A" to BatteryStatus(telemetry = tel(50f), reachable = false),
+                "A" to liveStatus(50f).copy(reachable = false),
                 "B" to BatteryStatus(telemetry = null, reachable = true),
             ),
         )
-        assertEquals("Connecting…", monitoringNotificationText(st))
+        assertEquals("Connecting…", monitoringNotificationText(st, nowE))
     }
 
     @Test
     fun `reachable packs read count and lowest soc`() {
         val st = MonitorState(
             fleet = mapOf(
-                "A" to BatteryStatus(telemetry = tel(83.4f), reachable = true),
-                "B" to BatteryStatus(telemetry = tel(51.6f), reachable = true),
-                "C" to BatteryStatus(telemetry = tel(90f), reachable = false),
+                "A" to liveStatus(83.4f),
+                "B" to liveStatus(51.6f),
+                "C" to liveStatus(90f).copy(reachable = false),
             ),
         )
-        assertEquals("2 packs connected · lowest 52%", monitoringNotificationText(st))
+        assertEquals("2 packs connected · lowest 52%", monitoringNotificationText(st, nowE))
     }
 
     @Test
     fun `single pack uses singular wording`() {
-        val st = MonitorState(fleet = mapOf("A" to BatteryStatus(telemetry = tel(99.6f), reachable = true)))
-        assertEquals("1 pack connected · lowest 100%", monitoringNotificationText(st))
+        val st = MonitorState(fleet = mapOf("A" to liveStatus(99.6f)))
+        assertEquals("1 pack connected · lowest 100%", monitoringNotificationText(st, nowE))
     }
 
     @Test
     fun `identical fleets produce identical text so distinctUntilChanged suppresses the repost`() {
-        val a = MonitorState(fleet = mapOf("A" to BatteryStatus(telemetry = tel(60.2f), reachable = true)))
-        val b = MonitorState(fleet = mapOf("A" to BatteryStatus(telemetry = tel(60.4f), reachable = true)))
+        val a = MonitorState(fleet = mapOf("A" to liveStatus(60.2f)))
+        val b = MonitorState(fleet = mapOf("A" to liveStatus(60.4f)))
         // Different raw SOC, same rounded display → same string → no notification churn.
-        assertEquals(monitoringNotificationText(a), monitoringNotificationText(b))
-        assertNotNull(monitoringNotificationText(a))
+        assertEquals(monitoringNotificationText(a, nowE), monitoringNotificationText(b, nowE))
+        assertNotNull(monitoringNotificationText(a, nowE))
+    }
+
+    // Tier-2 follow-up: a connected pack still showing only its restored seed is not "connected",
+    // and its possibly days-old SOC must never be the notification's "lowest".
+    @Test
+    fun `a seed-only pack is not counted and never sets the lowest`() {
+        val st = MonitorState(
+            fleet = mapOf("A" to liveStatus(80f), "B" to BatteryStatus(telemetry = tel(3f), reachable = true)),
+        )
+        assertEquals("1 pack connected · lowest 80%", monitoringNotificationText(st, nowE))
+    }
+
+    @Test
+    fun `a pack silent past the backstop is not counted`() {
+        val silent = liveStatus(10f).copy(lastFrameAtElapsedMs = nowE - 61_000L)
+        val st = MonitorState(fleet = mapOf("A" to liveStatus(80f), "B" to silent))
+        assertEquals("1 pack connected · lowest 80%", monitoringNotificationText(st, nowE))
+    }
+
+    @Test
+    fun `a pack that just missed two polls still counts`() {
+        val stale = liveStatus(40f).copy(lastFrameAtElapsedMs = nowE - 15_000L)   // STALE, this session
+        val st = MonitorState(fleet = mapOf("A" to liveStatus(80f), "B" to stale))
+        assertEquals("2 packs connected · lowest 40%", monitoringNotificationText(st, nowE))
+    }
+
+    @Test
+    fun `every pack disconnected by the user reads so`() {
+        val st = MonitorState(monitoring = true, linksWanted = false, fleet = mapOf("A" to liveStatus(80f)))
+        assertEquals("All packs disconnected", monitoringNotificationText(st, nowE))
+    }
+
+    // Final wave: with every battery removed nothing was disconnected by the user.
+    @Test
+    fun `an empty roster says there is nothing to monitor`() {
+        val st = MonitorState(monitoring = true, linksWanted = false, rosterEmpty = true)
+        assertEquals("No packs configured", monitoringNotificationText(st, nowE))
+    }
+
+    @Test
+    fun `the cpu is held only while monitoring has a pack to poll`() {
+        assertTrue(wantsCpuWakeLock(MonitorState(monitoring = true, linksWanted = true)))
+        assertFalse(wantsCpuWakeLock(MonitorState(monitoring = true, linksWanted = false)))
+        assertFalse(wantsCpuWakeLock(MonitorState(monitoring = false, linksWanted = true)))
+    }
+
+    // BLE-27 hard rule: the wakelock released by "Disconnect all" is taken again as soon as any
+    // pack is wanted — left released, the poll's delay() would stop firing in CPU suspend and
+    // overnight monitoring would silently stall. This checks the composed decision —
+    // wantsCpuWakeLock over linksWanted = hasDesiredLinks(roster, disabled) — for each kind of change
+    // to the wanted set; that the engine and service actually re-run it on each change is pinned by
+    // ServiceWiringTest's source guards.
+    @Test
+    fun `disconnect all releases the cpu and every way back to a wanted pack takes it again`() {
+        val all = DEFAULT_ROSTER.allTargets().map { it.address }.toSet()
+        fun holdCpu(disabled: Set<String>, roster: Roster = DEFAULT_ROSTER) =
+            wantsCpuWakeLock(MonitorState(monitoring = true, linksWanted = hasDesiredLinks(roster, disabled)))
+        assertTrue(holdCpu(emptySet()))                       // monitoring every pack
+        assertTrue(holdCpu(all - all.first()))                // one pack still wanted: still held
+        assertFalse(holdCpu(all))                             // Disconnect all: released
+        assertTrue(holdCpu(all - all.first()))                // Reconnect one pack: taken again
+        assertTrue(holdCpu(emptySet()))                       // Reconnect all: taken again
+        assertFalse(holdCpu(emptySet(), Roster()))            // every battery removed: released
+        assertTrue(holdCpu(emptySet(), DEFAULT_ROSTER))       // a battery added back: taken again
     }
 }

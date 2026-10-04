@@ -48,10 +48,10 @@ data class StageInputs(
     val now: Long,
     val groups: List<BatteryGroup>,
     /**
-     * SOC at/below which a reachable pack seizes the stage (safety override), or null to disable.
-     * The engine fills it from [StageConfig.seizeThreshold] — pushed by the ViewModel, or rebuilt
-     * from the persisted settings by the headless restore plan — which is [seizeThresholdFor]: the
-     * highest enabled capacity-alert threshold when alerts and "Pull low packs to stage" are both on.
+     * The seize level ([seizeThresholdFor]) when alerts and "Pull low packs to stage" are both on,
+     * else null; see [seizeCandidate] for who may seize. The engine fills it from
+     * [StageConfig.seizeThreshold] — pushed by the ViewModel, or rebuilt from the persisted
+     * settings by the headless restore plan.
      */
     val seizeThreshold: Int? = null,
 )
@@ -62,7 +62,8 @@ private fun groupForAddress(groups: List<BatteryGroup>, address: String): Batter
 
 /**
  * Resolve which target owns the stage:
- *  - a manual pin wins (permanently if dynamic is off, else for PIN_HOLD_MS);
+ *  - a low pack's seize wins ([seizeCandidate]: never off a base in use, never while charging);
+ *  - then a manual pin (permanently if dynamic is off, else for PIN_HOLD_MS);
  *  - otherwise dynamic:
  *      1. a base discharging right now (the active chair),
  *      2. a base that discharged within [holdMs] keeps the stage even if it's now idle OR
@@ -72,25 +73,12 @@ private fun groupForAddress(groups: List<BatteryGroup>, address: String): Batter
  *  Daily driver breaks ties.
  */
 fun resolveStage(i: StageInputs): StageTarget {
-    // Low-pack safety override: a reachable pack at/below the seize threshold pulls the stage to its
-    // base ahead of everything — the active chair AND a manual pin — so a pack draining too low can
-    // never sit hidden off-stage (that's what would let it discharge to damage). Lowest SOC wins; the
-    // daily driver breaks exact ties. When the pack recovers above the threshold this branch yields
-    // and the normal pin/auto resolution below takes back over (restoring any manual pin).
-    i.seizeThreshold?.let { thr ->
-        val low = i.fleet.entries
-            .mapNotNull { (addr, s) ->
-                s.telemetry?.takeIf { s.reachable && it.soc <= thr }?.let { addr to it.soc }
-            }
-            .minWithOrNull(
-                compareBy<Pair<String, Float>> { it.second }
-                    .thenByDescending { groupForAddress(i.groups, it.first)?.id == i.dailyDriverId }
-                    .thenBy { it.first },
-            )
-        if (low != null) {
-            val g = groupForAddress(i.groups, low.first)
-            return if (g != null) StageTarget.Base(g.id) else StageTarget.Single(low.first)
-        }
+    // Low-pack safety override (UI-19 rules — see seizeCandidate): a low pack pulls the stage to its
+    // base ahead of a manual pin, so a pack draining too low can't sit hidden off-stage. When it
+    // recovers (or starts charging) this branch yields and normal pin/auto resolution takes back over.
+    seizeCandidate(i)?.let { addr ->
+        val g = groupForAddress(i.groups, addr)
+        return if (g != null) StageTarget.Base(g.id) else StageTarget.Single(addr)
     }
     i.manualStage?.let { pin ->
         if (!i.dynamicEnabled) return pin
@@ -119,6 +107,63 @@ fun resolveStage(i: StageInputs): StageTarget {
 
     // 4. everything idle -> leave the stage where it is
     return i.current
+}
+
+/**
+ * The pack the low-pack seize pulls onto the stage, or null (UI-19).
+ *  - Candidates: reachable packs at or below [StageInputs.seizeThreshold] that are not charging. A
+ *    pack taking charge is not draining, so there is nothing to warn about: its capacity
+ *    notification is suppressed too. Regen — charge-direction current within [REGEN_WINDOW_MS] of
+ *    its base discharging — is driving, not charging, and still counts.
+ *  - The seize never displaces a base in use ([inUseGroupIds]): while any base is in use, only packs
+ *    on a base in use may seize. That keeps the case the seize exists for — a low in-use base
+ *    overriding a manual pin — and stops an idle spare on the shelf from taking the stage away from
+ *    the chair being driven. Every discharging base is in use, so a draining pack on a second
+ *    discharging base can't stay hidden off-stage.
+ *  - Lowest SOC wins; the daily driver, then the address, break ties.
+ */
+internal fun seizeCandidate(i: StageInputs): String? {
+    val thr = i.seizeThreshold ?: return null
+    val inUse = inUseGroupIds(i)
+    return i.fleet.entries
+        .mapNotNull { (addr, s) ->
+            val t = s.telemetry?.takeIf { s.reachable && it.soc <= thr } ?: return@mapNotNull null
+            val g = groupForAddress(i.groups, addr)
+            if (inUse.isNotEmpty() && g?.id !in inUse) return@mapNotNull null
+            if (chargingNotRegen(t, g?.let { i.lastDischargeAt[it.id] }, i.now)) return@mapNotNull null
+            addr to t.soc
+        }
+        .minWithOrNull(
+            compareBy<Pair<String, Float>> { it.second }
+                .thenByDescending { groupForAddress(i.groups, it.first)?.id == i.dailyDriverId }
+                .thenBy { it.first },
+        )
+        ?.first
+}
+
+/** The bases in use: every base discharging now; if none is, the one with the newest discharge
+ *  strictly inside the stage hold — the hold rule of [resolveStage]. Empty when nothing is in use. */
+private fun inUseGroupIds(i: StageInputs): Set<String> {
+    val discharging = i.groups.filter { groupActivity(it, i.fleet) == GroupActivity.Discharging }.map { it.id }.toSet()
+    if (discharging.isNotEmpty()) return discharging
+    return setOfNotNull(
+        i.groups
+            .mapNotNull { g -> i.lastDischargeAt[g.id]?.let { g to it } }
+            .filter { i.now - it.second < i.holdMs }
+            .maxByOrNull { it.second }
+            ?.first?.id,
+    )
+}
+
+/**
+ * Charging, and not regen. A superset of [isRegen] on purpose: any charge-direction state or current
+ * within [REGEN_WINDOW_MS] of the base discharging counts as regen here, with no [REGEN_EPS] floor, so a
+ * low pack on a chair being driven errs toward seizing. Do not tighten it to match [isRegen].
+ */
+private fun chargingNotRegen(t: Telemetry, groupLastDischargeAt: Long?, now: Long): Boolean {
+    val charging = t.state == BatteryState.Charging || t.current > CURRENT_EPS
+    val regen = groupLastDischargeAt != null && now - groupLastDischargeAt < REGEN_WINDOW_MS
+    return charging && !regen
 }
 
 /**

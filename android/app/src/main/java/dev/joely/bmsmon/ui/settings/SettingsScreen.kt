@@ -1,5 +1,7 @@
 package dev.joely.bmsmon.ui.settings
 
+import dev.joely.bmsmon.ui.Confirmations
+import dev.joely.bmsmon.ui.ConfirmDialog
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
@@ -91,6 +93,7 @@ import dev.joely.bmsmon.luxToFraction
 import dev.joely.bmsmon.model.BatteryGroup
 import dev.joely.bmsmon.model.GaugeSide
 import dev.joely.bmsmon.model.MIN_DIM_LEVEL
+import dev.joely.bmsmon.model.SEIZE_SOC_OPTIONS
 import dev.joely.bmsmon.model.STAGE_HOLD_OPTIONS_MIN
 import dev.joely.bmsmon.model.TempThresholds
 import dev.joely.bmsmon.model.TempUnit
@@ -158,7 +161,8 @@ fun SettingsScreen(
         }
         SettingsPage.Alerts -> DetailScaffold("Alerts", { page = null }) {
             AlertsContent(state, alerts.onSetAlertsOn, alerts.onToggleThreshold,
-                alerts.onSetCriticalThreshold, alerts.onSetSeizeLowToStage, alerts.onResetAlerts)
+                alerts.onSetCriticalThreshold, alerts.onSetSeizeLowToStage, alerts.onResetAlerts,
+                alerts.onSetSeizeSoc)
         }
         SettingsPage.Temperature -> DetailScaffold("Temperature", { page = null }) {
             TemperatureContent(state, temp.onSetTempAlertsEnabled, temp.onSetShowTempGauge,
@@ -340,6 +344,7 @@ private fun StatusHero(state: UiState, onToggleMonitoring: () -> Unit, big: Bool
     val border = if (on) RegenGreen.copy(alpha = 0.32f) else c.border
     val bases = state.roster.groups.size
     val packs = state.roster.batteries.size
+    var confirmStop by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth()
             .clip(RoundedCornerShape(if (big) 14.dp else 12.dp))
@@ -361,10 +366,13 @@ private fun StatusHero(state: UiState, onToggleMonitoring: () -> Unit, big: Bool
             )
         }
         if (on) {
-            PillButton("Stop", outlined = true, onClick = onToggleMonitoring)
+            PillButton("Stop", outlined = true, onClick = { confirmStop = true })
         } else {
             PillButton("Start", outlined = false, onClick = onToggleMonitoring)
         }
+    }
+    if (confirmStop) {
+        ConfirmDialog(Confirmations.stopMonitoring, onConfirm = onToggleMonitoring, onDismiss = { confirmStop = false })
     }
 }
 
@@ -647,6 +655,7 @@ private fun ColumnScope.AlertsContent(
     onSetCriticalThreshold: (Int) -> Unit,
     onSetSeizeLowToStage: (Boolean) -> Unit,
     onResetAlerts: () -> Unit,
+    onSetSeizeSoc: (Int) -> Unit,
 ) {
     val c = Bm.colors
     GroupedCard {
@@ -654,8 +663,9 @@ private fun ColumnScope.AlertsContent(
             state.alertsOn, onSetAlertsOn)
         ToggleRow(
             "Pull low packs to stage",
-            "When any pack hits your highest trigger level, jump it onto the main stage — over the " +
-                "in-use base and a manual pin — so it can't drain too low unseen. Alarms fire either way.",
+            "When a pack drops to your pull level (below), it jumps onto the main stage — over a manual " +
+                "pin — so it can't drain unseen. An idle spare never displaces the base you're driving, " +
+                "and a charging pack never jumps. Alarms fire either way.",
             state.seizeLowToStage, onSetSeizeLowToStage,
         )
     }
@@ -701,7 +711,21 @@ private fun ColumnScope.AlertsContent(
         }
     }
 
-    val next = if (state.alertsOn) state.enabledThresholds.maxOrNull() else null
+    if (state.seizeLowToStage) {
+        SectionLabel("Pull to stage at")
+        PlainCard {
+            Text(
+                "Separate from the alert levels above, so an early warning never moves the stage.",
+                color = c.text2, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.padding(bottom = 12.dp),
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SEIZE_SOC_OPTIONS.forEach { t ->
+                    SelectChip("$t%", state.seizeSoc == t, mono = true) { onSetSeizeSoc(t) }
+                }
+            }
+        }
+    }
+
     Box(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
             .background(AlertCritical.copy(alpha = 0.07f))
@@ -709,10 +733,7 @@ private fun ColumnScope.AlertsContent(
             .padding(14.dp),
     ) {
         Text(
-            if (next != null)
-                "Next alert fires when any pack — on stage or not — drops to $next%" +
-                    (if (state.seizeLowToStage) ", and that pack jumps onto the stage." else ".")
-            else "Low-battery alerts are off.",
+            alertSummaryLine(state.alertsOn, state.enabledThresholds, state.seizeThreshold),
             color = c.text2, fontSize = 12.sp, lineHeight = 17.sp,
         )
     }
@@ -1419,6 +1440,7 @@ private fun ColumnScope.DataLoggingContent(
     onClearLog: () -> Unit,
 ) {
     val c = Bm.colors
+    var confirmClear by remember { mutableStateOf(false) }
     GroupedCard {
         ToggleRow(
             "Usage logging",
@@ -1436,10 +1458,13 @@ private fun ColumnScope.DataLoggingContent(
     Box(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
             .border(1.dp, AlertCritical.copy(alpha = 0.55f), RoundedCornerShape(10.dp))
-            .clickable(onClick = onClearLog).padding(vertical = 12.dp),
+            .clickable { confirmClear = true }.padding(vertical = 12.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text("Clear data", color = AlertCritical, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+    }
+    if (confirmClear) {
+        ConfirmDialog(Confirmations.clearData, onConfirm = onClearLog, onDismiss = { confirmClear = false })
     }
     Text("Clearing removes logged history but not your settings.", color = c.text3, fontSize = 11.sp,
         modifier = Modifier.padding(start = 2.dp))

@@ -1,6 +1,7 @@
 package dev.joely.bmsmon
 
 import java.io.File
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -22,9 +23,38 @@ class EngineWiringTest {
     }
     private val flat: String get() = src.replace(Regex("\\s+"), " ")
 
+    // Every BLE event of the CURRENT session runs the decision step; one from an ended session
+    // (BLE-21) changes nothing, so it decides nothing either — it can no longer move the stage
+    // (and persist it) after a Stop.
     @Test fun everyBleEventRunsTheDecisionStep() {
-        assertTrue(flat.contains("onPoll = { addr, raw, t -> onPoll(addr, raw, t); reevaluate() }"))
-        assertTrue(flat.contains("onReachable = { addr, reachable -> onReachable(addr, reachable); reevaluate() }"))
+        assertTrue(flat.contains(
+            "onPoll = { addr, raw, t -> onPoll(session, addr, raw, t); if (session == currentSession) reevaluate() }",
+        ))
+        assertTrue(flat.contains(
+            "onReachable = { addr, reachable -> onReachable(session, addr, reachable); if (session == currentSession) reevaluate() }",
+        ))
+    }
+
+    // BLE-21: a callback already running on the control loop when monitoring stopped (cancellation
+    // can't interrupt it) must not mark a pack live under MONITORING OFF, post anything, or leak into
+    // the next session.
+    @Test fun aCallbackFromAnEndedSessionChangesNothing() {
+        val stop = flat.substringAfter("fun stop() {").substringBefore("fun persistMonitoringOff(")
+        assertTrue("stop() ends the session before tearing BLE down",
+            stop.indexOf("currentSession = 0L") in 0 until stop.indexOf("ble.stop()"))
+        val start = flat.substringAfter("fun start(roster: Roster,").substringBefore("suspend fun restoreFromPersisted(")
+        assertTrue(start.contains("val session = ++sessionSeq"))
+        assertTrue("minted before BLE starts", start.indexOf("currentSession = session") in 0 until start.indexOf("ble.start("))
+        val bodies = mapOf(
+            "private fun onPoll(" to "private fun onReachable(",
+            "private fun onReachable(" to "private suspend fun learnTail(",
+        )
+        for ((from, to) in bodies) {
+            val body = flat.substringAfter(from).substringBefore(to)
+            assertTrue("$from returns early for an ended session", body.contains("if (session != currentSession) return"))
+            assertTrue("$from re-checks inside its state update",
+                body.contains("if (session != currentSession || !st.monitoring) return@update st"))
+        }
     }
 
     @Test fun noAlertOrStagePathIsGatedOnStageMembership() {
@@ -74,6 +104,42 @@ class EngineWiringTest {
         )
     }
 
+    // Final-wave MUST-FIX: CLAUDE.md says a refused frame is not logged or uploaded. An undecodable
+    // frame used to be logged before the disabled check, and with no re-check of the session at the
+    // write: now a disabled pack's frame returns before either branch, and the decode_fail row is
+    // written only if the frame is still accepted right at the write.
+    @Test fun aRefusedUndecodableFrameIsNeverLogged() {
+        val onPoll = flat.substringAfter("private fun onPoll(").substringBefore("private fun onReachable(")
+        val disabled = onPoll.indexOf("if (isDisabled(addr)) return ")
+        val undecodable = onPoll.indexOf("if (t == null) {")
+        assertTrue("the disabled check comes first", disabled in 0 until undecodable)
+        val branch = onPoll.substring(undecodable).substringBefore("return }")
+        assertTrue(branch.contains(
+            "if (logging && session == currentSession && _state.value.monitoring && !isDisabled(addr)) { " +
+                "repository.ingestRawOnly(addr, raw, \"decode_fail\", now)",
+        ))
+        assertEquals("one raw-only write site", 1, Regex(Regex.escape("repository.ingestRawOnly(")).findAll(src).count())
+    }
+
+    // Task 8 carry: the temperature notifications read the freshness DECISION view (a seed or a
+    // silent pack never raises or holds an alarm — TempAlertsTest), not the raw fleet.
+    @Test fun theTemperatureAlarmReadsTheDecisionView() {
+        val decide = flat.substringAfter("private fun reevaluate() {").substringBefore("private fun applyStage(")
+        assertTrue(decide.contains("evaluateTempAlerts(d.view, nowE)"))
+        assertFalse(decide.contains("evaluateTempAlerts(st.fleet"))
+    }
+
+    // BLE-24 holds only packs the user hasn't disconnected or removed — and nothing at all with the
+    // alerts off, which is what cancels a pack that had already vanished when they were turned off.
+    // The temperature hold is per pack too: never the whole stage.
+    @Test fun onlyWantedPacksAreHeldAndNothingWithAlertsOff() {
+        val decide = flat.substringAfter("private fun reevaluate() {").substringBefore("private fun applyStage(")
+        assertTrue(decide.contains("holdable = if (cfg?.alertsOn == true) wantedAddrs(roster, disabledAddrs) else emptySet()"))
+        val temp = flat.substringAfter("private fun evaluateTempAlerts(").substringBefore("fun importLegacyCsvIfNeeded(")
+        assertTrue(temp.contains("holdable = if (on) wantedAddrs(roster, disabledAddrs) else emptySet()"))
+        assertFalse("no whole-stage hold", temp.contains("stageAddrs.isNotEmpty()"))
+    }
+
     @Test fun aDisabledPackIsNeverMarkedReachable() {
         val onReachable = flat.substringAfter("private fun onReachable(")
             .substringBefore("private suspend fun learnTail(")
@@ -82,10 +148,63 @@ class EngineWiringTest {
         assertFalse(onReachable.contains(".copy(reachable = reachable)"))
     }
 
+    // BLE-19 / BLE-23: the request is driven on every gate evaluation (a later permission grant is
+    // picked up), gpsActive comes from what is actually registered, and a sample reads the fix with
+    // the read-time staleness check.
+    @Test fun theGpsGateDrivesTheRequestEveryEvaluation() {
+        val gate = flat.substringAfter("private fun applyGpsGate(").substringBefore("private fun shutdownGps(")
+        assertTrue(gate.contains("val active = driveLocation(run, locationSource)"))
+        assertFalse(gate.contains("if (active) locationSource.start() else locationSource.stop()"))
+        val onPoll = flat.substringAfter("private fun onPoll(").substringBefore("private fun onReachable(")
+        assertTrue(onPoll.contains("locationSource.current(now)"))
+    }
+
+    // Final-wave MUST-FIX: every location-mode switch is guarded. The unguarded one in stopPowerLoop()
+    // aborted stop() just after it ended the session: BLE kept running with every frame refused, the
+    // throw crashed the main-thread caller, and the sticky restart undid the user's Stop.
+    @Test fun everyLocationModeSwitchIsGuardedSoStopAlwaysCompletes() {
+        assertEquals("one switch site", 1, Regex(Regex.escape("locationSource.setBalanced(")).findAll(src).count())
+        assertTrue(flat.contains(
+            "private fun applyLocationMode(balanced: Boolean) { runCatching { locationSource.setBalanced(balanced) }",
+        ))
+        val stopPower = flat.substringAfter("private fun stopPowerLoop() {").substringBefore("}")
+        assertTrue(stopPower.contains("applyLocationMode(false)"))
+        val powerLoop = flat.substringAfter("private fun startPowerLoop() {").substringBefore("private fun stopPowerLoop()")
+        assertTrue(powerLoop.contains("applyLocationMode(d.gpsBalanced)"))
+        // stop() reaches its teardown after the power loop: BLE, GPS, the state reset.
+        val stop = flat.substringAfter("fun stop() {").substringBefore("fun persistMonitoringOff(")
+        val power = stop.indexOf("stopPowerLoop()")
+        assertTrue(power in 0 until stop.indexOf("ble.stop()"))
+        assertTrue(stop.indexOf("ble.stop()") < stop.indexOf("shutdownGps()"))
+    }
+
+    // Final wave: a request Play Services fails after accepting it re-runs the gate, the single
+    // writer of gpsActive, under its lock — LocationSource forgets it (LocationSourceTest).
+    @Test fun aLostLocationRequestReRunsTheGpsGate() {
+        assertTrue(flat.contains("private val locationSource = LocationSource(appContext) { onLocationRequestLost() }"))
+        val lost = flat.substringAfter("private fun onLocationRequestLost() {").substringBefore("}")
+        assertTrue(lost.contains("runCatching { applyGpsGate(now())"))
+        assertTrue(Regex("@Synchronized\\s+private fun applyGpsGate\\(").containsMatchIn(src))
+    }
+
+    // Task 6 review carry: a roster left with no wanted pack must stop GPS at once — no BLE frame
+    // will drive the gate, and with the wakelock released the 5-min tick may never run.
+    @Test fun aRosterEditReRunsTheGpsGate() {
+        val body = flat.substringAfter("fun setRoster(roster: Roster) {").substringBefore("fun seedStage(")
+        assertTrue(body.contains("if (_state.value.monitoring) { ble.setTargets(roster.allTargets()) applyGpsGate(now())"))
+    }
+
     // M7: no CoroutineExceptionHandler on the engine scope — an unguarded import throw kills the process.
     @Test fun theLegacyCsvImportCannotCrashTheProcess() {
         val body = flat.substringAfter("fun importLegacyCsvIfNeeded(")
             .substringBefore("@Volatile private var gpsWanted")
         assertTrue(body.contains("runCatching { repository.importCsvOnce("))
+    }
+
+    // BLE-25: the range pass streams Room pages; it never loads a pack's whole window as a list.
+    @Test fun theRangePassStreamsTheWindow() {
+        val pass = flat.substringAfter("private suspend fun rangePass()").substringBefore("private fun recomputeLastDischarge(")
+        assertTrue(pass.contains("repository.forEachRangeRow(addr, since)"))
+        assertFalse(pass.contains("repository.rangeRows("))
     }
 }

@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.BluetoothDisabled
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -28,6 +29,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.joely.bmsmon.DEFAULT_CRITICAL_THRESHOLD
+import dev.joely.bmsmon.DEFAULT_THRESHOLDS
+import dev.joely.bmsmon.model.AlertConfig
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.GaugeSide
 import dev.joely.bmsmon.model.StageItem
@@ -49,7 +53,9 @@ import dev.joely.bmsmon.ui.gauge.tempZoneColor
 import dev.joely.bmsmon.ui.rememberBoltAlpha
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
-import dev.joely.bmsmon.ui.theme.RegenGreen
+import dev.joely.bmsmon.ui.theme.socSeverityFor
+import dev.joely.bmsmon.ui.theme.stageSeverityWord
+import dev.joely.bmsmon.ui.theme.textColor
 import kotlin.math.roundToInt
 
 /** The main stage: the active base's two packs, full gauges. */
@@ -64,6 +70,7 @@ fun StageScreen(
     thresholds: TempThresholds,
     envelope: TempEnvelope,
     modifier: Modifier = Modifier,
+    alertConfig: AlertConfig = AlertConfig(true, DEFAULT_THRESHOLDS.toSet(), DEFAULT_CRITICAL_THRESHOLD),
 ) {
     if (isEmpty) {
         val c = Bm.colors
@@ -96,7 +103,7 @@ fun StageScreen(
                 verticalAlignment = Alignment.CenterVertically) {
                 items.forEach { item ->
                     BatteryBlock(item, tempInF, showTempGauge, tempGaugeSide, thresholds, envelope,
-                        Modifier.width(320.dp))
+                        alertConfig, Modifier.width(320.dp))
                 }
             }
         } else {
@@ -104,7 +111,7 @@ fun StageScreen(
             Column(Modifier.weight(1f).padding(top = 6.dp)) {
                 items.forEach { item ->
                     BatteryBlock(item, tempInF, showTempGauge, tempGaugeSide, thresholds, envelope,
-                        Modifier.weight(1f))
+                        alertConfig, Modifier.weight(1f))
                 }
             }
         }
@@ -128,6 +135,7 @@ private fun BatteryBlock(
     tempGaugeSide: GaugeSide,
     thresholds: TempThresholds,
     envelope: TempEnvelope,
+    alertConfig: AlertConfig,
     modifier: Modifier = Modifier,
 ) {
     val c = Bm.colors
@@ -155,7 +163,7 @@ private fun BatteryBlock(
             if (gaugeColor != null && tempGaugeSide == GaugeSide.LEFT) {
                 TempGauge(b.temp, gaugeColor, formatTemp(b.temp, unit), tempCritical)
             }
-            StageRingBox(item, c)
+            StageRingBox(item, c, alertConfig)
             if (gaugeColor != null && tempGaugeSide == GaugeSide.RIGHT) {
                 TempGauge(b.temp, gaugeColor, formatTemp(b.temp, unit), tempCritical)
             }
@@ -176,7 +184,7 @@ private fun BatteryBlock(
 }
 
 @Composable
-private fun StageRingBox(item: StageItem, c: dev.joely.bmsmon.ui.theme.BmColors) {
+private fun StageRingBox(item: StageItem, c: dev.joely.bmsmon.ui.theme.BmColors, alertConfig: AlertConfig) {
     val b = item.telemetry
     // STALE (UI-16): this session's last reading, but older than the pack's live window. Keep the
     // number — a real low reading must never vanish — but mute it and say how old it is.
@@ -204,16 +212,34 @@ private fun StageRingBox(item: StageItem, c: dev.joely.bmsmon.ui.theme.BmColors)
             ChargingBoltIcon()
         }
         if (item.connected) {
+            // UI-21: a LIVE number takes the user's ladder severity (LOW amber / CRIT red, the alerts'
+            // own rule), contrast-corrected for the theme, with a word under it (stageSeverityWord: not
+            // while charging) so severity doesn't rest on hue alone. A STALE number gets neither: it
+            // stays text2 with its age, so an old reading never looks live (a stale low pack still
+            // drives the alert pill/overlay).
+            val severity = if (live) socSeverityFor(b.soc, alertConfig) else null
+            val numberColor = severity?.textColor() ?: c.text2
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     "${b.soc.roundToInt()}%",
                     // Stale stays legible in both themes (text2, not text3): readability is a safety
                     // property on this chair-mounted display.
-                    color = if (live) Bm.accent else c.text2,
+                    color = numberColor,
                     fontFamily = MonoFont,
                     fontSize = 40.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
+                // Its own line under the number, so it can never overlap or squeeze it: at most ~60 dp
+                // wide, and the whole readout stays inside the fixed ring box at 1.3x font scale.
+                stageSeverityWord(item, alertConfig)?.let { tag ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.Warning, contentDescription = null, modifier = Modifier.size(14.dp), tint = numberColor)
+                        Text(
+                            tag, color = numberColor, fontSize = 12.sp, fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp, modifier = Modifier.padding(start = 3.dp),
+                        )
+                    }
+                }
                 val age = item.staleAgeMs
                 if (stale && age != null) {
                     Text(
@@ -226,7 +252,7 @@ private fun StageRingBox(item: StageItem, c: dev.joely.bmsmon.ui.theme.BmColors)
                 } else {
                     Text(
                         if (item.regen) "↻ +${b.powerW.roundToInt()}W" else "${b.powerW.roundToInt()}W",
-                        color = if (item.regen) RegenGreen else c.text2,
+                        color = if (item.regen) Bm.goodText else c.text2,
                         fontFamily = MonoFont,
                         fontSize = 14.sp,
                         fontWeight = if (item.regen) FontWeight.SemiBold else FontWeight.Normal,
@@ -320,11 +346,13 @@ private fun StatGrid(
 @Composable
 private fun StatCell(s: Stat, connected: Boolean, muted: Boolean, modifier: Modifier = Modifier) {
     val c = Bm.colors
+    // UI-21: every value and label reads at >= 4.5:1 in both themes. A muted (stale) value is text2
+    // like the stale SOC number — grey, never the live accent; a disconnected one is a text3 dash.
     val valueColor = when {
         !connected -> c.text3
-        s.critical -> c.critical   // a critical temperature stays loud even on a stale reading
-        muted -> c.text3
-        else -> Bm.accent
+        s.critical -> Bm.criticalText   // a critical temperature stays loud even on a stale reading
+        muted -> c.text2
+        else -> Bm.accentText
     }
     Column(
         modifier
@@ -335,7 +363,7 @@ private fun StatCell(s: Stat, connected: Boolean, muted: Boolean, modifier: Modi
     ) {
         Text(
             s.label.uppercase(),
-            color = c.text3,
+            color = c.text2,
             fontSize = 10.sp,
             letterSpacing = 0.7.sp,
             modifier = Modifier.padding(bottom = 4.dp),

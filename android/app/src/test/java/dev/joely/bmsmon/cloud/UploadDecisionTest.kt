@@ -123,8 +123,25 @@ class UploadDecisionTest {
     }
 
     @Test fun uploadClientNeverFollowsRedirects() {
-        val c = uploadHttpClient()
-        assertFalse(c.followRedirects)
-        assertFalse(c.followSslRedirects)
+        // The production client carries the User-Agent; its builder path must refuse redirects too.
+        for (c in listOf(uploadHttpClient(), uploadHttpClient(userAgent("1.0", "2e9b6fd1a2b3", 37)))) {
+            assertFalse(c.followRedirects)
+            assertFalse(c.followSslRedirects)
+        }
+    }
+
+    // DATA-17: a phone moved to new hardware has its enrollment but not its Keystore key. Nothing was
+    // sent, so nothing is decided about the rows: hold them, leave the poison breaker and the auth
+    // badge alone (the UI shows its own "re-enroll required" state).
+    @Test fun aMissingKeyHoldsTheRowsWithoutTouchingTheBreakerOrTheAuthBadge() {
+        assertEquals(
+            UploadDecision(BatchStep.BACK_OFF_AUTH, poisonSkipsSinceOk = 1, authFailed = false),
+            decideUpload(PostResult.KeyMissing, poisonSkipsSinceOk = 1, authFailed = false),
+        )
+        // A badge already up stays up: a missing key proves nothing about the last sign-in.
+        assertEquals(
+            UploadDecision(BatchStep.BACK_OFF_AUTH, poisonSkipsSinceOk = 0, authFailed = true),
+            decideUpload(PostResult.KeyMissing, poisonSkipsSinceOk = 0, authFailed = true),
+        )
     }
 }

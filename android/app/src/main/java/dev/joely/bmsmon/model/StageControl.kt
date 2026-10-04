@@ -8,8 +8,9 @@ package dev.joely.bmsmon.model
  * and the engine re-evaluated fleet-wide alerts only when a (possibly dark) stage pack reported.
  * These pure pieces let the process-lifetime MonitorEngine own all of it: it runs
  * [engineDecision] on every BLE event and tick; the ViewModel pushes [StageConfig] and mirrors
- * the result. [resolveStage] itself (Fleet.kt) is unchanged — the seize semantics are byte for
- * byte the old ones; only its candidates are narrowed (roster members, session readings).
+ * the result. Since UI-19 the seize has its own level and never displaces a base in use (see
+ * seizeCandidate in Fleet.kt); its candidates are also narrowed to roster members and this
+ * session's readings.
  */
 
 /** Stage inputs that aren't telemetry: pushed by the ViewModel on every change, or rebuilt from
@@ -26,10 +27,34 @@ data class StageConfig(
 
 data class StageResolution(val target: StageTarget, val pinned: Boolean)
 
-/** The seize threshold (unchanged rule): the highest enabled ladder rung, only when alerts AND the
- *  "Pull low packs to stage" toggle are on. Shared by the ViewModel and the headless restore. */
-fun seizeThresholdFor(alertsOn: Boolean, seizeLowToStage: Boolean, enabledThresholds: Set<Int>): Int? =
-    if (alertsOn && seizeLowToStage && enabledThresholds.isNotEmpty()) enabledThresholds.max() else null
+/** The seize levels offered (UI-19). A seize is a safety override, so only low levels are offered. */
+val SEIZE_SOC_OPTIONS = listOf(10, 15, 20, 25, 30)
+
+/** The default seize level — the old effective default (the default ladder's top rung). */
+const val DEFAULT_SEIZE_SOC = 30
+
+/**
+ * A persisted seize level mapped onto an offered one ([SEIZE_SOC_OPTIONS]). The rounding rule errs
+ * toward MORE alerting — a higher threshold, so a low pack is pulled onto the stage sooner, never
+ * later:
+ *  - null (never set) → [DEFAULT_SEIZE_SOC];
+ *  - an offered level → itself;
+ *  - between two offered levels → the higher one (12 → 15);
+ *  - below the lowest → the lowest (10);
+ *  - above the highest → the highest (30), the most alerting level on offer.
+ */
+fun normalizeSeizeSoc(v: Int?): Int {
+    if (v == null) return DEFAULT_SEIZE_SOC
+    return SEIZE_SOC_OPTIONS.firstOrNull { it >= v } ?: SEIZE_SOC_OPTIONS.last()
+}
+
+/**
+ * The seize threshold (UI-19): its own level, separate from the notification ladder — enabling an
+ * early-warning rung (say 60 %) no longer drags the stage onto whichever pack is lowest. Only when
+ * alerts AND "Pull low packs to stage" are on. Shared by the ViewModel and the headless restore.
+ */
+fun seizeThresholdFor(alertsOn: Boolean, seizeLowToStage: Boolean, seizeSoc: Int): Int? =
+    if (alertsOn && seizeLowToStage) normalizeSeizeSoc(seizeSoc) else null
 
 /** The target's addresses that are actually in the roster (uppercased). A Single for a removed
  *  battery, or a base whose packs were all regrouped, has none. */
@@ -41,6 +66,17 @@ fun stageAddrsFor(target: StageTarget, roster: Roster, disabled: Set<String>): S
     val off = disabled.map { it.uppercase() }.toSet()
     return target.memberAddresses(roster) - off
 }
+
+/** The packs BLE should hold links to: every roster member the user hasn't disconnected
+ *  (uppercased, case-insensitive). */
+fun wantedAddrs(roster: Roster, disabled: Set<String>): Set<String> {
+    val off = disabled.map { it.uppercase() }.toSet()
+    return roster.allTargets().map { it.address.uppercase() }.filter { it !in off }.toSet()
+}
+
+/** BLE-27: whether BLE has any link to want — false after "Disconnect all" or with an empty roster.
+ *  With nothing wanted, nothing is polled: the service releases its wakelock and GPS stops. */
+fun hasDesiredLinks(roster: Roster, disabled: Set<String>): Boolean = wantedAddrs(roster, disabled).isNotEmpty()
 
 /** UI-29 fallback for a target with no members: the daily-driver base, else the first base with
  *  members, else the first battery as a single. Null only for an empty roster. */
@@ -119,10 +155,12 @@ fun engineDecision(
     disabled: Set<String>,
     alertCfg: AlertConfig?,
     chargeAt: Map<String, Long>,
+    /** Packs inside their regen window: never "charging" for the notifier ([fleetCapacityEvals]). */
+    regenAddrs: Set<String> = emptySet(),
 ): EngineDecision {
     val view = decisionView(pruneToRoster(fleet, roster), nowElapsedMs)
     val stage = resolveEngineStage(roster, view, lastDischargeAt, stageCfg, current, nowMs)
-    val fc = alertCfg?.let { fleetCapacityEvals(view, it, chargeAt, nowMs) }
+    val fc = alertCfg?.let { fleetCapacityEvals(view, it, chargeAt, nowMs, regenAddrs) }
     return EngineDecision(
         stage = stage,
         stageAddrs = stageAddrsFor(stage.target, roster, disabled),

@@ -8,8 +8,11 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -76,10 +79,6 @@ val AlertCritical = Color(0xFFE5342B)
 val TempCool = Color(0xFF46B3C9)
 val TempCold = Color(0xFF3D86D6)
 
-/** SOC / capacity severity ramp: <15% critical, <30% warning, else accent. */
-fun socSeverity(soc: Float, accent: Color): Color =
-    if (soc < 15f) AlertCritical else if (soc < 30f) AlertWarn else accent
-
 /** The eight preset swatches (theme list leads with accent default, power list with power default). */
 val ThemeSwatches = listOf(
     0xFFE67E22, 0xFF2A6C9C, 0xFF2E8B57, 0xFF8B2520,
@@ -96,6 +95,43 @@ val PowerSwatches = listOf(
 val LocalBmColors = compositionLocalOf { DarkBmColors }
 val LocalAccent = staticCompositionLocalOf { DefaultAccent }
 val LocalPower = staticCompositionLocalOf { DefaultPower }
+
+/** [fg] made readable on every one of the opaque [surfaces] ([readableOn]), as an opaque Color. */
+fun readableInk(fg: Color, surfaces: List<Color>): Color =
+    Color(0xFF000000.toInt() or readableOn(fg.toArgb(), surfaces.map { it.toArgb() }))
+
+/**
+ * [fg] made readable on a tinted strip: the translucent [wash] drawn over [under]. Text on a strip
+ * (the acknowledged-alert pill, the list's stage row) is checked against the strip itself, which the
+ * theme's own surfaces don't cover — a page-safe ink can fall short of [MIN_TEXT_CONTRAST] on it.
+ */
+fun readableInkOnWash(fg: Color, wash: Color, under: Color): Color = readableInk(fg, listOf(wash.compositeOver(under)))
+
+/**
+ * Text-safe variants of the user's accent/power colors and the status colors for one theme (UI-21)
+ * — see [readableOn]. Each reaches [MIN_TEXT_CONTRAST] on the theme's bg, card, card2 and inputBg;
+ * text on a tinted strip is re-checked against that strip with [readableInkOnWash].
+ */
+data class ReadableColors(val accent: Color, val warn: Color, val critical: Color, val good: Color, val power: Color)
+
+/** Contrast-correct the accent, power and status colors against [dark]'s surfaces (bg, cards, inputs). */
+fun readableColors(dark: Boolean, accent: Color, power: Color = DefaultPower): ReadableColors {
+    val t = if (dark) DarkBmColors else LightBmColors
+    val surfaces = listOf(t.bg, t.card, t.card2, t.inputBg)
+    fun r(c: Color) = readableInk(c, surfaces)
+    return ReadableColors(r(accent), r(AlertWarn), r(AlertCritical), r(RegenGreen), r(power))
+}
+
+// Static: it changes only when the theme or a picked color does, never per frame.
+val LocalReadable = staticCompositionLocalOf { readableColors(dark = true, accent = DefaultAccent) }
+
+/** A severity's text color, readable in the current theme. */
+@Composable
+fun SocSeverity.textColor(): Color = when (this) {
+    SocSeverity.NORMAL -> Bm.accentText
+    SocSeverity.WARNING -> Bm.warnText
+    SocSeverity.CRITICAL -> Bm.criticalText
+}
 
 /** Numeric readouts use JetBrains Mono; everything else uses Inter. */
 val MonoFont = FontFamily(
@@ -116,6 +152,14 @@ object Bm {
     val colors: BmColors @Composable get() = LocalBmColors.current
     val accent: Color @Composable get() = LocalAccent.current
     val power: Color @Composable get() = LocalPower.current
+
+    /** Text-safe accent / power / status colors (UI-21), for text and marks read like text (the list's
+     *  capacity bar). The stage rings and the alert washes keep the raw colors. */
+    val accentText: Color @Composable get() = LocalReadable.current.accent
+    val powerText: Color @Composable get() = LocalReadable.current.power
+    val warnText: Color @Composable get() = LocalReadable.current.warn
+    val criticalText: Color @Composable get() = LocalReadable.current.critical
+    val goodText: Color @Composable get() = LocalReadable.current.good
 }
 
 /** Duration of the light/dark theme crossfade. */
@@ -157,6 +201,7 @@ fun BmTheme(
         LocalBmColors provides animatedBmColors(dark),
         LocalAccent provides accent,
         LocalPower provides power,
+        LocalReadable provides remember(dark, accent, power) { readableColors(dark, accent, power) },
         // Default all text to Inter; mono readouts opt into MonoFont explicitly.
         LocalTextStyle provides LocalTextStyle.current.copy(fontFamily = SansFont),
         content = content,

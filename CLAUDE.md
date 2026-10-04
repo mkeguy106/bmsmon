@@ -314,7 +314,11 @@ A user Stop (notification or in-app; both route through `ACTION_STOP`) also pers
 undo it. A Recents swipe (`onTaskRemoved`) deliberately does NOT persist false: it means "close the
 app", and the next open or reboot resumes monitoring. Just backgrounding (Home) keeps it running.
 Needs `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_CONNECTED_DEVICE` + runtime
-`POST_NOTIFICATIONS` (requested opportunistically; never gates monitoring).
+`POST_NOTIFICATIONS` (requested opportunistically; never gates monitoring). The ongoing
+notification counts only packs with a reading from this session (`monitoringNotificationText`:
+the restored seed and a pack silent past the freshness backstop are not "connected", and never set
+its "lowest"), and reads "All packs disconnected" after "Disconnect all" ("No packs configured" with
+an empty roster).
 
 **Screen policy is plug-aware, and monitoring holds a wakelock.** The display is the phone's
 dominant drain — measured on the Pixel 6 at ~136 mAh/h against ~22 for GNSS and ~1.6 for
@@ -352,9 +356,15 @@ icon was.
 
 Because the BLE poll loop is a coroutine `delay()` — which does NOT fire while the CPU is
 suspended — keep-screen-on had been load-bearing for poll cadence *by accident*.
-`MonitoringService` now holds a `PARTIAL_WAKE_LOCK` (`bmsmon:monitoring`) for the monitoring
-session, so cadence, alerts, logging and GPS capture are identical with the screen dark. **Do not
-remove that wakelock without replacing the timer with an `AlarmManager`-backed one.**
+`MonitoringService` now holds a `PARTIAL_WAKE_LOCK` (`bmsmon:monitoring`) while the monitoring
+session has a pack to poll, so cadence, alerts, logging and GPS capture are identical with the
+screen dark. **Do not remove that wakelock without replacing the timer with an
+`AlarmManager`-backed one.** The decision is `wantsCpuWakeLock()` (`MonitorRestore.kt`) =
+`monitoring && linksWanted`, applied on every engine emission: it is released only when no pack is
+wanted (`MonitorState.linksWanted` = false — "Disconnect all", or an empty roster), and Reconnect
+takes it again (BLE-27). With nothing wanted nothing is polled, and the GPS gate stops GPS as well,
+since fixes only ever ride BLE samples. A sticky or boot restore takes the wakelock before it loads
+the persisted settings, and the same decision releases it right after if nothing is wanted.
 
 The same latch drops GPS to `PRIORITY_BALANCED_POWER_ACCURACY` (20 s) — **only** in that
 low-battery window (entered below 5%, held until 15% — on a charging chair-mounted phone that can
@@ -451,7 +461,14 @@ folds in the parked state and remains the **single writer** of `gpsActive`. `app
 `@Synchronized` because several threads drive it — the ViewModel (main), the BLE poll callback
 (`Dispatchers.IO`), the range loop — and the read-decide-act must be atomic, or an interleaving can
 leave `gpsActive = false` with the fused request still registered: exactly the silent GNSS drain the
-gate exists to remove. **Three gate drivers, all load-bearing:** the BLE poll (primary, but it only
+gate exists to remove. `gpsActive` is published only for a fused request that is actually
+registered: the gate drives `LocationSource` through `driveLocation()` on every evaluation, so a
+location permission granted after GPS was switched on starts capture at the next BLE frame (BLE-19),
+and with no pack wanted the gate stops GPS outright. A switch to or from balanced power replaces the
+request in place, so a switch that fails leaves the old request registered rather than none; a
+request Play Services fails after accepting it is dropped, retried no sooner than a minute later,
+and re-runs the gate so `gpsActive` turns false. Every mode switch is guarded, so a failed one can
+never cut a Stop short. **Three gate drivers, all load-bearing:** the BLE poll (primary, but it only
 fires when a frame arrives), `setDisabled()` (**"Disconnect all"** cancels every worker, so `onPoll`
 may never fire again with monitoring still on), and `startRangeLoop()`'s **5-minute tick** (Bluetooth
 off or every pack out of range stalls `onPoll` indefinitely, freezing `lastDischargeAt` and pinning
@@ -698,11 +715,11 @@ outage); that used to read as "server rejects this batch" and erased the outbox 
 Now every 4xx other than 401/403 that is not a marked 400/413/422 (so every unmarked 4xx, and e.g.
 a marked 404/408/429), every 3xx (the upload client is built with `followRedirects(false)` +
 `followSslRedirects(false)` in `uploadHttpClient()`, so a redirect to a login page can never come
-back as a 2xx "accept") and every 5xx except a marked non-503 one (below) is Transient; 401/403 are
+back as a 2xx "accept"), a 2xx WITHOUT the marker (a proxy's or captive portal's page, not the app's answer) and every 5xx except a marked non-503 one (below) is Transient; 401/403 are
 AuthFailed and hold the rows whether or not the marker is present. Poison then passes a circuit
 breaker (`decideUpload`, `cloud/UploadDecision.kt`, pure): the first Poison after a 2xx is skipped,
 any further Poison before the next 2xx is held and backed off — genuine poison is one bad batch; a
-run of rejects is a server problem. Ingest, the historical import and the config push each have
+run of rejects is a server problem. Ingest, the re-sync stream and the config push each have
 their own breaker; it lives in memory, so a restart re-arms one skip per stream. The config push
 also has its own retry gate (1 s doubling to 60 s, reset on a 2xx or a skip), so a held config is
 not re-POSTed on every loop pass. **Deploy order is load-bearing: the server's marker ships before
@@ -725,10 +742,9 @@ skip per 2xx** (`skipsSinceOk`, the poison breaker's rule): a second trip at one
 holds and backs off instead, so a server that faults on everything costs one sample, then holds
 until fixed, while a genuine bad row is still isolated because bisection's clean halves are 2xxs
 that re-arm it. Every trip needs a fresh full span. After a skip the next head goes alone (limit 1)
-and only 2xxs double it back to 200. Transient/AuthFailed responses neither reset nor advance a
+and 2xxs double it back to 200 — except inside a narrowing search: a 2xx on a batch ending before the suspect range's end (`HeadFaultState.searchEndId`) keeps the limit, so isolation takes one trip per halving (≤9, ~54 min). Transient/AuthFailed responses neither reset nor advance a
 streak; a changed head resets it but keeps the limit and the breaker. State is in memory, so a
-restart starts over at a full batch with one skip re-armed. The import and config streams are
-unchanged.
+restart starts over at a full batch with one skip re-armed. Every per-response decision of the ingest stream — breakers, skip, hold, backoff (a marked 503's `Retry-After`, ≤300 s, is a floor), and the re-send of anything skipped — is the pure `ingestStep` (`cloud/IngestStep.kt`); the loop only applies its effects, inside `NonCancellable`, counting the rows actually deleted.
 
 **Bounded history reads (DATA-15/16).** On the History/Review/Timeline and session-rollup paths
 nothing reads a pack's or a session's samples as a list. The engine's windowed reads —
@@ -780,8 +796,8 @@ type (`BATTERY CAPACITY` / `TEMPERATURE`) and fires headless notifications via `
 N% fires **at** N%, `<=`) and `model/TempAlerts.kt` (cold→hot zone ladder: caution/warning/
 critical/cutoff, **critical fires before the BMS cutoff**). The unified `stageAlert()` shows the
 **worst** of the two. Capacity/temperature settings live in `Settings › Alerts` and
-`Settings › Temperature`; the stage's worst pack drives the overlay + temperature `AlertNotifier`
-dedup.
+`Settings › Temperature`; the stage's worst pack drives the in-app overlay, and every alarming
+stage pack gets its own headless temperature notification (below). The overlay is hosted at App level (`ui/AlertPresentation.kt`): a flashing alert covers every screen; once acknowledged it is the status-line pill on Home and a banner elsewhere. A confirmation dialog or the scan sheet opens in its own window above the overlay, so while an alert flashes either one closes (`dismissTransientsFor`); both can be opened again. Stage and list SOC numbers take the user's ladder severity (`socSeverityFor`, the alerts' own rule) with a LOW/CRIT word, and the severity and other readable text tokens are contrast-corrected per theme to ≥4.5:1 against the surfaces they sit on (`readableOn`); the dim secondary tokens (e.g. `text3`, 2.46:1 in the light theme) are not part of that claim.
 
 **Capacity alerts are fleet-wide, not stage-only.** Because only one base occupies the stage at a
 time, a low pack that isn't on the stage used to be invisible — a pack could drain to damage
@@ -794,22 +810,29 @@ seed or a silent pack) against the ladder and fires a **per-pack** headless noti
 `NOTIF_CAP_BASE`; per-pack charge-hold latch). The pure `reconcileFleetNotifications()`
 (`model/Alerts.kt`) does the fan-out dedup: notify the fresh crossings, cancel
 recovered/charging/vanished packs. A second low pack is never masked by the one on stage.
-(Temperature notifications stay stage-worst-driven.) Only packs that are actually showing a
-notification are ever cancelled (BLE-28).
+Temperature notifications stay stage-driven but are per pack too: each stage pack at CRITICAL or
+worse has its own, deduped per (pack, side, rank), over the same decision view, so a seed or a
+silent pack never raises or holds one (`packTemps()` / `reconcileTempNotifications()` in
+`TempAlerts.kt`). Only packs that are actually showing a notification are ever cancelled (BLE-28).
+**A short absence is not a recovery** (BLE-24): a low pack that drops out of the decision view (a
+link flap, or silent past the backstop) keeps its notification and its baseline for
+`NOTIFY_VANISH_GRACE_MS` (10 min), so a reconnect in the same band stays quiet and only a lower band
+re-alarms; past the grace it is cancelled. Packs the user disconnected or removed, and every pack
+while alerts are off, still cancel at once. A temperature notification rides out its own pack's flap
+the same way, even while that pack's cooler partner stays live; a stage switch is not a flap, so a
+pack that leaves the stage is held only while it is still read that hot. A pack inside its regen
+window never counts as charging for the notifier (`fleetCapacityEvals(regenAddrs)`, the same rule as
+the stage's ack re-arm below), so a regen burst reporting `state=Charging` no longer cancels a low
+pack's notification mid-drive and re-alarms it once the charge latch expires.
 
-**Low pack seizes the stage (safety override).** `resolveStage()` (`model/Fleet.kt`) has a
-pre-emptive branch — before the manual-pin check — that stages the base of the **lowest
-alert-driving pack at/below the seize threshold** (the engine resolves on `decisionView()`), over
-the active chair AND a manual pin (daily-driver breaks ties). The seize threshold is
-`seizeThresholdFor()` (`model/StageControl.kt`, shared by the ViewModel and the headless restore) =
-the **highest enabled capacity threshold** (default ladder top = 30%) when both `alertsOn` and the
-new `seizeLowToStage` setting are on (else null). Charging doesn't block the seize (the flash is
-still charge-suppressed). On recovery the branch yields and normal pin/auto resolution takes back
-over. `Settings › Alerts` gains a **"Pull low packs to stage"** toggle (default ON) gating only the
-visual seize — fleet-wide notifications fire regardless. Only roster members can seize, and a stage
-target left with no members falls back to the daily driver (then the first populated base) instead
-of a blank stage (UI-29). The rule itself — threshold, charging-doesn't-block, lowest-wins,
-seize-before-pin — is unchanged.
+**Low pack seizes the stage (safety override).** `resolveStage()` (`model/Fleet.kt`) has a pre-emptive branch, before the manual-pin check, that stages the base of the pack picked by `seizeCandidate()`.
+- **Candidates.** A candidate is a reachable, alert-driving pack at or below the **seize level**, which is not charging. Regen within `REGEN_WINDOW_MS` of its base discharging counts as driving, not charging. This regen test is deliberately looser than `isRegen` (no current floor), so it errs toward seizing.
+- **Bases in use.** The seize never displaces a base in use. The bases in use are every base with a pack discharging now; when none is, the one base whose newest discharge is strictly inside the stage hold. While any base is in use, only packs on a base in use may seize. That keeps the core case, a low in-use base overriding a manual pin, and keeps an idle spare on the shelf from taking the stage from the chair being driven, while a draining pack on a second discharging base still seizes.
+- **Ties.** Lowest SOC wins; the daily driver, then the address, break ties.
+- **The level.** The seize level is `seizeThresholdFor()` (`model/StageControl.kt`, shared with the headless restore). It is its own setting, `seize_soc`: one of 10/15/20/25/30 (`SEIZE_SOC_OPTIONS`), default 30; a stored value rounds up to the next offered level. It is separate from the notification ladder, so an early-warning rung never moves the stage. It applies only when both `alertsOn` and "Pull low packs to stage" are on.
+- **Recovery.** On recovery the branch yields and normal pin/auto resolution takes back over.
+- **Roster.** Only roster members can seize, and a memberless target falls back to the daily driver, then the first populated base, instead of a blank stage (UI-29).
+- `Settings › Alerts` carries the **"Pull low packs to stage"** toggle (default ON, phone-only) and the "Pull to stage at" level chips; fleet-wide notifications fire regardless.
 
 **Temperature monitoring:** a vertical temperature gauge (`ui/gauge/TempGauge.kt`) sits beside the
 SOC ring on the stage (toggle + L/R position in settings), plus a `TEMP` stat tile. Thresholds are
@@ -828,6 +851,22 @@ the uploader flushes only at ≥`MIN_BATCH` (20) queued rows or a `FLUSH_AGE_MS`
 then drains to empty (`shouldFlush()` in `TelemetryReporter.kt`) — never per-sample POSTs, which
 paid ~470 B of JWT/header overhead each and defeated gzip on tiny bodies (~9× bandwidth combined
 with the GPS dedup below). Every sample is still uploaded; worst-case live-feed latency is ~15 s.
+
+**Upload recovery.**
+- **Evictions.** Nothing leaves the outbox silently. A cap eviction (`OUTBOX_MAX` 200 k, cut back by a chunk so it does not repeat on every insert) is counted (`outbox_evicted`, shown in Cloud sync). A one-row fault skip is logged and counted (`server_fault_skips`, shown once above 0). A poison skip is logged and parked for a re-send; it has no counter.
+- **Re-sync from local history.** Each of those records its sample-time span as a re-sync window (`cloud/Resync.kt`, persisted as `resync_state`). A second loop re-sends windows from the Room `samples` table (`RESYNC_PAGE_SQL`, keyset on `(tsMs, id)`, `RESYNC_PAGE` 500 rows per POST):
+  - GPS is included, sent once per pack per fix.
+  - It uses `batch_seq = -1`: stored, never WS-published.
+  - It runs only while the live outbox is below `MIN_BATCH`.
+  - It uses the same poison breaker and fault bisection as ingest. Bisection runs over stream positions, and a faulting row is parked for 6 h.
+  - Skipped batches and rows wait 6 h before their re-send.
+  - The one-shot history import is a re-sync window like any other, `[0, now]`. Cloud sync shows it through the re-send line ("Re-sending local history…"), and `importDone` means the import is queued, not sent.
+  - Re-enrolling and Forget device mark the import due before they clear the pending windows, under the import lock, so an interrupted reset fails toward a re-import (the server dedups) rather than losing recorded re-sends.
+- **Missing key.** A missing Keystore key (a device-to-device transfer) is `PostResult.KeyMissing`. It holds every row and shows "re-enroll required"; re-enrolling re-keys the same install.
+- **Enrollment errors.** A failed enroll says what went wrong (unreachable server, invalid or expired code, rejected key, revoked device, rate limit, server trouble) and restores the previous key state.
+- **Clock correction.** The skew is read from the server's `X-Bmsmon-Server-Time-Ms` (else `Date`) on an app-marked 401/403 whose reason is `clock_skew` (or carries none). A skew over 30 s is shown, and a correction is applied to token `iat`/`exp` (in memory, capped at ±1 h) only when an independent clock vouches for the phone's own: the platform's network time, else a fresh satellite fix. Otherwise nothing is corrected and the status says which clock looks off ("phone clock looks off" / "can't tell which clock is off" / server behind). A 2xx re-anchors a correction already in force and clears it once the clocks agree; it never starts one. Re-anchoring without the independent clock may move a correction at most 30 s from the value the clock last vouched for; past that the clock must vouch again, or the correction clears and uploads hold.
+- **Build identity.** Uploads and enrollment send `User-Agent: bmsmon-android/<versionName> (<git sha>; sdk <n>)`.
+- **Config push.** It is compare-and-clear: a config enqueued mid-flight survives. Non-finite range bands are left out.
 
 **Usage logging is intentionally ON right now — do not turn it off.** Every telemetry
 sample is recorded to the phone's Room DB (`bms.db`, `samples` table, columns incl.
@@ -1017,8 +1056,27 @@ Reconnect all**. "Disconnect all" is therefore distinct from *stopping monitorin
 foreground-service Stop), which tears the engine down entirely. A frame or connect already in
 flight when a pack is disconnected never touches the engine's fleet state (`onPoll`/`onReachable`
 check the disabled set inside their state update), so the pack can't flash back to connected — or
-drive an alert or the seize — while its worker tears down. (A frame that lands in that instant may
-still be logged and uploaded as an ordinary sample.)
+drive an alert or the seize — while its worker tears down; a frame refused that way is not logged or
+uploaded either. The same holds across a monitoring Stop (BLE-21): `start()` mints a session id that
+the engine's BLE callbacks carry, and `stop()` clears it first, so a callback already running on the
+control loop when monitoring stopped changes nothing.
+
+Stopping monitoring (stage title or Settings), Disconnect all, disconnecting a pack that is on the stage, Clear data and Forget device each ask for confirmation first; starting and reconnecting stay one tap. Home shows "N PACKS DISCONNECTED BY YOU · RECONNECT" while any are, and the All Batteries header decides Disconnect/Reconnect all from the roster, not the filtered list.
+
+**BLE attempt model.** Every connect attempt has an id (`LinkLedger`, `ble/LinkLedger.kt`), and
+only the current attempt's outcome and frames change state: a Disconnect → Reconnect during a slow
+connect holds one GATT link, never two (the stale session is closed, and a planner drop cancels a
+connect still in flight). The connect gate keeps one of its two permits for stage packs
+(`ConnectGate`), so a stage pack that drops reconnects without waiting behind absent spares. A
+connect's class is decided when it is admitted, from the current stage, so a pack promoted while
+its connect is queued (a low pack that just seized the stage) takes the stage permit at once; and
+holding the permit, immediately before connecting, the attempt re-checks that the pack is still
+wanted, so a pack disconnected while its connect was queued is never connected. The app-resume kick
+that resets every backoff always resets the stage packs, while spares are kicked at most once per
+`RESUME_KICK_MIN_INTERVAL_MS` (5 min); a user Reconnect and Bluetooth coming back on still kick
+everything at once. A pack whose sessions answer only with undecodable frames backs off along the
+connect ladder (5 s → … → 120 s, `reconnectDelayMs()`) instead of reconnecting every ~8–10 s; its
+first decodable frame resets that.
 
 **Low-battery alerts (configurable ladder + critical tier).** `ALERT_THRESHOLDS`
 (BatteryViewModel.kt) is the full selectable 5% ladder **95%→5%**; `DEFAULT_THRESHOLDS`
@@ -1037,9 +1095,7 @@ production data showed 86 of 531 regen samples (16 %) carry BMS `state=Charging`
 would re-flash an acknowledged rung about 30 s later, mid-drive. The flash-suppression latch is
 unchanged. ACKNOWLEDGE acks the alert the overlay displayed, never one re-derived at tap time
 (UI-25), and an ACKNOWLEDGE that lands after the stage changed is ignored (`StageAlert.target`).
-The **highest enabled** ladder rung doubles as the stage-seize threshold (see "Low pack seizes the
-stage" above), and headless notifications are **fleet-wide/per-pack** (see "Capacity alerts are
-fleet-wide") — the ladder is the single source of truth for all three.
+The seize has its own level (see above); headless notifications are **fleet-wide/per-pack** (see "Capacity alerts are fleet-wide") — the ladder drives the flash, the notifications and the SOC severity colors.
 
 **GPS telemetry (cloud upload).** When cloud sync is enrolled, the app captures the phone's
 location (`location/LocationSource.kt`, fused provider) and attaches `lat`/`lon`/`gps_accuracy_m`
@@ -1049,21 +1105,29 @@ to uploaded telemetry samples — **only when the fix is new for that pack** (de
 path only (`CloudJson.roundCoord`). Local Room logging keeps full precision on every sample. GPS
 rides the same offline-durable outbox, so offline driving is buffered and synced on reconnect. `gpsEnabled` defaults **on with cloud sync**
 (reducer `p.gpsEnabled ?: p.cloudEnabled`), toggled in Cloud sync settings ("Send GPS location").
+A first enrollment turns it on; re-enrolling an enrolled phone (a missing key, a rejected sign-in) keeps
+the user's setting (`gpsAfterEnroll`).
 The engine's effective GPS-active = `monitoring && gpsEnabled && enrolled && cloudEnabled`.
 Needs `ACCESS_FINE/COARSE_LOCATION` + `ACCESS_BACKGROUND_LOCATION` + a `location` FGS type
 (`MonitoringService` ORs `FOREGROUND_SERVICE_TYPE_LOCATION` only when GPS-active AND location is
 granted — required to avoid an Android-14 SecurityException). Background-location was the
-explicit design choice for pocket/driving capture.
+explicit design choice for pocket/driving capture. A cached fix is attached only while it is ≤ 120 s
+old — checked when it is read, not only when it is cached — and a `lastLocation` seed from an
+earlier start is ignored (`FixCache` in `LocationSource.kt`, BLE-23), so an old fix is never stamped
+onto a new sample.
 
 **Main-stage upload indicator.** The Home top bar shows a small glanceable cloud-upload status
 next to the stage label, only when cloud sync is enrolled: `↑ X.X KB/s` (green) while uploading,
 `↑ synced` when caught up, `↑ N queued` (amber) when buffering/offline. The rate comes from
 `cloud/UploadRate.kt` (a pure, unit-tested 5 s rolling window of gzipped wire bytes →
-smoothed KB/s) surfaced through the reporter's `onStatus` into `UiState.cloudUploadKbps`.
+smoothed KB/s). Most urgent first: `↑ re-enroll`, `↑ clock skew`, `↑ auth failed` (red), `↑ held · N queued` (amber, a breaker is holding), then rate / queued / re-sending / retry later / synced (`ui/home/UploadBadge.kt`). The status comes from `TelemetryReporter.status` (`UploadStatus`), which the ViewModel collects directly.
 
 **Discharge estimate (miles + time remaining).** The stage shows a base-level learned
-high/low line — `~37–50 mi · ~9–13h use · ~5–9 days` — under the rings whenever the staged
-packs are connected and not charging (charging shows the recharge ETA instead). Pure math in
+high/low line — `~37–49 mi · ~8–12h use · ~4–8 days` — under the rings whenever the staged
+packs are connected and not charging (charging shows the recharge ETA instead). **Every figure is
+floored, never rounded** (`floorFixed`/`floorBand`, twin of the web's `floorBand`): 26.9 mi reads 26,
+and tenths show while the high end is under 10 mi or 1 h of use or wall-clock time, so no range or
+runtime reads above its estimate. Pure math in
 `model/RangeEstimate.kt` (estimate + live tilt + formatting) and `model/RangeLearn.kt`
 (per-day p20/p80 bands: Wh/day, active W, and **outing-day Wh/mile** — a day's TOTAL discharge
 divided by its chair miles, counted only on days with ≥0.5 mi of driving, so indoor/idle
@@ -1092,12 +1156,14 @@ those would need map-matching/geofencing (backtest: the Jul-12 raw track's
 it drops to balanced power (20 s) ONLY inside the low-battery latch window (below 5% until 15%),
 see the screen-policy section)
 with a line-for-line TS twin in `web/src/range.ts` (no tilt on web — documented divergence).
-The engine learns every 6 h from the local 14-day Room history (GPS now stored locally —
-samples db v4), refreshes today's tilt inputs every 5 min, computes the per-pack estimate once
-per poll onto `BatteryStatus.range` (same single-writer pattern as `etaFullMin`), persists
-params in SettingsStore, and pushes them over the one-way config channel (optional `ranges`
-list on the `POST /api/v1/config` body) into `device_range_config`, mirrored read-only by
-`GET /web/range-config` for the WebUI's MainStage strip. Seeds until ≥3 qualifying days:
+The engine learns every 6 h from the local 14-day Room history (GPS now stored locally — samples db
+v4), streamed through a `RangeAccumulator` in 5 000-row (tsMs, id) keyset pages so the window is
+never held in memory (BLE-25, `forEachRangeRow`), refreshes today's tilt inputs every 5 min,
+computes the per-pack estimate once per poll onto `BatteryStatus.range` (same single-writer pattern
+as `etaFullMin`), persists params in SettingsStore, and pushes them over the one-way config channel
+(optional `ranges` list on the `POST /api/v1/config` body) into `device_range_config`, mirrored
+read-only by `GET /web/range-config` for the WebUI's MainStage strip. Seeds until
+≥3 qualifying days:
 130 Wh/day ±40%, 75 W ±30%, and whPerMile 51–85 (a conservative 15–25 practical miles at full
 charge — user-facing miles are OUTING semantics, "how far will it actually take me", not
 continuous-cruise physics). Wh/day and active-W were validated against the real fleet history
@@ -1152,7 +1218,7 @@ config lives in the `device_temp_config` table
 seize threshold** rides the same `POST /api/v1/config` body (optional flat `seize_soc`/`alerts_on`
 fields on `TempConfigBody`) into the device-level `device_alert_config` table (latest-wins); the
 WebUI reads it via `GET /web/alert-config` and seizes its main stage for the lowest fresh pack
-`≤ (alerts_on ? seize_soc ?? 30 : ∅)` — over pins and auto-selection, with a **"LOW"** marker,
+`≤ (alerts_on ? seize_soc ?? 30 : ∅)` (since Tier 2 `seize_soc` is the phone's dedicated seize level, 10–30) — over pins and auto-selection, with a **"LOW"** marker,
 no audible alarm: v2 (`/`) via `useV2Configs` + `web/src/v2/model/stageBase.ts`
 `selectStageBase` (Command stage, Journey and the Fleet Health hero; LOW chip in
 `CommandStage.tsx`; no seize until the config's first answer, and the 30 default only if

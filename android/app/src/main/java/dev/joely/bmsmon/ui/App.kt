@@ -23,10 +23,12 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -36,6 +38,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.joely.bmsmon.BatteryViewModel
 import dev.joely.bmsmon.BmsDeviceAdminReceiver
@@ -52,6 +55,8 @@ import dev.joely.bmsmon.ui.history.HealthReviewScreen
 import dev.joely.bmsmon.ui.history.HistoryLoad
 import dev.joely.bmsmon.ui.history.SessionTimelineScreen
 import dev.joely.bmsmon.ui.history.loadHistory
+import dev.joely.bmsmon.ui.home.AlertPill
+import dev.joely.bmsmon.ui.home.DangerOverlay
 import dev.joely.bmsmon.ui.home.HomeScreen
 import androidx.activity.compose.BackHandler
 import dev.joely.bmsmon.ui.scan.ScanSheet
@@ -283,6 +288,7 @@ fun App(vm: BatteryViewModel) {
         onSetCriticalThreshold = vm::setCriticalThreshold,
         onSetSeizeLowToStage = vm::setSeizeLowToStage,
         onResetAlerts = vm::resetAlertsToDefaults,
+        onSetSeizeSoc = vm::setSeizeSoc,
     )
     val tempActions = TempActions(
         onSetTempAlertsEnabled = vm::setTempAlertsEnabled,
@@ -326,7 +332,17 @@ fun App(vm: BatteryViewModel) {
         onSetGpsEnabled = onSetGps,
     )
 
+    // UI-18: the stage alert is decided once, here, and presented on EVERY screen - the full-screen
+    // overlay while it flashes; once acknowledged, the status-line pill on Home and a banner elsewhere.
+    val alert = state.stageAlert()
+    val presentation = alertPresentation(alert, state.screen)
+    // A flashing alert closes the transients that would sit above it in their own windows: an open
+    // confirmation (via LocalDismissTransients) and the scan sheet. Both can be opened again.
+    val dismissTransients = dismissTransientsFor(presentation)
+    LaunchedEffect(dismissTransients) { if (dismissTransients) showScan = false }
+
     BmTheme(dark = state.isDark, accent = state.accent, power = state.power) {
+      CompositionLocalProvider(LocalDismissTransients provides dismissTransients) {
         Box(Modifier.fillMaxSize().background(Bm.colors.bg)) {
           val lockStrip = state.locked && (state.lockShowTime || state.lockShowWifi || state.lockShowBattery)
           Column(Modifier.fillMaxSize()) {
@@ -344,85 +360,93 @@ fun App(vm: BatteryViewModel) {
                     else Modifier.systemBarsPadding(),
                 ),
             ) {
-                when (state.screen) {
-                    Screen.Home -> HomeScreen(
-                        state = state,
-                        topBar = topBarActions,
-                        fleet = fleetActions,
-                        rosterEdit = rosterActions,
-                        onAcknowledge = vm::acknowledgeAlert,
-                        onHomePageChanged = vm::setHomePage,
-                        locked = state.locked,
-                    )
-                    // The loaders are main-safe (IO/Default inside — DATA-15); produceState itself
-                    // runs on Main, so loadHistory turns any failure into a rendered state rather
-                    // than an exception that would kill the process (and monitoring with it).
-                    Screen.History -> {
-                        val packs by androidx.compose.runtime.produceState<HistoryLoad<List<dev.joely.bmsmon.data.PackHealth>>>(HistoryLoad.Loading, vm) {
-                            value = loadHistory { vm.loadFleetHealth() }
-                        }
-                        when (val p = packs) {
-                            HistoryLoad.Loading -> HistoryLoading()
-                            is HistoryLoad.Failed -> HistoryFailed(p.error)
-                            is HistoryLoad.Ready -> GroupHealthScreen(packs = p.value, onBack = vm::goHome)
-                        }
+                Column(Modifier.fillMaxSize()) {
+                    if (presentation == AlertPresentation.BANNER) {
+                        AlertPill(alert, Modifier.padding(start = 18.dp, end = 18.dp, top = 8.dp, bottom = 4.dp))
                     }
-                    Screen.Review -> {
-                        val addr = state.reviewAddress
-                        val pack by androidx.compose.runtime.produceState<HistoryLoad<dev.joely.bmsmon.data.PackHealth?>>(HistoryLoad.Loading, addr) {
-                            value = loadHistory { addr?.let { vm.loadPackHealth(it) } }
-                        }
-                        when (val p = pack) {
-                            HistoryLoad.Loading -> HistoryLoading()
-                            is HistoryLoad.Failed -> HistoryFailed(p.error)
-                            is HistoryLoad.Ready -> {
-                                val health = p.value
-                                if (health == null) HistoryLoading()
-                                else HealthReviewScreen(pack = health, onBack = vm::closeReview, onOpenTimeline = vm::openTimeline)
+                    Box(Modifier.fillMaxWidth().weight(1f)) {
+                        when (state.screen) {
+                            Screen.Home -> HomeScreen(
+                                state = state,
+                                alert = alert,
+                                topBar = topBarActions,
+                                fleet = fleetActions,
+                                rosterEdit = rosterActions,
+                                onHomePageChanged = vm::setHomePage,
+                                locked = state.locked,
+                            )
+                            // The loaders are main-safe (IO/Default inside — DATA-15); produceState itself
+                            // runs on Main, so loadHistory turns any failure into a rendered state rather
+                            // than an exception that would kill the process (and monitoring with it).
+                            Screen.History -> {
+                                val packs by androidx.compose.runtime.produceState<HistoryLoad<List<dev.joely.bmsmon.data.PackHealth>>>(HistoryLoad.Loading, vm) {
+                                    value = loadHistory { vm.loadFleetHealth() }
+                                }
+                                when (val p = packs) {
+                                    HistoryLoad.Loading -> HistoryLoading()
+                                    is HistoryLoad.Failed -> HistoryFailed(p.error)
+                                    is HistoryLoad.Ready -> GroupHealthScreen(packs = p.value, onBack = vm::goHome)
+                                }
+                            }
+                            Screen.Review -> {
+                                val addr = state.reviewAddress
+                                val pack by androidx.compose.runtime.produceState<HistoryLoad<dev.joely.bmsmon.data.PackHealth?>>(HistoryLoad.Loading, addr) {
+                                    value = loadHistory { addr?.let { vm.loadPackHealth(it) } }
+                                }
+                                when (val p = pack) {
+                                    HistoryLoad.Loading -> HistoryLoading()
+                                    is HistoryLoad.Failed -> HistoryFailed(p.error)
+                                    is HistoryLoad.Ready -> {
+                                        val health = p.value
+                                        if (health == null) HistoryLoading()
+                                        else HealthReviewScreen(pack = health, onBack = vm::closeReview, onOpenTimeline = vm::openTimeline)
+                                    }
+                                }
+                            }
+                            Screen.Timeline -> {
+                                val sid = state.timelineSession
+                                val data by androidx.compose.runtime.produceState<HistoryLoad<Triple<String, dev.joely.bmsmon.data.db.SessionEntity, List<dev.joely.bmsmon.data.TimelineBucket>>?>>(HistoryLoad.Loading, sid) {
+                                    value = loadHistory { sid?.let { vm.loadTimeline(it) } }
+                                }
+                                when (val d = data) {
+                                    HistoryLoad.Loading -> HistoryLoading()
+                                    is HistoryLoad.Failed -> HistoryFailed(d.error)
+                                    is HistoryLoad.Ready -> {
+                                        val t = d.value
+                                        if (t == null) HistoryLoading()
+                                        else SessionTimelineScreen(alias = t.first, session = t.second, buckets = t.third, onBack = vm::closeTimeline)
+                                    }
+                                }
+                            }
+                            Screen.Settings -> SettingsScreen(
+                                state = state,
+                                onBack = vm::goHome,
+                                monitoring = monitoringActions,
+                                alerts = alertActions,
+                                temp = tempActions,
+                                appearance = appearanceActions,
+                                display = displayActions,
+                                lock = lockActions,
+                                batterySaver = batterySaverActions,
+                                data = dataActions,
+                                cloud = cloudActions,
+                            )
+                            Screen.Detail -> {
+                                val addr = state.detailAddress
+                                val sessionsFlow = remember(addr) {
+                                    if (addr != null) vm.sessionsFor(addr) else kotlinx.coroutines.flow.flowOf(emptyList())
+                                }
+                                val sessions by sessionsFlow.collectAsState(initial = emptyList())
+                                BatteryDetailScreen(state = state, sessions = sessions, onBack = vm::closeDetail,
+                                    onOpenReview = { addr?.let(vm::openReview) })
                             }
                         }
-                    }
-                    Screen.Timeline -> {
-                        val sid = state.timelineSession
-                        val data by androidx.compose.runtime.produceState<HistoryLoad<Triple<String, dev.joely.bmsmon.data.db.SessionEntity, List<dev.joely.bmsmon.data.TimelineBucket>>?>>(HistoryLoad.Loading, sid) {
-                            value = loadHistory { sid?.let { vm.loadTimeline(it) } }
-                        }
-                        when (val d = data) {
-                            HistoryLoad.Loading -> HistoryLoading()
-                            is HistoryLoad.Failed -> HistoryFailed(d.error)
-                            is HistoryLoad.Ready -> {
-                                val t = d.value
-                                if (t == null) HistoryLoading()
-                                else SessionTimelineScreen(alias = t.first, session = t.second, buckets = t.third, onBack = vm::closeTimeline)
-                            }
-                        }
-                    }
-                    Screen.Settings -> SettingsScreen(
-                        state = state,
-                        onBack = vm::goHome,
-                        monitoring = monitoringActions,
-                        alerts = alertActions,
-                        temp = tempActions,
-                        appearance = appearanceActions,
-                        display = displayActions,
-                        lock = lockActions,
-                        batterySaver = batterySaverActions,
-                        data = dataActions,
-                        cloud = cloudActions,
-                    )
-                    Screen.Detail -> {
-                        val addr = state.detailAddress
-                        val sessionsFlow = remember(addr) {
-                            if (addr != null) vm.sessionsFor(addr) else kotlinx.coroutines.flow.flowOf(emptyList())
-                        }
-                        val sessions by sessionsFlow.collectAsState(initial = emptyList())
-                        BatteryDetailScreen(state = state, sessions = sessions, onBack = vm::closeDetail,
-                            onOpenReview = { addr?.let(vm::openReview) })
                     }
                 }
+                if (presentation == AlertPresentation.OVERLAY) DangerOverlay(alert, vm::acknowledgeAlert)
             }
           }
-            if (showScan) {
+            if (showScan && !dismissTransients) {
                 ScanSheet(
                     roster = state.roster,
                     onAdd = { address, name -> vm.addBattery(address, name) },
@@ -430,6 +454,7 @@ fun App(vm: BatteryViewModel) {
                 )
             }
         }
+      }
     }
 }
 

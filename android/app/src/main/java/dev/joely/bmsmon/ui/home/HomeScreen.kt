@@ -1,5 +1,12 @@
 package dev.joely.bmsmon.ui.home
 
+import dev.joely.bmsmon.ui.all.userDisconnectedCount
+import dev.joely.bmsmon.ui.all.disconnectedChipText
+import dev.joely.bmsmon.ui.Confirmations
+import dev.joely.bmsmon.ui.ConfirmDialog
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -58,17 +65,20 @@ import dev.joely.bmsmon.ui.theme.AlertCritical
 import dev.joely.bmsmon.ui.theme.AlertWarn
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
-import dev.joely.bmsmon.ui.theme.RegenGreen
+import dev.joely.bmsmon.ui.theme.readableInkOnWash
+import dev.joely.bmsmon.Screen
+import dev.joely.bmsmon.ui.AlertPresentation
+import dev.joely.bmsmon.ui.alertPresentation
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun HomeScreen(
     state: UiState,
+    alert: StageAlert,
     topBar: TopBarActions,
     fleet: FleetActions,
     rosterEdit: RosterActions,
-    onAcknowledge: (StageAlert) -> Unit,
     onHomePageChanged: (Int) -> Unit,
     locked: Boolean,
 ) {
@@ -79,7 +89,6 @@ fun HomeScreen(
     val scope = rememberCoroutineScope()
     // Remember the current page so the detail screen's back button can restore it.
     LaunchedEffect(pager.currentPage) { onHomePageChanged(pager.currentPage) }
-    val alert = state.stageAlert()
     // While locked, force the stage (page 0) and keep it there.
     LaunchedEffect(locked) { if (locked) pager.scrollToPage(0) }
 
@@ -91,9 +100,21 @@ fun HomeScreen(
             StatusLine(
                 state = state,
                 alert = alert,
-                showAlert = pager.currentPage == 0 && alert.present && !alert.flashing,
+                showAlert = alertPresentation(alert, Screen.Home) == AlertPresentation.STATUS_PILL,
                 locked = locked,
             )
+            // UI-28: user-disconnected packs no longer alert; keep that visible on the stage.
+            run {
+                disconnectedChipText(userDisconnectedCount(state.roster, state.disabled))?.let { text ->
+                    Text(
+                        text, color = Bm.warnText, fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 0.8.sp, fontFamily = MonoFont,
+                        modifier = Modifier.fillMaxWidth()
+                            .clickable(enabled = !locked, onClick = fleet.onReconnectAll)
+                            .padding(start = 18.dp, end = 18.dp, bottom = 6.dp),
+                    )
+                }
+            }
             HorizontalPager(state = pager, userScrollEnabled = !locked, modifier = Modifier.weight(1f)) { page ->
                 when (page) {
                     0 -> StageScreen(
@@ -105,6 +126,7 @@ fun HomeScreen(
                         tempGaugeSide = state.tempGaugeSide,
                         thresholds = state.tempThresholdsFor(state.stageProfile().id),
                         envelope = state.stageProfile().tempEnvelope,
+                        alertConfig = state.alertConfig,
                     )
                     else -> AllBatteriesScreen(
                         state = state,
@@ -125,10 +147,6 @@ fun HomeScreen(
                 }
             }
         }
-        // A flashing (un-acknowledged) alert still takes over the whole stage. The acknowledged
-        // strip and the cloud-upload status now live in the StatusLine directly under the top bar,
-        // so neither overlaps the utility row any more.
-        if (pager.currentPage == 0 && alert.flashing) DangerOverlay(alert, onAcknowledge)
     }
 }
 
@@ -242,31 +260,38 @@ private fun stageState(state: UiState, locked: Boolean): StageStateLabel {
     val c = Bm.colors
     val (text, color) = when {
         !state.monitoring -> "MONITORING OFF" to c.text3
-        state.stageRegen -> "REGEN ↻" to RegenGreen
-        state.pinned -> "PINNED" to Bm.accent
+        state.stageRegen -> "REGEN ↻" to Bm.goodText
+        state.pinned -> "PINNED" to Bm.accentText
         !state.dynamicStage -> "MANUAL" to c.text2
-        state.stageActivity == GroupActivity.Discharging -> "DISCHARGING" to Bm.power
-        state.stageActivity == GroupActivity.Charging -> "CHARGING" to Bm.accent
+        state.stageActivity == GroupActivity.Discharging -> "DISCHARGING" to Bm.powerText
+        state.stageActivity == GroupActivity.Charging -> "CHARGING" to Bm.accentText
         state.stageActivity == GroupActivity.Idle -> "IDLE" to c.text2
         else -> "…" to c.text3
     }
     return StageStateLabel(if (locked) "$text · LOCKED" else text, color)
 }
 
+/** Opacity of the acknowledged-alert pill's red wash (over the status line's bg). */
+internal const val ACK_PILL_WASH_ALPHA = 0.10f
+
 /** The acknowledged-alert form of the status line: a red strip naming the alert + its reading. */
 @Composable
-private fun AlertPill(alert: StageAlert) {
+internal fun AlertPill(alert: StageAlert, modifier: Modifier = Modifier) {
     val c = Bm.colors
+    val wash = AlertCritical.copy(alpha = ACK_PILL_WASH_ALPHA)
+    // UI-21: the icon and headline are text on the red wash, not on bg — so the readable red is checked
+    // against the wash itself (light theme: 4.07:1 on the wash otherwise). Wash and border stay raw red.
+    val ink = readableInkOnWash(Bm.criticalText, wash, c.bg)
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
-            .background(AlertCritical.copy(alpha = 0.10f))
+        modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+            .background(wash)
             .border(1.dp, AlertCritical.copy(alpha = 0.55f), RoundedCornerShape(10.dp))
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(Icons.Filled.Warning, null, Modifier.size(14.dp), tint = AlertCritical)
+        Icon(Icons.Filled.Warning, null, Modifier.size(14.dp), tint = ink)
         Column(Modifier.weight(1f).padding(start = 10.dp)) {
-            Text(alert.headline, color = AlertCritical, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+            Text(alert.headline, color = ink, fontSize = 11.sp, fontWeight = FontWeight.Bold,
                 letterSpacing = 0.5.sp, fontFamily = MonoFont)
             Text(alert.detail.ifBlank { "${alert.lowSoc}%" }, color = c.text2, fontSize = 9.sp,
                 fontFamily = MonoFont, maxLines = 1)
@@ -283,6 +308,7 @@ private fun TopBar(
     locked: Boolean,
 ) {
     val c = Bm.colors
+    var confirmStop by remember { mutableStateOf(false) }
     // Utility row = pure identity (base name + pin) · page dots · actions. The live activity/mode
     // and alert now live one line down in StatusLine, so this row stays uncrowded and fixed-width.
     Box(Modifier.fillMaxWidth().background(c.bg).padding(start = 18.dp, top = 12.dp, end = 18.dp, bottom = 4.dp)) {
@@ -292,7 +318,10 @@ private fun TopBar(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Row(
-                if (locked) Modifier else Modifier.clickable(onClick = actions.onToggleMonitoring),
+                if (locked) Modifier else Modifier.clickable {
+                    // UI-28: starting is one tap; stopping (every alert goes quiet) asks first.
+                    if (state.monitoring) confirmStop = true else actions.onToggleMonitoring()
+                },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(
@@ -337,23 +366,27 @@ private fun TopBar(
         // Page dots centered on the top-bar row (hidden while locked — the stage is frozen on page 0).
         if (!locked) PageDots(currentPage, Modifier.align(Alignment.Center))
     }
+    if (confirmStop) {
+        ConfirmDialog(Confirmations.stopMonitoring, onConfirm = actions.onToggleMonitoring, onDismiss = { confirmStop = false })
+    }
 }
 
-/** Tiny cloud-upload status in the stage's bottom-right: live KB/s while uploading, else synced/queued. */
+/**
+ * Tiny cloud-upload status beside the stage label ([uploadBadge]): the most urgent upload state in
+ * words, in a color readable in both themes (UI-21) — the muted states use text2, not the faint text3.
+ */
 @Composable
 private fun UploadBadge(state: UiState, modifier: Modifier = Modifier) {
-    val c = Bm.colors
-    val kbps = state.cloudUploadKbps
-    val (text, color) = when {
-        state.cloudAuthFailed -> "↑ auth failed" to AlertCritical
-        kbps > 0.05f -> "↑ %.1f KB/s".format(kbps) to RegenGreen
-        state.cloudOutboxDepth > 0 -> "↑ ${state.cloudOutboxDepth} queued" to AlertWarn
-        state.cloudLastUploadMs > 0L -> "↑ synced" to c.text3
-        else -> "↑ idle" to c.text3
+    val (text, tone) = uploadBadge(state.cloud)
+    val color = when (tone) {
+        BadgeTone.CRITICAL -> Bm.criticalText
+        BadgeTone.WARN -> Bm.warnText
+        BadgeTone.GOOD -> Bm.goodText
+        BadgeTone.MUTED -> Bm.colors.text2
     }
     Text(
         text, color = color, fontSize = 9.5.sp, fontWeight = FontWeight.Medium,
-        letterSpacing = 0.6.sp, modifier = modifier,
+        letterSpacing = 0.6.sp, maxLines = 1, modifier = modifier,
     )
 }
 

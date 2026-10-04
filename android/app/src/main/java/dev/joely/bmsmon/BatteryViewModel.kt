@@ -16,6 +16,7 @@ import dev.joely.bmsmon.data.formatDbSizeMb
 import dev.joely.bmsmon.ble.profile.BatteryProfile
 import dev.joely.bmsmon.ble.profile.ProfileRegistry
 import dev.joely.bmsmon.cloud.CloudJson
+import dev.joely.bmsmon.cloud.UploadStatus
 import dev.joely.bmsmon.ble.profile.RedodoBekenProfile
 import dev.joely.bmsmon.model.ACK_REARM_MARGIN_PCT
 import dev.joely.bmsmon.model.AlertConfig
@@ -42,6 +43,7 @@ import dev.joely.bmsmon.model.tempZone
 import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.DEFAULT_GROUP_ID
 import dev.joely.bmsmon.model.DEFAULT_ROSTER
+import dev.joely.bmsmon.model.DEFAULT_SEIZE_SOC
 import dev.joely.bmsmon.model.DEFAULT_STAGE_HOLD_MIN
 import dev.joely.bmsmon.model.Freshness
 import dev.joely.bmsmon.model.GroupActivity
@@ -69,6 +71,7 @@ import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.model.removeBattery
 import dev.joely.bmsmon.model.renameBattery
 import dev.joely.bmsmon.model.renameGroup
+import dev.joely.bmsmon.model.normalizeSeizeSoc
 import dev.joely.bmsmon.model.seizeThresholdFor
 import dev.joely.bmsmon.model.targetFor
 import dev.joely.bmsmon.ui.theme.DefaultAccent
@@ -165,9 +168,11 @@ data class UiState(
     val enabledThresholds: Set<Int> = DEFAULT_THRESHOLDS.toSet(),
     val acknowledgedThresholds: Set<Int> = emptySet(),
     val criticalThreshold: Int = DEFAULT_CRITICAL_THRESHOLD,
-    // When on (and alerts on), any reachable pack at/below the highest enabled threshold seizes the
-    // main stage — over the active chair and a manual pin — so a too-low pack can't hide off-stage.
+    // When on (and alerts on), a reachable, non-charging pack at/below the seize level (`seizeSoc`)
+    // seizes the main stage — over a manual pin, never off a base in use (UI-19, seizeCandidate) — so
+    // a too-low pack can't hide off-stage.
     val seizeLowToStage: Boolean = true,
+    val seizeSoc: Int = DEFAULT_SEIZE_SOC,
     // temperature alerts (per-profile thresholds; unit reuses tempFahrenheit below)
     val tempAlertsEnabled: Boolean = true,
     val tempThresholdsByProfile: Map<String, TempThresholds> = emptyMap(),
@@ -207,28 +212,29 @@ data class UiState(
     val apiBaseUrl: String? = null,
     val enrolled: Boolean = false,
     val gpsEnabled: Boolean = false,
-    val cloudOutboxDepth: Int = 0,
-    val cloudLastUploadMs: Long = 0,
-    val cloudUploadKbps: Float = 0f,
-    val cloudAuthFailed: Boolean = false,
-    /** Samples the uploader skipped because the server kept crashing on them (DATA-22), all time. */
-    val cloudServerFaultSkips: Long = 0L,
-    val importDone: Boolean = false,
-    val importTotal: Int = 0,
-    val importSent: Int = 0,
+    /**
+     * Live cloud upload status, straight from the TelemetryReporter (not mirrored through the engine):
+     * the queue, the sign-in and clock state, the holds, the re-send of local history, and the
+     * all-time eviction (DATA-19) and server-fault skip (DATA-22) counters.
+     */
+    val cloud: UploadStatus = UploadStatus(),
+    /** An enrollment is in flight (the Enroll buttons show progress and ignore taps). */
+    val enrolling: Boolean = false,
+    /** Why the last enrollment failed, in words the user can act on (DATA-25); null = none. */
+    val enrollError: String? = null,
 ) {
     val isDark get() = mode == Mode.Dark
     val dailyDriver: BatteryGroup
         get() = roster.groupById(dailyDriverId) ?: BatteryGroup(dailyDriverId, dailyDriverId, emptyList())
     val stageGroupId: String? get() = (stageTarget as? StageTarget.Base)?.groupId
 
-    /** SOC at/below which a reachable pack seizes the stage, or null when disabled. Shared rule
-     *  with the headless restore (T1.2) — see seizeThresholdFor. */
-    val seizeThreshold: Int? get() = seizeThresholdFor(alertsOn, seizeLowToStage, enabledThresholds)
+    /** The seize level, or null while the seize is off (alerts or "Pull low packs to stage" off).
+     *  Shared rule with the headless restore (T1.2) — see seizeThresholdFor; which packs may seize
+     *  at it is seizeCandidate's rule (Fleet.kt). */
+    val seizeThreshold: Int? get() = seizeThresholdFor(alertsOn, seizeLowToStage, seizeSoc)
 
-    /** Highest enabled capacity threshold, pushed to the cloud so the WebUI drives its own low-pack
-     *  stage seize (defaults to 30 when the ladder is empty, matching the web fallback). */
-    val cloudSeizeSoc: Int get() = enabledThresholds.maxOrNull() ?: 30
+    /** The user's capacity ladder, as the alerts and the SOC severity colors read it. */
+    val alertConfig: AlertConfig get() = AlertConfig(alertsOn, enabledThresholds, criticalThreshold)
 
     /** App-wide temperature unit (reuses the existing °C/°F preference). */
     val tempUnit: TempUnit get() = if (tempFahrenheit) TempUnit.F else TempUnit.C
@@ -418,7 +424,7 @@ data class UiState(
         packs.map { (addr, t) ->
             PackSoc(t.soc, t.state == BatteryState.Charging && (countRegenAsCharging || addr !in regenAddrs))
         },
-        AlertConfig(alertsOn, enabledThresholds, criticalThreshold),
+        alertConfig,
     )
 
     /**
@@ -471,10 +477,7 @@ data class UiState(
         val kept = if (eval.charging) {
             emptySet()
         } else {
-            heldCapAcks(
-                acknowledgedThresholds, packs.minOf { it.second.soc },
-                AlertConfig(alertsOn, enabledThresholds, criticalThreshold),
-            )
+            heldCapAcks(acknowledgedThresholds, packs.minOf { it.second.soc }, alertConfig)
         }
         return if (kept == acknowledgedThresholds) this else copy(acknowledgedThresholds = kept)
     }
@@ -583,6 +586,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     enabledThresholds = p.enabledThresholds ?: s.enabledThresholds,
                     criticalThreshold = p.criticalThreshold ?: s.criticalThreshold,
                     seizeLowToStage = p.seizeLowToStage,
+                    seizeSoc = p.seizeSoc,
                     keepScreenOn = p.keepScreenOn,
                     tempFahrenheit = p.tempFahrenheit,
                     tempAlertsEnabled = p.tempAlertsEnabled,
@@ -605,7 +609,6 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     gpsEnabled = p.gpsEnabled ?: p.cloudEnabled,
                     apiBaseUrl = p.apiBaseUrl,
                     enrolled = p.enrolled,
-                    importDone = p.importDone,
                     sortKey = p.sortKey?.let { runCatching { SortKey.valueOf(it) }.getOrNull() } ?: s.sortKey,
                     filters = p.filters?.mapNotNull { runCatching { FilterKey.valueOf(it) }.getOrNull() }?.toSet()
                         ?: s.filters,
@@ -639,11 +642,12 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             updateSensor()
         }
         // Mirror the engine's state into the UI while we're alive — the engine is the single
-        // source of truth for the fleet (reachability included), the stage (T1.2) and the cloud
-        // upload status; the VM never mutates the fleet or resolves the stage itself. While
-        // monitoring is off the engine keeps the last-known fleet marked unreachable, so packs
-        // render dimmed as DISCONNECTED (no demo data); on a fresh launch (engine fleet empty) the
-        // VM's persisted seed is kept instead. (The old 30 s re-resolve ticker is gone: the
+        // source of truth for the fleet (reachability included) and the stage (T1.2); the cloud
+        // upload status is read from the reporter below. The VM never mutates the fleet or
+        // resolves the stage itself. While monitoring is off the engine keeps the last-known
+        // fleet marked unreachable, so packs render dimmed as DISCONNECTED (no demo data); on a
+        // fresh launch (engine fleet empty) the VM's persisted seed is kept instead. (The old
+        // 30 s re-resolve ticker is gone: the
         // engine's own STAGE_TICK_MS tick expires pins and holds, headless or not.)
         viewModelScope.launch {
             engine.state.collect { es ->
@@ -652,10 +656,6 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     val mirrored = s.copy(
                         monitoring = es.monitoring,
                         screenHoldAllowed = es.holdScreen,
-                        cloudOutboxDepth = es.cloudOutboxDepth,
-                        cloudLastUploadMs = es.cloudLastUploadMs,
-                        cloudUploadKbps = es.cloudUploadKbps,
-                        cloudAuthFailed = es.cloudAuthFailed,
                         stageTarget = es.stageTarget,
                         pinned = es.stagePinned,
                         nowElapsedMs = SystemClock.elapsedRealtime(),
@@ -692,10 +692,11 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
-        // The uploader can skip a sample at any time while this VM is alive, so mirror the
-        // persisted count live rather than reading it once at load.
+        // Upload status comes from the reporter itself (the process-lifetime uploader), live: the
+        // sign-in, key and clock states (DATA-17/20), the holds, the re-send of local history and the
+        // persisted eviction / skip counters (DATA-19/22).
         viewModelScope.launch {
-            store.serverFaultSkips.collect { n -> _state.update { it.copy(cloudServerFaultSkips = n) } }
+            getApplication<BmsApp>().reporter.status.collect { st -> _state.update { it.copy(cloud = st) } }
         }
         startFreshnessTicker()
     }
@@ -890,10 +891,13 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             // back to the daily driver when the target has no members left (UI-29).
             st.copy(disabled = st.disabled - a, fleet = st.fleet - a, manualStage = newManualStage)
         }
+        pushStageConfig()   // a pin on this pack is gone before the roster loses it
+        // Roster before the disabled set: un-disabling a pack still in the roster made it wanted for
+        // a moment — after "Disconnect all" that took the wakelock, started GPS and flipped the FGS
+        // type, only for the roster edit to undo it all (and pointed BLE at the pack being removed).
+        updateRoster { it.removeBattery(a) }
         engine.setDisabled(_state.value.disabled)
         persistDisabled()
-        pushStageConfig()
-        updateRoster { it.removeBattery(a) }
     }
 
     fun renameBattery(address: String, alias: String) =
@@ -1028,7 +1032,8 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         foreground = true
         startFreshnessTicker()
         updateSensor()
-        if (_state.value.monitoring) engine.kickAll()
+        // BLE-16: the stage at once, spares at most once per 5 min (a user Reconnect: kickAll).
+        if (_state.value.monitoring) engine.kickOnResume()
     }
 
     private var lastTeleSaveAt = 0L
@@ -1070,38 +1075,66 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun enroll(baseUrl: String, code: String) {
+        if (_state.value.enrolling) return
         // HTTPS-only at the entry point (DATA-11): a manually typed http:// or bare host is
         // normalized before ever being used or persisted.
         val base = dev.joely.bmsmon.data.normalizeApiBaseUrl(baseUrl)
+        // Whether this is a re-enroll (fixing a missing key or a rejected sign-in), which keeps the GPS choice.
+        val wasEnrolled = _state.value.enrolled
+        _state.update { it.copy(enrolling = true, enrollError = null) }
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            dev.joely.bmsmon.cloud.DeviceKeys.ensureKeyPair()
-            val installUuid = store.installUuid()
-            val res = dev.joely.bmsmon.cloud.EnrollClient(okhttp3.OkHttpClient())
-                .enroll(base, code, installUuid, dev.joely.bmsmon.cloud.DeviceKeys.publicKeySpkiB64())
-            res.onSuccess { id ->
+            // DATA-25: Keystore, network and parse failures all land here, never in viewModelScope's
+            // (absent) handler, which would kill the process and monitoring with it. Nothing is
+            // persisted until the server has said yes, so a failure leaves the previous state as it was.
+            // This is also the re-enroll path for a phone whose key is missing (DATA-17):
+            // ensureKeyPair makes a new key and the server re-keys the same install.
+            try {
+                val keys = dev.joely.bmsmon.cloud.DeviceKeys
+                val id = dev.joely.bmsmon.cloud.rollingBackNewKey(keys.hasKey(), keys::deleteKey) {
+                    keys.ensureKeyPair()
+                    dev.joely.bmsmon.cloud.EnrollClient(
+                        dev.joely.bmsmon.cloud.uploadHttpClient(dev.joely.bmsmon.cloud.appUserAgent()),
+                    ).enroll(base, code, store.installUuid(), keys.publicKeySpkiB64()).getOrThrow()
+                }
+                val app = getApplication<BmsApp>()
+                // Re-sends queued under the old key are dropped and the history import is queued afresh
+                // (idempotent on the server); reset first and wait, so the import isn't wiped behind it.
+                app.reporter.resetResync().join()
                 store.setApiBaseUrl(base)
                 store.setDeviceId(id)
                 store.setEnrolled(true)
                 store.setCloudEnabled(true)
-                store.setGpsEnabled(true)
-                _state.update { it.copy(apiBaseUrl = base, enrolled = true, cloudEnabled = true, gpsEnabled = true) }
-                val app = getApplication<BmsApp>()
+                // GPS on for a first enrollment only. Persisted either way: a never-set value reads as
+                // the cloud-sync setting, which was just turned on.
+                val gps = dev.joely.bmsmon.cloud.gpsAfterEnroll(wasEnrolled, _state.value.gpsEnabled)
+                store.setGpsEnabled(gps)
+                _state.update {
+                    it.copy(apiBaseUrl = base, enrolled = true, cloudEnabled = true, gpsEnabled = gps, enrolling = false)
+                }
                 app.reporter.start()
-                app.reporter.startImportIfNeeded(_state.value.roster)
+                app.reporter.queueImport()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // The exception text can hold the server's detail; log only its class and HTTP status.
+                val status = (e as? dev.joely.bmsmon.cloud.EnrollException)?.code
+                android.util.Log.w("BatteryViewModel", "enroll failed: ${e.javaClass.simpleName} status=$status")
+                _state.update { it.copy(enrolling = false, enrollError = dev.joely.bmsmon.cloud.enrollErrorMessage(e)) }
             }
         }
     }
 
     fun forgetDevice() {
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            dev.joely.bmsmon.cloud.DeviceKeys.deleteKey()
+            // A Keystore failure must not crash the process (DATA-25); the enrollment is forgotten regardless.
+            runCatching { dev.joely.bmsmon.cloud.DeviceKeys.deleteKey() }
+                .onFailure { android.util.Log.w("BatteryViewModel", "deleteKey failed: ${it.javaClass.simpleName}") }
             store.setEnrolled(false)
             store.setCloudEnabled(false)
             store.setDeviceId("")
-            store.setImportDone(false)
-            store.setImportWatermark(0)
             store.setGpsEnabled(false)
-            _state.update { it.copy(enrolled = false, cloudEnabled = false, gpsEnabled = false) }
+            getApplication<BmsApp>().reporter.resetResync()
+            _state.update { it.copy(enrolled = false, cloudEnabled = false, gpsEnabled = false, enrollError = null) }
             engine.setGpsActive(false)
         }
     }
@@ -1122,9 +1155,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
 
     // --- low-battery alerts ---
     /** Mirror the current alert settings down to the headless engine so it can notify off-screen. */
-    private fun pushAlertConfig() = engine.setAlertConfig(
-        AlertConfig(_state.value.alertsOn, _state.value.enabledThresholds, _state.value.criticalThreshold),
-    )
+    private fun pushAlertConfig() = engine.setAlertConfig(_state.value.alertConfig)
     fun setAlertsOn(enabled: Boolean) {
         _state.update { it.copy(alertsOn = enabled) }
         viewModelScope.launch { store.setAlertsOn(enabled) }
@@ -1161,6 +1192,15 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { store.setSeizeLowToStage(enabled) }
         pushStageConfig()
     }
+    /** The seize level (UI-19), separate from the alert ladder; the engine re-resolves at once and
+     *  the web mirror follows via the config push. */
+    fun setSeizeSoc(level: Int) {
+        val v = normalizeSeizeSoc(level)
+        _state.update { it.copy(seizeSoc = v) }
+        viewModelScope.launch { store.setSeizeSoc(v) }
+        enqueueCapacityConfig()
+        pushStageConfig()
+    }
     /** Restore every alert setting (toggle, thresholds, critical level, seize) to its default. */
     fun resetAlertsToDefaults() {
         _state.update {
@@ -1170,6 +1210,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                 criticalThreshold = DEFAULT_CRITICAL_THRESHOLD,
                 acknowledgedThresholds = emptySet(),
                 seizeLowToStage = true,
+                seizeSoc = DEFAULT_SEIZE_SOC,
             )
         }
         viewModelScope.launch {
@@ -1177,6 +1218,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             store.setThresholds(DEFAULT_THRESHOLDS.toSet())
             store.setCriticalThreshold(DEFAULT_CRITICAL_THRESHOLD)
             store.setSeizeLowToStage(true)
+            store.setSeizeSoc(DEFAULT_SEIZE_SOC)
         }
         pushAlertConfig()
         enqueueCapacityConfig()
@@ -1230,14 +1272,14 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Queue this profile's threshold config for the one-way cloud push (drained by the uploader).
-     *  The device-level capacity seize threshold + alerts-on flag ride along so the WebUI can drive
-     *  its own low-pack stage seize (latest-wins server-side). */
+     *  The device-level seize level (UI-19: its own setting, no longer the ladder top) + alerts-on
+     *  flag ride along so the WebUI can drive its own low-pack stage seize (latest-wins server-side). */
     private fun enqueueTempConfig(profileId: String) {
         if (!_state.value.cloudSyncAlerts || !_state.value.enrolled) return
         val t = _state.value.tempThresholdsFor(profileId)
         val env = (ProfileRegistry.all.firstOrNull { it.id == profileId } ?: RedodoBekenProfile).tempEnvelope
         val unit = if (_state.value.tempFahrenheit) "F" else "C"
-        val seizeSoc = _state.value.cloudSeizeSoc
+        val seizeSoc = _state.value.seizeSoc
         val alertsOn = _state.value.alertsOn
         val ranges = engine.state.value.rangeParamsByAddress
         viewModelScope.launch {
@@ -1247,7 +1289,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Push the capacity seize threshold / alerts-on to the cloud after a low-battery-alert change,
+    /** Push the seize level / alerts-on to the cloud after a low-battery-alert change,
      *  reusing the per-profile temp-config channel (temp values unchanged, latest-wins). */
     private fun enqueueCapacityConfig() = enqueueTempConfig(_state.value.stageProfile().id)
 
@@ -1294,7 +1336,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     fun acknowledgeAlert(shown: StageAlert) = _state.update { it.withAcknowledged(shown) }
 
     /** Stage inputs → engine (T1.2). Call after ANY change to pin / dynamic / hold / daily driver /
-     *  alert ladder / seize toggle: the engine re-resolves at once and the mirror carries it back. */
+     *  alerts on / seize toggle / seize level: the engine re-resolves at once and the mirror carries it back. */
     private fun pushStageConfig() {
         val s = _state.value
         engine.setStageConfig(

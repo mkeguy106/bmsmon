@@ -63,6 +63,24 @@ class SqlTestDb : AutoCloseable {
             ps.executeQuery().use { rs -> buildList { while (rs.next()) add(row(rs)) } }
         }
 
+    /** Run a DELETE/UPDATE [sql] with `:name` parameters; returns the affected row count. */
+    fun update(sql: String, args: Map<String, Any?>): Int = prepare(sql, args).use { it.executeUpdate() }
+
+    /** Insert one outbox row the way Room's adapter does; returns its id. */
+    fun insertOutbox(payload: String, enqueuedAt: Long): Long {
+        conn.prepareStatement("INSERT INTO outbox (payload, enqueuedAt) VALUES (?, ?)").use { ps ->
+            ps.setString(1, payload)
+            ps.setLong(2, enqueuedAt)
+            ps.executeUpdate()
+        }
+        conn.createStatement().use { st ->
+            st.executeQuery("SELECT last_insert_rowid()").use { rs ->
+                rs.next()
+                return rs.getLong(1)
+            }
+        }
+    }
+
     /** EXPLAIN QUERY PLAN detail lines for [sql], joined — pins index use and absence of sorts. */
     fun plan(sql: String, args: Map<String, Any?>): String =
         query("EXPLAIN QUERY PLAN $sql", args) { it.getString("detail") }.joinToString("\n")

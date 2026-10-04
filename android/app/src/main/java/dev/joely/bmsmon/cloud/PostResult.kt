@@ -16,12 +16,12 @@ const val API_MARKER_HEADER = "X-Bmsmon-Api"
  * [ServerFault] backs off like a Transient; on the ingest stream it also feeds [stepHeadFault].
  */
 sealed class PostResult {
-    /** HTTP 2xx — the batch was accepted. */
+    /** A 2xx carrying [API_MARKER_HEADER] — the app accepted the batch. */
     object Ok : PostResult()
 
     /**
-     * Network/IO failure, 3xx, an unmarked 5xx or a marked 503, 408/429, or any 4xx the app did not
-     * provably send — back off and retry the SAME rows.
+     * Network/IO failure, an unmarked 2xx, 3xx, an unmarked 5xx or a marked 503, 408/429, or any 4xx
+     * the app did not provably send — back off and retry the SAME rows.
      */
     object Transient : PostResult()
 
@@ -32,8 +32,19 @@ sealed class PostResult {
      */
     object ServerFault : PostResult()
 
-    /** 401/403 — revoked device or >60 s clock skew. Rows are kept; needs user attention. */
+    /**
+     * 401/403 — the sign-in was refused. An app-marked answer names why in [AUTH_REASON_HEADER]
+     * (`clock_skew`, `unknown_or_revoked_device`, `bad_signature`, …), which [outcomeOf] reads. Rows are
+     * kept; a clock reject may be corrected for (see nextSigningCorrection), anything else needs the user.
+     */
     object AuthFailed : PostResult()
+
+    /**
+     * The device key is gone from the Keystore — a device-to-device transfer copies the enrollment but
+     * never the key (DATA-17). Nothing was sent; the rows are kept until the phone is re-enrolled.
+     * Never produced by [classifyPost]: no HTTP response can mean this.
+     */
+    object KeyMissing : PostResult()
 
     /** 400/413/422 carrying [API_MARKER_HEADER] — the app itself permanently rejects this batch. */
     object Poison : PostResult()
@@ -46,15 +57,19 @@ sealed class PostResult {
  * every other 4xx, and any 4xx without it (Traefik's 404 during a deploy), is Transient. 401/403
  * hold the rows regardless of the marker — holding is always safe.
  *
+ * 2xx: only a MARKED 2xx is [PostResult.Ok], since Ok deletes the batch. The app marks every response
+ * it sends, so an unmarked 2xx came from something in front of it (a captive portal, a misrouted
+ * proxy) that never saw the rows — Transient, retried.
+ *
  * 5xx (DATA-22): only a MARKED 5xx other than 503 is a [PostResult.ServerFault]. A marked 503 is the
  * server's "database unavailable" answer (with Retry-After) — an outage, so Transient. An unmarked
  * 5xx came from Traefik or anything else in front of the app — an outage too, so Transient.
  */
 fun classifyPost(code: Int?, fromApi: Boolean): PostResult = when {
     code == null -> PostResult.Transient
-    code in 200..299 -> PostResult.Ok
+    code in 200..299 && fromApi -> PostResult.Ok
     code == 401 || code == 403 -> PostResult.AuthFailed
     fromApi && (code == 400 || code == 413 || code == 422) -> PostResult.Poison
     fromApi && code in 500..599 && code != 503 -> PostResult.ServerFault
-    else -> PostResult.Transient // 3xx, 408/429, other or unmarked 4xx, unmarked 5xx or marked 503, 1xx: retry with backoff
+    else -> PostResult.Transient // unmarked 2xx, 3xx, 408/429, other or unmarked 4xx, unmarked 5xx or marked 503, 1xx: retry with backoff
 }
