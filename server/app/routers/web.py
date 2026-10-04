@@ -30,6 +30,8 @@ router = APIRouter(prefix="/web")
 # DST fall-back night is 31 d + 1 h. Wider is refused (400), NOT clamped. Silently
 # returning a truncated track would draw a wrong map.
 TRACK_MAX_SPAN_MS = 31 * 86_400_000 + 3_600_000
+# SRV-23: the History view asks for 30 days; 90 bounds a hand-written request.
+CHARGE_SESSIONS_MAX_DAYS = 90
 # Plausible epoch-ms ceiling (2100-01-01 UTC, same bound as SampleIn._clip_motion_at):
 # keeps to_timestamp() inside Postgres' range, so garbage params are a 422, never a 500.
 _EPOCH_MS_MAX = 4_102_444_800_000
@@ -122,7 +124,7 @@ async def trends(address: Address, from_ms: EpochMs, to_ms: EpochMs,
 
 
 @router.get("/charge-sessions")
-async def charge_sessions(address: Address, days: int = Query(30, ge=1, le=365),
+async def charge_sessions(address: Address, days: int = Query(30, ge=1, le=CHARGE_SESSIONS_MAX_DAYS),
                           user: AuthUser = Depends(current_user), pool=Depends(get_pool)):
     """Read-only detected charge sessions (full CC->CV runs) for a pack."""
     since_ms = int(time.time() * 1000) - days * 86_400_000

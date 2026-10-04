@@ -53,3 +53,9 @@ async def test_charge_sessions_detects_full_ramp(app, client):
     assert s["duration_min"] == 6
     assert s["cv_tail_min"] == 3  # 98, 99, 100 (buckets with soc >= cv_soc=98)
     assert s["peak_temp_c"] == 28.0
+
+
+async def test_charge_sessions_days_is_capped_at_90(client):
+    a = "C8:47:80:15:67:44"
+    assert (await client.get(f"/web/charge-sessions?address={a}&days=90", headers=USER)).status_code == 200
+    assert (await client.get(f"/web/charge-sessions?address={a}&days=91", headers=USER)).status_code == 422

@@ -1,13 +1,14 @@
 """Background maintenance that must never run on a request path (SRV-24): an hourly pass
-that pre-creates partitions a month ahead (later tasks add the pack-registry backfill and
-online index builds). Every step is isolated: one that fails is logged and the others
-still run; the next pass retries."""
+that pre-creates partitions a month ahead, backfills the pack registry, and completes the
+partitioned indexes schema.sql declares (SRV-32, app/db/online_index.py). Every step is
+isolated: one that fails is logged and the others still run; the next pass retries."""
 import asyncio
 import logging
 import time
 
 import asyncpg
 
+from app.db.online_index import complete_partitioned_indexes
 from app.db.queries import register_orphan_addresses
 from app.db.partitions import PRECREATE_AHEAD_MS, precreate_partitions
 
@@ -36,11 +37,15 @@ async def run_maintenance(pool, now_ms: int | None = None) -> dict[str, object]:
             "partition pre-create",
             precreate_partitions(conn, now_ms, now_ms + PRECREATE_AHEAD_MS))
         report["registry"] = await _step("registry backfill", register_orphan_addresses(conn))
+        report["indexes"] = await _step("online index build", complete_partitioned_indexes(conn))
     if report["partitions"]:
         logger.info("maintenance: created partition(s) %s", ", ".join(report["partitions"]))
     if report["registry"]:
         logger.warning("maintenance: registered %d pack address(es) that had samples but no "
                        "registry row", report["registry"])
+    if report["indexes"]:
+        logger.info("maintenance: built and attached %d index partition(s): %s",
+                    len(report["indexes"]), ", ".join(report["indexes"]))
     return report
 
 

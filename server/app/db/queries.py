@@ -465,24 +465,29 @@ async def history_series(conn, since_ms: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# 1-minute buckets of one pack's charging rows since $2. Served by the partial covering
+# index samples_charging_idx (schema.sql): keep this WHERE implying its predicate
+# (current_a > 0.1 AND link_event IS NULL) and the select list inside its columns
+# (ts_ms, soc, temp_c), or the lookup falls back to reading whole partitions.
+_CHARGE_SESSION_BUCKETS = """
+SELECT (ts_ms / 60000) * 60000 AS bucket_ms,
+       avg(soc)::real AS soc, max(temp_c)::real AS temp_max
+  FROM samples
+ WHERE address = $1
+   AND ts >= to_timestamp($2::double precision / 1000.0)
+   AND link_event IS NULL AND current_a > 0.1
+ GROUP BY bucket_ms ORDER BY bucket_ms
+"""
+
+
 async def charge_session_buckets(conn, address: str, since_ms: int) -> list[dict]:
     """1-minute buckets of charging-only rows (current_a > 0.1) since since_ms.
-    The redundant ts predicate exists purely for partition pruning (see history_series).
 
     Deliberately NOT routed through samples_rollup (SRV-14): session detection needs
     1-minute granularity (the CC->CV shape and cv_tail_min), which 30-min sums can't
-    reconstruct, and the rollup doesn't segregate charging rows (current_a > 0.1)
-    anyway. Windows are single-address and partition-pruned; charging hours are a tiny
-    fraction of raw rows, so the raw scan stays cheap."""
-    rows = await conn.fetch(
-        """SELECT (ts_ms / 60000) * 60000 AS bucket_ms,
-                  avg(soc)::real AS soc, max(temp_c)::real AS temp_max
-             FROM samples
-            WHERE address = $1 AND ts_ms >= $2 AND ts >= to_timestamp($2::double precision / 1000.0)
-              AND link_event IS NULL AND current_a > 0.1
-            GROUP BY bucket_ms ORDER BY bucket_ms""",
-        address, since_ms,
-    )
+    reconstruct, and the rollup doesn't segregate charging rows anyway. The ts predicate
+    alone prunes partitions (ts is ts_ms at ms precision)."""
+    rows = await conn.fetch(_CHARGE_SESSION_BUCKETS, address, since_ms)
     return [dict(r) for r in rows]
 
 

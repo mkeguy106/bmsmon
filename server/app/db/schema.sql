@@ -154,6 +154,21 @@ SELECT pg_temp.add_column_if_missing('samples', 'cell4_v', 'real');
 -- every start.
 SELECT pg_temp.drop_column_if_present('samples', 'cells');
 
+-- SRV-23: charging rows only (current > 0.1 A, real telemetry), covering exactly what
+-- queries.charge_session_buckets reads: a 30-day charge-session lookup is an index-only
+-- scan of one pack's charging minutes instead of a full read of every partition in the
+-- window. Declared ON ONLY (metadata on the parent, no data read; later partitions get it
+-- automatically); the partitions that already exist are indexed in the background,
+-- CONCURRENTLY, by app/db/online_index.py. Never here, where a build would block ingest.
+DO $$
+BEGIN
+  IF to_regclass('samples_charging_idx') IS NULL THEN
+    CREATE INDEX samples_charging_idx ON ONLY samples (address, ts)
+      INCLUDE (ts_ms, soc, temp_c)
+      WHERE current_a > 0.1 AND link_event IS NULL;
+  END IF;
+END $$;
+
 -- One-way temperature-alert config pushed from the phone (latest-wins per device+profile). The
 -- webui reads these to alert on exactly what the phone does; there is no write path back from web.
 CREATE TABLE IF NOT EXISTS device_temp_config (
