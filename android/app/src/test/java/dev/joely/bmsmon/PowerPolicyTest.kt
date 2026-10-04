@@ -146,4 +146,19 @@ class PowerPolicyTest {
     @Test fun pluggedIntoADeadChargerIsNotCharging() {
         assertFalse(batteryCharging(4))
     }
+
+    @Test fun chargerFaultReleasesTheScreenHold() {
+        val d = powerDecision(onExternal = true, levelPct = 80, wasLowPower = false, chargerFault = true)
+        assertFalse(d.holdScreen)
+        assertFalse(d.gpsBalanced)
+        assertFalse(d.lowPower)
+    }
+
+    @Test fun chargerFaultDoesNotTouchTheLatchOrGps() {
+        val d = powerDecision(onExternal = true, levelPct = 3, wasLowPower = false, chargerFault = true)
+        assertTrue(d.lowPower)
+        assertTrue(d.gpsBalanced)
+        assertFalse(d.holdScreen)
+        assertTrue(powerDecision(onExternal = true, levelPct = 80, wasLowPower = false).holdScreen)
+    }
 }

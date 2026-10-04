@@ -29,9 +29,19 @@ data class PowerDecision(
  * load returns. The same latch drops GPS to balanced power — that emergency window only, so the
  * still-converging Wh/mile band never learns from coarse fixes.
  *
+ * [chargerFault] (see [foldChargerFault]) means a source reports connected but the battery's real
+ * charge is falling, so the pad is dead and holding the screen would only deepen the drain. A dead
+ * charger is then treated exactly like no charger: the display may sleep. It touches neither the
+ * latch nor GPS.
+ *
  * Pure and total: the same inputs always yield the same decision. No clock, no Android types.
  */
-fun powerDecision(onExternal: Boolean, levelPct: Int, wasLowPower: Boolean): PowerDecision {
+fun powerDecision(
+    onExternal: Boolean,
+    levelPct: Int,
+    wasLowPower: Boolean,
+    chargerFault: Boolean = false,
+): PowerDecision {
     val level = levelPct.coerceIn(0, 100)
     val lowPower = when {
         level < LOW_ENTER_PCT -> true
@@ -39,7 +49,7 @@ fun powerDecision(onExternal: Boolean, levelPct: Int, wasLowPower: Boolean): Pow
         else -> wasLowPower  // inside the band: hold, so the latch cannot flap
     }
     return PowerDecision(
-        holdScreen = onExternal && !lowPower,
+        holdScreen = onExternal && !lowPower && !chargerFault,
         gpsBalanced = lowPower,
         lowPower = lowPower,
     )
