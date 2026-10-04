@@ -26,7 +26,8 @@ function when(ms: number, nowMs: number): string {
 }
 
 /** One recharge-plan row: live rows count down to their anchored ready time; a pack that is
- *  not live is muted and says when it was last seen and when it was due (WEB-18). */
+ *  not live is muted and says when it was last seen and when it was estimated full (WEB-18).
+ *  Only an estimate: unseen since, it may have stopped charging, so nothing implies it is full. */
 function RechargeLine({ row, now }: { row: RechargeRow; now: number }) {
   const phase = rechargePhase(row, now);
   return (
@@ -41,7 +42,7 @@ function RechargeLine({ row, now }: { row: RechargeRow; now: number }) {
       <div className="mono" style={{ fontSize: 11, color: "var(--text-4)" }}>
         {phase === "charging"
           ? <>≈ {fmtEta(minutesLeft(row, now))} to full · ready by {when(row.readyAtMs, now)}</>
-          : <>last seen <Ago tsMs={row.tsMs} /> · {phase === "due" ? "due full" : "was due full"} {when(row.readyAtMs, now)}</>}
+          : <>last seen <Ago tsMs={row.tsMs} /> · est. full {when(row.readyAtMs, now)}</>}
       </div>
     </div>
   );
