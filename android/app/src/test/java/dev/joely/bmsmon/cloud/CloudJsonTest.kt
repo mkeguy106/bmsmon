@@ -84,6 +84,19 @@ class CloudJsonTest {
         assertTrue(s.contains("\"updated_at_ms\":123"))
     }
 
+    // UI-19: seize_soc now carries the seize's own level instead of the ladder top; the wire shape
+    // is unchanged — an int, alongside the alerts_on flag, both present on every capacity push.
+    @Test fun tempConfig_carries_seize_level_and_alerts_on() {
+        val s = CloudJson.encodeTempConfig(
+            profileId = "redodo-beken-12v100",
+            t = dev.joely.bmsmon.model.TempThresholds(),
+            env = dev.joely.bmsmon.model.TempEnvelope(),
+            unit = "F", updatedAtMs = 123L, seizeSoc = 20, alertsOn = false,
+        )
+        assertTrue(s.contains("\"seize_soc\":20"))
+        assertTrue(s.contains("\"alerts_on\":false"))
+    }
+
     @Test fun tempConfig_includes_ranges_when_present() {
         val s = CloudJson.encodeTempConfig(
             profileId = "redodo-beken-12v100",

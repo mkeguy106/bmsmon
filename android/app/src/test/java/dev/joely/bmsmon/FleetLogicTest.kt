@@ -98,13 +98,6 @@ class FleetLogicTest {
 
     // --- low-pack stage seize (safety override) ---
 
-    @Test fun lowPackSeizesStageOverActiveDischarge() {
-        // 2016 actively discharging (would normally own the stage) but 2024 is at 25% ≤ 30 → seize.
-        val fleet = fleetWith("2016" to BatteryState.Discharging) + fleetWithSoc("2024" to 25f)
-        val r = resolveStage(inputs(fleet, seizeThreshold = 30))
-        assertEquals(StageTarget.Base("2024"), r)
-    }
-
     @Test fun lowPackSeizesStageOverManualPin() {
         val fleet = fleetWithSoc("2024" to 20f) + fleetWith("2012" to BatteryState.Idle)
         val r = resolveStage(inputs(fleet, manualStage = StageTarget.Base("2012"), seizeThreshold = 30))
@@ -131,13 +124,61 @@ class FleetLogicTest {
         assertEquals(StageTarget.Base("2016"), r)  // no live SOC → normal resolution, not the dead pack
     }
 
-    @Test fun chargingLowPackStillSeizes() {
-        // Charging doesn't block the seize (the alarm flash is suppressed elsewhere, the stage isn't).
-        val charging = fleetWithSoc("2024" to 15f)
-            .mapValues { it.value.copy(telemetry = it.value.telemetry!!.copy(state = BatteryState.Charging)) }
-        val fleet = charging + fleetWith("2016" to BatteryState.Idle)
-        val r = resolveStage(inputs(fleet, seizeThreshold = 30))
-        assertEquals(StageTarget.Base("2024"), r)
+    // --- UI-19: the seize never displaces the base in use, and a charging pack never seizes ---
+
+    @Test fun idleLowSpareNeverDisplacesTheDischargingBase() {
+        // Riding 2016 at home with spare 2024 idle on the shelf at 25 %: the stage stays on the chair
+        // (2024's own low notification still fires fleet-wide — the seize is only the visual override).
+        val fleet = fleetWith("2016" to BatteryState.Discharging) + fleetWithSoc("2024" to 25f)
+        assertEquals(StageTarget.Base("2016"), resolveStage(inputs(fleet, seizeThreshold = 30)))
+    }
+
+    @Test fun chargingLowPackNeverSeizesOverAPin() {
+        val charging = fleetWithSoc("2024" to 15f).mapValues {
+            it.value.copy(telemetry = it.value.telemetry!!.copy(state = BatteryState.Charging, current = 3f))
+        }
+        val fleet = charging + fleetWith("2012" to BatteryState.Idle)
+        val r = resolveStage(inputs(fleet, manualStage = StageTarget.Base("2012"), seizeThreshold = 30))
+        assertEquals(StageTarget.Base("2012"), r)
+    }
+
+    @Test fun aLowInUseBaseStillSeizesOverAManualPin() {
+        val low2016 = fleetWith("2016" to BatteryState.Discharging)
+            .mapValues { it.value.copy(telemetry = it.value.telemetry!!.copy(soc = 20f)) }
+        val r = resolveStage(
+            inputs(low2016 + fleetWith("2012" to BatteryState.Idle), manualStage = StageTarget.Base("2012"), seizeThreshold = 30),
+        )
+        assertEquals(StageTarget.Base("2016"), r)
+    }
+
+    @Test fun regenOnTheInUseBaseStillCountsAsDriving() {
+        // A regen burst reads state=Charging with charge-direction current; within REGEN_WINDOW_MS of
+        // the base's last discharge it is driving, not charging, so the low base keeps the seize.
+        val regen = fleetWithSoc("2016" to 20f).mapValues {
+            it.value.copy(telemetry = it.value.telemetry!!.copy(state = BatteryState.Charging, current = 4f))
+        }
+        val r = resolveStage(
+            inputs(
+                regen + fleetWith("2012" to BatteryState.Idle),
+                lastDischargeAt = mapOf("2016" to now - 5_000L),
+                manualStage = StageTarget.Base("2012"), seizeThreshold = 30,
+            ),
+        )
+        assertEquals(StageTarget.Base("2016"), r)
+    }
+
+    @Test fun anIdleLowSpareWaitsForTheChairsStageHoldToExpire() {
+        val fleet = fleetWith("2016" to BatteryState.Idle) + fleetWithSoc("2024" to 20f)
+        // Parked 5 min ago: still the base in use (inside the 15 min hold) — no seize.
+        assertEquals(
+            StageTarget.Base("2016"),
+            resolveStage(inputs(fleet, mapOf("2016" to now - 5 * 60_000L), StageTarget.Base("2016"), seizeThreshold = 30)),
+        )
+        // Parked 20 min ago: nothing is in use, so the low spare seizes.
+        assertEquals(
+            StageTarget.Base("2024"),
+            resolveStage(inputs(fleet, mapOf("2016" to now - 20 * 60_000L), StageTarget.Base("2016"), seizeThreshold = 30)),
+        )
     }
 
     @Test fun seizeFiresAtThresholdAndReleasesAbove() {

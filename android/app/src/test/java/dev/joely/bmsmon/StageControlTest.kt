@@ -5,9 +5,11 @@ import dev.joely.bmsmon.model.Battery
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.DEFAULT_ROSTER
+import dev.joely.bmsmon.model.DEFAULT_SEIZE_SOC
 import dev.joely.bmsmon.model.Group
 import dev.joely.bmsmon.model.PIN_HOLD_MS
 import dev.joely.bmsmon.model.Roster
+import dev.joely.bmsmon.model.SEIZE_SOC_OPTIONS
 import dev.joely.bmsmon.model.STAGE_POLL_MS
 import dev.joely.bmsmon.model.StageConfig
 import dev.joely.bmsmon.model.StageTarget
@@ -17,6 +19,7 @@ import dev.joely.bmsmon.model.engineDecision
 import dev.joely.bmsmon.model.fallbackStage
 import dev.joely.bmsmon.model.groupById
 import dev.joely.bmsmon.model.hasDesiredLinks
+import dev.joely.bmsmon.model.normalizeSeizeSoc
 import dev.joely.bmsmon.model.pruneToRoster
 import dev.joely.bmsmon.model.reconcileFleetNotifications
 import dev.joely.bmsmon.model.resolveEngineStage
@@ -72,18 +75,57 @@ class StageControlTest {
         chargeAt: Map<String, Long> = emptyMap(),
     ) = engineDecision(r, fleet, nowE, nowMs, emptyMap(), cfg, current, disabled, alerts, chargeAt)
 
-    // --- the seize rule itself: unchanged, byte for byte ---
+    // --- UI-19: the seize has its own level, separate from the notification ladder ---
 
-    @Test fun seizeThresholdIsTheHighestEnabledRungOnlyWhenBothTogglesAreOn() {
-        assertEquals(
-            30,
-            seizeThresholdFor(alertsOn = true, seizeLowToStage = true, enabledThresholds = setOf(30, 25, 5)),
+    @Test fun seizeThresholdIsItsOwnLevelOnlyWhenBothTogglesAreOn() {
+        assertEquals(30, seizeThresholdFor(alertsOn = true, seizeLowToStage = true, seizeSoc = 30))
+        assertEquals(20, seizeThresholdFor(alertsOn = true, seizeLowToStage = true, seizeSoc = 20))
+        assertEquals(15, seizeThresholdFor(alertsOn = true, seizeLowToStage = true, seizeSoc = 12))   // rounded UP to an offered level
+        assertEquals(30, seizeThresholdFor(alertsOn = true, seizeLowToStage = true, seizeSoc = 60))   // never above the highest offered
+        assertNull(seizeThresholdFor(alertsOn = false, seizeLowToStage = true, seizeSoc = 30))
+        assertNull(seizeThresholdFor(alertsOn = true, seizeLowToStage = false, seizeSoc = 30))
+    }
+
+    @Test fun aStoredSeizeLevelNormalizesTowardMoreAlerting() {
+        assertEquals(listOf(10, 15, 20, 25, 30), SEIZE_SOC_OPTIONS)
+        assertEquals(30, DEFAULT_SEIZE_SOC)
+        assertEquals(DEFAULT_SEIZE_SOC, normalizeSeizeSoc(null))                  // never touched → the old default
+        SEIZE_SOC_OPTIONS.forEach { assertEquals(it, normalizeSeizeSoc(it)) }     // an offered level is kept
+        // Between two levels → the HIGHER one (a pack is pulled to the stage sooner, never later).
+        assertEquals(15, normalizeSeizeSoc(11))
+        assertEquals(15, normalizeSeizeSoc(14))
+        assertEquals(20, normalizeSeizeSoc(16))
+        assertEquals(30, normalizeSeizeSoc(26))
+        // Below the lowest → the lowest (still a higher threshold than stored).
+        assertEquals(10, normalizeSeizeSoc(9))
+        assertEquals(10, normalizeSeizeSoc(0))
+        assertEquals(10, normalizeSeizeSoc(-5))
+        assertEquals(10, normalizeSeizeSoc(Int.MIN_VALUE))
+        // Above the highest → the highest offered (a seize is only offered at low levels).
+        assertEquals(30, normalizeSeizeSoc(31))
+        assertEquals(30, normalizeSeizeSoc(100))
+        assertEquals(30, normalizeSeizeSoc(Int.MAX_VALUE))
+    }
+
+    // The seize is only the visual override: a low idle spare the seize must leave off the stage
+    // (the chair is being driven) still gets its own fleet-wide notification.
+    @Test fun aLowIdleSpareIsStillNotifiedWhileTheStageStaysOnTheDrivenChair() {
+        val d = decide(
+            base("2012", 70f, BatteryState.Discharging) + base("2024", 12f),
+            cfg = StageConfig(dailyDriverId = "2012", seizeThreshold = 30),
         )
-        // UI-19 is Tier 2 and untouched: a high early-warning rung still sets the seize threshold.
-        assertEquals(60, seizeThresholdFor(alertsOn = true, seizeLowToStage = true, enabledThresholds = setOf(60, 30)))
-        assertNull(seizeThresholdFor(alertsOn = false, seizeLowToStage = true, enabledThresholds = setOf(30)))
-        assertNull(seizeThresholdFor(alertsOn = true, seizeLowToStage = false, enabledThresholds = setOf(30)))
-        assertNull(seizeThresholdFor(alertsOn = true, seizeLowToStage = true, enabledThresholds = emptySet()))
+        assertEquals(StageTarget.Base("2012"), d.stage.target)
+        assertEquals(addrs("2024").toSet(), reconcileFleetNotifications(d.capacity!!, emptyMap()).notify)
+    }
+
+    // Only alert-driving readings may seize: a STALE session reading can, a pack silent past the
+    // freshness backstop (DISCONNECTED) cannot.
+    @Test fun aStaleLowSpareSeizesButASilentOneDoesNot() {
+        val cfg = StageConfig(dailyDriverId = "2012", seizeThreshold = 30)
+        val stale = addrs("2024").associateWith { live(12f).copy(lastFrameAtElapsedMs = nowE - 15_000L) }
+        assertEquals(StageTarget.Base("2024"), decide(stale, cfg = cfg).stage.target)
+        val silent = addrs("2024").associateWith { live(12f).copy(lastFrameAtElapsedMs = nowE - 61_000L) }
+        assertEquals(StageTarget.Base("2012"), decide(silent, cfg = cfg).stage.target)
     }
 
     // --- BLE-14 / UI-20 ---
@@ -130,13 +172,16 @@ class StageControlTest {
         assertEquals(setOf(a), plan.cancel)
     }
 
-    // A charging low spare still seizes (rule unchanged) but is not notified.
-    @Test fun chargingLowNonStagePackSeizesButIsNotNotified() {
+    // A charging low spare neither seizes (UI-19) nor is notified.
+    @Test fun chargingLowNonStagePackNeitherSeizesNorIsNotified() {
         val d = decide(
             base("2016", 12f, BatteryState.Charging),
-            cfg = StageConfig(dailyDriverId = "2012", seizeThreshold = 30),
+            cfg = StageConfig(
+                dailyDriverId = "2012", seizeThreshold = 30,
+                manualStage = StageTarget.Base("2012"), manualPinnedAt = nowMs,
+            ),
         )
-        assertEquals(StageTarget.Base("2016"), d.stage.target)
+        assertEquals(StageTarget.Base("2012"), d.stage.target)
         assertTrue(reconcileFleetNotifications(d.capacity!!, emptyMap()).notify.isEmpty())
     }
 

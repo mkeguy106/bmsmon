@@ -91,6 +91,7 @@ import dev.joely.bmsmon.luxToFraction
 import dev.joely.bmsmon.model.BatteryGroup
 import dev.joely.bmsmon.model.GaugeSide
 import dev.joely.bmsmon.model.MIN_DIM_LEVEL
+import dev.joely.bmsmon.model.SEIZE_SOC_OPTIONS
 import dev.joely.bmsmon.model.STAGE_HOLD_OPTIONS_MIN
 import dev.joely.bmsmon.model.TempThresholds
 import dev.joely.bmsmon.model.TempUnit
@@ -158,7 +159,8 @@ fun SettingsScreen(
         }
         SettingsPage.Alerts -> DetailScaffold("Alerts", { page = null }) {
             AlertsContent(state, alerts.onSetAlertsOn, alerts.onToggleThreshold,
-                alerts.onSetCriticalThreshold, alerts.onSetSeizeLowToStage, alerts.onResetAlerts)
+                alerts.onSetCriticalThreshold, alerts.onSetSeizeLowToStage, alerts.onResetAlerts,
+                alerts.onSetSeizeSoc)
         }
         SettingsPage.Temperature -> DetailScaffold("Temperature", { page = null }) {
             TemperatureContent(state, temp.onSetTempAlertsEnabled, temp.onSetShowTempGauge,
@@ -647,6 +649,7 @@ private fun ColumnScope.AlertsContent(
     onSetCriticalThreshold: (Int) -> Unit,
     onSetSeizeLowToStage: (Boolean) -> Unit,
     onResetAlerts: () -> Unit,
+    onSetSeizeSoc: (Int) -> Unit,
 ) {
     val c = Bm.colors
     GroupedCard {
@@ -654,8 +657,9 @@ private fun ColumnScope.AlertsContent(
             state.alertsOn, onSetAlertsOn)
         ToggleRow(
             "Pull low packs to stage",
-            "When any pack hits your highest trigger level, jump it onto the main stage — over the " +
-                "in-use base and a manual pin — so it can't drain too low unseen. Alarms fire either way.",
+            "When a pack drops to your pull level (below), it jumps onto the main stage — over a manual " +
+                "pin — so it can't drain unseen. It never displaces the base you're driving, and a " +
+                "charging pack never jumps. Alarms fire either way.",
             state.seizeLowToStage, onSetSeizeLowToStage,
         )
     }
@@ -701,6 +705,21 @@ private fun ColumnScope.AlertsContent(
         }
     }
 
+    if (state.seizeLowToStage) {
+        SectionLabel("Pull to stage at")
+        PlainCard {
+            Text(
+                "Separate from the alert levels above, so an early warning never moves the stage.",
+                color = c.text2, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.padding(bottom = 12.dp),
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SEIZE_SOC_OPTIONS.forEach { t ->
+                    SelectChip("$t%", state.seizeSoc == t, mono = true) { onSetSeizeSoc(t) }
+                }
+            }
+        }
+    }
+
     val next = if (state.alertsOn) state.enabledThresholds.maxOrNull() else null
     Box(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
@@ -710,8 +729,8 @@ private fun ColumnScope.AlertsContent(
     ) {
         Text(
             if (next != null)
-                "Next alert fires when any pack — on stage or not — drops to $next%" +
-                    (if (state.seizeLowToStage) ", and that pack jumps onto the stage." else ".")
+                "Next alert fires when any pack — on stage or not — drops to $next%." +
+                    (if (state.seizeLowToStage) " A pack at or below ${state.seizeSoc}% is pulled onto the stage." else "")
             else "Low-battery alerts are off.",
             color = c.text2, fontSize = 12.sp, lineHeight = 17.sp,
         )

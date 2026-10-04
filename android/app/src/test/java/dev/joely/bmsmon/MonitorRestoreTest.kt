@@ -6,6 +6,7 @@ import dev.joely.bmsmon.model.Battery
 import dev.joely.bmsmon.model.DEFAULT_DIM_LEVEL
 import dev.joely.bmsmon.model.DEFAULT_GROUP_ID
 import dev.joely.bmsmon.model.DEFAULT_ROSTER
+import dev.joely.bmsmon.model.DEFAULT_SEIZE_SOC
 import dev.joely.bmsmon.model.DEFAULT_STAGE_HOLD_MIN
 import dev.joely.bmsmon.model.Group
 import dev.joely.bmsmon.model.Roster
@@ -51,6 +52,7 @@ class MonitorRestoreTest {
         seizeLowToStage: Boolean = true,
         dynamicStage: Boolean? = null,
         stageHoldMinutes: Int? = null,
+        seizeSoc: Int = DEFAULT_SEIZE_SOC,
     ) = Persisted(
         accentArgb = null, powerArgb = null, manualMode = false, darkMode = false,
         dailyDriverId = dailyDriverId, lastStage = lastStage, dynamicStage = dynamicStage,
@@ -68,6 +70,7 @@ class MonitorRestoreTest {
         importDone = false, tempThresholdsByProfile = emptyMap(),
         tempAlertsEnabled = tempAlertsEnabled, showTempGauge = true, tempGaugeSide = null,
         cloudSyncAlerts = true, pendingTempConfig = null,
+        seizeSoc = seizeSoc,
     )
 
     private fun tel(soc: Float) = Telemetry(
@@ -243,10 +246,26 @@ class MonitorRestoreTest {
 
     @Test
     fun `headless seize threshold uses the same rule as the app`() {
-        assertEquals(30, restorePlan(persisted())!!.stageConfig.seizeThreshold)   // default ladder top
-        assertEquals(50, restorePlan(persisted(enabledThresholds = setOf(50, 20)))!!.stageConfig.seizeThreshold)
+        assertEquals(30, restorePlan(persisted())!!.stageConfig.seizeThreshold)                              // default seize level
+        assertEquals(30, restorePlan(persisted(enabledThresholds = setOf(50, 20)))!!.stageConfig.seizeThreshold) // the ladder no longer moves it
+        assertEquals(20, restorePlan(persisted(seizeSoc = 20))!!.stageConfig.seizeThreshold)
         assertNull(restorePlan(persisted(seizeLowToStage = false))!!.stageConfig.seizeThreshold)
         assertNull(restorePlan(persisted(alertsOn = false))!!.stageConfig.seizeThreshold)
+    }
+
+    // UI-19: the foreground app (UiState.seizeThreshold → the pushed StageConfig) and a sticky or
+    // boot restore resolve the same seize level from the same settings, so both seize identically.
+    @Test
+    fun `the app and the headless restore resolve the same seize level`() {
+        for (alertsOn in listOf(true, false)) for (pull in listOf(true, false)) for (soc in listOf(10, 12, 20, 30, 60)) {
+            val thresholds = setOf(60, 30, 5)
+            val headless = restorePlan(
+                persisted(alertsOn = alertsOn, seizeLowToStage = pull, seizeSoc = soc, enabledThresholds = thresholds),
+            )!!.stageConfig.seizeThreshold
+            val app = UiState(alertsOn = alertsOn, seizeLowToStage = pull, seizeSoc = soc, enabledThresholds = thresholds)
+                .seizeThreshold
+            assertEquals("alertsOn=$alertsOn pull=$pull soc=$soc", headless, app)
+        }
     }
 
     // --- monitoringNotificationText (BLE-11 de-churn; counts only this session's readings) ---

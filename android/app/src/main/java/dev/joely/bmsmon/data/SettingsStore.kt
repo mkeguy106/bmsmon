@@ -14,12 +14,14 @@ import dev.joely.bmsmon.model.Band
 import dev.joely.bmsmon.model.Battery
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.DEFAULT_DIM_LEVEL
+import dev.joely.bmsmon.model.DEFAULT_SEIZE_SOC
 import dev.joely.bmsmon.model.Group
 import dev.joely.bmsmon.model.RangeParams
 import dev.joely.bmsmon.model.Roster
 import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.Telemetry
 import dev.joely.bmsmon.model.TempThresholds
+import dev.joely.bmsmon.model.normalizeSeizeSoc
 import androidx.datastore.preferences.core.Preferences
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -88,6 +90,8 @@ data class Persisted(
     val tempGaugeSide: String?,
     val cloudSyncAlerts: Boolean,
     val pendingTempConfig: String?,
+    /** The low-pack seize level (UI-19), normalized on read; [DEFAULT_SEIZE_SOC] when never set. */
+    val seizeSoc: Int = DEFAULT_SEIZE_SOC,
 )
 
 /** Persists user preferences (colors, appearance override, BMS addresses) via DataStore. */
@@ -108,6 +112,7 @@ class SettingsStore(private val context: Context) {
         val THRESHOLDS = stringSetPreferencesKey("alert_thresholds")
         val CRITICAL_THRESHOLD = intPreferencesKey("alert_critical_threshold")
         val SEIZE_LOW_TO_STAGE = booleanPreferencesKey("seize_low_to_stage")
+        val SEIZE_SOC = intPreferencesKey("seize_soc")
         val KEEP_SCREEN_ON = booleanPreferencesKey("keep_screen_on")
         val SORT_KEY = stringPreferencesKey("all_sort")
         val FILTERS = stringSetPreferencesKey("all_filters")
@@ -229,6 +234,7 @@ class SettingsStore(private val context: Context) {
             tempGaugeSide = p[K.TEMP_GAUGE_SIDE],
             cloudSyncAlerts = p[K.CLOUD_SYNC_ALERTS] ?: true,
             pendingTempConfig = p[K.PENDING_TEMP_CONFIG],
+            seizeSoc = normalizeSeizeSoc(p[K.SEIZE_SOC]),
         )
     }
 
@@ -250,6 +256,7 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { it[K.CRITICAL_THRESHOLD] = t }.let {}
     suspend fun setSeizeLowToStage(on: Boolean) =
         context.dataStore.edit { it[K.SEIZE_LOW_TO_STAGE] = on }.let {}
+    suspend fun setSeizeSoc(v: Int) = context.dataStore.edit { it[K.SEIZE_SOC] = normalizeSeizeSoc(v) }.let {}
     suspend fun setKeepScreenOn(on: Boolean) = context.dataStore.edit { it[K.KEEP_SCREEN_ON] = on }.let {}
     suspend fun setSort(name: String) = context.dataStore.edit { it[K.SORT_KEY] = name }.let {}
     suspend fun setFilters(names: Set<String>) = context.dataStore.edit { it[K.FILTERS] = names }.let {}

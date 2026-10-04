@@ -80,7 +80,7 @@ fun restorePlan(p: Persisted): RestorePlan? {
             dailyDriverId = dailyDriverId,
             dynamicEnabled = p.dynamicStage ?: true,
             holdMs = (p.stageHoldMinutes ?: DEFAULT_STAGE_HOLD_MIN) * 60_000L,
-            seizeThreshold = seizeThresholdFor(p.alertsOn, p.seizeLowToStage, enabled),
+            seizeThreshold = seizeThresholdFor(p.alertsOn, p.seizeLowToStage, p.seizeSoc),
         ),
         alertConfig = AlertConfig(
             alertsOn = p.alertsOn,

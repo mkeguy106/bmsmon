@@ -63,6 +63,7 @@ data class AlertActions(
     val onSetCriticalThreshold: (Int) -> Unit,
     val onSetSeizeLowToStage: (Boolean) -> Unit,
     val onResetAlerts: () -> Unit,
+    val onSetSeizeSoc: (Int) -> Unit,
 )
 
 /** Settings › Temperature. */
