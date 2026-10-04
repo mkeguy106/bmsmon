@@ -10,7 +10,11 @@ import org.junit.Test
 /** BLE-19: gpsActive is true only while a location request is actually registered. */
 class LocationControlTest {
 
-    private class FakeLocation(var permitted: Boolean = true, var throwsLeft: Int = 0) : LocationControl {
+    private class FakeLocation(
+        var permitted: Boolean = true,
+        var throwsLeft: Int = 0,
+        var stopThrows: Boolean = false,
+    ) : LocationControl {
         var requesting = false
         var starts = 0
         override fun start(): Boolean {
@@ -23,6 +27,7 @@ class LocationControlTest {
             return requesting
         }
         override fun stop() {
+            if (stopThrows) throw SecurityException("removeLocationUpdates refused")
             requesting = false
         }
     }
@@ -49,6 +54,20 @@ class LocationControlTest {
         assertFalse(driveLocation(true, loc) { errors += it })
         assertEquals(1, errors.size)
         assertTrue(driveLocation(true, loc) { errors += it })
+        assertEquals(1, errors.size)
+    }
+
+    // A stop that throws is reported and reads as not running — never a crash — and the next
+    // closed-gate evaluation retries it.
+    @Test fun aStopThatThrowsIsReportedAndReadsInactive() {
+        val loc = FakeLocation(stopThrows = true)
+        assertTrue(driveLocation(true, loc) {})
+        val errors = ArrayList<Throwable>()
+        assertFalse(driveLocation(false, loc) { errors += it })
+        assertEquals(1, errors.size)
+        loc.stopThrows = false
+        assertFalse(driveLocation(false, loc) { errors += it })
+        assertFalse(loc.requesting)
         assertEquals(1, errors.size)
     }
 

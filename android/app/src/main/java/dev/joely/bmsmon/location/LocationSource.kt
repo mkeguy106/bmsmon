@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.location.Location
 import android.os.Looper
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
@@ -97,45 +98,116 @@ class FixCache(private val maxAgeMs: Long = MAX_CACHED_FIX_AGE_MS) {
 }
 
 /**
- * Thin wrapper over the fused location provider. Holds the latest fix in a [FixCache]; [current]
- * is read on each telemetry sample. Safe to call [start]/[stop] repeatedly.
+ * The fused location provider as [LocationSource] drives it: Play Services in production
+ * ([GmsFusedProvider]), a fake in JVM tests.
  */
-class LocationSource(private val context: Context) : LocationControl {
+interface FusedProvider {
+    /**
+     * Register the request for [balanced] (or high) accuracy, delivering fixes to [onFix]. It
+     * REPLACES any request this provider already has registered — GMS replaces a request made with
+     * the same callback in place — so a throw leaves the previous registration in force.
+     * [onRejected] runs, on any thread, if the provider fails the request after accepting it.
+     */
+    fun request(balanced: Boolean, onFix: (GpsFix) -> Unit, onRejected: () -> Unit)
 
+    /** Remove the registered request, if any. */
+    fun remove()
+
+    /** Best-effort one-shot last-known fix. */
+    fun lastFix(onFix: (GpsFix) -> Unit)
+}
+
+/** [FusedProvider] over Play Services' fused location client. Callers guard on location permission. */
+@SuppressLint("MissingPermission")
+private class GmsFusedProvider(context: Context) : FusedProvider {
     private val client = LocationServices.getFusedLocationProviderClient(context)
-    private val fixes = FixCache()
-    private var balanced = false
+    @Volatile private var sink: (GpsFix) -> Unit = {}
 
+    // ONE callback for every request: re-requesting with it replaces the registered request.
     private val callback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
-            result.lastLocation?.let { fixes.offerLive(it.toFix()) }
+            result.lastLocation?.let { sink(it.toFix()) }
         }
     }
 
+    override fun request(balanced: Boolean, onFix: (GpsFix) -> Unit, onRejected: () -> Unit) {
+        sink = onFix
+        val req = if (balanced) {
+            LocationRequest.Builder(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 20_000L)
+                .setMinUpdateIntervalMillis(10_000L)
+                .build()
+        } else {
+            LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 5_000L)
+                .setMinUpdateIntervalMillis(2_000L)
+                .build()
+        }
+        client.requestLocationUpdates(req, callback, Looper.getMainLooper())
+            .addOnFailureListener { onRejected() }
+    }
+
+    override fun remove() {
+        client.removeLocationUpdates(callback)
+    }
+
+    override fun lastFix(onFix: (GpsFix) -> Unit) {
+        client.lastLocation.addOnSuccessListener { loc -> loc?.let { onFix(it.toFix()) } }
+    }
+
+    private fun Location.toFix() = GpsFix(latitude, longitude, if (hasAccuracy()) accuracy else null, time)
+}
+
+/** How long a request the provider rejected after accepting it keeps [LocationSource] from asking
+ *  again — so a Play Services outage costs a retry a minute, not one on every BLE frame. */
+internal const val REQUEST_RETRY_AFTER_REJECT_MS = 60_000L
+
+/**
+ * The fused request the GPS gate drives. Holds the latest fix in a [FixCache]; [current] is read on
+ * each telemetry sample. Safe to call [start]/[stop] repeatedly.
+ *
+ * [start] reports true only while a request is registered (BLE-19), and that stays true to life:
+ * a mode switch ([setBalanced]) replaces the request in place, so a failed switch leaves the old one
+ * registered rather than none; and a request the provider fails AFTER accepting it (Play Services
+ * rejecting it asynchronously) is forgotten, held off for [REQUEST_RETRY_AFTER_REJECT_MS], and
+ * reported through [onRequestLost] so the gate re-evaluates and publishes `gpsActive = false`.
+ */
+class LocationSource internal constructor(
+    private val provider: FusedProvider,
+    private val permitted: () -> Boolean,
+    /** Runs, outside this source's lock, when a registered request was lost (see above). */
+    private val onRequestLost: () -> Unit,
+    private val elapsedNow: () -> Long = { SystemClock.elapsedRealtime() },
+    private val wallNow: () -> Long = { System.currentTimeMillis() },
+) : LocationControl {
+
+    constructor(context: Context, onRequestLost: () -> Unit) :
+        this(GmsFusedProvider(context), { hasLocationPermission(context) }, onRequestLost)
+
+    private val fixes = FixCache()
+    private var balanced = false
+    private var requestSeq = 0L          // the latest request handed to the provider
+    private var retryAt: Long? = null    // elapsed clock: no new request before this (a rejection)
+
     /**
      * Register the fused request if it isn't already (idempotent). Returns whether one is registered
-     * after the call: false without location permission — the GPS gate publishes gpsActive from this
-     * and calls again at its next evaluation, so a later grant is picked up (BLE-19). A GMS throw
-     * propagates with nothing registered.
+     * after the call: false without location permission, or while a rejected request is held off —
+     * the GPS gate publishes gpsActive from this and calls again at its next evaluation, so a later
+     * grant is picked up (BLE-19). A provider throw propagates with nothing registered.
      */
     @Synchronized
-    @SuppressLint("MissingPermission") // guarded by hasLocationPermission
     override fun start(): Boolean {
         if (fixes.requesting) return true
-        if (!hasLocationPermission(context)) return false
+        if (!permitted()) return false
+        retryAt?.let { if (elapsedNow() < it) return false }
+        retryAt = null
         val gen = fixes.begin()
         try {
-            requestUpdates()
-        } catch (e: Exception) {
+            request(balanced)
+        } catch (e: Throwable) {
             fixes.end()
             throw e
         }
         // Best-effort seed: the request above is what matters, so a failure here is not a failed start.
-        runCatching {
-            client.lastLocation.addOnSuccessListener { loc ->
-                loc?.let { fixes.offerSeed(gen, it.toFix(), System.currentTimeMillis()) }
-            }
-        }
+        runCatching { provider.lastFix { fixes.offerSeed(gen, it, wallNow()) } }
         return true
     }
 
@@ -149,41 +221,49 @@ class LocationSource(private val context: Context) : LocationControl {
      * charging chair-mounted phone that window can run 15-30 minutes, so it is not brief, but it
      * is rare, and the still-converging Wh/mile band is never fed a meaningful amount of coarse
      * data.
+     *
+     * A registered request is REPLACED in place, never removed first: it used to be removed and then
+     * re-requested, so a re-request that threw left nothing registered while gpsActive still read
+     * true. Now a throw propagates with the old request — and the old mode — still in force, and the
+     * next call retries the switch.
      */
     @Synchronized
     fun setBalanced(balanced: Boolean) {
         if (balanced == this.balanced) return
+        if (fixes.requesting) request(balanced)   // not requesting: the next start() uses the new mode
         this.balanced = balanced
-        if (!fixes.requesting) return  // will pick up the new mode on the next start()
-        client.removeLocationUpdates(callback)
-        requestUpdates()
-    }
-
-    @SuppressLint("MissingPermission") // callers guard on hasLocationPermission
-    private fun requestUpdates() {
-        val req = if (balanced) {
-            LocationRequest.Builder(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 20_000L)
-                .setMinUpdateIntervalMillis(10_000L)
-                .build()
-        } else {
-            LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 5_000L)
-                .setMinUpdateIntervalMillis(2_000L)
-                .build()
-        }
-        client.requestLocationUpdates(req, callback, Looper.getMainLooper())
     }
 
     @Synchronized
     override fun stop() {
         if (!fixes.requesting) return
-        client.removeLocationUpdates(callback)
+        provider.remove()
         fixes.end()
     }
 
     /** The cached fix, or null when none is fresher than 120 s (checked at read time, BLE-23). */
-    fun current(nowMs: Long = System.currentTimeMillis()): GpsFix? = fixes.read(nowMs)
+    fun current(nowMs: Long = wallNow()): GpsFix? = fixes.read(nowMs)
 
-    private fun Location.toFix() = GpsFix(latitude, longitude, if (hasAccuracy()) accuracy else null, time)
+    /** Lock held: hand the provider a request, tagged so a late rejection of it can be told apart. */
+    private fun request(balanced: Boolean) {
+        val id = ++requestSeq
+        provider.request(balanced, fixes::offerLive) { onRejected(id) }
+    }
+
+    /** The provider failed request [id] after accepting it. Only the latest request, still
+     *  registered, counts: an older one was replaced, and one after stop() is moot. */
+    private fun onRejected(id: Long) {
+        val lost = synchronized(this) {
+            if (id != requestSeq || !fixes.requesting) return@synchronized false
+            // Whatever the provider still holds, nothing is registered from here on — make it so.
+            runCatching { provider.remove() }
+            fixes.end()
+            retryAt = elapsedNow() + REQUEST_RETRY_AFTER_REJECT_MS
+            true
+        }
+        // Outside this lock: the gate takes the engine's, and its order is engine -> this.
+        if (lost) onRequestLost()
+    }
 
     companion object {
         fun hasLocationPermission(context: Context): Boolean =

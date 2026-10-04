@@ -1,6 +1,7 @@
 package dev.joely.bmsmon
 
 import java.io.File
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -113,6 +114,41 @@ class EngineWiringTest {
         assertFalse(gate.contains("if (active) locationSource.start() else locationSource.stop()"))
         val onPoll = flat.substringAfter("private fun onPoll(").substringBefore("private fun onReachable(")
         assertTrue(onPoll.contains("locationSource.current(now)"))
+    }
+
+    // Final-wave MUST-FIX: every location-mode switch is guarded. The unguarded one in stopPowerLoop()
+    // aborted stop() just after it ended the session: BLE kept running with every frame refused, the
+    // throw crashed the main-thread caller, and the sticky restart undid the user's Stop.
+    @Test fun everyLocationModeSwitchIsGuardedSoStopAlwaysCompletes() {
+        assertEquals("one switch site", 1, Regex(Regex.escape("locationSource.setBalanced(")).findAll(src).count())
+        assertTrue(flat.contains(
+            "private fun applyLocationMode(balanced: Boolean) { runCatching { locationSource.setBalanced(balanced) }",
+        ))
+        val stopPower = flat.substringAfter("private fun stopPowerLoop() {").substringBefore("}")
+        assertTrue(stopPower.contains("applyLocationMode(false)"))
+        val powerLoop = flat.substringAfter("private fun startPowerLoop() {").substringBefore("private fun stopPowerLoop()")
+        assertTrue(powerLoop.contains("applyLocationMode(d.gpsBalanced)"))
+        // stop() reaches its teardown after the power loop: BLE, GPS, the state reset.
+        val stop = flat.substringAfter("fun stop() {").substringBefore("fun persistMonitoringOff(")
+        val power = stop.indexOf("stopPowerLoop()")
+        assertTrue(power in 0 until stop.indexOf("ble.stop()"))
+        assertTrue(stop.indexOf("ble.stop()") < stop.indexOf("shutdownGps()"))
+    }
+
+    // Final wave: a request Play Services fails after accepting it re-runs the gate, the single
+    // writer of gpsActive, under its lock — LocationSource forgets it (LocationSourceTest).
+    @Test fun aLostLocationRequestReRunsTheGpsGate() {
+        assertTrue(flat.contains("private val locationSource = LocationSource(appContext) { onLocationRequestLost() }"))
+        val lost = flat.substringAfter("private fun onLocationRequestLost() {").substringBefore("}")
+        assertTrue(lost.contains("runCatching { applyGpsGate(now())"))
+        assertTrue(Regex("@Synchronized\\s+private fun applyGpsGate\\(").containsMatchIn(src))
+    }
+
+    // Task 6 review carry: a roster left with no wanted pack must stop GPS at once — no BLE frame
+    // will drive the gate, and with the wakelock released the 5-min tick may never run.
+    @Test fun aRosterEditReRunsTheGpsGate() {
+        val body = flat.substringAfter("fun setRoster(roster: Roster) {").substringBefore("fun seedStage(")
+        assertTrue(body.contains("if (_state.value.monitoring) { ble.setTargets(roster.allTargets()) applyGpsGate(now())"))
     }
 
     // M7: no CoroutineExceptionHandler on the engine scope — an unguarded import throw kills the process.

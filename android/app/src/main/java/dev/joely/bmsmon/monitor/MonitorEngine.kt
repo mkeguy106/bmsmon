@@ -168,7 +168,8 @@ class MonitorEngine(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val ble = BmsRepository(appContext)
-    private val locationSource = LocationSource(appContext)
+    // A request Play Services fails after accepting it re-runs the GPS gate (see onLocationRequestLost).
+    private val locationSource = LocationSource(appContext) { onLocationRequestLost() }
     private val motionSource = MotionSource(appContext)
     private val powerMonitor = PowerMonitor(appContext)
     private var powerJob: Job? = null
@@ -843,8 +844,8 @@ class MonitorEngine(
      *
      * The screen is the phone's dominant drain by a wide margin, so it is held only on external
      * power and out of the low-battery latch (see PowerPolicy for why the latch exists). Note the
-     * GPS half is applied unconditionally — LocationSource.setBalanced is a no-op while GPS is
-     * inactive and remembers the mode for the next start(), so this never fights setGpsActive.
+     * GPS half is applied unconditionally — LocationSource.setBalanced only records the mode while GPS
+     * is inactive, for the next start(), so this never fights setGpsActive.
      */
     private fun startPowerLoop() {
         powerJob?.cancel()
@@ -872,7 +873,7 @@ class MonitorEngine(
                     _state.update {
                         it.copy(holdScreen = d.holdScreen, gpsBalanced = d.gpsBalanced, lowPower = d.lowPower)
                     }
-                    locationSource.setBalanced(d.gpsBalanced)
+                    applyLocationMode(d.gpsBalanced)
                 }
             }
         }
@@ -882,7 +883,29 @@ class MonitorEngine(
         powerJob?.cancel()
         powerJob = null
         powerMonitor.stop()
-        locationSource.setBalanced(false)
+        applyLocationMode(false)
+    }
+
+    /**
+     * The ONE place the location mode is switched, guarded: a GMS throw is logged and reads as "mode
+     * unchanged" ([LocationSource.setBalanced] keeps the old request registered and the next call
+     * retries). Unguarded, the switch in [stopPowerLoop] aborted [stop] right after it had ended the
+     * session — BLE left running with every frame refused, the throw crashing the main-thread caller,
+     * and the user's Stop lost to the sticky restart.
+     */
+    private fun applyLocationMode(balanced: Boolean) {
+        runCatching { locationSource.setBalanced(balanced) }
+            .onFailure { Log.w(TAG, "location mode switch failed; the current request stays", it) }
+    }
+
+    /**
+     * The provider failed a registered request after accepting it (Play Services rejecting it
+     * asynchronously). [LocationSource] has already forgotten it; re-run the gate — under its lock,
+     * as the single writer of `gpsActive` — so the state stops claiming a request that doesn't exist.
+     * Runs on the main thread (GMS listeners), holding no lock.
+     */
+    private fun onLocationRequestLost() {
+        runCatching { applyGpsGate(now()) }.onFailure { Log.w(TAG, "GPS gate re-evaluation failed", it) }
     }
 
     fun setLogging(enabled: Boolean) {

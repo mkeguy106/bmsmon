@@ -53,6 +53,15 @@ class FixCacheTest {
         assertNull(c.read(300_000L))
     }
 
+    // The park→drive "first point within seconds": a fresh lastLocation seed of the current start is
+    // kept. Every other seed case here is a rejection, so a no-op offerSeed would pass them all.
+    @Test fun aFreshSeedOfTheCurrentStartIsKept() {
+        val c = FixCache(maxAgeMs = 120_000L)
+        val gen = c.begin()
+        c.offerSeed(gen, fix(1_000L), nowMs = 2_000L)
+        assertEquals(fix(1_000L), c.read(2_000L))
+    }
+
     @Test fun aLiveResultAfterStopIsDropped() {
         val c = FixCache()
         c.begin()
