@@ -108,6 +108,9 @@ interface FusedProvider {
      * the same callback in place — so a throw leaves the previous registration in force.
      * [onRejected] runs, on any thread, if the provider fails the request after accepting it (GMS
      * posts it to the main looper; one run before [request] returns is handled too).
+     * It must NEVER run synchronously inside [request] on the mode-switch path: that path holds this
+     * source's lock, and [onRejected] re-enters the engine's GPS gate, whose lock order is
+     * engine-then-source — a synchronous call would invert it. Post it instead (as GMS does).
      */
     fun request(balanced: Boolean, onFix: (GpsFix) -> Unit, onRejected: () -> Unit)
 
