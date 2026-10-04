@@ -1,12 +1,9 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { createApiKey, getApiKeys, revokeApiKey, type ApiKeyRow } from "../../api";
 import { revokeApiKeyConfirm } from "../../adminConfirm";
+import { API_KEY_AUTH as AUTH_MSG, API_KEY_CREATE_ERROR, failureKind } from "../model/formErrors";
 
-const errKind = (e: unknown): "auth" | "net" =>
-  e instanceof Error && (e.message === "401" || e.message === "403") ? "auth" : "net";
-
-const AUTH_MSG =
-  "Not authorized — your session may have expired (admin required). Reload to sign in again.";
+const errKind = (e: unknown): "auth" | "net" => (failureKind(e) === "auth" ? "auth" : "net");
 
 const btn: CSSProperties = {
   background: "var(--nav-active)", border: "1px solid var(--border)", color: "var(--text)",
@@ -50,8 +47,8 @@ export function ApiKeysPanel() {
     createApiKey(n)
       .then((r) => { setMinted({ name: r.name, key: r.key }); setCopied(false);
                      setName(""); setActionErr(null); refresh(); })
-      .catch((e) => setActionErr(errKind(e) === "auth" ? AUTH_MSG
-        : "Couldn't create the key — check the connection and try again."));
+      // A 422 is a name the server refuses: say what to change, not "check the connection".
+      .catch((e) => setActionErr(API_KEY_CREATE_ERROR[failureKind(e)]));
   };
 
   const revoke = (k: ApiKeyRow) => {

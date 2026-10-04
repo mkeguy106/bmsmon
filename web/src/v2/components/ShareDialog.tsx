@@ -1,6 +1,7 @@
 import { useState, type CSSProperties } from "react";
 import { createShare } from "../../api";
 import { backdropDismisses } from "../../adminConfirm";
+import { SHARE_CREATE_ERROR, failureKind } from "../model/formErrors";
 
 const DURATIONS = [
   { value: "1h", label: "1 hour" },
@@ -37,10 +38,8 @@ export function ShareDialog({ onClose }: { onClose: () => void }) {
           copy(full);
         }
       })
-      .catch((e) => setErr(
-        e instanceof Error && (e.message === "401" || e.message === "403")
-          ? "Not authorized — your session may have expired (admin required)."
-          : "Couldn't create the share link — check the connection and try again."))
+      // A 422 is a name the server refuses: say what to change, not "check the connection".
+      .catch((e) => setErr(SHARE_CREATE_ERROR[failureKind(e)]))
       .finally(() => setBusy(false));
   };
 
