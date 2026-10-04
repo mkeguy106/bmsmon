@@ -715,11 +715,11 @@ outage); that used to read as "server rejects this batch" and erased the outbox 
 Now every 4xx other than 401/403 that is not a marked 400/413/422 (so every unmarked 4xx, and e.g.
 a marked 404/408/429), every 3xx (the upload client is built with `followRedirects(false)` +
 `followSslRedirects(false)` in `uploadHttpClient()`, so a redirect to a login page can never come
-back as a 2xx "accept") and every 5xx except a marked non-503 one (below) is Transient; 401/403 are
+back as a 2xx "accept"), a 2xx WITHOUT the marker (a proxy's or captive portal's page, not the app's answer) and every 5xx except a marked non-503 one (below) is Transient; 401/403 are
 AuthFailed and hold the rows whether or not the marker is present. Poison then passes a circuit
 breaker (`decideUpload`, `cloud/UploadDecision.kt`, pure): the first Poison after a 2xx is skipped,
 any further Poison before the next 2xx is held and backed off — genuine poison is one bad batch; a
-run of rejects is a server problem. Ingest, the historical import and the config push each have
+run of rejects is a server problem. Ingest, the re-sync stream and the config push each have
 their own breaker; it lives in memory, so a restart re-arms one skip per stream. The config push
 also has its own retry gate (1 s doubling to 60 s, reset on a 2xx or a skip), so a held config is
 not re-POSTed on every loop pass. **Deploy order is load-bearing: the server's marker ships before
@@ -742,10 +742,9 @@ skip per 2xx** (`skipsSinceOk`, the poison breaker's rule): a second trip at one
 holds and backs off instead, so a server that faults on everything costs one sample, then holds
 until fixed, while a genuine bad row is still isolated because bisection's clean halves are 2xxs
 that re-arm it. Every trip needs a fresh full span. After a skip the next head goes alone (limit 1)
-and only 2xxs double it back to 200. Transient/AuthFailed responses neither reset nor advance a
+and 2xxs double it back to 200 — except inside a narrowing search: a 2xx on a batch ending before the suspect range's end (`HeadFaultState.searchEndId`) keeps the limit, so isolation takes one trip per halving (≤9, ~54 min). Transient/AuthFailed responses neither reset nor advance a
 streak; a changed head resets it but keeps the limit and the breaker. State is in memory, so a
-restart starts over at a full batch with one skip re-armed. The import and config streams are
-unchanged.
+restart starts over at a full batch with one skip re-armed. Every per-response decision of the ingest stream — breakers, skip, hold, backoff (a marked 503's `Retry-After`, ≤300 s, is a floor), and the re-send of anything skipped — is the pure `ingestStep` (`cloud/IngestStep.kt`); the loop only applies its effects, inside `NonCancellable`, counting the rows actually deleted.
 
 **Bounded history reads (DATA-15/16).** On the History/Review/Timeline and session-rollup paths
 nothing reads a pack's or a session's samples as a list. The engine's windowed reads —
@@ -798,7 +797,7 @@ N% fires **at** N%, `<=`) and `model/TempAlerts.kt` (cold→hot zone ladder: cau
 critical/cutoff, **critical fires before the BMS cutoff**). The unified `stageAlert()` shows the
 **worst** of the two. Capacity/temperature settings live in `Settings › Alerts` and
 `Settings › Temperature`; the stage's worst pack drives the in-app overlay, and every alarming
-stage pack gets its own headless temperature notification (below).
+stage pack gets its own headless temperature notification (below). The overlay is hosted at App level (`ui/AlertPresentation.kt`): a flashing alert covers every screen; once acknowledged it is the status-line pill on Home and a banner elsewhere. Stage and list SOC numbers take the user's ladder severity (`socSeverityFor`, the alerts' own rule) with a LOW/CRIT word, and the severity and other readable text tokens are contrast-corrected per theme to ≥4.5:1 against the surfaces they sit on (`readableOn`); the dim secondary tokens (e.g. `text3`, 2.46:1 in the light theme) are not part of that claim.
 
 **Capacity alerts are fleet-wide, not stage-only.** Because only one base occupies the stage at a
 time, a low pack that isn't on the stage used to be invisible — a pack could drain to damage
@@ -826,19 +825,14 @@ window never counts as charging for the notifier (`fleetCapacityEvals(regenAddrs
 the stage's ack re-arm below), so a regen burst reporting `state=Charging` no longer cancels a low
 pack's notification mid-drive and re-alarms it once the charge latch expires.
 
-**Low pack seizes the stage (safety override).** `resolveStage()` (`model/Fleet.kt`) has a
-pre-emptive branch — before the manual-pin check — that stages the base of the **lowest
-alert-driving pack at/below the seize threshold** (the engine resolves on `decisionView()`), over
-the active chair AND a manual pin (daily-driver breaks ties). The seize threshold is
-`seizeThresholdFor()` (`model/StageControl.kt`, shared by the ViewModel and the headless restore) =
-the **highest enabled capacity threshold** (default ladder top = 30%) when both `alertsOn` and the
-new `seizeLowToStage` setting are on (else null). Charging doesn't block the seize (the flash is
-still charge-suppressed). On recovery the branch yields and normal pin/auto resolution takes back
-over. `Settings › Alerts` gains a **"Pull low packs to stage"** toggle (default ON) gating only the
-visual seize — fleet-wide notifications fire regardless. Only roster members can seize, and a stage
-target left with no members falls back to the daily driver (then the first populated base) instead
-of a blank stage (UI-29). The rule itself — threshold, charging-doesn't-block, lowest-wins,
-seize-before-pin — is unchanged.
+**Low pack seizes the stage (safety override).** `resolveStage()` (`model/Fleet.kt`) has a pre-emptive branch, before the manual-pin check, that stages the base of the pack picked by `seizeCandidate()`.
+- **Candidates.** A candidate is a reachable, alert-driving pack at or below the **seize level**, which is not charging. Regen within `REGEN_WINDOW_MS` of its base discharging counts as driving, not charging.
+- **Base in use.** The seize never displaces the base in use: a base discharging now (daily driver first), or the base that discharged most recently within the stage hold. While one is in use, only its packs may seize. That keeps the core case: a low in-use base overrides a manual pin.
+- **Ties.** Lowest SOC wins; the daily driver, then the address, break ties.
+- **The level.** The seize level is `seizeThresholdFor()` (`model/StageControl.kt`, shared with the headless restore). It is its own setting, `seize_soc`: one of 10/15/20/25/30 (`SEIZE_SOC_OPTIONS`), default 30; a stored value rounds up to the next offered level. It is separate from the notification ladder, so an early-warning rung never moves the stage. It applies only when both `alertsOn` and "Pull low packs to stage" are on.
+- **Recovery.** On recovery the branch yields and normal pin/auto resolution takes back over.
+- **Roster.** Only roster members can seize, and a memberless target falls back to the daily driver, then the first populated base, instead of a blank stage (UI-29).
+- `Settings › Alerts` carries the **"Pull low packs to stage"** toggle (default ON, phone-only) and the "Pull to stage at" level chips; fleet-wide notifications fire regardless.
 
 **Temperature monitoring:** a vertical temperature gauge (`ui/gauge/TempGauge.kt`) sits beside the
 SOC ring on the stage (toggle + L/R position in settings), plus a `TEMP` stat tile. Thresholds are
@@ -857,6 +851,21 @@ the uploader flushes only at ≥`MIN_BATCH` (20) queued rows or a `FLUSH_AGE_MS`
 then drains to empty (`shouldFlush()` in `TelemetryReporter.kt`) — never per-sample POSTs, which
 paid ~470 B of JWT/header overhead each and defeated gzip on tiny bodies (~9× bandwidth combined
 with the GPS dedup below). Every sample is still uploaded; worst-case live-feed latency is ~15 s.
+
+**Upload recovery.**
+- **Evictions.** Nothing leaves the outbox silently. A cap eviction (`OUTBOX_MAX` 200 k, cut back by a chunk so it does not repeat on every insert) is counted (`outbox_evicted`, shown in Cloud sync). A poison skip or a one-row fault skip is logged and counted.
+- **Re-sync from local history.** Each of those records its sample-time span as a re-sync window (`cloud/Resync.kt`, persisted as `resync_state`). A second loop re-sends windows from the Room `samples` table (`RESYNC_PAGE_SQL`, keyset on `(tsMs, id)`, `RESYNC_PAGE` 500 rows per POST):
+  - GPS is included, sent once per pack per fix.
+  - It uses `batch_seq = -1`: stored, never WS-published.
+  - It runs only while the live outbox is below `MIN_BATCH`.
+  - It uses the same poison breaker and fault bisection as ingest. Bisection runs over stream positions, and a faulting row is parked for 6 h.
+  - Skipped batches and rows wait 6 h before their re-send.
+  - The one-shot history import is just the window `[0, now]`; its Cloud sync line reads "queued", not "sent".
+- **Missing key.** A missing Keystore key (a device-to-device transfer) is `PostResult.KeyMissing`. It holds every row and shows "re-enroll required"; re-enrolling re-keys the same install.
+- **Enrollment errors.** A failed enroll says what went wrong (unreachable server, invalid or expired code, rejected key, revoked device, rate limit, server trouble) and restores the previous key state.
+- **Clock correction.** The skew is read from the server's `X-Bmsmon-Server-Time-Ms` (else `Date`) on an app-marked 401/403 whose reason is `clock_skew` (or carries none). A skew over 30 s is shown, and a correction is applied to token `iat`/`exp` (in memory, capped at ±1 h) only when an independent clock vouches for the phone's own: the platform's network time, else a fresh satellite fix. Otherwise nothing is corrected and the status says which clock looks off ("phone clock looks off" / "can't tell which clock is off" / server behind). A 2xx re-anchors a correction already in force and clears it once the clocks agree; it never starts one.
+- **Build identity.** Uploads and enrollment send `User-Agent: bmsmon-android/<versionName> (<git sha>; sdk <n>)`.
+- **Config push.** It is compare-and-clear: a config enqueued mid-flight survives. Non-finite range bands are left out.
 
 **Usage logging is intentionally ON right now — do not turn it off.** Every telemetry
 sample is recorded to the phone's Room DB (`bms.db`, `samples` table, columns incl.
@@ -1051,6 +1060,8 @@ uploaded either. The same holds across a monitoring Stop (BLE-21): `start()` min
 the engine's BLE callbacks carry, and `stop()` clears it first, so a callback already running on the
 control loop when monitoring stopped changes nothing.
 
+Stopping monitoring (stage title or Settings), Disconnect all, disconnecting a pack that is on the stage, Clear data and Forget device each ask for confirmation first; starting and reconnecting stay one tap. Home shows "N PACKS DISCONNECTED BY YOU · RECONNECT" while any are, and the All Batteries header decides Disconnect/Reconnect all from the roster, not the filtered list.
+
 **BLE attempt model.** Every connect attempt has an id (`LinkLedger`, `ble/LinkLedger.kt`), and
 only the current attempt's outcome and frames change state: a Disconnect → Reconnect during a slow
 connect holds one GATT link, never two (the stale session is closed, and a planner drop cancels a
@@ -1083,9 +1094,7 @@ production data showed 86 of 531 regen samples (16 %) carry BMS `state=Charging`
 would re-flash an acknowledged rung about 30 s later, mid-drive. The flash-suppression latch is
 unchanged. ACKNOWLEDGE acks the alert the overlay displayed, never one re-derived at tap time
 (UI-25), and an ACKNOWLEDGE that lands after the stage changed is ignored (`StageAlert.target`).
-The **highest enabled** ladder rung doubles as the stage-seize threshold (see "Low pack seizes the
-stage" above), and headless notifications are **fleet-wide/per-pack** (see "Capacity alerts are
-fleet-wide") — the ladder is the single source of truth for all three.
+The seize has its own level (see above); headless notifications are **fleet-wide/per-pack** (see "Capacity alerts are fleet-wide") — the ladder drives the flash, the notifications and the SOC severity colors.
 
 **GPS telemetry (cloud upload).** When cloud sync is enrolled, the app captures the phone's
 location (`location/LocationSource.kt`, fused provider) and attaches `lat`/`lon`/`gps_accuracy_m`
@@ -1108,11 +1117,14 @@ onto a new sample.
 next to the stage label, only when cloud sync is enrolled: `↑ X.X KB/s` (green) while uploading,
 `↑ synced` when caught up, `↑ N queued` (amber) when buffering/offline. The rate comes from
 `cloud/UploadRate.kt` (a pure, unit-tested 5 s rolling window of gzipped wire bytes →
-smoothed KB/s) surfaced through the reporter's `onStatus` into `UiState.cloudUploadKbps`.
+smoothed KB/s). Most urgent first: `↑ re-enroll`, `↑ clock skew`, `↑ auth failed` (red), `↑ held · N` (amber, a breaker is holding), then rate / queued / re-sending / retry later / synced (`ui/home/UploadBadge.kt`). The status comes from `TelemetryReporter.status` (`UploadStatus`), which the ViewModel collects directly.
 
 **Discharge estimate (miles + time remaining).** The stage shows a base-level learned
-high/low line — `~37–50 mi · ~9–13h use · ~5–9 days` — under the rings whenever the staged
-packs are connected and not charging (charging shows the recharge ETA instead). Pure math in
+high/low line — `~37–49 mi · ~8–12h use · ~4–8 days` — under the rings whenever the staged
+packs are connected and not charging (charging shows the recharge ETA instead). **Every figure is
+floored, never rounded** (`floorFixed`/`floorBand`, twin of the web's `floorBand`): 26.9 mi reads 26,
+and tenths show while the high end is under 10 mi or 1 h of use or wall-clock time, so no range or
+runtime reads above its estimate. Pure math in
 `model/RangeEstimate.kt` (estimate + live tilt + formatting) and `model/RangeLearn.kt`
 (per-day p20/p80 bands: Wh/day, active W, and **outing-day Wh/mile** — a day's TOTAL discharge
 divided by its chair miles, counted only on days with ≥0.5 mi of driving, so indoor/idle
@@ -1203,7 +1215,7 @@ config lives in the `device_temp_config` table
 seize threshold** rides the same `POST /api/v1/config` body (optional flat `seize_soc`/`alerts_on`
 fields on `TempConfigBody`) into the device-level `device_alert_config` table (latest-wins); the
 WebUI reads it via `GET /web/alert-config` and seizes its main stage for the lowest fresh pack
-`≤ (alerts_on ? seize_soc ?? 30 : ∅)` — over pins and auto-selection, with a **"LOW"** marker,
+`≤ (alerts_on ? seize_soc ?? 30 : ∅)` (since Tier 2 `seize_soc` is the phone's dedicated seize level, 10–30) — over pins and auto-selection, with a **"LOW"** marker,
 no audible alarm: v2 (`/`) via `useV2Configs` + `web/src/v2/model/stageBase.ts`
 `selectStageBase` (Command stage, Journey and the Fleet Health hero; LOW chip in
 `CommandStage.tsx`; no seize until the config's first answer, and the 30 default only if
