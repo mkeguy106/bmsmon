@@ -314,6 +314,7 @@ class AlertsTest {
             emptyMap(), last = mapOf("A" to 15), holdable = setOf("A"), nowMs = 1_000L, graceMs = grace,
         )
         assertTrue(r.cancel.isEmpty())
+        assertTrue("held quietly: nothing re-posted", r.notify.isEmpty())
         assertEquals(15, r.newLast["A"])
         assertEquals(mapOf("A" to 1_000L), r.vanishedAt)
     }
@@ -360,6 +361,26 @@ class AlertsTest {
         // user-disconnected, removed, or alerts off — the engine leaves it out of holdable
         val r = reconcileFleetNotifications(emptyMap(), mapOf("A" to 15), holdable = emptySet(), nowMs = 1_000L, graceMs = grace)
         assertEquals(setOf("A"), r.cancel)
+    }
+
+    @Test fun aHeldPackThatReturnsAboveEveryRungCancelsAtOnce() {
+        val recovered = AlertEval(activeThreshold = null, critical = false, lowSoc = 40, charging = false, crossed = emptySet())
+        val r = reconcileFleetNotifications(
+            mapOf("A" to recovered), mapOf("A" to 15), mapOf("A" to 0L), setOf("A"), 60_000L, grace,
+        )
+        assertEquals(setOf("A"), r.cancel)
+        assertTrue(r.notify.isEmpty())
+        assertNull(r.newLast["A"])
+        assertTrue(r.vanishedAt.isEmpty())
+    }
+
+    // Task 7 review carry: regen membership is case-insensitive, like every other address set.
+    @Test fun regenMembershipIgnoresAddressCase() {
+        val fleet = mapOf("c8:47:80:15:67:44" to BatteryStatus(capTel(12f, BatteryState.Charging), reachable = true))
+        val fc = fleetCapacityEvals(
+            fleet, cfg(setOf(30, 15), critical = 15), emptyMap(), nowMs = 1_000L, regenAddrs = setOf("C8:47:80:15:67:44"),
+        )
+        assertFalse(fc.evals.getValue("c8:47:80:15:67:44").charging)
     }
 
     @Test fun aPackThatReturnsChargingCancelsAtOnce() {

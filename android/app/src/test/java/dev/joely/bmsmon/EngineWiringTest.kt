@@ -121,6 +121,25 @@ class EngineWiringTest {
         assertEquals("one raw-only write site", 1, Regex(Regex.escape("repository.ingestRawOnly(")).findAll(src).count())
     }
 
+    // Task 8 carry: the temperature notifications read the freshness DECISION view (a seed or a
+    // silent pack never raises or holds an alarm — TempAlertsTest), not the raw fleet.
+    @Test fun theTemperatureAlarmReadsTheDecisionView() {
+        val decide = flat.substringAfter("private fun reevaluate() {").substringBefore("private fun applyStage(")
+        assertTrue(decide.contains("evaluateTempAlerts(d.view, nowE)"))
+        assertFalse(decide.contains("evaluateTempAlerts(st.fleet"))
+    }
+
+    // BLE-24 holds only packs the user hasn't disconnected or removed — and nothing at all with the
+    // alerts off, which is what cancels a pack that had already vanished when they were turned off.
+    // The temperature hold is per pack too: never the whole stage.
+    @Test fun onlyWantedPacksAreHeldAndNothingWithAlertsOff() {
+        val decide = flat.substringAfter("private fun reevaluate() {").substringBefore("private fun applyStage(")
+        assertTrue(decide.contains("holdable = if (cfg?.alertsOn == true) wantedAddrs(roster, disabledAddrs) else emptySet()"))
+        val temp = flat.substringAfter("private fun evaluateTempAlerts(").substringBefore("fun importLegacyCsvIfNeeded(")
+        assertTrue(temp.contains("holdable = if (on) wantedAddrs(roster, disabledAddrs) else emptySet()"))
+        assertFalse("no whole-stage hold", temp.contains("stageAddrs.isNotEmpty()"))
+    }
+
     @Test fun aDisabledPackIsNeverMarkedReachable() {
         val onReachable = flat.substringAfter("private fun onReachable(")
             .substringBefore("private suspend fun learnTail(")

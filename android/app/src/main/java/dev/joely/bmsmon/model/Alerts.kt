@@ -225,13 +225,14 @@ fun fleetCapacityEvals(
     regenAddrs: Set<String> = emptySet(),
 ): FleetCapacity {
     val nextCharge = chargeAt.toMutableMap()
+    val regen = regenAddrs.map { it.uppercase() }.toSet()   // case-insensitive, like the other address sets
     val evals = fleet.mapNotNull { (addr, s) ->
         val tel = s.telemetry?.takeIf { s.reachable } ?: return@mapNotNull null
         // A pack inside its regen window ([regenAddrs]) is not on a charger, whatever its state
         // field says: 16 % of production regen samples carry state=Charging, and counting one as
         // charging cancelled a low pack's notification mid-drive, then re-alarmed it once the latch
         // that frame armed had expired. Same rule as the stage's ack re-arm.
-        val charging = tel.state == BatteryState.Charging && addr !in regenAddrs
+        val charging = tel.state == BatteryState.Charging && addr.uppercase() !in regen
         val hold = nextChargeHold(
             charging = charging,
             discharging = tel.state == BatteryState.Discharging,

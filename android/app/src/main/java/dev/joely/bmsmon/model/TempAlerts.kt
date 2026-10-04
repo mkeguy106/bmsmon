@@ -75,54 +75,93 @@ fun formatTemp(c: Float, unit: TempUnit): String =
 fun formatDelta(dC: Int, unit: TempUnit): String =
     if (unit == TempUnit.F) "${(dC * 9f / 5f).roundToInt()}°F" else "${dC}°C"
 
-/** The worst stage pack's temperature, for the headless temperature alarm. */
-data class StageTemp(val addr: String, val telemetry: Telemetry, val zone: TempZone, val env: TempEnvelope)
+/** One pack's live temperature reading, classified, for the headless temperature notifications. */
+data class PackTemp(val addr: String, val telemetry: Telemetry, val zone: TempZone, val env: TempEnvelope)
 
 /**
- * The worst temperature zone among the stage packs whose reading may drive alerts — pass the
- * freshness decision view ([decisionView]), so a carried seed or a silent pack never raises (or
- * holds) the alarm. [limitsFor] gives a pack's thresholds and envelope (its battery profile). Null
- * when no stage pack has such a reading: an ABSENCE, not a recovery — see [nextTempNotify].
+ * Every pack whose reading may drive alerts, classified — pass the freshness decision view
+ * ([decisionView]), so a carried seed or a silent pack never raises (or holds) an alarm. [limitsFor]
+ * gives a pack's thresholds and envelope (its battery profile).
  */
-fun worstStageTemp(
+fun packTemps(
     view: Map<String, BatteryStatus>,
-    stageAddrs: Set<String>,
     limitsFor: (String) -> Pair<TempThresholds, TempEnvelope>,
-): StageTemp? = stageAddrs
-    .mapNotNull { a -> view[a]?.takeIf { it.reachable }?.telemetry?.let { a to it } }
-    .map { (a, t) ->
+): Map<String, PackTemp> = view
+    .mapNotNull { (a, s) -> s.telemetry?.takeIf { s.reachable }?.let { a to it } }
+    .associate { (a, t) ->
         val (thr, env) = limitsFor(a)
-        StageTemp(a, t, tempZone(t.temp, thr, env), env)
+        a to PackTemp(a, t, tempZone(t.temp, thr, env), env)
     }
-    .maxByOrNull { it.zone.rank.ordinal }
 
-/** One headless temperature-notification step: [post] / [cancel], and the state to carry forward. */
-data class TempNotifyStep(val post: Boolean, val cancel: Boolean, val key: String?, val vanishedAt: Long?)
+/** The side and rank a pack's temperature notification was posted at — its dedup key. */
+data class TempAlarm(val side: TempSide, val rank: TempRank)
+
+/** Per-pack plan for the temperature notifier, like [FleetNotify]: who to [notify], who to [cancel],
+ *  the baselines to carry forward, and when each held pack's absence began ([heldSince]). */
+data class TempFleetNotify(
+    val newLast: Map<String, TempAlarm>,
+    val cancel: Set<String>,
+    val notify: Set<String>,
+    val heldSince: Map<String, Long> = emptyMap(),
+)
 
 /**
- * The temperature alarm's dedup, with BLE-24's grace. [key] = "SIDE:RANK" while the worst stage
- * reading is CRITICAL or CUTOFF, else null; [present] = some stage pack had an alert-driving reading
- * at all; [holdable] = the stage has packs the user hasn't disconnected. A new or changed key posts
- * (an escalation always alarms); the same key stays quiet; a recovery cancels at once. An absence
- * (a dark stage — link flap, silent packs) holds the alarm for [graceMs] from when it began, so a
- * reconnect at the same rank doesn't re-alarm; past the grace, or when not [holdable], it cancels.
+ * The headless temperature notifications (BLE-24), one per alarming pack — keyed, deduped and held
+ * per (pack, side, rank), like the capacity ones ([reconcileFleetNotifications]).
+ *
+ * A [stage] pack whose reading in [zones] is CRITICAL or CUTOFF posts when its side/rank differs
+ * from the one it last posted at ([last]): a first crossing, an escalation, a change of side — and a
+ * different pack reaching the same side/rank posts its own. The same side/rank stays quiet.
+ *
+ * A notified pack that is no longer an alarming stage pack:
+ * - has a reading below CRITICAL on the stage → it recovered: cancelled at once;
+ * - is still on the stage with no alert-driving reading → a link flap, which is not a recovery: held
+ *   (notification and baseline kept) for [graceMs] from when it began, so a reconnect at the same
+ *   side/rank stays quiet — even while its cooler partner stays live, since the hold follows the
+ *   pack that alarmed, not the stage;
+ * - left the stage because the stage moved → not a flap: cancelled, unless the pack is still read
+ *   at CRITICAL or worse on the same side, which holds it for the grace (errs toward alerting).
+ *
+ * Only a pack in [holdable] — one the user has not disconnected or removed — is ever held, and a
+ * hold past the grace cancels. Only packs actually showing a notification are cancelled. The
+ * defaults (nothing holdable, no grace) cancel every pack that stops alarming at once.
  */
-fun nextTempNotify(
-    prevKey: String?,
-    prevVanishedAt: Long?,
-    key: String?,
-    present: Boolean,
-    holdable: Boolean,
-    nowMs: Long,
-    graceMs: Long,
-): TempNotifyStep = when {
-    !present && prevKey == null -> TempNotifyStep(post = false, cancel = false, key = null, vanishedAt = null)
-    !present -> {
-        val since = prevVanishedAt ?: nowMs
-        if (holdable && nowMs - since < graceMs) TempNotifyStep(false, false, prevKey, since)
-        else TempNotifyStep(false, true, null, null)
+fun reconcileTempNotifications(
+    zones: Map<String, TempZone>,
+    stage: Set<String>,
+    last: Map<String, TempAlarm>,
+    heldSince: Map<String, Long> = emptyMap(),
+    holdable: Set<String> = emptySet(),
+    nowMs: Long = 0L,
+    graceMs: Long = 0L,
+): TempFleetNotify {
+    val onStage = stage.map { it.uppercase() }.toSet()
+    val canHold = holdable.map { it.uppercase() }.toSet()
+    val newLast = mutableMapOf<String, TempAlarm>()
+    val notify = mutableSetOf<String>()
+    val cancel = mutableSetOf<String>()
+    val held = mutableMapOf<String, Long>()
+    for ((addr, z) in zones) {
+        if (addr.uppercase() !in onStage || z.rank < TempRank.CRITICAL) continue
+        val key = TempAlarm(z.side, z.rank)
+        if (last[addr] != key) notify += addr
+        newLast[addr] = key
     }
-    key == null -> TempNotifyStep(false, prevKey != null, null, null)
-    key == prevKey -> TempNotifyStep(false, false, key, null)
-    else -> TempNotifyStep(true, false, key, null)
+    for ((addr, shown) in last) {
+        if (addr in newLast) continue
+        val live = zones[addr]
+        val absent = if (addr.uppercase() in onStage) {
+            live == null                                                  // a flap
+        } else {
+            live != null && live.side == shown.side && live.rank >= TempRank.CRITICAL   // moved away, still hot
+        }
+        val since = heldSince[addr] ?: nowMs
+        if (absent && addr.uppercase() in canHold && nowMs - since < graceMs) {
+            newLast[addr] = shown
+            held[addr] = since
+        } else {
+            cancel += addr
+        }
+    }
+    return TempFleetNotify(newLast, cancel, notify, held)
 }

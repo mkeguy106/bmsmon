@@ -63,7 +63,7 @@ import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.model.hasDesiredLinks
 import dev.joely.bmsmon.model.pruneToRoster
 import dev.joely.bmsmon.model.wantedAddrs
-import dev.joely.bmsmon.model.worstStageTemp
+import dev.joely.bmsmon.model.packTemps
 import dev.joely.bmsmon.model.MotionGate
 import dev.joely.bmsmon.model.MotionReading
 import dev.joely.bmsmon.model.foldMotion
@@ -582,7 +582,7 @@ class MonitorEngine(
                 nowElapsedMs = nowE,
             )
         }
-        evaluateTempAlerts(d.view, stageAddrs.firstNotNullOfOrNull { roster.groupOf(it)?.id }, nowE)
+        evaluateTempAlerts(d.view, nowE)
     }
 
     /** Publish a resolved stage (lock held by [reevaluate]): mirror it into [MonitorState], persist
@@ -633,33 +633,39 @@ class MonitorEngine(
         }
     }
 
-    /** Worst alert-driving stage pack's temperature zone → headless temperature notification. [view]
-     *  is the freshness decision view, so a seed or a silent pack never raises or holds the alarm; a
-     *  dark stage holds an active alarm through a short flap (BLE-24). */
-    private fun evaluateTempAlerts(view: Map<String, BatteryStatus>, label: String?, nowE: Long) {
-        // The stage has packs the user hasn't disconnected: an absence there is a flap to ride out.
-        val holdable = stageAddrs.isNotEmpty()
-        if (!tempAlertsEnabled) {
-            alertNotifier.updateTemp(null, label, "", present = true, holdable = holdable, nowElapsedMs = nowE)
-            return
-        }
-        val worst = worstStageTemp(view, stageAddrs) { a ->
-            val profile = ProfileRegistry.profileFor(roster.batteryAt(a)?.advertisedName) ?: RedodoBekenProfile
-            (tempThresholdsByProfile[profile.id] ?: profile.tempEnvelope.defaults) to profile.tempEnvelope
-        }
-        if (worst == null) {
-            alertNotifier.updateTemp(null, label, "", present = false, holdable = holdable, nowElapsedMs = nowE)
-            return
-        }
-        val name = roster.batteryAt(worst.addr)?.alias ?: worst.telemetry.name
-        val side = if (worst.zone.side == TempSide.COLD) "COLD" else "HOT"
-        val detail = if (worst.zone.rank == TempRank.CUTOFF) {
-            "$side · $name · load disconnected"
+    /** Stage packs' temperature zones → headless temperature notifications, one per alarming pack
+     *  (BLE-24: deduped and held per pack — `reconcileTempNotifications`). [view] is the freshness
+     *  decision view, so a seed or a silent pack never raises or holds an alarm. */
+    private fun evaluateTempAlerts(view: Map<String, BatteryStatus>, nowE: Long) {
+        val on = tempAlertsEnabled
+        val temps = if (on) {
+            packTemps(view) { a ->
+                val profile = ProfileRegistry.profileFor(roster.batteryAt(a)?.advertisedName) ?: RedodoBekenProfile
+                (tempThresholdsByProfile[profile.id] ?: profile.tempEnvelope.defaults) to profile.tempEnvelope
+            }
         } else {
-            // Margin formatted in the user's °C/°F preference (mirrored via setTempAlertConfig).
-            "$side · $name · ${formatDelta(tempMarginToCutoffC(worst.telemetry.temp, worst.zone.side, worst.env), tempUnit)} to cutoff"
+            emptyMap()
         }
-        alertNotifier.updateTemp(worst.zone, label, detail, present = true, holdable = holdable, nowElapsedMs = nowE)
+        alertNotifier.updateTemp(
+            temps,
+            stageAddrs,
+            // Temperature alerts off: no readings AND nothing holdable, which is what cancels every
+            // temperature notification on show at once — holdable packs would be held for the grace.
+            // Otherwise only packs the user hasn't disconnected or removed are held through a flap.
+            holdable = if (on) wantedAddrs(roster, disabledAddrs) else emptySet(),
+            nowElapsedMs = nowE,
+            label = { a -> roster.groupOf(a)?.id },
+            detail = { t ->
+                val name = roster.batteryAt(t.addr)?.alias ?: t.telemetry.name
+                val side = if (t.zone.side == TempSide.COLD) "COLD" else "HOT"
+                if (t.zone.rank == TempRank.CUTOFF) {
+                    "$side · $name · load disconnected"
+                } else {
+                    // Margin formatted in the user's °C/°F preference (mirrored via setTempAlertConfig).
+                    "$side · $name · ${formatDelta(tempMarginToCutoffC(t.telemetry.temp, t.zone.side, t.env), tempUnit)} to cutoff"
+                }
+            },
+        )
     }
 
     /** Backfill the legacy CSVs into the DB exactly once (guarded by a persisted flag). */
