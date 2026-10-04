@@ -28,7 +28,7 @@ export function AdminDevices() {
       : "Couldn't mint an enroll code — check the connection and try again."));
   // WEB-21: revoking the chair's phone stops all telemetry, so it is confirmed first.
   const revoke = (d: DeviceRow) => {
-    if (!window.confirm(revokeDeviceConfirm(d, devices, Date.now()))) return;
+    if (!window.confirm(revokeDeviceConfirm(d, devices, Date.now(), false))) return;
     revokeDevice(d.id)
       .then(() => { setActionErr(null); refresh(); })
       .catch((e) => setActionErr(errKind(e) === "auth" ? AUTH_MSG

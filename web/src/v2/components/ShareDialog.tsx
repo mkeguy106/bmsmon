@@ -44,7 +44,7 @@ export function ShareDialog({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <div style={backdrop} onClick={backdropDismisses(url) ? onClose : undefined}>
+    <div style={backdrop} onClick={backdropDismisses(url, busy) ? onClose : undefined}>
       <div style={card} onClick={(e) => e.stopPropagation()}>
         <div className="eyebrow" style={{ marginBottom: 12 }}>Share live location</div>
         {url == null ? (
@@ -64,7 +64,7 @@ export function ShareDialog({ onClose }: { onClose: () => void }) {
             </div>
             {err && <div style={{ color: "var(--live)", fontSize: 12, marginBottom: 10 }}>{err}</div>}
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-              <button style={btn} onClick={onClose}>Cancel</button>
+              <button style={btn} disabled={busy} onClick={onClose}>Cancel</button>
               <button style={{ ...btn, background: "var(--ok)", color: "#fff", border: "none" }}
                 disabled={busy || name.trim() === ""} onClick={create}>
                 {busy ? "Creating…" : "Create link"}

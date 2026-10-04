@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { DeviceRow } from "./types";
 import {
-  backdropDismisses, lastSeenMs, restoreDeviceConfirm, revokeApiKeyConfirm, revokeDeviceConfirm,
+  ACTIVE_WINDOW_MS, backdropDismisses, lastSeenMs, restoreDeviceConfirm, revokeApiKeyConfirm, revokeDeviceConfirm,
   revokeShareConfirm,
 } from "./adminConfirm";
 
@@ -31,7 +31,24 @@ describe("revokeDeviceConfirm (WEB-21)", () => {
     const only = revokeDeviceConfirm(d, [d, dev({ id: "d2", revoked: true })], NOW);
     expect(only).toContain("only active device: all uploads from the chair stop until it is restored");
     expect(only).toContain("the dashboard, shared location links and desktop widgets stop updating");
-    expect(revokeDeviceConfirm(d, [d, dev({ id: "d2" })], NOW)).toContain("It stops uploading telemetry at once.");
+    const seen = iso(NOW - 3_600_000);
+    expect(revokeDeviceConfirm(d, [d, dev({ id: "d2", last_seen_at: seen })], NOW))
+      .toContain("It stops uploading telemetry at once.");
+  });
+
+  // Final review minor 4: a dormant, never-revoked enrollment is not "another active device".
+  it("does not count a dormant or never-seen device as another active one", () => {
+    const d = dev();
+    const dormant = dev({ id: "d2", last_seen_at: iso(NOW - ACTIVE_WINDOW_MS - 1) });
+    const never = dev({ id: "d3", last_seen_at: null });
+    const t = revokeDeviceConfirm(d, [d, dormant, never], NOW);
+    expect(t).toContain("only active device");
+    const edge = dev({ id: "d4", last_seen_at: iso(NOW - ACTIVE_WINDOW_MS) });
+    expect(revokeDeviceConfirm(d, [d, dormant, edge], NOW)).not.toContain("only active device");
+  });
+
+  it("omits the Restore line where there is no Restore (v1)", () => {
+    expect(revokeDeviceConfirm(dev(), [dev()], NOW, false)).not.toContain("Restore");
   });
 
   it("always says how to undo it", () => {
@@ -73,5 +90,11 @@ describe("backdropDismisses", () => {
   it("lets the backdrop close the dialog only before a link exists", () => {
     expect(backdropDismisses(null)).toBe(true);
     expect(backdropDismisses("https://bmsmon.example/share/abc")).toBe(false);
+  });
+
+  // Final review minor 5: the link is shown once, so no dismissal while it is being created.
+  it("does not close while the create request is in flight", () => {
+    expect(backdropDismisses(null, true)).toBe(false);
+    expect(backdropDismisses(null, false)).toBe(true);
   });
 });
