@@ -82,7 +82,7 @@ export const mintCode = async (): Promise<{ code: string; expires_at: string }> 
 };
 
 export const revokeDevice = (id: string): Promise<unknown> =>
-  fetch(`/web/devices/${id}`, { method: "DELETE" }).then(j);
+  fetch(`/web/devices/${encodeURIComponent(id)}`, { method: "DELETE" }).then(j);
 
 /** Un-revoke a device (admin): its existing key can upload again, no re-enrollment.
  *  POST /web/devices/{id}/restore answers {restored: id}; 404 for an unknown device. */

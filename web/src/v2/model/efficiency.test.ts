@@ -70,7 +70,7 @@ describe("drainedPct", () => {
 });
 
 describe("baseBand", () => {
-  it("sums each connected pack's whPerMile band", () => {
+  it("sums each pack's whPerMile band", () => {
     expect(baseBand([params({ whPerMile: { lo: 50, hi: 100 } }), params({ whPerMile: { lo: 40, hi: 90 } })]))
       .toEqual({ lo: 90, hi: 190 });
   });
@@ -141,7 +141,7 @@ describe("efficiencySummary", () => {
     expect(r.milesAtUsualRate).toBeNull();
   });
 
-  it("flags a seed band when any connected pack is unlearned", () => {
+  it("flags a seed band when any pack is unlearned", () => {
     const r = efficiencySummary({
       points: track, activeMiles: 1, packParams: [params({ learnedDays: 5 }), params({ learnedDays: 0 })],
       usableWh: 1280, charging: false, live: false, packCount: 2, everyPackLive: true,
