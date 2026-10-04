@@ -126,6 +126,9 @@ def evaluate_health(*, now_ms: int, last_ingest_ms: int | None, rollup_high_wate
     fresh = status_age is not None and status_age <= PHONE_STATUS_FRESH_S
     phone_power = {
         "fault": bool(phone and phone.get("fault") and fresh),
+        # The verdict `failing` uses: a fresh fault persisted PHONE_FAULT_CONFIRM_S on ANY
+        # non-revoked device. `fault` above describes only the newest device's report.
+        "fault_confirmed": bool(phone and phone.get("fault_confirmed")),
         "fault_since_ms": phone.get("fault_since_ms") if phone else None,
         "level": phone.get("level") if phone else None,
         "plugged": phone.get("plugged") if phone else None,

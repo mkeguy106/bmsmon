@@ -292,7 +292,7 @@ async def test_phone_power_no_devices_is_ok(app, client):
         h = await _key(conn)
     r = await _phone_get(client, h)
     assert r.status_code == 200 and r.json()["failing"] == []
-    assert r.json()["phone_power"] == {"fault": False, "fault_since_ms": None, "level": None,
+    assert r.json()["phone_power"] == {"fault": False, "fault_confirmed": False, "fault_since_ms": None, "level": None,
                                        "plugged": None, "status_age_s": None}
 
 
@@ -304,6 +304,7 @@ async def test_phone_power_fresh_old_fault_fails(app, client):
     body = r.json()
     assert r.status_code == 503 and body["failing"] == ["phone_power"]
     assert body["phone_power"]["fault"] is True
+    assert body["phone_power"]["fault_confirmed"] is True
     assert body["phone_power"]["level"] == 80 and body["phone_power"]["plugged"] == 4
     assert 55 <= body["phone_power"]["status_age_s"] <= 70
     assert body["phone_power"]["fault_since_ms"] is not None
@@ -315,6 +316,7 @@ async def test_phone_power_young_fault_is_ok(app, client):
         await _phone(conn, since_ago=120)
     r = await _phone_get(client, h)
     assert r.status_code == 200 and r.json()["failing"] == []
+    assert r.json()["phone_power"]["fault"] is True and r.json()["phone_power"]["fault_confirmed"] is False
 
 
 async def test_phone_power_null_since_counts_from_status_time(app, client):
