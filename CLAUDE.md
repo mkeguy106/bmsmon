@@ -1798,7 +1798,7 @@ answers **200 when every check passes and 503 otherwise**, `Cache-Control: no-st
  "online_indexes": {"samples_charging_idx": true},
  "limits": {"ingest_age_s": 1800, "rollup_lag_s": 10800, "clock_skew_s": 120,
             "phone_status_fresh_s": 600},
- "phone_power": {"fault": false, "fault_since_ms": null, "level": 80, "plugged": 4,
+ "phone_power": {"fault": false, "fault_confirmed": false, "fault_since_ms": null, "level": 80, "plugged": 4,
                  "status_age_s": 20}}   // newest non-revoked device's phone snapshot
 ```
 
@@ -1814,7 +1814,8 @@ answers **200 when every check passes and 503 otherwise**, `Cache-Control: no-st
 checks can fail the response; `ok` and `failing` consider only those. The default, with no
 `checks`, is the first four, exactly as before, so the deadman is unaffected by `phone_power`. An
 unknown name is a 422. The `phone_power` body block and `limits.phone_status_fresh_s` are always
-present; `phone_power.fault` is true only while the status is fresh.
+present; `phone_power` describes the device with the newest status (`fault` is true only while
+that status is fresh), and `fault_confirmed` is the any-device verdict the check itself uses.
 
 `auth_fail_5m` counts known-device auth failures (at most 100 per device and 5000 in all,
 oldest dropped first). It is informational; a stuck phone
