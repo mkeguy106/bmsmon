@@ -1145,7 +1145,7 @@ history, viewer-gated and span-bounded — see "Server access control & request 
 `GET /web/map-config` (the runtime CARTO basemap key — see "CARTO basemap key"), plus
 admin-gated
 `GET /web/samples`, `GET /web/devices`, `POST /web/enroll-codes`,
-`DELETE /web/devices/{id}` — which **revokes** the device, review SEC-27/WEB-21). The temperature
+`DELETE /web/devices/{id}` — which **revokes** the device — and `POST /web/devices/{id}/restore`, which undoes a revoke without re-enrolling). The temperature
 config lives in the `device_temp_config` table
 (per device+profile, latest-wins); the WebUI mirror (`web/src/temp.ts` + `TempGauge`/`TempBanner`/
 `TempOverlay`/`BatteryProfilePanel`) re-evaluates the same zone ladder read-only. The **capacity
@@ -1559,6 +1559,8 @@ docker exec -it bmsmon-api python -m tools.api_key_admin mint "desktop widgets"
 docker exec -it bmsmon-api python -m tools.api_key_admin list
 docker exec -it bmsmon-api python -m tools.api_key_admin revoke <id>
 ```
+
+Devices have a sibling CLI, `python -m tools.device_admin list | restore <id> | delete <id> [--yes]` (run the same way); `delete` removes only the device row and keeps its telemetry.
 
 ### Location sharing (public /share/ zone)
 

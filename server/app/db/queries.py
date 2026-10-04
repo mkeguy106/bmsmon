@@ -431,6 +431,20 @@ async def revoke_device(conn, device_id) -> None:
     await conn.execute("UPDATE devices SET revoked=true WHERE id=$1", device_id)
 
 
+async def restore_device(conn, device_id) -> bool:
+    """Undo a revoke. Only the flag changes; the device's key is untouched, so its phone
+    works again without re-enrolling. False when no such device exists."""
+    row = await conn.fetchrow(
+        "UPDATE devices SET revoked=false WHERE id=$1 RETURNING id", device_id)
+    return row is not None
+
+
+async def delete_device_row(conn, device_id) -> bool:
+    """Hard-delete the device row only; samples keep their device_id. CLI use only."""
+    row = await conn.fetchrow("DELETE FROM devices WHERE id=$1 RETURNING id", device_id)
+    return row is not None
+
+
 HISTORY_BUCKET_MS = ROLLUP_BUCKET_MS  # 30-minute buckets — history buckets ARE rollup buckets
 
 # SRV-16: fleet-wide windows. samples' only index is the (address, ts, ...) key and PG16

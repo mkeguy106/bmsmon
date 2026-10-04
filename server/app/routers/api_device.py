@@ -252,7 +252,7 @@ async def enroll(body: EnrollBody, request: Request, pool=Depends(get_pool)):
                 # Revoked install_uuid (T2.4/SRV-7): refuse enrollment BEFORE claiming the
                 # code, so the code is not burned and stays usable for another device. The
                 # upsert was a no-op (WHERE revoked=false), so key/revoked are untouched.
-                raise HTTPException(403, "device revoked; delete it first")
+                raise HTTPException(403, "device revoked; restore it first")
             claimed = await q.claim_code(conn, hash_code(body.code), device_id, now)
             if claimed is None:
                 raise HTTPException(400, "invalid or expired code")

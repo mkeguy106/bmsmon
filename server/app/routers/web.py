@@ -206,6 +206,16 @@ async def revoke(device_id: PathUuid, user: AuthUser = Depends(require_admin), p
     return {"revoked": str(device_id)}
 
 
+@router.post("/devices/{device_id}/restore")
+async def restore(device_id: PathUuid, user: AuthUser = Depends(require_admin),
+                  pool=Depends(get_pool)):
+    async with pool.acquire() as conn:
+        found = await q.restore_device(conn, device_id)
+    if not found:
+        raise HTTPException(404, "device not found")
+    return {"restored": str(device_id)}
+
+
 _SHARE_DURATION_MS = {"1h": 3_600_000, "1d": 86_400_000, "1w": 7 * 86_400_000}
 SHARE_LIST_KEEP_MS = 7 * 86_400_000  # ended shares stay listed for 7 days
 
