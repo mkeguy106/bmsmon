@@ -1145,7 +1145,7 @@ history, viewer-gated and span-bounded — see "Server access control & request 
 `GET /web/map-config` (the runtime CARTO basemap key — see "CARTO basemap key"), plus
 admin-gated
 `GET /web/samples`, `GET /web/devices`, `POST /web/enroll-codes`,
-`DELETE /web/devices/{id}` — which **revokes** the device, review SEC-27/WEB-21). The temperature
+`DELETE /web/devices/{id}` — which **revokes** the device — and `POST /web/devices/{id}/restore`, which undoes a revoke without re-enrolling). The temperature
 config lives in the `device_temp_config` table
 (per device+profile, latest-wins); the WebUI mirror (`web/src/temp.ts` + `TempGauge`/`TempBanner`/
 `TempOverlay`/`BatteryProfilePanel`) re-evaluates the same zone ladder read-only. The **capacity
@@ -1156,11 +1156,39 @@ WebUI reads it via `GET /web/alert-config` and seizes its main stage for the low
 no audible alarm: v2 (`/`) via `useV2Configs` + `web/src/v2/model/stageBase.ts`
 `selectStageBase` (Command stage, Journey and the Fleet Health hero; LOW chip in
 `CommandStage.tsx`; no seize until the config's first answer, and the 30 default only if
-that fetch fails, so a guessed threshold can't leave the stage parked on a seized base), v1 (`/v1/`) via `web/src/stage.ts` `selectStageItems` (`MainStage.tsx`).
-Only the seize is synced — v2's capacity ALERT ladder is still the fixed 30…5 / critical 15. Schema is
-idempotent SQL in `server/app/db/schema.sql` (`CREATE TABLE IF NOT EXISTS` + `ALTER TABLE ... ADD
-COLUMN IF NOT EXISTS`) run on pool creation — so **schema changes apply automatically on container
-start; there is no separate migration step**.
+that fetch fails, so a guessed threshold can't leave the stage parked on a seized base),
+v1 (`/v1/`) via `web/src/stage.ts` `selectStageItems` (`MainStage.tsx`).
+Only the seize is synced — v2's capacity ALERT ladder is still the fixed 30…5 / critical 15.
+Schema is idempotent SQL in `server/app/db/schema.sql`, run on pool creation — so **schema
+changes apply automatically on container start; there is no separate migration step**.
+Columns are added with `SELECT pg_temp.add_column_if_missing('<table>', '<column>', '<type>')`
+(dropped with `pg_temp.drop_column_if_present`), **never a bare `ALTER TABLE … ADD/DROP
+COLUMN`**: the helpers read the catalog first, so a boot against an up-to-date database takes
+no table lock and never waits for the nightly `pg_dump` (`tests/test_schema_apply.py` holds
+ROW EXCLUSIVE on every table and allows zero retries). A change that a concurrent schema run
+made first counts as done. Any other `ALTER TABLE` there sits behind its own catalog check.
+An index on `samples` is only **declared** there —
+`CREATE INDEX samples_<name> ON ONLY samples …` inside an `IF to_regclass(…) IS NULL` guard —
+and the hourly maintenance pass builds it on every existing partition with
+`CREATE INDEX CONCURRENTLY` and attaches it (`app/db/online_index.py`); partitions created
+later get it automatically. A guard test refuses a plain `CREATE INDEX` in `schema.sql`.
+
+Device admin: `DELETE /web/devices/{id}` only **revokes** (the row and its key stay), and a
+revoked phone's re-enroll is refused with 403 "device revoked; restore it first".
+`POST /web/devices/{id}/restore` (admin-gated) clears the revoke flag and keeps the key, so the
+same phone uploads again without re-enrolling; it answers 200 `{"restored": "<id>"}`, 404
+`{"detail": "device not found"}`, and the standard 422 for a non-UUID id. When the WebUI is not
+reachable, use the CLI:
+
+```bash
+docker exec -it bmsmon-api python -m tools.device_admin list
+docker exec -it bmsmon-api python -m tools.device_admin restore <id>
+docker exec -it bmsmon-api python -m tools.device_admin delete <id> [--yes]
+```
+
+`list` shows no key material. `delete` asks for confirmation (or takes `--yes`) and removes only
+the device row: samples keep their `device_id`, and an enrollment code the device claimed stays
+used but is detached from it.
 
 The `samples` table mirrors the phone's telemetry (soc, current, power, voltage, temp, cells,
 cycles, regen, link_event, …) plus **GPS** columns `lat`/`lon` (`double precision`) and
@@ -1496,6 +1524,35 @@ Enforced in the app itself (not delegated to Traefik/Authentik) and pinned by te
   `TextOrNone`; positional `cells` are nulled in place), while a required config field
   with such a value drops its range row or 422s the config envelope. The `app` logger hierarchy logs at INFO with time/level/name
   (`main.configure_logging`), so rollup, scrub and drop lines are visible in `docker logs`.
+- **Garbage input is a 422, never a 500.** A NUL byte in a browser or enroll body string
+  (`models.NulFreeStr`), a query `address` outside the ingest rule (`^[!-~]{1,32}$`), a
+  non-UUID id in `DELETE /web/devices/{id}` or `/web/api-keys/{id}`, and a `/web/trends`
+  or `/web/samples` epoch outside `[0, 2100-01-01)`. Device telemetry still *strips* NUL
+  instead, because the phone deletes a 4xx'd batch.
+- **Device-auth failures say why** (DATA-20). Every 401 from `/api/v1/ingest` and
+  `/api/v1/config` carries `X-Bmsmon-Auth-Reason`: `missing_bearer`, `bad_token`,
+  `unknown_or_revoked_device`, `bad_signature`, `clock_skew`, `replay` or
+  `body_mismatch` (the body's `detail` text is unchanged). A known device's failure is
+  logged at WARNING with the signed clock skew (`server − iat`) and the app's User-Agent,
+  once per device per reason per minute; unknown device ids at most once a minute in all.
+  Every app-generated `/api/` response carries `X-Bmsmon-Server-Time-Ms`, so the phone can
+  show "server clock off by N s" itself. The app's User-Agent is kept on
+  `devices.user_agent` and shown on the admin device list (DATA-28).
+- **Clock tolerance is ±10 minutes** (`IAT_LEEWAY_S` = `EXP_LEEWAY_S` = 600 in
+  `auth/device_jwt.py`): a token passes while `iat ≤ server_now + 600 s` and
+  `server_now ≤ exp + 600 s`. The 585 s NAS clock step of 2026-09-16 now passes, and
+  `/api/v1/health/detail` pages on any verified skew over 120 s. Replay stays bounded:
+  the jti cache remembers a token until `exp + 600 s`, and the body-hash binding means a
+  replay can only resubmit the identical body.
+- **A database outage is answered inside the app.** A marked 503 + `Retry-After: 30`, one
+  WARNING per exception class per 10 s, no traceback (`middleware.db_error_handler`);
+  `/ws` closes with 1011. Real crashes stay a marked 500 with uvicorn's traceback. Every
+  `/share/*` error carries `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
+- **Successful timer polls stay out of the access log** (`main.QuietAccessLogFilter`):
+  2xx/3xx lines for `/api/v1/health`, `/api/v1/health/detail`, `/api/v1/groups` and
+  `/share/<token>/feed`. Their failures, and every other route, are still logged. An
+  invalid ingest/config envelope (422) is logged with its first error's location and type,
+  never its contents.
 
 ### Read-only API keys (`/api/v1/groups`, desktop widgets)
 
@@ -1559,6 +1616,97 @@ docker exec -it bmsmon-api python -m tools.api_key_admin mint "desktop widgets"
 docker exec -it bmsmon-api python -m tools.api_key_admin list
 docker exec -it bmsmon-api python -m tools.api_key_admin revoke <id>
 ```
+
+Devices have a sibling CLI, `python -m tools.device_admin list | restore <id> | delete <id>
+[--yes]` (run the same way); `delete` removes only the device row and keeps its telemetry.
+Every restore is logged at INFO (the WebUI's with the admin's username), and so is every CLI
+delete.
+
+### Operational health and background maintenance (2026-10 review, T2.2/T2.4/T2.5)
+
+**`GET /api/v1/health/detail`** (`X-API-Key`, the read-only key type the widgets use) is the
+telemetry deadman. `/api/v1/health` stays a bare DB ping, because Docker's healthcheck and
+autoheal use it, and a phone that stops uploading must never get the API restarted. Detail
+answers **200 when every check passes and 503 otherwise**, `Cache-Control: no-store`:
+
+```jsonc
+{"ok": true, "failing": [],            // any of: ingest, rollup, partition, clock
+ "server_time_ms": …, "last_ingest_ms": …, "last_ingest_age_s": 12,
+ "auth_fail_5m": 0, "last_auth_fail": null, "last_ok_skew_s": 1,
+ "rollup_lag_s": 1500, "next_month_partition": true,
+ "online_indexes": {"samples_charging_idx": true},
+ "limits": {"ingest_age_s": 1800, "rollup_lag_s": 10800, "clock_skew_s": 120}}
+```
+
+| Check | Fails when |
+|---|---|
+| `ingest` | No non-revoked device has uploaded for `BMSMON_DEADMAN_INGEST_S` (default **1800 s**), measured from `devices.last_seen_at`, which only a live upload that stores at least one valid sample refreshes (at most once a minute). A batch whose every sample is dropped, a history import (`batch_seq` < 0) and a config push never refresh it. No upload ever also fails. |
+| `rollup` | The 30-min rollup's high-water mark is more than 3 h behind, or it has never run. |
+| `partition` | Next month's `samples` partition is missing. |
+| `clock` | The last verified token's `server − iat` skew exceeds ±120 s. |
+
+`auth_fail_5m` counts known-device auth failures (at most 100 per device and 5000 in all,
+oldest dropped first). It is informational; a stuck phone
+trips `ingest` anyway. `?max_ingest_age_s=N` can only **tighten** the ingest limit; it
+exists to prove the alarm path end to end.
+
+Uptime Kuma monitor **`bmsmon-telemetry-deadman`** polls
+`http://bmsmon-api:8000/api/v1/health/detail` every 60 s with an API key named
+"uptime-kuma deadman", wired to the ntfy notification. To rotate that key:
+1. mint a new one (`tools.api_key_admin mint`);
+2. update the monitor's `headers` (Kuma stopped; see `~/qnap-nas-docker/CLAUDE.md`);
+3. revoke the old one.
+
+**Maintenance loop** (`app/maintenance.py`). It runs 60 s after boot, then hourly. Each step
+is isolated, so a failing step is logged and the rest still run:
+- **Partitions:** every month from now to 31 days ahead, so always next month (the boot
+  also covers the 31 days behind). Each CREATE gives up after 0.5 s
+  (`PARTITION_LOCK_TIMEOUT`) instead of queueing ingest behind a long reader; that month is
+  logged, the later months are still tried, and the next pass retries it. A partition
+  created inside an ingest transaction (only for an odd old timestamp) has the same timeout
+  and becomes a marked 503.
+- **Registry backfill:** a registry row for any `samples` address without one.
+- **Online index builds:** see the schema mechanism above. Each index partition is logged
+  as it attaches (`maintenance: built and attached index …`). An ATTACH that gives up on its
+  0.5 s lock wait is logged and the pass moves on; the next pass attaches the built child.
+  A same-named child is rebuilt only when Postgres reports the definitions do not match.
+
+The pool has `command_timeout = 30 s`, so a timed-out request statement is a marked 503.
+Background statements pass `MAINTENANCE_TIMEOUT_S` (1 h).
+
+**Fleet-wide windows are read per pack.** The share trail (`queries._GPS_TRACK_ALL`), the
+history raw parts (`_HISTORY_RAW`/`_HISTORY_ROUTED`) and the rollup re-roll (`rollup._UPSERT`)
+are driven from `batteries` with `CROSS JOIN LATERAL`. `samples`' only index leads with
+`address` and PG16 has no skip scan, so a ts-only window otherwise seq-scans the whole
+month-to-date partition: a 15 h share trail at month end read 81 k buffers in 437 ms,
+against 5 k buffers and 35 ms per pack. Two things are load-bearing:
+- `_GPS_TRACK_ALL`'s **`OFFSET 0` fence**. Its inner select has no GROUP BY, and without
+  the fence the planner de-correlates back into the full scan.
+- **The registry invariant.** Ingest registers every address it writes (`upsert_battery`,
+  in the batch's transaction), `insert_samples` does it for every other writer, and the
+  maintenance pass backfills.
+
+Windows are expressed on `ts` alone (SRV-28: `ts` is `ts_ms` at ms precision). Two test
+files pin all of this:
+- `tests/test_query_plans.py` seeds a synthetic month and asserts buffer bounds, a
+  ts-only guard and millisecond boundaries;
+- `tests/test_rollup.py`'s routed == raw equivalence.
+
+**Charge sessions** read the partial covering index `samples_charging_idx`
+(`(address, ts) INCLUDE (ts_ms, soc, temp_c) WHERE current_a > 0.1 AND link_event IS NULL`).
+On the measured month that was 673 ms / 90 k buffers before and 160 ms / 4.1 k after
+(index-only). `days` is capped at 90; the History view asks for 30.
+
+**GPS retention (SEC-12).** `BMSMON_GPS_RETENTION_DAYS` (default 1095; ≤ 0 disables). The
+daily scrub NULLs `lat`/`lon`/`gps_accuracy_m` and never deletes rows. It walks only
+`[watermark, cutoff)` (`gps_scrub_state`), per pack, one day per statement, so the daily cost
+is one day and a retention change becomes many small transactions. A sample that arrives
+*already* past retention (a late outbox drain, a history import) is stored and broadcast
+without coordinates.
+
+**Share caches are single-flight** (`TtlCache.get_or_compute`): guests that miss the trail,
+last-fix or discharge cache together share one query, and a guest that disconnects
+mid-query does not cancel it for the others.
 
 ### Location sharing (public /share/ zone)
 
@@ -1788,7 +1936,8 @@ image, and every `main` build that runs also stays pullable as `:<full sha>`. `b
 `bmsmon-db` are opted out of watchtower (`com.centurylinklabs.watchtower.enable: "false"`), so
 nothing recreates them unattended; the qnap-nas-docker deploy runner only fires on
 `docker-compose.yml`/`.env` changes, and `up -d` alone never re-pulls. Avoid 07:35–08:45 UTC: the
-nightly `pg_dump` runs then, and a booting API waits for it to finish. A normal deploy — once the
+nightly `pg_dump` runs then. A routine boot no longer waits for it, but a deploy that adds a
+column (an ACCESS EXCLUSIVE `ALTER`) would. A normal deploy — once the
 `promote` job has succeeded — leaves `BMSMON_TAG` unset and pulls `:latest` (which also keeps the
 NAS's cached `:latest` current for any later `up -d`), recreates only the API (`--no-deps`), then
 records the deploy (below):
@@ -1798,6 +1947,8 @@ ssh joely@ddnas02 'bash -lc "cd /share/bsv/docker-compose && \
   docker compose --env-file .env -f bmsmon/docker-compose.yml pull bmsmon-api && \
   docker compose --env-file .env -f bmsmon/docker-compose.yml up -d --no-deps bmsmon-api"'
 curl -fsS https://bmsmon.covert.life/api/v1/health   # expect {"status":"ok"}
+# telemetry deadman (needs any read-only API key; expect "ok": true within a minute or two)
+curl -fsS -H "X-API-Key: $KEY" https://bmsmon.covert.life/api/v1/health/detail
 ```
 
 **Record every deploy as a git tag** — `deploy/YYYYMMDDTHHMMZ` (UTC, exactly that form; the prune
@@ -1868,9 +2019,12 @@ headers, nightly dump + monthly drill, and Uptime Kuma monitors for api/db/backu
 pick up the owner-only admin group, and a browser confirmation that WebSocket live updates pass the
 Origin check.
 
-On startup the new container re-runs `schema.sql`, so additive columns/tables land automatically.
-If the nightly dump is holding `samples`, startup waits for it (retrying for up to ~5 min),
-then fails and the container restarts.
+On startup the new container re-runs `schema.sql`, so additive columns/tables land
+automatically. A boot against an up-to-date database takes no table lock. Only a deploy that
+actually adds a column can wait on a dump in progress (retrying for up to ~5 min, then the
+container restarts). A newly declared `samples` index is built in the background after boot
+by the maintenance pass: `docker logs bmsmon-api 2>&1 | grep maintenance`, then
+`SELECT indisvalid FROM pg_index WHERE indexrelid = '<name>'::regclass` reads `t`.
 Changes to the **stack** itself (`bmsmon/docker-compose.yml` or the shared `.env`) deploy
 differently: push them to the `~/qnap-nas-docker` repo's `master` and its self-hosted runner
 (`.github/workflows/deploy.yml`) SSHes in and restarts the changed service.

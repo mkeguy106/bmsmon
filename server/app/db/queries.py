@@ -1,8 +1,11 @@
+import logging
+import time
 from datetime import datetime, timezone
 
 import asyncpg
 
 from app.db.partitions import ensure_partitions_for_range
+from app.db.pool import MAINTENANCE_TIMEOUT_S
 from app.db.rollup import ROLLUP_BUCKET_MS, get_high_water_ms
 
 _COLS = ["state", "soc", "current_a", "power_w", "voltage_v", "temp_c", "mosfet_temp_c",
@@ -62,15 +65,67 @@ _INSERT_FIELDS = ["device_id", "address", "ts_ms", "ts", "state", "soc", "curren
                   "motion_activity", "motion_confidence", "motion_still", "motion_at_ms"]
 
 
-async def insert_samples(conn: asyncpg.Connection, rows: list[dict]) -> int:
+# Fleet-wide reads (share trail, history, rollup, GPS scrub) are driven per pack from the
+# small `batteries` registry (SRV-16), so every address that has a sample MUST have a
+# registry row. insert_samples is the only writer of samples and guarantees it below,
+# unless its caller already registered every address (ingest: upsert_battery, in the same
+# transaction); register_orphan_addresses (maintenance pass) backfills any row written
+# another way.
+_REGISTER_ADDRESSES = """
+INSERT INTO batteries (address)
+SELECT DISTINCT a FROM unnest($1::text[]) AS a
+ON CONFLICT (address) DO NOTHING
+"""
+
+
+logger = logging.getLogger(__name__)
+
+
+async def insert_samples(conn: asyncpg.Connection, rows: list[dict], *,
+                         registered: bool = False) -> int:
     """Insert sample rows; returns the count of rows actually inserted (duplicates
-    already present under the samples PK are skipped and NOT counted)."""
+    already present under the samples PK are skipped and NOT counted). registered=True:
+    the caller has already given every address a registry row in this transaction, so the
+    registry write is skipped."""
     if not rows:
         return 0
     ts_all = [r["ts_ms"] for r in rows]
     await ensure_partitions_for_range(conn, min(ts_all), max(ts_all))
+    if not registered:
+        # A registry failure must never fail the write: run it in a savepoint so a database
+        # error rolls back only the registry write (the maintenance backfill repairs it).
+        try:
+            async with conn.transaction():
+                await conn.execute(_REGISTER_ADDRESSES, sorted({r["address"] for r in rows}))
+        except Exception as e:
+            logger.warning("insert_samples: registry insert failed (%s); samples still "
+                           "stored, maintenance will backfill", type(e).__name__)
     cols = [[r[f] for r in rows] for f in _INSERT_FIELDS]
     return await conn.fetchval(_INSERT, *cols)
+
+
+# A loose index scan over the samples key: one descent of each partition's (address, ts)
+# prefix per distinct address (~250 buffers for the 8-pack fleet), never a full scan.
+_ORPHAN_ADDRESSES = """
+WITH RECURSIVE a AS (
+  (SELECT address FROM samples ORDER BY address LIMIT 1)
+  UNION ALL
+  SELECT (SELECT s.address FROM samples s WHERE s.address > a.address
+           ORDER BY s.address LIMIT 1)
+    FROM a WHERE a.address IS NOT NULL
+)
+INSERT INTO batteries (address)
+SELECT address FROM a WHERE address IS NOT NULL
+ON CONFLICT (address) DO NOTHING
+"""
+
+
+async def register_orphan_addresses(conn) -> int:
+    """Backfill a registry row for every samples address that lacks one (see
+    _REGISTER_ADDRESSES). Returns the rows added; above 0 means some writer bypassed
+    insert_samples."""
+    status = await conn.execute(_ORPHAN_ADDRESSES, timeout=MAINTENANCE_TIMEOUT_S)
+    return int(status.rsplit(" ", 1)[-1])  # "INSERT 0 n"
 
 
 async def upsert_battery(conn, address, advertised_name, alias, group_id, ts_ms: int) -> None:
@@ -234,16 +289,15 @@ async def recent_discharge_by_address(conn, since_ms: int, eps_a: float) -> dict
     is the chair" when nothing is drawing *right now* — see routers/share.py.
 
     Same LATERAL shape as fleet_snapshot, so each pack is one bounded backward walk of
-    the PK's (address, ts) prefix; the redundant ts predicate prunes partitions. Bounded
-    by the caller's window (~15 min), which is what keeps it cheap for packs that never
-    discharge — measured on prod: ~6 ms, ~600 shared buffers for the 8-pack fleet."""
+    the PK's (address, ts) prefix; the ts predicate alone prunes partitions (SRV-28).
+    Bounded by the caller's window (~15 min), which is what keeps it cheap for packs that
+    never discharge — measured on prod: ~6 ms, ~600 shared buffers for the 8-pack fleet."""
     rows = await conn.fetch(
         """SELECT b.address, s.ts_ms
              FROM batteries b
              JOIN LATERAL (
                 SELECT s.ts_ms FROM samples s
                 WHERE s.address = b.address AND s.link_event IS NULL
-                  AND s.ts_ms >= $1
                   AND s.ts >= to_timestamp($1::double precision / 1000.0)
                   AND s.current_a < $2
                 ORDER BY s.ts DESC
@@ -254,25 +308,59 @@ async def recent_discharge_by_address(conn, since_ms: int, eps_a: float) -> dict
     return {r["address"]: int(r["ts_ms"]) for r in rows}
 
 
-async def scrub_expired_gps(conn, retention_days: int) -> int:
+GPS_SCRUB_CHUNK_MS = 86_400_000  # one day of one pack per UPDATE
+
+_SCRUB_CHUNK = """
+UPDATE samples SET lat = NULL, lon = NULL, gps_accuracy_m = NULL
+ WHERE address = $1
+   AND ts >= to_timestamp($2::double precision / 1000.0)
+   AND ts < to_timestamp($3::double precision / 1000.0)
+   AND (lat IS NOT NULL OR lon IS NOT NULL OR gps_accuracy_m IS NOT NULL)
+"""
+
+
+async def scrub_expired_gps(conn, retention_days: int, now_ms: int | None = None) -> int:
     """GPS retention scrub (SEC-12): NULL out the location columns on samples older than
     the retention window. Telemetry rows are NEVER deleted — the battery history is kept
     forever; only lat/lon/gps_accuracy_m are cleared. Returns the number of rows scrubbed.
 
     retention_days <= 0 means retention is disabled (keep GPS forever) — no-op.
 
-    The ts predicate prunes the monthly RANGE(ts) partitions, and the IS NOT NULL guard
-    makes re-runs idempotent and cheap (already-scrubbed rows are never rewritten)."""
+    SRV-22: walks only [watermark, cutoff) (gps_scrub_state), per pack on the (address, ts)
+    key, one GPS_SCRUB_CHUNK_MS per statement. The daily pass costs one day of rows, and a
+    retention change becomes many small transactions instead of one giant UPDATE. The mark
+    moves only after every pack is done, so an interrupted pass redoes its window (the
+    IS NOT NULL guard keeps that idempotent)."""
     if retention_days <= 0:
         return 0
-    status = await conn.execute(
-        """UPDATE samples
-           SET lat = NULL, lon = NULL, gps_accuracy_m = NULL
-           WHERE ts < now() - ($1 * interval '1 day')
-             AND (lat IS NOT NULL OR lon IS NOT NULL OR gps_accuracy_m IS NOT NULL)""",
-        float(retention_days),
-    )
-    return int(status.rsplit(" ", 1)[-1])  # asyncpg status tag, e.g. "UPDATE 3"
+    now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    cutoff = now_ms - retention_days * 86_400_000
+    mark = await conn.fetchval("SELECT scrubbed_before_ms FROM gps_scrub_state WHERE id = 1")
+    if mark is not None and mark >= cutoff:
+        return 0
+    # The scrub can run before the maintenance backfill; an address without a registry
+    # row would be skipped and then fall behind the mark for good.
+    await register_orphan_addresses(conn)
+    total = 0
+    for row in await conn.fetch("SELECT address FROM batteries ORDER BY address"):
+        first = await conn.fetchval(
+            "SELECT ts_ms FROM samples WHERE address = $1 ORDER BY address, ts LIMIT 1",
+            row["address"])
+        if first is None:
+            continue
+        lo = max(int(first), int(mark) if mark is not None else 0)
+        while lo < cutoff:
+            hi = min(lo + GPS_SCRUB_CHUNK_MS, cutoff)
+            status = await conn.execute(_SCRUB_CHUNK, row["address"], lo, hi,
+                                        timeout=MAINTENANCE_TIMEOUT_S)
+            total += int(status.rsplit(" ", 1)[-1])  # asyncpg status tag, e.g. "UPDATE 3"
+            lo = hi
+    await conn.execute(
+        """INSERT INTO gps_scrub_state (id, scrubbed_before_ms) VALUES (1, $1)
+           ON CONFLICT (id) DO UPDATE SET scrubbed_before_ms =
+             GREATEST(gps_scrub_state.scrubbed_before_ms, EXCLUDED.scrubbed_before_ms)""",
+        cutoff)
+    return total
 
 
 # SRV-11 bounds for /web/samples: cap the caller-chosen range at 7 days (a wider
@@ -331,25 +419,73 @@ async def get_device(conn, device_id):
 
 async def list_devices(conn) -> list[dict]:
     rows = await conn.fetch(
-        "SELECT id, install_uuid, label, created_at, last_seen_at, revoked FROM devices ORDER BY created_at")
+        "SELECT id, install_uuid, label, created_at, last_seen_at, revoked, user_agent "
+        "FROM devices ORDER BY created_at")
     return [dict(r) for r in rows]
+
+
+async def touch_device(conn, device_id: str, user_agent: str | None) -> None:
+    """A live upload stored telemetry: last_seen_at (the deadman's ingest signal, see
+    routers/api_device.py) and the app build that sent it (DATA-28). A request without a
+    User-Agent keeps the previous value."""
+    await conn.execute(
+        "UPDATE devices SET last_seen_at = now(), user_agent = COALESCE($2, user_agent) "
+        "WHERE id = $1", device_id, user_agent)
+
+
+async def record_user_agent(conn, device_id: str, user_agent: str) -> None:
+    """The app build behind an upload that is not live telemetry (a config push);
+    last_seen_at is left alone."""
+    await conn.execute("UPDATE devices SET user_agent = $2 WHERE id = $1", device_id, user_agent)
 
 
 async def revoke_device(conn, device_id) -> None:
     await conn.execute("UPDATE devices SET revoked=true WHERE id=$1", device_id)
 
 
+async def restore_device(conn, device_id) -> bool:
+    """Undo a revoke. Only the flag changes; the device's key is untouched, so its phone
+    works again without re-enrolling. False when no such device exists."""
+    row = await conn.fetchrow(
+        "UPDATE devices SET revoked=false WHERE id=$1 RETURNING id", device_id)
+    return row is not None
+
+
+async def delete_device_row(conn, device_id) -> bool:
+    """Hard-delete the device row only; samples keep their device_id. CLI use only.
+
+    Enrollment codes that the device claimed are kept; they are first detached from it
+    (device_id set to NULL) in the same transaction as the delete."""
+    async with conn.transaction():
+        await conn.execute(
+            "UPDATE enrollment_codes SET device_id = NULL WHERE device_id = $1", device_id)
+        row = await conn.fetchrow("DELETE FROM devices WHERE id=$1 RETURNING id", device_id)
+    return row is not None
+
+
 HISTORY_BUCKET_MS = ROLLUP_BUCKET_MS  # 30-minute buckets — history buckets ARE rollup buckets
 
+# SRV-16: fleet-wide windows. samples' only index is the (address, ts, ...) key and PG16
+# has no skip scan, so a window filtered on ts alone seq-scans the WHOLE month-to-date
+# partition however small the window (measured at month end: a 15 h share trail read 81 k
+# buffers / 437 ms). Driving each read per pack from the small batteries registry makes it
+# one (address, ts) range scan per pack (5 k buffers / 35 ms). Completeness rests on the
+# registry invariant (insert_samples). tests/test_query_plans.py pins the cost. A LATERAL
+# subquery with its own GROUP BY stays correlated by construction; one without needs the
+# OFFSET 0 fence (see _GPS_TRACK_ALL). ts predicates only (SRV-28): ts is ts_ms at ms
+# precision, so it alone prunes partitions and keeps the planner's estimates honest.
 _HISTORY_RAW = """
-SELECT address,
-       (ts_ms / $2) * $2 AS bucket_ms,
-       avg(soc)::real AS soc
-  FROM samples
- WHERE ts_ms >= $1 AND ts >= to_timestamp($1::double precision / 1000.0)
-   AND link_event IS NULL AND soc IS NOT NULL
- GROUP BY address, bucket_ms
- ORDER BY address, bucket_ms
+SELECT b.address, h.bucket_ms, h.soc
+  FROM batteries b
+  CROSS JOIN LATERAL (
+    SELECT (s.ts_ms / $2) * $2 AS bucket_ms, avg(s.soc)::real AS soc
+      FROM samples s
+     WHERE s.address = b.address
+       AND s.ts >= to_timestamp($1::double precision / 1000.0)
+       AND s.link_event IS NULL AND s.soc IS NOT NULL
+     GROUP BY 1
+  ) h
+ ORDER BY b.address, h.bucket_ms
 """
 
 # SRV-14 routed variant: rollup rows for the fully-rolled middle [$2, $3), raw for the
@@ -357,31 +493,34 @@ SELECT address,
 # pure-raw partial-bucket semantics) and for the live tail [$3, now). The three parts
 # are disjoint, so summing sums/counts per bucket reproduces avg(soc) exactly.
 # soc_n > 0 mirrors the raw soc IS NOT NULL filter: a bucket whose every soc was NULL
-# yields no row, same as raw.
+# yields no row, same as raw. All three parts are read per pack (the rollup part through
+# samples_rollup's (address, bucket_ms) key, SRV-27).
 _HISTORY_ROUTED = """
-WITH parts AS (
-  SELECT address, (ts_ms / $4) * $4 AS bucket_ms,
-         sum(soc::float8) AS soc_sum, count(soc)::bigint AS soc_n
-    FROM samples
-   WHERE ts_ms >= $1 AND ts_ms < $2
-     AND ts >= to_timestamp($1::double precision / 1000.0)
-     AND ts < to_timestamp($2::double precision / 1000.0)
-     AND link_event IS NULL AND soc IS NOT NULL
-   GROUP BY address, bucket_ms
-  UNION ALL
-  SELECT address, bucket_ms, soc_sum, soc_n::bigint
-    FROM samples_rollup
-   WHERE bucket_ms >= $2 AND bucket_ms < $3 AND soc_n > 0
-  UNION ALL
-  SELECT address, (ts_ms / $4) * $4 AS bucket_ms,
-         sum(soc::float8), count(soc)::bigint
-    FROM samples
-   WHERE ts_ms >= $3 AND ts >= to_timestamp($3::double precision / 1000.0)
-     AND link_event IS NULL AND soc IS NOT NULL
-   GROUP BY address, bucket_ms
-)
-SELECT address, bucket_ms, (sum(soc_sum) / nullif(sum(soc_n), 0))::real AS soc
-  FROM parts GROUP BY address, bucket_ms ORDER BY address, bucket_ms
+SELECT b.address, p.bucket_ms, (sum(p.soc_sum) / nullif(sum(p.soc_n), 0))::real AS soc
+  FROM batteries b
+  CROSS JOIN LATERAL (
+    SELECT (s.ts_ms / $4) * $4 AS bucket_ms,
+           sum(s.soc::float8) AS soc_sum, count(s.soc)::bigint AS soc_n
+      FROM samples s
+     WHERE s.address = b.address
+       AND s.ts >= to_timestamp($1::double precision / 1000.0)
+       AND s.ts < to_timestamp($2::double precision / 1000.0)
+       AND s.link_event IS NULL AND s.soc IS NOT NULL
+     GROUP BY 1
+    UNION ALL
+    SELECT r.bucket_ms, r.soc_sum, r.soc_n::bigint
+      FROM samples_rollup r
+     WHERE r.address = b.address AND r.bucket_ms >= $2 AND r.bucket_ms < $3 AND r.soc_n > 0
+    UNION ALL
+    SELECT (s.ts_ms / $4) * $4, sum(s.soc::float8), count(s.soc)::bigint
+      FROM samples s
+     WHERE s.address = b.address
+       AND s.ts >= to_timestamp($3::double precision / 1000.0)
+       AND s.link_event IS NULL AND s.soc IS NOT NULL
+     GROUP BY 1
+  ) p
+ GROUP BY b.address, p.bucket_ms
+ ORDER BY b.address, p.bucket_ms
 """
 
 
@@ -395,8 +534,7 @@ async def history_series(conn, since_ms: int) -> list[dict]:
     (SRV-14, ~48 rows/pack/day); the partial head bucket and the live tail come from
     raw, so results are identical to the pure-raw computation (see tests/test_rollup.py).
 
-    The ts predicate mirrors the ts_ms one (ts is derived from ts_ms at insert time) so
-    the planner can prune the monthly RANGE(ts) partitions — ts_ms alone can't."""
+    Every part is read per pack from the batteries registry (SRV-16); see _HISTORY_RAW."""
     hw = await get_high_water_ms(conn)
     b = HISTORY_BUCKET_MS
     ru_lo = -(-since_ms // b) * b  # first FULL bucket at/after since_ms
@@ -407,24 +545,29 @@ async def history_series(conn, since_ms: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# 1-minute buckets of one pack's charging rows since $2. Served by the partial covering
+# index samples_charging_idx (schema.sql): keep this WHERE implying its predicate
+# (current_a > 0.1 AND link_event IS NULL) and the select list inside its columns
+# (ts_ms, soc, temp_c), or the lookup falls back to reading whole partitions.
+_CHARGE_SESSION_BUCKETS = """
+SELECT (ts_ms / 60000) * 60000 AS bucket_ms,
+       avg(soc)::real AS soc, max(temp_c)::real AS temp_max
+  FROM samples
+ WHERE address = $1
+   AND ts >= to_timestamp($2::double precision / 1000.0)
+   AND link_event IS NULL AND current_a > 0.1
+ GROUP BY bucket_ms ORDER BY bucket_ms
+"""
+
+
 async def charge_session_buckets(conn, address: str, since_ms: int) -> list[dict]:
     """1-minute buckets of charging-only rows (current_a > 0.1) since since_ms.
-    The redundant ts predicate exists purely for partition pruning (see history_series).
 
     Deliberately NOT routed through samples_rollup (SRV-14): session detection needs
     1-minute granularity (the CC->CV shape and cv_tail_min), which 30-min sums can't
-    reconstruct, and the rollup doesn't segregate charging rows (current_a > 0.1)
-    anyway. Windows are single-address and partition-pruned; charging hours are a tiny
-    fraction of raw rows, so the raw scan stays cheap."""
-    rows = await conn.fetch(
-        """SELECT (ts_ms / 60000) * 60000 AS bucket_ms,
-                  avg(soc)::real AS soc, max(temp_c)::real AS temp_max
-             FROM samples
-            WHERE address = $1 AND ts_ms >= $2 AND ts >= to_timestamp($2::double precision / 1000.0)
-              AND link_event IS NULL AND current_a > 0.1
-            GROUP BY bucket_ms ORDER BY bucket_ms""",
-        address, since_ms,
-    )
+    reconstruct, and the rollup doesn't segregate charging rows anyway. The ts predicate
+    alone prunes partitions (ts is ts_ms at ms precision)."""
+    rows = await conn.fetch(_CHARGE_SESSION_BUCKETS, address, since_ms)
     return [dict(r) for r in rows]
 
 
@@ -447,7 +590,7 @@ SELECT (ts_ms / $4) * $4 AS bucket_ms,
        avg((cell_max_v - cell_min_v) * 1000)::real AS cell_spread_mv,
        avg(temp_c)::real AS temp_avg, min(temp_c)::real AS temp_min, max(temp_c)::real AS temp_max
   FROM samples
- WHERE address = $1 AND ts_ms >= $2 AND ts_ms < $3
+ WHERE address = $1
    AND ts >= to_timestamp($2::double precision / 1000.0)
    AND ts < to_timestamp($3::double precision / 1000.0)
    AND link_event IS NULL
@@ -471,7 +614,7 @@ WITH parts AS (
          sum(temp_c::float8) AS temp_sum, count(temp_c)::bigint AS temp_n,
          min(temp_c) AS temp_min, max(temp_c) AS temp_max
     FROM samples
-   WHERE address = $1 AND ts_ms >= $2 AND ts_ms < $3
+   WHERE address = $1
      AND ts >= to_timestamp($2::double precision / 1000.0)
      AND ts < to_timestamp($3::double precision / 1000.0)
      AND link_event IS NULL
@@ -489,7 +632,7 @@ WITH parts AS (
          sum(temp_c::float8), count(temp_c)::bigint,
          min(temp_c), max(temp_c)
     FROM samples
-   WHERE address = $1 AND ts_ms >= $4 AND ts_ms < $5
+   WHERE address = $1
      AND ts >= to_timestamp($4::double precision / 1000.0)
      AND ts < to_timestamp($5::double precision / 1000.0)
      AND link_event IS NULL
@@ -506,7 +649,7 @@ SELECT bucket_ms,
 
 async def trend_series(conn, address: str, from_ms: int, to_ms: int, bucket_ms: int) -> list[dict]:
     """Per-pack bucketed SOH / cell-spread / temperature trend for /web/trends.
-    The redundant ts predicates exist purely for partition pruning (see history_series).
+    ts predicates only: they prune partitions exactly (SRV-28).
 
     Routed through samples_rollup (SRV-14) whenever the requested bucket is a multiple
     of 30 min — every size trend_bucket_ms returns (30 min / 6 h / 1 d / 7 d) qualifies,
@@ -530,14 +673,14 @@ async def track_series(conn, address: str, from_ms: int, to_ms: int) -> list[dic
     """15-second buckets of GPS-carrying real telemetry (lat/lon present) with discharge context
     and the bucket's mean accuracy radius (`acc`) — the Journey map weights fixes by it.
     Coarse fixes (accuracy radius > GPS_ACCURACY_MAX_M) are gated out; NULL accuracy passes.
-    The redundant ts predicates exist purely for partition pruning (see history_series)."""
+    ts predicates only: they prune partitions exactly (SRV-28)."""
     rows = await conn.fetch(
         """SELECT (ts_ms / 15000) * 15000 AS bucket_ms,
                   avg(lat)::double precision AS lat, avg(lon)::double precision AS lon,
                   avg(power_w)::real AS power_w, avg(current_a)::real AS current_a, avg(soc)::real AS soc,
                   avg(gps_accuracy_m)::real AS acc
              FROM samples
-            WHERE address = $1 AND ts_ms >= $2 AND ts_ms < $3
+            WHERE address = $1
               AND ts >= to_timestamp($2::double precision / 1000.0)
               AND ts < to_timestamp($3::double precision / 1000.0)
               AND link_event IS NULL AND lat IS NOT NULL AND lon IS NOT NULL
@@ -610,25 +753,34 @@ async def revoke_location_share(conn, share_id: int, now_ms: int) -> None:
         share_id, now_ms)
 
 
+# Fleet-wide GPS buckets for the public share trail. The inner select has no GROUP BY, so
+# without the OFFSET 0 fence the planner de-correlates the LATERAL straight back into the
+# month-wide scan (measured: 450 ms vs 35 ms). Keep the fence.
+_GPS_TRACK_ALL = """
+SELECT (s.ts_ms / 15000) * 15000 AS bucket_ms,
+       avg(s.lat)::double precision AS lat, avg(s.lon)::double precision AS lon,
+       avg(s.power_w)::real AS power_w, avg(s.current_a)::real AS current_a
+  FROM batteries b
+  CROSS JOIN LATERAL (
+    SELECT s.ts_ms, s.lat, s.lon, s.power_w, s.current_a
+      FROM samples s
+     WHERE s.address = b.address
+       AND s.ts >= to_timestamp($1::double precision / 1000.0)
+       AND s.ts < to_timestamp($2::double precision / 1000.0)
+       AND s.link_event IS NULL AND s.lat IS NOT NULL AND s.lon IS NOT NULL
+       AND (s.gps_accuracy_m IS NULL OR s.gps_accuracy_m <= $3)
+    OFFSET 0
+  ) s
+ GROUP BY 1 ORDER BY 1
+"""
+
+
 async def gps_track_all(conn, from_ms: int, to_ms: int) -> list[dict]:
     """15-second buckets of GPS fixes across the whole fleet. Feeds the public
     location-share guest page: coordinates plus per-bucket discharge context
     (power/current — the 2026-07-14 trail-detail relaxation) and deliberately
-    nothing else (no SOC, voltage, temperature, or cells).
-    The redundant ts predicates exist purely for partition pruning (see history_series)."""
-    rows = await conn.fetch(
-        """SELECT (ts_ms / 15000) * 15000 AS bucket_ms,
-                  avg(lat)::double precision AS lat, avg(lon)::double precision AS lon,
-                  avg(power_w)::real AS power_w, avg(current_a)::real AS current_a
-             FROM samples
-            WHERE ts_ms >= $1 AND ts_ms < $2
-              AND ts >= to_timestamp($1::double precision / 1000.0)
-              AND ts < to_timestamp($2::double precision / 1000.0)
-              AND link_event IS NULL AND lat IS NOT NULL AND lon IS NOT NULL
-              AND (gps_accuracy_m IS NULL OR gps_accuracy_m <= $3)
-            GROUP BY bucket_ms ORDER BY bucket_ms""",
-        from_ms, to_ms, GPS_ACCURACY_MAX_M,
-    )
+    nothing else (no SOC, voltage, temperature, or cells). Read per pack (SRV-16)."""
+    rows = await conn.fetch(_GPS_TRACK_ALL, from_ms, to_ms, GPS_ACCURACY_MAX_M)
     return [dict(r) for r in rows]
 
 

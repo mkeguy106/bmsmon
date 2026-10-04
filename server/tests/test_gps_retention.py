@@ -1,7 +1,9 @@
+import json
 from datetime import datetime, timedelta, timezone
 
 from app.db import queries as q
 from app.main import run_gps_scrub
+from tests.test_ingest_jwt import _enroll_device, _keypair, _token
 
 A = "C8:47:80:15:25:01"
 DEV = "00000000-0000-0000-0000-000000000001"
@@ -112,3 +114,85 @@ async def test_run_gps_scrub_uses_settings(app, set_setting):
     set_setting("gps_retention_days", RETENTION_DAYS)
     assert await run_gps_scrub(pool) == 1
     assert await run_gps_scrub(pool) == 0
+
+
+DAY = 86_400_000
+
+
+async def test_scrub_records_a_watermark_and_walks_only_forward(app):
+    async with app.state.pool.acquire() as conn:
+        await _device(conn)
+        t0 = _ms(datetime.now(timezone.utc))
+        cutoff1 = t0 - RETENTION_DAYS * DAY
+        before = cutoff1 - 5 * DAY       # behind the first pass's cutoff
+        between = cutoff1 + DAY // 2     # only the second pass reaches it
+        for ts in (before, between):
+            await q.insert_samples(conn, [q.sample_row(DEV, A, _sample(ts))])
+        assert await q.scrub_expired_gps(conn, RETENTION_DAYS, now_ms=t0) == 1
+        assert await conn.fetchval("SELECT scrubbed_before_ms FROM gps_scrub_state") == cutoff1
+        # GPS written behind the mark is not revisited: ingest strips such rows instead
+        await conn.execute("UPDATE samples SET lat = 1, lon = 1 WHERE ts_ms = $1", before)
+        assert await q.scrub_expired_gps(conn, RETENTION_DAYS, now_ms=t0 + DAY) == 1
+        assert await conn.fetchval("SELECT lat FROM samples WHERE ts_ms = $1", before) == 1
+        assert await conn.fetchval("SELECT lat FROM samples WHERE ts_ms = $1", between) is None
+
+
+class _CountingConn:
+    """Delegates to a real connection, counting the per-chunk scrub UPDATEs."""
+
+    def __init__(self, conn):
+        self._conn, self.chunks = conn, 0
+
+    async def execute(self, query, *args, **kw):
+        if query == q._SCRUB_CHUNK:
+            self.chunks += 1
+        return await self._conn.execute(query, *args, **kw)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+async def test_scrub_covers_an_address_with_no_registry_row(app):
+    async with app.state.pool.acquire() as conn:
+        await _device(conn)
+        old = _ms(datetime.now(timezone.utc)) - (RETENTION_DAYS + 10) * DAY
+        await q.insert_samples(conn, [q.sample_row(DEV, A, _sample(old))])
+        await conn.execute("DELETE FROM batteries WHERE address = $1", A)
+        assert await q.scrub_expired_gps(conn, RETENTION_DAYS) == 1
+        assert await conn.fetchval("SELECT lat FROM samples WHERE ts_ms = $1", old) is None
+
+
+async def test_lowering_retention_scrubs_everything_in_small_chunks(app, monkeypatch):
+    monkeypatch.setattr(q, "GPS_SCRUB_CHUNK_MS", 3_600_000)  # one hour per statement
+    async with app.state.pool.acquire() as conn:
+        await _device(conn)
+        now = _ms(datetime.now(timezone.utc))
+        await q.insert_samples(conn, [q.sample_row(DEV, A, _sample(now - d * DAY))
+                                      for d in (10, 11, 12)])
+        assert await q.scrub_expired_gps(conn, RETENTION_DAYS) == 0
+        counter = _CountingConn(conn)
+        assert await q.scrub_expired_gps(counter, 5) == 3  # retention lowered to 5 days
+        # ~7 days of history walked in one-hour statements, not one giant UPDATE
+        assert counter.chunks >= 40
+        assert await conn.fetchval("SELECT count(*) FROM samples WHERE lat IS NOT NULL") == 0
+
+
+async def test_ingest_strips_gps_from_samples_already_past_retention(app, client, set_setting):
+    set_setting("gps_retention_days", 30)
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    now = _ms(datetime.now(timezone.utc))
+    old, recent = now - 40 * DAY, now - 3_600_000
+    payload = {"batch_seq": 1, "samples": [
+        {"ts_ms": old, "address": A, "soc": 50.0, "lat": 43.0, "lon": -87.9, "gps_accuracy_m": 5.0},
+        {"ts_ms": recent, "address": A, "soc": 51.0, "lat": 43.1, "lon": -87.8, "gps_accuracy_m": 5.0}]}
+    body = json.dumps(payload).encode()
+    r = await client.post("/api/v1/ingest", content=body,
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
+    assert r.status_code == 200 and r.json()["accepted"] == 2
+    async with app.state.pool.acquire() as conn:
+        rows = {r["ts_ms"]: r for r in await conn.fetch(
+            "SELECT ts_ms, soc, lat, lon, gps_accuracy_m FROM samples")}
+    assert (rows[old]["lat"], rows[old]["lon"], rows[old]["gps_accuracy_m"]) == (None, None, None)
+    assert rows[old]["soc"] == 50.0
+    assert abs(rows[recent]["lat"] - 43.1) < 1e-9

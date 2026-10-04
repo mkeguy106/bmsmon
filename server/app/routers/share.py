@@ -8,7 +8,6 @@ and never battery fields beyond the minimal dock status (see queries.gps_track_a
 guest map also gets the CARTO basemap key from /share/{token}/map-config."""
 
 import os
-import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -18,11 +17,11 @@ from app.auth.enroll import hash_code
 from app.config import settings
 from app.db import queries as q
 from app.db.pool import get_pool
+from app.middleware import SHARE_SEC_HEADERS as _SEC_HEADERS
 from app.ratelimit import client_key
 
 router = APIRouter(prefix="/share")
 
-_SEC_HEADERS = {"Referrer-Policy": "no-referrer", "Cache-Control": "no-store"}
 
 _EXPIRED_HTML = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Share expired</title>
@@ -33,6 +32,12 @@ background:#09090b;color:#f4f4f5;font-family:Inter,system-ui,sans-serif;text-ali
 padding:24px}p{color:#a1a1aa}</style></head>
 <body><div><h2>This location share has expired</h2>
 <p>Ask for a new link to keep following along.</p></div></body></html>"""
+
+
+def utcnow() -> datetime:
+    """The share zone's one clock: share expiry, the guest's 'today' window and the dock's
+    staleness all read it. Tests pin it, so they do not depend on the time of day they run."""
+    return datetime.now(timezone.utc)
 
 
 def share_status(share: dict | None, now_ms: int) -> str:
@@ -73,8 +78,8 @@ DISCHARGE_EPS = 0.1           # A — same threshold as the app/WebUI (BMS deadb
 ACTIVE_HOLD_MS = 15 * 60_000  # mirrors android DEFAULT_STAGE_HOLD_MIN
 _DISCHARGE_CACHE_KEY = "recent_discharge"  # fleet-wide, so one key (see TRACK_CACHE_TTL_S)
 
-# Guest polls arrive every ~10 s per guest; the fleet GPS track query is the expensive
-# part (~200 ms over today's whole window in prod). Cache it process-wide for one poll
+# Guest polls arrive every ~4 s per guest; the fleet GPS track (queries._GPS_TRACK_ALL, one
+# (address, ts) range read per pack over today's window) is the expensive part. Cache it process-wide for one poll
 # period so N guests collapse onto <=1 query per TRACK_TTL_S. The cache key is the day
 # window's START (local midnight, epoch ms): to_ms is "now" and changes every request,
 # but the trail is append-only within a day, so a <=10 s-stale tail is fine — and a new
@@ -207,7 +212,7 @@ async def _resolve(request: Request, token: str, pool) -> tuple[str, dict | None
         raise HTTPException(429, "too many requests", headers=_SEC_HEADERS)
     async with pool.acquire() as conn:
         share = await q.get_location_share(conn, hash_code(token))
-    return share_status(share, int(time.time() * 1000)), share
+    return share_status(share, int(utcnow().timestamp() * 1000)), share
 
 
 async def _active_share(request: Request, token: str, pool) -> dict:
@@ -219,6 +224,26 @@ async def _active_share(request: Request, token: str, pool) -> dict:
     if status == "expired":
         raise HTTPException(410, "share expired", headers=_SEC_HEADERS)
     return share
+
+
+async def _load_trail(pool, from_ms: int, now_ms: int) -> list[dict]:
+    async with pool.acquire() as conn:
+        rows = await q.gps_track_all(conn, from_ms, now_ms + 1)
+    return [{"t": int(r["bucket_ms"]), "lat": r["lat"], "lon": r["lon"],
+             "power_w": _f(r["power_w"]), "current_a": _f(r["current_a"])} for r in rows]
+
+
+async def _load_last_fix(pool, now_ms: int) -> tuple:
+    async with pool.acquire() as conn:
+        fix = await q.latest_gps_fix(conn, now_ms - LAST_FIX_LOOKBACK_MS, now_ms + 1)
+    # A 1-tuple so "no fix in the lookback" (None) is a cacheable value too.
+    return (None if fix is None else _marker(
+        (int(fix["ts_ms"]) // TRAIL_BUCKET_MS) * TRAIL_BUCKET_MS, fix["lat"], fix["lon"]),)
+
+
+async def _load_discharge(pool, now_ms: int) -> dict[str, int]:
+    async with pool.acquire() as conn:
+        return await q.recent_discharge_by_address(conn, now_ms - ACTIVE_HOLD_MS, DISCHARGE_EPS)
 
 
 @router.get("/{token}")
@@ -246,41 +271,28 @@ async def share_map_config(token: str, request: Request, pool=Depends(get_pool))
 async def share_feed(token: str, request: Request, since: str | None = None,
                      pool=Depends(get_pool)):
     share = await _active_share(request, token, pool)
-    from_ms, now_ms = day_window_ms(datetime.now(timezone.utc))
+    from_ms, now_ms = day_window_ms(utcnow())
     state = request.app.state
     # Per-share state above (expiry/410/revocation) and the guest *status* below stay
-    # per-request; only the fleet-wide GPS trail — identical for every guest — is cached.
-    points = state.share_track_cache.get(from_ms)
-    # Fleet-wide like the trail, so it is cached on the same period: N guests collapse
-    # onto <=1 discharge lookup per TTL, and a <=10 s-stale answer is nothing against a
-    # 15-minute hold window.
-    last_discharge = state.share_discharge_cache.get(_DISCHARGE_CACHE_KEY)
+    # per-request. The trail, the last-fix fallback and the discharge lookup are
+    # fleet-wide and identical for every guest, so they are cached for one poll period AND
+    # single-flighted (SRV-26): guests that miss together share one query. Each loader
+    # closes over the now_ms of the guest whose miss started it, so a guest served from
+    # the cache or a shared load gets an answer at most one TTL old, as before.
+    points = await state.share_track_cache.get_or_compute(
+        from_ms, lambda: _load_trail(pool, from_ms, now_ms))
+    # `last` comes from the FULL data, never the `since` slice below. Today's trail head IS
+    # the newest fix in the 48 h window when one exists (no extra query); otherwise ask the
+    # bounded per-pack lookup, cached for LAST_FIX_CACHE_TTL_S.
+    if points:
+        last = _marker(points[-1]["t"], points[-1]["lat"], points[-1]["lon"])
+    else:
+        last = (await state.share_last_fix_cache.get_or_compute(
+            _LAST_FIX_CACHE_KEY, lambda: _load_last_fix(pool, now_ms)))[0]
+    # A <=10 s-stale answer is nothing against a 15-minute hold window.
+    last_discharge = await state.share_discharge_cache.get_or_compute(
+        _DISCHARGE_CACHE_KEY, lambda: _load_discharge(pool, now_ms))
     async with pool.acquire() as conn:
-        if points is None:
-            rows = await q.gps_track_all(conn, from_ms, now_ms + 1)
-            points = [{"t": int(r["bucket_ms"]), "lat": r["lat"], "lon": r["lon"],
-                       "power_w": _f(r["power_w"]), "current_a": _f(r["current_a"])}
-                      for r in rows]
-            state.share_track_cache.put(from_ms, points)
-        # `last` comes from the FULL data, never the `since` slice below. Today's trail
-        # head IS the newest fix in the 48 h window when one exists (no extra query);
-        # otherwise ask the bounded per-pack lookup, cached for LAST_FIX_CACHE_TTL_S.
-        # Cached as a 1-tuple so "no fix in 48 h" (None) is a cache hit too.
-        if points:
-            last = _marker(points[-1]["t"], points[-1]["lat"], points[-1]["lon"])
-        else:
-            cached = state.share_last_fix_cache.get(_LAST_FIX_CACHE_KEY)
-            if cached is None:
-                fix = await q.latest_gps_fix(conn, now_ms - LAST_FIX_LOOKBACK_MS, now_ms + 1)
-                cached = (None if fix is None else _marker(
-                    (int(fix["ts_ms"]) // TRAIL_BUCKET_MS) * TRAIL_BUCKET_MS,
-                    fix["lat"], fix["lon"]),)
-                state.share_last_fix_cache.put(_LAST_FIX_CACHE_KEY, cached)
-            last = cached[0]
-        if last_discharge is None:
-            last_discharge = await q.recent_discharge_by_address(
-                conn, now_ms - ACTIVE_HOLD_MS, DISCHARGE_EPS)
-            state.share_discharge_cache.put(_DISCHARGE_CACHE_KEY, last_discharge)
         snapshot = await q.fleet_snapshot(conn)
         if state.share_touch.should_touch(share["id"]):
             await q.touch_location_share(conn, share["id"], now_ms)

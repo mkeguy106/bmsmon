@@ -32,6 +32,8 @@ from datetime import datetime, timezone
 
 import asyncpg
 
+from app.db.pool import MAINTENANCE_TIMEOUT_S
+
 ROLLUP_BUCKET_MS = 1_800_000            # 30 min — must match queries.HISTORY_BUCKET_MS
 ROLLUP_SAFETY_LAG_MS = 5 * 60_000       # only roll buckets whose end is >= this far past
 ROLLUP_REROLL_MS = 48 * 3_600_000       # trailing window re-upserted every pass
@@ -43,25 +45,30 @@ ROLLUP_REROLL_MS = 48 * 3_600_000       # trailing window re-upserted every pass
 # soc IS NOT NULL filter). Expressions match the raw queries verbatim, with sums
 # accumulated in float8 like Postgres' own avg(float4) transition does; the cell spread
 # subtraction stays float4 first, exactly like avg((cell_max_v - cell_min_v) * 1000).
-# The redundant ts predicates exist purely for partition pruning (see history_series).
+# Read per pack from the batteries registry, ts predicates only (see queries._HISTORY_RAW: SRV-16/SRV-28).
 _UPSERT = f"""
 INSERT INTO samples_rollup AS r
   (address, bucket_ms, n, soc_sum, soc_n, soh_sum, soh_n,
    spread_sum, spread_n, temp_sum, temp_n, temp_min, temp_max)
-SELECT address,
-       (ts_ms / {ROLLUP_BUCKET_MS}) * {ROLLUP_BUCKET_MS} AS bucket_ms,
-       count(*)::int,
-       sum(soc::float8), count(soc)::int,
-       sum(soh), count(soh)::int,
-       sum(((cell_max_v - cell_min_v) * 1000)::float8), count(cell_max_v - cell_min_v)::int,
-       sum(temp_c::float8), count(temp_c)::int,
-       min(temp_c), max(temp_c)
-  FROM samples
- WHERE ts_ms >= $1 AND ts_ms < $2
-   AND ts >= to_timestamp($1::double precision / 1000.0)
-   AND ts < to_timestamp($2::double precision / 1000.0)
-   AND link_event IS NULL
- GROUP BY address, bucket_ms
+SELECT b.address, s.bucket_ms, s.n, s.soc_sum, s.soc_n, s.soh_sum, s.soh_n,
+       s.spread_sum, s.spread_n, s.temp_sum, s.temp_n, s.temp_min, s.temp_max
+  FROM batteries b
+  CROSS JOIN LATERAL (
+    SELECT (ts_ms / {ROLLUP_BUCKET_MS}) * {ROLLUP_BUCKET_MS} AS bucket_ms,
+           count(*)::int AS n,
+           sum(soc::float8) AS soc_sum, count(soc)::int AS soc_n,
+           sum(soh) AS soh_sum, count(soh)::int AS soh_n,
+           sum(((cell_max_v - cell_min_v) * 1000)::float8) AS spread_sum,
+           count(cell_max_v - cell_min_v)::int AS spread_n,
+           sum(temp_c::float8) AS temp_sum, count(temp_c)::int AS temp_n,
+           min(temp_c) AS temp_min, max(temp_c) AS temp_max
+      FROM samples s
+     WHERE s.address = b.address
+       AND s.ts >= to_timestamp($1::double precision / 1000.0)
+       AND s.ts < to_timestamp($2::double precision / 1000.0)
+       AND s.link_event IS NULL
+     GROUP BY 1
+  ) s
 ON CONFLICT (address, bucket_ms) DO UPDATE SET
   n = EXCLUDED.n,
   soc_sum = EXCLUDED.soc_sum, soc_n = EXCLUDED.soc_n,
@@ -119,7 +126,8 @@ async def run_rollup_pass(conn: asyncpg.Connection, now_ms: int | None = None) -
         # Fresh mark: backfill from the true first sample. min(ts_ms) is a full scan,
         # but it runs exactly once, in the background task. An empty DB keeps hw at 0
         # (NOT vacuously advanced) so a later multi-day backlog still backfills fully.
-        first = await conn.fetchval("SELECT min(ts_ms) FROM samples WHERE link_event IS NULL")
+        first = await conn.fetchval("SELECT min(ts_ms) FROM samples WHERE link_event IS NULL",
+                                    timeout=MAINTENANCE_TIMEOUT_S)
         if first is None:
             return 0
         lo = (int(first) // b) * b
@@ -130,7 +138,7 @@ async def run_rollup_pass(conn: asyncpg.Connection, now_ms: int | None = None) -
     total = 0
     for a, c in _month_chunks(lo, target):
         async with conn.transaction():
-            status = await conn.execute(_UPSERT, a, c)
+            status = await conn.execute(_UPSERT, a, c, timeout=MAINTENANCE_TIMEOUT_S)
             total += int(status.rsplit(" ", 1)[-1])  # "INSERT 0 N"
             await _set_high_water_ms(conn, c)
     return total

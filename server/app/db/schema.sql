@@ -1,3 +1,40 @@
+-- Boot-time column changes go through these two session-local helpers, never a bare
+-- ADD/DROP COLUMN with IF [NOT] EXISTS (a guard test greps for both forms): ALTER TABLE
+-- takes ACCESS EXCLUSIVE even when its IF [NOT] EXISTS turns it into a no-op, so every
+-- boot queued behind any reader of the table (the nightly pg_dump holds ACCESS SHARE on
+-- every table for minutes) and every later query queued behind the boot. Any other
+-- ALTER TABLE in this file must sit behind its own catalog check, as the PK migration
+-- below does. The helpers read the catalog first, so a boot against an up-to-date
+-- database takes no table lock at all (tests/test_schema_apply.py pins that). A change a
+-- concurrent schema run made first counts as done. pg_temp: they vanish with the session.
+-- Indexes on samples are DECLARED here only (ON ONLY, inside a to_regclass guard); the
+-- maintenance pass builds them online (app/db/online_index.py).
+CREATE OR REPLACE FUNCTION pg_temp.add_column_if_missing(tbl regclass, col text, typ text)
+RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_attribute
+                  WHERE attrelid = tbl AND attname = col AND attnum > 0 AND NOT attisdropped) THEN
+    BEGIN
+      EXECUTE format('ALTER TABLE %s ADD COLUMN %I %s', tbl, col, typ);
+    EXCEPTION WHEN duplicate_column THEN
+      NULL;  -- a concurrent run added it after the check above: already present
+    END;
+  END IF;
+END $$;
+
+CREATE OR REPLACE FUNCTION pg_temp.drop_column_if_present(tbl regclass, col text)
+RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_attribute
+              WHERE attrelid = tbl AND attname = col AND attnum > 0 AND NOT attisdropped) THEN
+    BEGIN
+      EXECUTE format('ALTER TABLE %s DROP COLUMN %I', tbl, col);
+    EXCEPTION WHEN undefined_column THEN
+      NULL;  -- a concurrent run dropped it after the check above: already gone
+    END;
+  END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS devices (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   install_uuid text UNIQUE NOT NULL,
@@ -7,6 +44,9 @@ CREATE TABLE IF NOT EXISTS devices (
   last_seen_at timestamptz,
   revoked boolean NOT NULL DEFAULT false
 );
+-- DATA-28: the app build that last uploaded for this device (its User-Agent), shown on the
+-- admin device list. Written by queries.touch_device and queries.record_user_agent.
+SELECT pg_temp.add_column_if_missing('devices', 'user_agent', 'text');
 
 CREATE TABLE IF NOT EXISTS enrollment_codes (
   code_hash text PRIMARY KEY,
@@ -105,23 +145,48 @@ CREATE TABLE IF NOT EXISTS samples_rollup_state (
   high_water_ms bigint NOT NULL
 );
 
-ALTER TABLE samples ADD COLUMN IF NOT EXISTS lat double precision;
-ALTER TABLE samples ADD COLUMN IF NOT EXISTS lon double precision;
-ALTER TABLE samples ADD COLUMN IF NOT EXISTS gps_accuracy_m real;
-ALTER TABLE samples ADD COLUMN IF NOT EXISTS eta_full_min real;
-ALTER TABLE samples ADD COLUMN IF NOT EXISTS motion_activity   text;
-ALTER TABLE samples ADD COLUMN IF NOT EXISTS motion_confidence smallint;
-ALTER TABLE samples ADD COLUMN IF NOT EXISTS motion_still      boolean;
-ALTER TABLE samples ADD COLUMN IF NOT EXISTS motion_at_ms      bigint;
-ALTER TABLE samples ADD COLUMN IF NOT EXISTS cell1_v real;
-ALTER TABLE samples ADD COLUMN IF NOT EXISTS cell2_v real;
-ALTER TABLE samples ADD COLUMN IF NOT EXISTS cell3_v real;
-ALTER TABLE samples ADD COLUMN IF NOT EXISTS cell4_v real;
+-- SEC-12/SRV-22: GPS retention scrub watermark (single row). The daily scrub walks only
+-- [scrubbed_before_ms, cutoff) and then advances the mark to the cutoff. Samples that
+-- arrive already past retention have their coordinates stripped at ingest
+-- (routers/api_device.py), so the mark never needs to look behind itself.
+CREATE TABLE IF NOT EXISTS gps_scrub_state (
+  id smallint PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  scrubbed_before_ms bigint NOT NULL
+);
+
+SELECT pg_temp.add_column_if_missing('samples', 'lat', 'double precision');
+SELECT pg_temp.add_column_if_missing('samples', 'lon', 'double precision');
+SELECT pg_temp.add_column_if_missing('samples', 'gps_accuracy_m', 'real');
+SELECT pg_temp.add_column_if_missing('samples', 'eta_full_min', 'real');
+SELECT pg_temp.add_column_if_missing('samples', 'motion_activity', 'text');
+SELECT pg_temp.add_column_if_missing('samples', 'motion_confidence', 'smallint');
+SELECT pg_temp.add_column_if_missing('samples', 'motion_still', 'boolean');
+SELECT pg_temp.add_column_if_missing('samples', 'motion_at_ms', 'bigint');
+SELECT pg_temp.add_column_if_missing('samples', 'cell1_v', 'real');
+SELECT pg_temp.add_column_if_missing('samples', 'cell2_v', 'real');
+SELECT pg_temp.add_column_if_missing('samples', 'cell3_v', 'real');
+SELECT pg_temp.add_column_if_missing('samples', 'cell4_v', 'real');
 
 -- WEB-5: the jsonb `cells` column was dead contract cruft — never sent by the phone
 -- (CloudJson.kt has no such field), never read by the web. Dropping on the partitioned
--- parent cascades to every partition; IF EXISTS keeps this idempotent on every start.
-ALTER TABLE samples DROP COLUMN IF EXISTS cells;
+-- parent cascades to every partition; the helper keeps this idempotent and lock-free on
+-- every start.
+SELECT pg_temp.drop_column_if_present('samples', 'cells');
+
+-- SRV-23: charging rows only (current > 0.1 A, real telemetry), covering exactly what
+-- queries.charge_session_buckets reads: a 30-day charge-session lookup is an index-only
+-- scan of one pack's charging minutes instead of a full read of every partition in the
+-- window. Declared ON ONLY (metadata on the parent, no data read; later partitions get it
+-- automatically); the partitions that already exist are indexed in the background,
+-- CONCURRENTLY, by app/db/online_index.py. Never here, where a build would block ingest.
+DO $$
+BEGIN
+  IF to_regclass('samples_charging_idx') IS NULL THEN
+    CREATE INDEX samples_charging_idx ON ONLY samples (address, ts)
+      INCLUDE (ts_ms, soc, temp_c)
+      WHERE current_a > 0.1 AND link_event IS NULL;
+  END IF;
+END $$;
 
 -- One-way temperature-alert config pushed from the phone (latest-wins per device+profile). The
 -- webui reads these to alert on exactly what the phone does; there is no write path back from web.
@@ -140,11 +205,11 @@ CREATE TABLE IF NOT EXISTS device_temp_config (
 
 -- WEB-6c: optional profile envelope (BMS cutoffs + charge lock/resume) pushed by newer
 -- app builds; NULL when an older app pushed the config. Mirrored read-only by the web.
-ALTER TABLE device_temp_config ADD COLUMN IF NOT EXISTS cutoff_cold_c real;
-ALTER TABLE device_temp_config ADD COLUMN IF NOT EXISTS cutoff_hot_c real;
-ALTER TABLE device_temp_config ADD COLUMN IF NOT EXISTS charge_lock_cold_c real;
-ALTER TABLE device_temp_config ADD COLUMN IF NOT EXISTS charge_lock_hot_c real;
-ALTER TABLE device_temp_config ADD COLUMN IF NOT EXISTS charge_resume_cold_c real;
+SELECT pg_temp.add_column_if_missing('device_temp_config', 'cutoff_cold_c', 'real');
+SELECT pg_temp.add_column_if_missing('device_temp_config', 'cutoff_hot_c', 'real');
+SELECT pg_temp.add_column_if_missing('device_temp_config', 'charge_lock_cold_c', 'real');
+SELECT pg_temp.add_column_if_missing('device_temp_config', 'charge_lock_hot_c', 'real');
+SELECT pg_temp.add_column_if_missing('device_temp_config', 'charge_resume_cold_c', 'real');
 
 -- One-way capacity alert config pushed from the phone (latest-wins per device, device-level
 -- not per-profile). Tells the webui the SOC threshold at which a low pack seizes the main

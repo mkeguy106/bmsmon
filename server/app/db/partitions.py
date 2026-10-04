@@ -1,6 +1,9 @@
+import logging
 from datetime import datetime, timezone
 
 import asyncpg
+
+logger = logging.getLogger(__name__)
 
 
 def _month_bounds(year: int, month: int) -> tuple[str, str, str]:
@@ -27,19 +30,59 @@ def _months_in_range(min_ms: int, max_ms: int) -> set[tuple[int, int]]:
 # round trip entirely. Grows by one entry per month for the process lifetime — bounded in
 # practice (a year of uptime = 12 tuples). PROCESS-LOCAL is fine (single worker, SRV-8),
 # and safe across test apps: entries are only added for verified-committed partitions,
-# and nothing ever drops a partition (test TRUNCATEs keep them).
+# and the app never drops a partition (test TRUNCATEs keep them; a test that drops one
+# calls reset_ensured_months()).
 #
 # ROLLBACK SAFETY: a month is NEVER added right after a CREATE that ran inside an outer
 # (ingest) transaction — that CREATE is a savepoint and rolls back with the batch, and a
 # poisoned cache would make every later insert fail with "no partition ... found for row".
 # Inside a transaction we only trust to_regclass() (sees committed DDL); outside one
-# (startup/lifespan, autocommit) the CREATE commits on the context exit, so caching is safe.
+# (precreate_partitions from the lifespan and the maintenance pass, autocommit) the CREATE
+# commits on the context exit, so caching is safe.
 _ensured: set[tuple[int, int]] = set()
+
+# SRV-24: partition DDL needs ACCESS EXCLUSIVE on samples. Waiting for it unboundedly
+# behind a long reader would also queue every later query on samples behind the CREATE,
+# so every CREATE here gives up after this long and is retried later.
+PARTITION_LOCK_TIMEOUT = "500ms"
+# How far ahead of now the maintenance pass keeps partitions: [now, now + 31 days] always
+# reaches into the next month (a month is at most 31 days), and near a month's end it can
+# reach the month after that too. The boot also covers as far behind now, for late rows.
+PRECREATE_AHEAD_MS = 31 * 86_400_000
+
+
+def next_month_partition_name(now_ms: int) -> str:
+    """Name of the partition for the UTC month after now_ms's month."""
+    d = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
+    y, m = (d.year + 1, 1) if d.month == 12 else (d.year, d.month + 1)
+    return _month_bounds(y, m)[0]
 
 
 def reset_ensured_months() -> None:
     """Test hook: forget which partitions this process has verified."""
     _ensured.clear()
+
+
+async def _create_partition(conn: asyncpg.Connection, name: str, start: str, end: str) -> bool:
+    """CREATE one monthly partition under PARTITION_LOCK_TIMEOUT, in its own transaction (a
+    SAVEPOINT inside the ingest transaction, so a failed CREATE doesn't abort the batch).
+    False when a concurrent CREATE won the race; LockNotAvailableError when the lock wait
+    gave up (inside a request: a marked 503, so the phone retries)."""
+    try:
+        async with conn.transaction():
+            # In a request, the setting also bounds the rest of that batch's transaction,
+            # i.e. its INSERT; elsewhere it ends with this transaction.
+            await conn.execute(f"SET LOCAL lock_timeout = '{PARTITION_LOCK_TIMEOUT}'")
+            await conn.execute(
+                f"CREATE TABLE IF NOT EXISTS {name} PARTITION OF samples "
+                f"FOR VALUES FROM ('{start}') TO ('{end}')")
+    except (asyncpg.exceptions.UniqueViolationError, asyncpg.exceptions.DuplicateTableError,
+            asyncpg.exceptions.DuplicateObjectError):
+        # Known Postgres catalog race: two connections running CREATE TABLE IF NOT EXISTS
+        # for the same partition concurrently can still raise unique_violation /
+        # duplicate_table. The loser can safely proceed — the partition exists.
+        return False
+    return True
 
 
 async def ensure_partition(conn: asyncpg.Connection, year: int, month: int) -> None:
@@ -51,20 +94,10 @@ async def ensure_partition(conn: asyncpg.Connection, year: int, month: int) -> N
         if await conn.fetchval("SELECT to_regclass($1)", name) is not None:
             _ensured.add((year, month))
             return
-    try:
-        # Nested conn.transaction() = a SAVEPOINT when we're already inside the ingest
-        # transaction, so a failed CREATE doesn't abort the whole batch insert.
-        async with conn.transaction():
-            await conn.execute(
-                f"CREATE TABLE IF NOT EXISTS {name} PARTITION OF samples "
-                f"FOR VALUES FROM ('{start}') TO ('{end}')"
-            )
-    except (asyncpg.exceptions.UniqueViolationError, asyncpg.exceptions.DuplicateTableError,
-            asyncpg.exceptions.DuplicateObjectError):
-        # Known Postgres catalog race: two connections running CREATE TABLE IF NOT EXISTS
-        # for the same partition concurrently can still raise unique_violation /
-        # duplicate_table. The loser can safely proceed — the partition exists.
-        pass
+    # Steady-state ingest never gets here: the maintenance pass pre-creates every partition
+    # a month ahead. Inside a request the CREATE gives up quickly rather than queue ingest
+    # behind a long reader.
+    await _create_partition(conn, name, start, end)
     if not in_tx:
         # Autocommit: the nested conn.transaction() above was a real transaction and has
         # committed (or the partition already existed) — safe to cache. The in-tx path
@@ -76,3 +109,28 @@ async def ensure_partition(conn: asyncpg.Connection, year: int, month: int) -> N
 async def ensure_partitions_for_range(conn: asyncpg.Connection, min_ms: int, max_ms: int) -> None:
     for y, m in sorted(_months_in_range(min_ms, max_ms)):
         await ensure_partition(conn, y, m)
+
+
+async def precreate_partitions(conn: asyncpg.Connection, min_ms: int, max_ms: int) -> list[str]:
+    """SRV-24: create the monthly partitions covering [min_ms, max_ms] OFF the request path
+    (lifespan + the hourly maintenance pass), each in its own short transaction under
+    PARTITION_LOCK_TIMEOUT. A month whose CREATE gives up on a lock wait (a long reader
+    holds samples) is logged and skipped, the later months are still tried, and the next
+    pass retries it. Returns the partitions it created."""
+    if conn.is_in_transaction():
+        raise RuntimeError("precreate_partitions must run outside a transaction")
+    created: list[str] = []
+    for y, m in sorted(_months_in_range(min_ms, max_ms)):
+        if (y, m) in _ensured:
+            continue
+        name, start, end = _month_bounds(y, m)
+        if await conn.fetchval("SELECT to_regclass($1)", name) is None:
+            try:
+                if await _create_partition(conn, name, start, end):
+                    created.append(name)
+            except asyncpg.exceptions.LockNotAvailableError:
+                logger.warning("partition pre-create: %s gave up on a lock wait; the next "
+                               "pass retries", name)
+                continue
+        _ensured.add((y, m))  # committed, or already there: safe to cache
+    return created

@@ -1,4 +1,6 @@
-import time
+import asyncio
+
+import pytest
 from datetime import datetime, timezone
 
 from httpx import ASGITransport, AsyncClient
@@ -6,6 +8,7 @@ from httpx import ASGITransport, AsyncClient
 from app.auth.enroll import hash_code
 from app.db import queries as q
 from app.caching import TtlCache
+from app.routers import share as share_mod
 from app.routers.share import (
     ACTIVE_HOLD_MS, LAST_FIX_CACHE_TTL_S, LAST_FIX_LOOKBACK_MS, STATUS_STALE_MS,
     TRACK_CACHE_TTL_S, day_window_ms, pick_guest_status, share_status,
@@ -14,6 +17,21 @@ from app.routers.share import (
 DEV = "00000000-0000-0000-0000-000000000002"
 A = "C8:47:80:15:67:44"
 SPARE = "C8:47:80:15:25:01"
+
+
+@pytest.fixture(autouse=True)
+def pinned_share_clock(monkeypatch):
+    """Every test here runs at 12:00 local time today. Fixes are seeded 60-90 s before
+    "now", and with the real clock a run in the first 90 s after local midnight put them in
+    yesterday, outside the guest's today-only window (five tests failed that way)."""
+    noon = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0).astimezone()
+    pinned = noon.astimezone(timezone.utc)
+    monkeypatch.setattr(share_mod, "utcnow", lambda: pinned)
+    return pinned
+
+
+def _now_ms() -> int:
+    return int(share_mod.utcnow().timestamp() * 1000)
 
 
 def test_share_status():
@@ -191,7 +209,7 @@ async def _seed_device(conn):
 
 
 async def test_unknown_and_revoked_are_identical_404(app, client):
-    now_ms = int(time.time() * 1000)
+    now_ms = _now_ms()
     async with app.state.pool.acquire() as conn:
         await _mk_share(conn, "tok-revoked", now_ms, now_ms + 3_600_000, revoked_ms=now_ms)
     for path in ("/share/{t}", "/share/{t}/feed"):
@@ -205,7 +223,7 @@ async def test_unknown_and_revoked_are_identical_404(app, client):
 
 
 async def test_expired_page_and_feed(app, client):
-    now_ms = int(time.time() * 1000)
+    now_ms = _now_ms()
     async with app.state.pool.acquire() as conn:
         await _mk_share(conn, "tok-exp", now_ms - 7_200_000, now_ms - 3_600_000)
     page = await client.get("/share/tok-exp")
@@ -218,7 +236,7 @@ async def test_expired_page_and_feed(app, client):
 
 
 async def test_feed_today_only_no_battery_fields(app, client):
-    now_ms = int(time.time() * 1000)
+    now_ms = _now_ms()
     async with app.state.pool.acquire() as conn:
         await _seed_device(conn)
         await q.upsert_battery(conn, A, "R-12100", "2012 · A", "2012", now_ms)
@@ -232,7 +250,7 @@ async def test_feed_today_only_no_battery_fields(app, client):
     body = r.json()
     assert set(body.keys()) == {"points", "last", "expires_at", "now", "day_start",
                                 "owner", "status"}
-    assert body["day_start"] == day_window_ms(datetime.now(timezone.utc))[0]
+    assert body["day_start"] == day_window_ms(share_mod.utcnow())[0]
     assert len(body["points"]) == 1
     # trail-detail relaxation (2026-07-14): per-bucket discharge context rides along —
     # exactly these keys, still never per-point SOC/voltage/temp/cells
@@ -260,7 +278,7 @@ async def test_feed_track_cached_between_rapid_polls(app, client):
     between (the fleet GPS query is TTL-cached per poll period), and the throttled
     touch bookkeeping counts the burst as one access. Clearing the cache (= TTL lapse)
     makes the next poll pick up the new fix."""
-    now_ms = int(time.time() * 1000)
+    now_ms = _now_ms()
     async with app.state.pool.acquire() as conn:
         await _seed_device(conn)
         await _mk_share(conn, "tok-cache", now_ms, now_ms + 3_600_000)
@@ -284,7 +302,7 @@ async def test_feed_track_cached_between_rapid_polls(app, client):
 async def test_feed_cache_never_leaks_into_expired_or_gone_shares(app, client):
     """Per-share state (expiry, revocation) stays per-request: a warm track cache from
     an active share must not resurrect an expired (410) or revoked (404) link."""
-    now_ms = int(time.time() * 1000)
+    now_ms = _now_ms()
     async with app.state.pool.acquire() as conn:
         await _seed_device(conn)
         await _mk_share(conn, "tok-warm", now_ms, now_ms + 3_600_000)
@@ -298,7 +316,7 @@ async def test_feed_cache_never_leaks_into_expired_or_gone_shares(app, client):
 async def test_feed_status_stays_live_despite_track_cache(app, client):
     """The guest dock status is computed from a fresh fleet snapshot per request —
     only the GPS trail is cached."""
-    now_ms = int(time.time() * 1000)
+    now_ms = _now_ms()
     async with app.state.pool.acquire() as conn:
         await _seed_device(conn)
         await q.upsert_battery(conn, A, "R-12100", "2012 · A", "2012", now_ms)
@@ -330,7 +348,7 @@ async def _two_base_fleet(conn, now_ms, token):
 async def test_feed_status_follows_the_chair_not_the_freshest_spare(app, client):
     """The rotating background sampler owns the newest row a third of the time at home;
     the dock must still describe the base that's actually moving."""
-    now_ms = int(time.time() * 1000)
+    now_ms = _now_ms()
     async with app.state.pool.acquire() as conn:
         await _two_base_fleet(conn, now_ms, "tok-chair")
         await _seed_pack_sample(conn, A, now_ms - 3_000, 72, -4.0)
@@ -344,7 +362,7 @@ async def test_feed_status_follows_the_chair_not_the_freshest_spare(app, client)
 async def test_feed_status_holds_the_chair_across_a_pause(app, client):
     """Chair idle at a crossing, spare freshest: the recent-discharge hold (a real DB
     lookup) keeps the dock on the chair instead of jumping to the 99% spare."""
-    now_ms = int(time.time() * 1000)
+    now_ms = _now_ms()
     async with app.state.pool.acquire() as conn:
         await _two_base_fleet(conn, now_ms, "tok-hold")
         await _seed_pack_sample(conn, A, now_ms - 120_000, 72, -4.0)  # drove 2 min ago
@@ -357,7 +375,7 @@ async def test_feed_status_holds_the_chair_across_a_pause(app, client):
 
 async def test_feed_excludes_coarse_fixes(app, client):
     """The guest trail must not jump to a coarse network fix (huge accuracy radius)."""
-    now_ms = int(time.time() * 1000)
+    now_ms = _now_ms()
     async with app.state.pool.acquire() as conn:
         await _seed_device(conn)
         await _mk_share(conn, "tok-acc", now_ms, now_ms + 3_600_000)
@@ -374,7 +392,7 @@ async def test_feed_since_returns_only_newer_buckets_and_never_requeries(app, cl
     """Incremental poll: `since` slices the CACHED trail, so a 4 s poll costs no DB work.
     Proof that it is a cache slice and not a fresh query: a fix seeded after the first
     poll is invisible until the TTL lapses."""
-    now_ms = int(time.time() * 1000)
+    now_ms = _now_ms()
     async with app.state.pool.acquire() as conn:
         await _seed_device(conn)
         await _mk_share(conn, "tok-inc", now_ms, now_ms + 3_600_000)
@@ -394,7 +412,7 @@ async def test_feed_since_returns_only_newer_buckets_and_never_requeries(app, cl
 
 async def test_feed_since_keeps_last_as_the_whole_trails_newest(app, client):
     """A poll with nothing new must not blank the live chair marker."""
-    now_ms = int(time.time() * 1000)
+    now_ms = _now_ms()
     async with app.state.pool.acquire() as conn:
         await _seed_device(conn)
         await _mk_share(conn, "tok-last", now_ms, now_ms + 3_600_000)
@@ -407,7 +425,7 @@ async def test_feed_since_keeps_last_as_the_whole_trails_newest(app, client):
 async def test_feed_garbage_or_stale_since_degrades_to_the_full_trail(app, client):
     """A share link must never 4xx on a stray query param; the whole day is always a
     correct answer, and a `since` from before today's window has nothing to trim."""
-    now_ms = int(time.time() * 1000)
+    now_ms = _now_ms()
     async with app.state.pool.acquire() as conn:
         await _seed_device(conn)
         await _mk_share(conn, "tok-junk", now_ms, now_ms + 3_600_000)
@@ -419,7 +437,7 @@ async def test_feed_garbage_or_stale_since_degrades_to_the_full_trail(app, clien
 
 
 async def test_feed_since_does_not_resurrect_expired_or_gone_shares(app, client):
-    now_ms = int(time.time() * 1000)
+    now_ms = _now_ms()
     async with app.state.pool.acquire() as conn:
         await _seed_device(conn)
         await _mk_share(conn, "tok-warm2", now_ms, now_ms + 3_600_000)
@@ -445,7 +463,7 @@ async def test_active_page_serves_guest_shell(app, client, tmp_path, monkeypatch
     (tmp_path / "share").mkdir()
     (tmp_path / "share" / "index.html").write_text("<html>guest-shell</html>")
     monkeypatch.setenv("BMSMON_WEB_DIST", str(tmp_path))
-    now_ms = int(time.time() * 1000)
+    now_ms = _now_ms()
     async with app.state.pool.acquire() as conn:
         await _mk_share(conn, "tok-page", now_ms, now_ms + 3_600_000)
     r = await client.get("/share/tok-page")
@@ -469,8 +487,8 @@ async def _lookback_fixture(conn, token: str, now_ms: int):
 
 
 async def test_feed_last_survives_midnight_from_the_48h_lookback(app, client):
-    now_ms = int(time.time() * 1000)
-    last_night = day_window_ms(datetime.now(timezone.utc))[0] - 60_000
+    now_ms = _now_ms()
+    last_night = day_window_ms(share_mod.utcnow())[0] - 60_000
     async with app.state.pool.acquire() as conn:
         await _lookback_fixture(conn, "tok-night", now_ms)
         await _seed_fix(conn, last_night - 3_600_000, 44.0, -88.0)
@@ -481,7 +499,7 @@ async def test_feed_last_survives_midnight_from_the_48h_lookback(app, client):
 
 
 async def test_feed_last_ignores_fixes_older_than_48h(app, client):
-    now_ms = int(time.time() * 1000)
+    now_ms = _now_ms()
     async with app.state.pool.acquire() as conn:
         await _lookback_fixture(conn, "tok-old", now_ms)
         await _seed_fix(conn, now_ms - LAST_FIX_LOOKBACK_MS - 60_000, 43.0, -87.9)
@@ -490,8 +508,8 @@ async def test_feed_last_ignores_fixes_older_than_48h(app, client):
 
 
 async def test_feed_last_lookback_skips_coarse_fixes(app, client):
-    now_ms = int(time.time() * 1000)
-    last_night = day_window_ms(datetime.now(timezone.utc))[0] - 60_000
+    now_ms = _now_ms()
+    last_night = day_window_ms(share_mod.utcnow())[0] - 60_000
     async with app.state.pool.acquire() as conn:
         await _lookback_fixture(conn, "tok-coarse", now_ms)
         await _seed_fix(conn, last_night - 600_000, 43.0, -87.9, accuracy_m=16.0)
@@ -501,8 +519,8 @@ async def test_feed_last_lookback_skips_coarse_fixes(app, client):
 
 
 async def test_feed_last_is_t_lat_lon_and_matches_todays_trail_head(app, client):
-    now_ms = int(time.time() * 1000)
-    day_start = day_window_ms(datetime.now(timezone.utc))[0]
+    now_ms = _now_ms()
+    day_start = day_window_ms(share_mod.utcnow())[0]
     async with app.state.pool.acquire() as conn:
         await _lookback_fixture(conn, "tok-head", now_ms)
         # never before local midnight, or in the day's first second it misses today's trail
@@ -513,8 +531,8 @@ async def test_feed_last_is_t_lat_lon_and_matches_todays_trail_head(app, client)
 
 
 async def test_feed_last_lookback_is_cached_like_the_trail(app, client):
-    now_ms = int(time.time() * 1000)
-    last_night = day_window_ms(datetime.now(timezone.utc))[0] - 600_000
+    now_ms = _now_ms()
+    last_night = day_window_ms(share_mod.utcnow())[0] - 600_000
     async with app.state.pool.acquire() as conn:
         await _lookback_fixture(conn, "tok-lcache", now_ms)
         await _seed_fix(conn, last_night, 43.0, -87.9)
@@ -534,8 +552,8 @@ async def test_feed_last_lookback_has_its_own_five_minute_cache(app, client):
     clock = [0.0]
     app.state.share_track_cache = TtlCache(TRACK_CACHE_TTL_S, clock=lambda: clock[0])
     app.state.share_last_fix_cache = TtlCache(LAST_FIX_CACHE_TTL_S, clock=lambda: clock[0])
-    now_ms = int(time.time() * 1000)
-    last_night = day_window_ms(datetime.now(timezone.utc))[0] - 600_000
+    now_ms = _now_ms()
+    last_night = day_window_ms(share_mod.utcnow())[0] - 600_000
     async with app.state.pool.acquire() as conn:
         await _lookback_fixture(conn, "tok-l5min", now_ms)
         await _seed_fix(conn, last_night, 43.0, -87.9)
@@ -549,8 +567,8 @@ async def test_feed_last_lookback_has_its_own_five_minute_cache(app, client):
 
 
 async def test_feed_last_lookback_ignores_since_slicing(app, client):
-    now_ms = int(time.time() * 1000)
-    last_night = day_window_ms(datetime.now(timezone.utc))[0] - 60_000
+    now_ms = _now_ms()
+    last_night = day_window_ms(share_mod.utcnow())[0] - 60_000
     async with app.state.pool.acquire() as conn:
         await _lookback_fixture(conn, "tok-lsince", now_ms)
         await _seed_fix(conn, last_night, 43.0, -87.9)
@@ -572,3 +590,45 @@ async def test_latest_gps_fix_picks_newest_across_packs_and_months(app):
         fix = await q.latest_gps_fix(conn, sep30 - 3_600_000, sep30 + 86_400_000)
         assert fix == {"ts_ms": sep30, "lat": 43.0, "lon": -87.9}
         assert await q.latest_gps_fix(conn, sep30 + 1, sep30 + 86_400_000) is None
+
+
+async def test_feed_day_window_follows_the_share_clock(app, client, monkeypatch):
+    """The feed's 'today' and its 'now' come from share.utcnow(), never the wall clock:
+    pinned at 00:00:30 local, a fix from 23:59:30 is yesterday's and stays out."""
+    # From a NAIVE local time, so astimezone() applies 00:00:30's own UTC offset (on a
+    # DST-change day it differs from the current one).
+    after_midnight = (datetime.now().replace(hour=0, minute=0, second=30, microsecond=0)
+                      .astimezone().astimezone(timezone.utc))
+    monkeypatch.setattr(share_mod, "utcnow", lambda: after_midnight)
+    now_ms = int(after_midnight.timestamp() * 1000)
+    async with app.state.pool.acquire() as conn:
+        await _seed_device(conn)
+        await _mk_share(conn, "tok-midnight", now_ms - 60_000, now_ms + 3_600_000)
+        await _seed_fix(conn, now_ms - 60_000, 43.0, -87.9)   # 23:59:30 yesterday
+        await _seed_fix(conn, now_ms - 10_000, 43.1, -87.8)   # 00:00:20 today
+    body = (await client.get("/share/tok-midnight/feed")).json()
+    assert body["day_start"] == now_ms - 30_000
+    assert body["now"] == now_ms
+    assert [round(p["lat"], 1) for p in body["points"]] == [43.1]
+
+
+async def test_concurrent_guests_share_one_trail_query(app, client, monkeypatch):
+    calls = 0
+    real = q.gps_track_all
+
+    async def slow(conn, from_ms, to_ms):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.05)
+        return await real(conn, from_ms, to_ms)
+
+    monkeypatch.setattr(q, "gps_track_all", slow)
+    now_ms = _now_ms()
+    async with app.state.pool.acquire() as conn:
+        await _seed_device(conn)
+        await _mk_share(conn, "tok-flight", now_ms, now_ms + 3_600_000)
+        await _seed_fix(conn, now_ms - 60_000, 43.0, -87.9)
+    rs = await asyncio.gather(*(client.get("/share/tok-flight/feed") for _ in range(3)))
+    assert [r.status_code for r in rs] == [200, 200, 200]
+    assert calls == 1
+    assert rs[0].json()["points"] == rs[1].json()["points"] == rs[2].json()["points"]

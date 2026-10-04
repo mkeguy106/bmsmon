@@ -29,7 +29,7 @@ async def app():
         pool = application.state.pool
         async with pool.acquire() as conn:
             await conn.execute(
-                "TRUNCATE samples, samples_rollup, samples_rollup_state, batteries, "
+                "TRUNCATE samples, samples_rollup, samples_rollup_state, gps_scrub_state, batteries, "
                 "enrollment_codes, devices, device_temp_config, "
                 "device_alert_config, device_range_config, web_notes, location_shares, api_keys "
                 "RESTART IDENTITY CASCADE"

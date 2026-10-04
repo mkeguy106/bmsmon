@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -9,16 +10,39 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import CARTO_KEY_ENV, parse_carto_key, settings
-from app.db.partitions import ensure_partitions_for_range
+from app.db.partitions import PRECREATE_AHEAD_MS, precreate_partitions
 from app.db.pool import create_pool
 from app.db.queries import scrub_expired_gps
 from app.db.rollup import run_rollup_pass
-from app.routers import api_device, api_widget, share, web, ws
+from app.maintenance import maintenance_loop
+from app.routers import api_device, api_widget, health, share, web, ws
 
 logger = logging.getLogger(__name__)
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 _LOG_HANDLER_NAME = "bmsmon"
+
+
+# Timer-polled routes whose SUCCESSES carry no diagnostic value: Docker's healthcheck and the
+# uptime monitor, the desktop widgets, and the guest share feed (every 4 s per guest). Their
+# 2xx/3xx lines filled the 5 MB docker log cap in about a day and rotated away the lines that
+# matter. Errors on these routes, and every other route, are still logged.
+_QUIET_PATHS = frozenset({"/api/v1/health", "/api/v1/health/detail", "/api/v1/groups"})
+_QUIET_SHARE_FEED = re.compile(r"^/share/[^/]+/feed$")
+
+
+class QuietAccessLogFilter(logging.Filter):
+    """Drops uvicorn access lines for successful timer polls (see _QUIET_PATHS)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if not isinstance(args, tuple) or len(args) < 5:
+            return True
+        status = args[4]
+        if not isinstance(status, int) or status >= 400:
+            return True
+        path = str(args[2]).split("?", 1)[0]
+        return not (path in _QUIET_PATHS or _QUIET_SHARE_FEED.match(path))
 
 
 def configure_logging() -> None:
@@ -27,7 +51,11 @@ def configure_logging() -> None:
     scrub) were discarded and warnings printed bare via logging.lastResort. Idempotent
     (create_app runs once per test). propagate stays True so pytest's caplog, which hooks
     the root logger, still sees app records; uvicorn attaches no root handler, so lines
-    are not printed twice in prod."""
+    are not printed twice in prod. Also installs QuietAccessLogFilter on uvicorn.access
+    (uvicorn configures that logger before it imports the app; dictConfig keeps filters)."""
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, QuietAccessLogFilter) for f in access.filters):
+        access.addFilter(QuietAccessLogFilter())
     log = logging.getLogger("app")
     log.setLevel(logging.INFO)
     if any(h.get_name() == _LOG_HANDLER_NAME for h in log.handlers):
@@ -137,11 +165,13 @@ class CachedStaticFiles(StaticFiles):
 async def lifespan(app: FastAPI):
     app.state.pool = await create_pool()
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    month = 31 * 24 * 3600 * 1000
     async with app.state.pool.acquire() as conn:
-        await ensure_partitions_for_range(conn, now_ms - month, now_ms + month)
+        # A month that gives up on a lock wait is logged and skipped, never fails the boot;
+        # the maintenance pass retries it (maintenance.MAINTENANCE_INITIAL_DELAY_S).
+        await precreate_partitions(conn, now_ms - PRECREATE_AHEAD_MS, now_ms + PRECREATE_AHEAD_MS)
+    tasks = [asyncio.create_task(_rollup_loop(app.state.pool)),
+             asyncio.create_task(maintenance_loop(app.state.pool))]
     # GPS retention (SEC-12): skipped entirely when disabled (retention <= 0).
-    tasks = [asyncio.create_task(_rollup_loop(app.state.pool))]
     if settings.gps_retention_days > 0:
         tasks.append(asyncio.create_task(_gps_scrub_loop(app.state.pool)))
     try:
@@ -163,10 +193,14 @@ def create_app() -> FastAPI:
     app = FastAPI(title="bmsmon", lifespan=lifespan)
     from starlette.middleware.gzip import GZipMiddleware
 
-    from app.middleware import (ApiMarkerMiddleware, BodySizeLimitMiddleware,
-                                marked_internal_error)
+    from app.middleware import (DB_ERROR_HANDLED_TYPES, DB_UNAVAILABLE_LOG_INTERVAL_S,
+                                ApiMarkerMiddleware, BodySizeLimitMiddleware,
+                                db_error_handler, marked_internal_error)
     # Unhandled exceptions -> a 500 that still carries the C1 marker (see the handler).
     app.add_exception_handler(Exception, marked_internal_error)
+    # DB outages are answered inside the app (no re-raise, so no uvicorn traceback).
+    for exc_type in DB_ERROR_HANDLED_TYPES:
+        app.add_exception_handler(exc_type, db_error_handler)
     # MIDDLEWARE ORDER: Starlette wraps in REVERSE order of add_middleware, so the LAST
     # call is the outermost layer. ApiMarkerMiddleware must stay last (outermost) so every
     # response below it — including middleware-generated ones — gets X-Bmsmon-Api.
@@ -183,6 +217,9 @@ def create_app() -> FastAPI:
     from app.live.bus import LiveBus
     from app.ratelimit import RateLimiter
     app.state.jti_cache = JtiCache()
+    # Device-auth outcomes of KNOWN devices (routers/api_device.py), for health/detail.
+    from app.observability import AuthStats
+    app.state.auth_stats = AuthStats()
     app.state.bus = LiveBus()
     # Process-local perf state (single worker, SRV-8; app-scoped like the limiters so
     # each test app starts fresh). See routers/share.py for the TTL/interval rationale.
@@ -199,6 +236,8 @@ def create_app() -> FastAPI:
     app.state.share_touch = TouchThrottle(interval_s=TOUCH_INTERVAL_S)
     # devices.last_seen_at write throttle (see routers/api_device.py).
     app.state.device_touch = TouchThrottle(interval_s=60.0)
+    # One "database unavailable" WARNING per exception class per interval (middleware.py).
+    app.state.db_unavailable_log = TouchThrottle(interval_s=DB_UNAVAILABLE_LOG_INTERVAL_S)
     # C3: invalid-sample/range-row WARNINGs, at most once per device per kind per interval.
     app.state.reject_log = TouchThrottle(interval_s=api_device.REJECT_LOG_INTERVAL_S)
     # SEC-4: per-IP limiter for the unauthenticated /api/v1/enroll (see app/ratelimit.py).
@@ -214,6 +253,7 @@ def create_app() -> FastAPI:
                                            window_s=INGEST_WINDOW_S)
     app.include_router(api_device.router)
     app.include_router(api_widget.router)
+    app.include_router(health.router)
     app.include_router(web.router)
     app.include_router(ws.router)
     # Per-IP limiter for the public /share zone. A guest page polls every 4 s = 15/min,
