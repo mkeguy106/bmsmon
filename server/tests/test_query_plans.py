@@ -3,7 +3,9 @@ the size of the month it falls in. Each test seeds one synthetic month into
 samples_2026_03: 8 packs, 2 at a 15 s stage cadence and 6 spares at 5 min; GPS 13-18 h UTC;
 charging 01-07 h UTC. That is ~410 k rows / ~7 k heap pages. The tests read the plan's
 buffer counts."""
+import inspect
 import json
+import re
 from datetime import datetime, timezone
 
 from app.db import queries as q
@@ -11,6 +13,7 @@ from app.db import rollup as ru
 from app.db.online_index import complete_partitioned_indexes
 from app.db.partitions import ensure_partitions_for_range
 
+DEV = "00000000-0000-0000-0000-000000000001"
 MARCH = int(datetime(2026, 3, 1, tzinfo=timezone.utc).timestamp() * 1000)
 DAY, HOUR = 86_400_000, 3_600_000
 END = MARCH + 31 * DAY
@@ -121,3 +124,63 @@ async def test_rollup_reroll_reads_only_its_window(app):
     # side is its single child.
     (read_side,) = plan["Plans"]
     assert buffers(read_side) * 4 < pages
+
+
+_WINDOW_ON_TS_MS = re.compile(r"\bts_ms\s*(?:>=|<=|>|<)\s*\$\d")
+
+
+def test_windowed_queries_filter_on_ts_only():
+    """SRV-28: a window is expressed on ts alone. ts is ts_ms at ms precision, so a second
+    ts_ms predicate adds nothing but an estimate the planner multiplies in as if it were
+    independent (measured 47x too low), and a window on ts_ms ALONE would scan every
+    partition."""
+    for module in (q, ru):
+        assert not _WINDOW_ON_TS_MS.findall(inspect.getsource(module)), module.__name__
+
+
+async def test_track_window_is_half_open_to_the_millisecond(app):
+    """Dropping ts_ms must not move a boundary: [from_ms, to_ms) still includes from_ms and
+    excludes to_ms exactly."""
+    a = STAGE[0]
+    lo = MARCH + 10 * DAY + 123         # deliberately not second-aligned
+    hi = lo + 30_000
+    async with app.state.pool.acquire() as conn:
+        await ensure_partitions_for_range(conn, lo - 1, hi)
+        await q.insert_samples(conn, [
+            q.sample_row(DEV, a, {"ts_ms": t, "lat": 40.0 + 10 * i, "lon": -87.0})
+            for i, t in enumerate((lo - 1, lo, hi - 1, hi))])
+        pts = await q.track_series(conn, a, lo, hi)
+    # lo-1 shares lo's 15 s bucket and hi shares hi-1's: wrong boundaries would average them in
+    assert [round(p["lat"]) for p in pts] == [50, 60]
+
+
+async def test_ts_is_ts_ms_to_the_millisecond_for_every_writer(app):
+    """The premise of ts-only windows: sample_row derives ts from ts_ms, and
+    to_timestamp(ms / 1000.0) (what the windows compare against) names the same instant for
+    every millisecond, including skewed far-future and pre-epoch-ish clocks."""
+    import random
+    rnd = random.Random(14)
+    values = [0, 1, 999, 1_000, MARCH, MARCH + 1, 4_102_444_799_999]
+    values += [rnd.randrange(1_500_000_000_000, 4_102_444_800_000) for _ in range(2000)]
+    async with app.state.pool.acquire() as conn:
+        rows = [q.sample_row(DEV, STAGE[0], {"ts_ms": v})["ts"] for v in values]
+        bad = await conn.fetchval(
+            "SELECT count(*) FROM unnest($1::bigint[], $2::timestamptz[]) AS u(ms, ts)"
+            " WHERE ts <> to_timestamp(ms::double precision / 1000.0)", values, rows)
+    assert bad == 0
+
+
+async def test_trend_and_track_prune_to_their_window(app):
+    async with app.state.pool.acquire() as conn:
+        pages = await seed_month(conn)
+        lo = MARCH + 20 * DAY + 12 * HOUR
+        plans = [
+            await explain(conn, q._TREND_RAW, STAGE[0], lo, lo + 6 * HOUR, 1_800_000),
+            await explain(conn, q._TREND_ROUTED, STAGE[0], lo, lo + HOUR, lo + 5 * HOUR,
+                          lo + 6 * HOUR, 6 * HOUR),
+            await explain(conn, q._TREND_RAW, STAGE[0], END + DAY, END + 2 * DAY, 1_800_000),
+        ]
+    for plan in plans:
+        assert PART not in seq_scanned(plan)
+    # the empty window past the month touches no partition's heap at all
+    assert buffers(plans[2]) * 100 < pages

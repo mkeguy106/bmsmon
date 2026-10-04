@@ -283,7 +283,8 @@ async def recent_discharge_by_address(conn, since_ms: int, eps_a: float) -> dict
     is the chair" when nothing is drawing *right now* — see routers/share.py.
 
     Same LATERAL shape as fleet_snapshot, so each pack is one bounded backward walk of
-    the PK's (address, ts) prefix; the redundant ts predicate prunes partitions. Bounded
+    the PK's (address, ts) prefix; the ts predicate alone prunes partitions (SRV-28).
+    Bounded
     by the caller's window (~15 min), which is what keeps it cheap for packs that never
     discharge — measured on prod: ~6 ms, ~600 shared buffers for the 8-pack fleet."""
     rows = await conn.fetch(
@@ -292,7 +293,6 @@ async def recent_discharge_by_address(conn, since_ms: int, eps_a: float) -> dict
              JOIN LATERAL (
                 SELECT s.ts_ms FROM samples s
                 WHERE s.address = b.address AND s.link_event IS NULL
-                  AND s.ts_ms >= $1
                   AND s.ts >= to_timestamp($1::double precision / 1000.0)
                   AND s.current_a < $2
                 ORDER BY s.ts DESC
@@ -558,7 +558,7 @@ SELECT (ts_ms / $4) * $4 AS bucket_ms,
        avg((cell_max_v - cell_min_v) * 1000)::real AS cell_spread_mv,
        avg(temp_c)::real AS temp_avg, min(temp_c)::real AS temp_min, max(temp_c)::real AS temp_max
   FROM samples
- WHERE address = $1 AND ts_ms >= $2 AND ts_ms < $3
+ WHERE address = $1
    AND ts >= to_timestamp($2::double precision / 1000.0)
    AND ts < to_timestamp($3::double precision / 1000.0)
    AND link_event IS NULL
@@ -582,7 +582,7 @@ WITH parts AS (
          sum(temp_c::float8) AS temp_sum, count(temp_c)::bigint AS temp_n,
          min(temp_c) AS temp_min, max(temp_c) AS temp_max
     FROM samples
-   WHERE address = $1 AND ts_ms >= $2 AND ts_ms < $3
+   WHERE address = $1
      AND ts >= to_timestamp($2::double precision / 1000.0)
      AND ts < to_timestamp($3::double precision / 1000.0)
      AND link_event IS NULL
@@ -600,7 +600,7 @@ WITH parts AS (
          sum(temp_c::float8), count(temp_c)::bigint,
          min(temp_c), max(temp_c)
     FROM samples
-   WHERE address = $1 AND ts_ms >= $4 AND ts_ms < $5
+   WHERE address = $1
      AND ts >= to_timestamp($4::double precision / 1000.0)
      AND ts < to_timestamp($5::double precision / 1000.0)
      AND link_event IS NULL
@@ -617,7 +617,7 @@ SELECT bucket_ms,
 
 async def trend_series(conn, address: str, from_ms: int, to_ms: int, bucket_ms: int) -> list[dict]:
     """Per-pack bucketed SOH / cell-spread / temperature trend for /web/trends.
-    The redundant ts predicates exist purely for partition pruning (see history_series).
+    ts predicates only: they prune partitions exactly (SRV-28).
 
     Routed through samples_rollup (SRV-14) whenever the requested bucket is a multiple
     of 30 min — every size trend_bucket_ms returns (30 min / 6 h / 1 d / 7 d) qualifies,
@@ -641,14 +641,14 @@ async def track_series(conn, address: str, from_ms: int, to_ms: int) -> list[dic
     """15-second buckets of GPS-carrying real telemetry (lat/lon present) with discharge context
     and the bucket's mean accuracy radius (`acc`) — the Journey map weights fixes by it.
     Coarse fixes (accuracy radius > GPS_ACCURACY_MAX_M) are gated out; NULL accuracy passes.
-    The redundant ts predicates exist purely for partition pruning (see history_series)."""
+    ts predicates only: they prune partitions exactly (SRV-28)."""
     rows = await conn.fetch(
         """SELECT (ts_ms / 15000) * 15000 AS bucket_ms,
                   avg(lat)::double precision AS lat, avg(lon)::double precision AS lon,
                   avg(power_w)::real AS power_w, avg(current_a)::real AS current_a, avg(soc)::real AS soc,
                   avg(gps_accuracy_m)::real AS acc
              FROM samples
-            WHERE address = $1 AND ts_ms >= $2 AND ts_ms < $3
+            WHERE address = $1
               AND ts >= to_timestamp($2::double precision / 1000.0)
               AND ts < to_timestamp($3::double precision / 1000.0)
               AND link_event IS NULL AND lat IS NOT NULL AND lon IS NOT NULL

@@ -173,3 +173,60 @@ async def test_rollup_upsert_matches_old_select(app):
                 "spread_n, temp_sum, temp_n, temp_min, temp_max FROM samples_rollup "
                 "ORDER BY address, bucket_ms")]
             assert got == expected, (lo, hi)
+
+
+# SRV-28: the same queries before the redundant ts_ms predicates were dropped, rebuilt by
+# putting them back verbatim.
+_OLD_TREND_RAW = q._TREND_RAW.replace(
+    "WHERE address = $1\n", "WHERE address = $1 AND ts_ms >= $2 AND ts_ms < $3\n", 1)
+
+
+async def test_trend_raw_matches_old_query_on_ms_edges(app):
+    async with app.state.pool.acquire() as conn:
+        await _seed(conn)
+        for lo, hi in ((FEB28, END), (MAR1 - 1, MAR1 + 1), (MAR1, MAR1 + 1),
+                       (MAR1 + HOUR, MAR1 + HOUR + 1), (MAR1 - HOUR + 7, MAR1 + HOUR - 3),
+                       (END + DAY, END + 2 * DAY)):
+            for bucket in (1_800_000, 21_600_000):
+                old = [dict(r) for r in await conn.fetch(_OLD_TREND_RAW, PACKS[0], lo, hi, bucket)]
+                new = [dict(r) for r in await conn.fetch(q._TREND_RAW, PACKS[0], lo, hi, bucket)]
+                assert new == old, (lo, hi, bucket)
+        assert old == [] and await q.trend_series(conn, PACKS[0], FEB28, END, 21_600_000)
+
+
+async def test_track_series_matches_old_query_on_ms_edges(app):
+    async with app.state.pool.acquire() as conn:
+        await _seed(conn)
+        old_sql = """SELECT (ts_ms / 15000) * 15000 AS bucket_ms,
+                  avg(lat)::double precision AS lat, avg(lon)::double precision AS lon,
+                  avg(power_w)::real AS power_w, avg(current_a)::real AS current_a, avg(soc)::real AS soc,
+                  avg(gps_accuracy_m)::real AS acc
+             FROM samples
+            WHERE address = $1 AND ts_ms >= $2 AND ts_ms < $3
+              AND ts >= to_timestamp($2::double precision / 1000.0)
+              AND ts < to_timestamp($3::double precision / 1000.0)
+              AND link_event IS NULL AND lat IS NOT NULL AND lon IS NOT NULL
+              AND (gps_accuracy_m IS NULL OR gps_accuracy_m <= $4)
+            GROUP BY bucket_ms ORDER BY bucket_ms"""
+        saw = False
+        for lo, hi in ((FEB28, END), (MAR1 - 1, MAR1), (MAR1, MAR1 + 1), (MAR1 - 1, MAR1 + 1),
+                       (MAR1 + HOUR, MAR1 + HOUR + 1), (MAR1 - 6 * HOUR + 9, MAR1 + 6 * HOUR - 9)):
+            old = [dict(r) for r in await conn.fetch(old_sql, PACKS[0], lo, hi, q.GPS_ACCURACY_MAX_M)]
+            assert await q.track_series(conn, PACKS[0], lo, hi) == old, (lo, hi)
+            saw = saw or bool(old)
+        assert saw
+
+
+async def test_recent_discharge_matches_old_query(app):
+    async with app.state.pool.acquire() as conn:
+        await _seed(conn)
+        old_sql = """SELECT b.address, s.ts_ms FROM batteries b JOIN LATERAL (
+                SELECT s.ts_ms FROM samples s
+                WHERE s.address = b.address AND s.link_event IS NULL
+                  AND s.ts_ms >= $1
+                  AND s.ts >= to_timestamp($1::double precision / 1000.0)
+                  AND s.current_a < $2
+                ORDER BY s.ts DESC LIMIT 1) s ON true"""
+        for since in (FEB28, MAR1 - 1, MAR1, MAR1 + HOUR + 1, END - 1, END + DAY):
+            old = {r["address"]: int(r["ts_ms"]) for r in await conn.fetch(old_sql, since, -0.1)}
+            assert await q.recent_discharge_by_address(conn, since, 0.1) == old, since
