@@ -135,6 +135,16 @@ CREATE TABLE IF NOT EXISTS samples_rollup_state (
   high_water_ms bigint NOT NULL
 );
 
+-- SEC-12/SRV-22: GPS retention scrub watermark (single row). Every sample with
+-- ts < scrubbed_before_ms has had its location cleared, so the daily scrub walks only
+-- [scrubbed_before_ms, cutoff) instead of all history. A sample that arrives already past
+-- retention is stored without coordinates (routers/api_device.py), so nothing with GPS
+-- can land behind the mark.
+CREATE TABLE IF NOT EXISTS gps_scrub_state (
+  id smallint PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  scrubbed_before_ms bigint NOT NULL
+);
+
 SELECT pg_temp.add_column_if_missing('samples', 'lat', 'double precision');
 SELECT pg_temp.add_column_if_missing('samples', 'lon', 'double precision');
 SELECT pg_temp.add_column_if_missing('samples', 'gps_accuracy_m', 'real');

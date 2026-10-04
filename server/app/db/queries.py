@@ -1,4 +1,5 @@
 import logging
+import time
 from datetime import datetime, timezone
 
 import asyncpg
@@ -302,26 +303,56 @@ async def recent_discharge_by_address(conn, since_ms: int, eps_a: float) -> dict
     return {r["address"]: int(r["ts_ms"]) for r in rows}
 
 
-async def scrub_expired_gps(conn, retention_days: int) -> int:
+GPS_SCRUB_CHUNK_MS = 86_400_000  # one day of one pack per UPDATE
+
+_SCRUB_CHUNK = """
+UPDATE samples SET lat = NULL, lon = NULL, gps_accuracy_m = NULL
+ WHERE address = $1
+   AND ts >= to_timestamp($2::double precision / 1000.0)
+   AND ts < to_timestamp($3::double precision / 1000.0)
+   AND (lat IS NOT NULL OR lon IS NOT NULL OR gps_accuracy_m IS NOT NULL)
+"""
+
+
+async def scrub_expired_gps(conn, retention_days: int, now_ms: int | None = None) -> int:
     """GPS retention scrub (SEC-12): NULL out the location columns on samples older than
     the retention window. Telemetry rows are NEVER deleted — the battery history is kept
     forever; only lat/lon/gps_accuracy_m are cleared. Returns the number of rows scrubbed.
 
     retention_days <= 0 means retention is disabled (keep GPS forever) — no-op.
 
-    The ts predicate prunes the monthly RANGE(ts) partitions, and the IS NOT NULL guard
-    makes re-runs idempotent and cheap (already-scrubbed rows are never rewritten)."""
+    SRV-22: walks only [watermark, cutoff) (gps_scrub_state), per pack on the (address, ts)
+    key, one GPS_SCRUB_CHUNK_MS per statement. The daily pass costs one day of rows, and a
+    retention change becomes many small transactions instead of one giant UPDATE. The mark
+    moves only after every pack is done, so an interrupted pass redoes its window (the
+    IS NOT NULL guard keeps that idempotent)."""
     if retention_days <= 0:
         return 0
-    status = await conn.execute(
-        """UPDATE samples
-           SET lat = NULL, lon = NULL, gps_accuracy_m = NULL
-           WHERE ts < now() - ($1 * interval '1 day')
-             AND (lat IS NOT NULL OR lon IS NOT NULL OR gps_accuracy_m IS NOT NULL)""",
-        float(retention_days),
-        timeout=MAINTENANCE_TIMEOUT_S,
-    )
-    return int(status.rsplit(" ", 1)[-1])  # asyncpg status tag, e.g. "UPDATE 3"
+    now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    cutoff = now_ms - retention_days * 86_400_000
+    mark = await conn.fetchval("SELECT scrubbed_before_ms FROM gps_scrub_state WHERE id = 1")
+    if mark is not None and mark >= cutoff:
+        return 0
+    total = 0
+    for row in await conn.fetch("SELECT address FROM batteries ORDER BY address"):
+        first = await conn.fetchval(
+            "SELECT ts_ms FROM samples WHERE address = $1 ORDER BY address, ts LIMIT 1",
+            row["address"])
+        if first is None:
+            continue
+        lo = max(int(first), int(mark) if mark is not None else 0)
+        while lo < cutoff:
+            hi = min(lo + GPS_SCRUB_CHUNK_MS, cutoff)
+            status = await conn.execute(_SCRUB_CHUNK, row["address"], lo, hi,
+                                        timeout=MAINTENANCE_TIMEOUT_S)
+            total += int(status.rsplit(" ", 1)[-1])  # asyncpg status tag, e.g. "UPDATE 3"
+            lo = hi
+    await conn.execute(
+        """INSERT INTO gps_scrub_state (id, scrubbed_before_ms) VALUES (1, $1)
+           ON CONFLICT (id) DO UPDATE SET scrubbed_before_ms =
+             GREATEST(gps_scrub_state.scrubbed_before_ms, EXCLUDED.scrubbed_before_ms)""",
+        cutoff)
+    return total
 
 
 # SRV-11 bounds for /web/samples: cap the caller-chosen range at 7 days (a wider

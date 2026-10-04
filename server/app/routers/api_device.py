@@ -32,6 +32,14 @@ def _partition_ts_window() -> tuple[int, int]:
     return settings.ingest_ts_min_ms, now_ms + settings.ingest_ts_max_future_ms
 
 
+def _gps_cutoff_ms() -> int | None:
+    """Samples older than this are past GPS retention (SEC-12); None when retention is off."""
+    days = settings.gps_retention_days
+    if days <= 0:
+        return None
+    return int(datetime.now(timezone.utc).timestamp() * 1000) - days * 86_400_000
+
+
 # SRV-13: max accepted sample-address length. BLE MACs are 17 chars; the headroom is
 # forward compat (e.g. iOS CoreBluetooth surfaces UUID-ish identifiers, not MACs).
 ADDRESS_MAX_LEN = 32
@@ -306,6 +314,14 @@ async def ingest(request: Request, pool=Depends(get_pool)):
     # below (it used to run twice per sample on the ingest hot path). sample_row
     # and publish both only READ the dict, so sharing it is safe.
     dumped = [s.model_dump() for s in samples]
+    # SEC-12/SRV-22: a sample already past GPS retention when it arrives (a late outbox
+    # drain, a history import) is stored and broadcast without coordinates: the daily scrub
+    # walks forward from its watermark and would never revisit it.
+    gps_cutoff = _gps_cutoff_ms()
+    if gps_cutoff is not None:
+        for d in dumped:
+            if d["ts_ms"] < gps_cutoff:
+                d["lat"] = d["lon"] = d["gps_accuracy_m"] = None
     rows = [q.sample_row(device_id, s.address, d) for s, d in zip(samples, dumped)]
     # SRV-13: one registry upsert per unique address per batch (not per sample).
     # Dict insertion order keeps the LAST-seen sample's alias/group per address.
