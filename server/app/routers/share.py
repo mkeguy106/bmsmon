@@ -226,6 +226,26 @@ async def _active_share(request: Request, token: str, pool) -> dict:
     return share
 
 
+async def _load_trail(pool, from_ms: int, now_ms: int) -> list[dict]:
+    async with pool.acquire() as conn:
+        rows = await q.gps_track_all(conn, from_ms, now_ms + 1)
+    return [{"t": int(r["bucket_ms"]), "lat": r["lat"], "lon": r["lon"],
+             "power_w": _f(r["power_w"]), "current_a": _f(r["current_a"])} for r in rows]
+
+
+async def _load_last_fix(pool, now_ms: int) -> tuple:
+    async with pool.acquire() as conn:
+        fix = await q.latest_gps_fix(conn, now_ms - LAST_FIX_LOOKBACK_MS, now_ms + 1)
+    # A 1-tuple so "no fix in the lookback" (None) is a cacheable value too.
+    return (None if fix is None else _marker(
+        (int(fix["ts_ms"]) // TRAIL_BUCKET_MS) * TRAIL_BUCKET_MS, fix["lat"], fix["lon"]),)
+
+
+async def _load_discharge(pool, now_ms: int) -> dict[str, int]:
+    async with pool.acquire() as conn:
+        return await q.recent_discharge_by_address(conn, now_ms - ACTIVE_HOLD_MS, DISCHARGE_EPS)
+
+
 @router.get("/{token}")
 async def share_page(token: str, request: Request, pool=Depends(get_pool)):
     status, _share = await _resolve(request, token, pool)
@@ -254,38 +274,23 @@ async def share_feed(token: str, request: Request, since: str | None = None,
     from_ms, now_ms = day_window_ms(utcnow())
     state = request.app.state
     # Per-share state above (expiry/410/revocation) and the guest *status* below stay
-    # per-request; only the fleet-wide GPS trail — identical for every guest — is cached.
-    points = state.share_track_cache.get(from_ms)
-    # Fleet-wide like the trail, so it is cached on the same period: N guests collapse
-    # onto <=1 discharge lookup per TTL, and a <=10 s-stale answer is nothing against a
-    # 15-minute hold window.
-    last_discharge = state.share_discharge_cache.get(_DISCHARGE_CACHE_KEY)
+    # per-request. The trail, the last-fix fallback and the discharge lookup are
+    # fleet-wide and identical for every guest, so they are cached for one poll period AND
+    # single-flighted (SRV-26): guests that miss together share one query.
+    points = await state.share_track_cache.get_or_compute(
+        from_ms, lambda: _load_trail(pool, from_ms, now_ms))
+    # `last` comes from the FULL data, never the `since` slice below. Today's trail head IS
+    # the newest fix in the 48 h window when one exists (no extra query); otherwise ask the
+    # bounded per-pack lookup, cached for LAST_FIX_CACHE_TTL_S.
+    if points:
+        last = _marker(points[-1]["t"], points[-1]["lat"], points[-1]["lon"])
+    else:
+        last = (await state.share_last_fix_cache.get_or_compute(
+            _LAST_FIX_CACHE_KEY, lambda: _load_last_fix(pool, now_ms)))[0]
+    # A <=10 s-stale answer is nothing against a 15-minute hold window.
+    last_discharge = await state.share_discharge_cache.get_or_compute(
+        _DISCHARGE_CACHE_KEY, lambda: _load_discharge(pool, now_ms))
     async with pool.acquire() as conn:
-        if points is None:
-            rows = await q.gps_track_all(conn, from_ms, now_ms + 1)
-            points = [{"t": int(r["bucket_ms"]), "lat": r["lat"], "lon": r["lon"],
-                       "power_w": _f(r["power_w"]), "current_a": _f(r["current_a"])}
-                      for r in rows]
-            state.share_track_cache.put(from_ms, points)
-        # `last` comes from the FULL data, never the `since` slice below. Today's trail
-        # head IS the newest fix in the 48 h window when one exists (no extra query);
-        # otherwise ask the bounded per-pack lookup, cached for LAST_FIX_CACHE_TTL_S.
-        # Cached as a 1-tuple so "no fix in 48 h" (None) is a cache hit too.
-        if points:
-            last = _marker(points[-1]["t"], points[-1]["lat"], points[-1]["lon"])
-        else:
-            cached = state.share_last_fix_cache.get(_LAST_FIX_CACHE_KEY)
-            if cached is None:
-                fix = await q.latest_gps_fix(conn, now_ms - LAST_FIX_LOOKBACK_MS, now_ms + 1)
-                cached = (None if fix is None else _marker(
-                    (int(fix["ts_ms"]) // TRAIL_BUCKET_MS) * TRAIL_BUCKET_MS,
-                    fix["lat"], fix["lon"]),)
-                state.share_last_fix_cache.put(_LAST_FIX_CACHE_KEY, cached)
-            last = cached[0]
-        if last_discharge is None:
-            last_discharge = await q.recent_discharge_by_address(
-                conn, now_ms - ACTIVE_HOLD_MS, DISCHARGE_EPS)
-            state.share_discharge_cache.put(_DISCHARGE_CACHE_KEY, last_discharge)
         snapshot = await q.fleet_snapshot(conn)
         if state.share_touch.should_touch(share["id"]):
             await q.touch_location_share(conn, share["id"], now_ms)

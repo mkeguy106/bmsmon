@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from datetime import datetime, timezone
 
@@ -607,3 +609,25 @@ async def test_feed_day_window_follows_the_share_clock(app, client, monkeypatch)
     assert body["day_start"] == now_ms - 30_000
     assert body["now"] == now_ms
     assert [round(p["lat"], 1) for p in body["points"]] == [43.1]
+
+
+async def test_concurrent_guests_share_one_trail_query(app, client, monkeypatch):
+    calls = 0
+    real = q.gps_track_all
+
+    async def slow(conn, from_ms, to_ms):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.05)
+        return await real(conn, from_ms, to_ms)
+
+    monkeypatch.setattr(q, "gps_track_all", slow)
+    now_ms = _now_ms()
+    async with app.state.pool.acquire() as conn:
+        await _seed_device(conn)
+        await _mk_share(conn, "tok-flight", now_ms, now_ms + 3_600_000)
+        await _seed_fix(conn, now_ms - 60_000, 43.0, -87.9)
+    rs = await asyncio.gather(*(client.get("/share/tok-flight/feed") for _ in range(3)))
+    assert [r.status_code for r in rs] == [200, 200, 200]
+    assert calls == 1
+    assert rs[0].json()["points"] == rs[1].json()["points"] == rs[2].json()["points"]
