@@ -110,7 +110,7 @@ fun restorePlan(p: Persisted): RestorePlan? {
  * so a background pack's routine miss doesn't re-post the notification.
  */
 fun monitoringNotificationText(st: MonitorState, nowElapsedMs: Long): String {
-    if (!st.linksWanted) return "All packs disconnected"
+    if (!st.linksWanted) return if (st.rosterEmpty) "No packs configured" else "All packs disconnected"
     val reading = st.fleet.values.filter { it.telemetry != null && freshness(it, nowElapsedMs).drivesAlerts() }
     return when {
         reading.isEmpty() -> "Connecting…"

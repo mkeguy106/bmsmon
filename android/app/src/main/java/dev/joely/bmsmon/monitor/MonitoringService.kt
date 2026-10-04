@@ -27,6 +27,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 
 /**
@@ -57,7 +58,8 @@ class MonitoringService : Service() {
     // does not fire in suspend. Screen-on used to provide this incidentally; now that the screen
     // is allowed to sleep on battery, this wakelock is what keeps polling, alerting and GPS
     // capture at full cadence. Held while the monitoring session has a pack to poll (BLE-27,
-    // wantsCpuWakeLock): released after "Disconnect all", taken again on Reconnect.
+    // wantsCpuWakeLock): released after "Disconnect all", taken again on Reconnect — and through a
+    // sticky / boot restore, from before the persisted settings load until that decision first runs.
     private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -68,9 +70,8 @@ class MonitoringService : Service() {
     }
 
     /** The parts of engine state the notification layer reacts to — anything else changing
-     *  (~every 1.5 s poll) must NOT re-post the ongoing notification (BLE-11). [holdCpu] is the
-     *  wakelock decision (BLE-27). */
-    private data class NotifState(val monitoring: Boolean, val text: String, val fgsType: Int, val holdCpu: Boolean)
+     *  (~every 1.5 s poll) must NOT re-post the ongoing notification (BLE-11). */
+    private data class NotifState(val monitoring: Boolean, val text: String, val fgsType: Int)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
@@ -107,11 +108,24 @@ class MonitoringService : Service() {
             // actually on (or BLE permission is gone), exit quietly instead of collecting.
             val restore = intent == null || intent.action == ACTION_RESTORE
             collectorJob = scope.launch {
-                if (restore && !engine.restoreFromPersisted()) {
-                    stopCleanly()
-                    return@launch
+                if (restore) {
+                    // Hold the CPU through the restore itself: loading the persisted settings
+                    // suspends, and a phone asleep here (a boot, a sticky restart overnight) would
+                    // leave monitoring un-restored until something woke it. Biased toward holding —
+                    // the decision below releases it within moments if nothing is wanted.
+                    acquireWakeLock()
+                    if (!engine.restoreFromPersisted()) {
+                        stopCleanly()
+                        return@launch
+                    }
                 }
                 engine.state
+                    // BLE-27: hold the CPU while some pack is wanted; release it when "Disconnect all"
+                    // (or an empty roster) leaves nothing to poll, and take it again on Reconnect.
+                    // Applied on EVERY emission, ahead of the de-duplication below: both calls are
+                    // no-ops in the steady state, and a flip back to "wanted" — or a failed acquire —
+                    // is never deduplicated away.
+                    .onEach { st -> if (wantsCpuWakeLock(st)) acquireWakeLock() else releaseWakeLock() }
                     // Derive the notification-relevant fields first, then de-duplicate: the engine
                     // emits on every poll (~1.5 s) but the text/type change rarely (BLE-11).
                     .map { st ->
@@ -119,7 +133,6 @@ class MonitoringService : Service() {
                             st.monitoring,
                             monitoringNotificationText(st, SystemClock.elapsedRealtime()),
                             fgsType(st.gpsActive),
-                            wantsCpuWakeLock(st),
                         )
                     }
                     .distinctUntilChanged()
@@ -128,9 +141,6 @@ class MonitoringService : Service() {
                             stopCleanly()
                             return@collect
                         }
-                        // BLE-27: hold the CPU while some pack is wanted; release it when "Disconnect
-                        // all" (or an empty roster) leaves nothing to poll. Reconnect takes it again.
-                        if (ns.holdCpu) acquireWakeLock() else releaseWakeLock()
                         if (Build.VERSION.SDK_INT >= 30 && ns.fgsType != appliedType) {
                             // The parked-GPS gate flips gpsActive on its own now, so the location
                             // bit of the FGS type changes *while the service runs* and often while

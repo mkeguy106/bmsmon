@@ -23,9 +23,16 @@ class EngineWiringTest {
     }
     private val flat: String get() = src.replace(Regex("\\s+"), " ")
 
+    // Every BLE event of the CURRENT session runs the decision step; one from an ended session
+    // (BLE-21) changes nothing, so it decides nothing either — it can no longer move the stage
+    // (and persist it) after a Stop.
     @Test fun everyBleEventRunsTheDecisionStep() {
-        assertTrue(flat.contains("onPoll = { addr, raw, t -> onPoll(session, addr, raw, t); reevaluate() }"))
-        assertTrue(flat.contains("onReachable = { addr, reachable -> onReachable(session, addr, reachable); reevaluate() }"))
+        assertTrue(flat.contains(
+            "onPoll = { addr, raw, t -> onPoll(session, addr, raw, t); if (session == currentSession) reevaluate() }",
+        ))
+        assertTrue(flat.contains(
+            "onReachable = { addr, reachable -> onReachable(session, addr, reachable); if (session == currentSession) reevaluate() }",
+        ))
     }
 
     // BLE-21: a callback already running on the control loop when monitoring stopped (cancellation
@@ -95,6 +102,23 @@ class EngineWiringTest {
             "…and re-checks inside the CAS loop, so a racing setDisabled can't be overtaken",
             lambda.contains("if (isDisabled(addr)) return@update st"),
         )
+    }
+
+    // Final-wave MUST-FIX: CLAUDE.md says a refused frame is not logged or uploaded. An undecodable
+    // frame used to be logged before the disabled check, and with no re-check of the session at the
+    // write: now a disabled pack's frame returns before either branch, and the decode_fail row is
+    // written only if the frame is still accepted right at the write.
+    @Test fun aRefusedUndecodableFrameIsNeverLogged() {
+        val onPoll = flat.substringAfter("private fun onPoll(").substringBefore("private fun onReachable(")
+        val disabled = onPoll.indexOf("if (isDisabled(addr)) return ")
+        val undecodable = onPoll.indexOf("if (t == null) {")
+        assertTrue("the disabled check comes first", disabled in 0 until undecodable)
+        val branch = onPoll.substring(undecodable).substringBefore("return }")
+        assertTrue(branch.contains(
+            "if (logging && session == currentSession && _state.value.monitoring && !isDisabled(addr)) { " +
+                "repository.ingestRawOnly(addr, raw, \"decode_fail\", now)",
+        ))
+        assertEquals("one raw-only write site", 1, Regex(Regex.escape("repository.ingestRawOnly(")).findAll(src).count())
     }
 
     @Test fun aDisabledPackIsNeverMarkedReachable() {

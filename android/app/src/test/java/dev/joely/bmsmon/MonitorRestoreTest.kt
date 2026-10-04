@@ -328,6 +328,13 @@ class MonitorRestoreTest {
         assertEquals("All packs disconnected", monitoringNotificationText(st, nowE))
     }
 
+    // Final wave: with every battery removed nothing was disconnected by the user.
+    @Test
+    fun `an empty roster says there is nothing to monitor`() {
+        val st = MonitorState(monitoring = true, linksWanted = false, rosterEmpty = true)
+        assertEquals("No packs configured", monitoringNotificationText(st, nowE))
+    }
+
     @Test
     fun `the cpu is held only while monitoring has a pack to poll`() {
         assertTrue(wantsCpuWakeLock(MonitorState(monitoring = true, linksWanted = true)))
@@ -337,8 +344,10 @@ class MonitorRestoreTest {
 
     // BLE-27 hard rule: the wakelock released by "Disconnect all" is taken again as soon as any
     // pack is wanted — left released, the poll's delay() would stop firing in CPU suspend and
-    // overnight monitoring would silently stall. Walks the engine's published decision
-    // (linksWanted = hasDesiredLinks(roster, disabled)) through each path that changes the set.
+    // overnight monitoring would silently stall. This checks the composed decision —
+    // wantsCpuWakeLock over linksWanted = hasDesiredLinks(roster, disabled) — for each kind of change
+    // to the wanted set; that the engine and service actually re-run it on each change is pinned by
+    // ServiceWiringTest's source guards.
     @Test
     fun `disconnect all releases the cpu and every way back to a wanted pack takes it again`() {
         val all = DEFAULT_ROSTER.allTargets().map { it.address }.toSet()

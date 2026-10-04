@@ -890,10 +890,13 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
             // back to the daily driver when the target has no members left (UI-29).
             st.copy(disabled = st.disabled - a, fleet = st.fleet - a, manualStage = newManualStage)
         }
+        pushStageConfig()   // a pin on this pack is gone before the roster loses it
+        // Roster before the disabled set: un-disabling a pack still in the roster made it wanted for
+        // a moment — after "Disconnect all" that took the wakelock, started GPS and flipped the FGS
+        // type, only for the roster edit to undo it all (and pointed BLE at the pack being removed).
+        updateRoster { it.removeBattery(a) }
         engine.setDisabled(_state.value.disabled)
         persistDisabled()
-        pushStageConfig()
-        updateRoster { it.removeBattery(a) }
     }
 
     fun renameBattery(address: String, alias: String) =

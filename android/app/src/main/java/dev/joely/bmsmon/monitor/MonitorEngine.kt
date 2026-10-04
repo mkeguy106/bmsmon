@@ -113,8 +113,12 @@ data class MonitorState(
     // BLE-27: some roster pack is not user-disconnected, i.e. BLE has a link to want. Single writer:
     // the engine (start / setDisabled / setRoster). The service holds its wakelock only while
     // monitoring && linksWanted, and the GPS gate needs it too (fixes only ride BLE samples).
-    // Defaults true so a state built without it (stop()'s reset, tests) never reads "nothing to poll".
+    // Defaults true so a state built without it (stop()'s reset, tests) never reads "nothing to poll"
+    // — so it reads true whenever monitoring is off: gate any use of it on [monitoring].
     val linksWanted: Boolean = true,
+    // The roster has no battery at all — the ongoing notification says so rather than "All packs
+    // disconnected". Single writer: the engine (start / setRoster).
+    val rosterEmpty: Boolean = false,
     // Stage (T1.2, 2026-10-02 review) — single writer: the engine. Resolved (low-pack seize
     // included) on every BLE event, every config push and a 10 s tick, with or without a
     // ViewModel; the VM pushes StageConfig and mirrors these two fields.
@@ -312,6 +316,7 @@ class MonitorEngine(
                 tailMinByAddress = emptyMap(),
                 tailRunEndByAddress = emptyMap(),
                 linksWanted = hasDesiredLinks(roster, disabledAddrs),
+                rosterEmpty = roster.batteries.isEmpty(),
             )
         }
         ble.start(
@@ -324,8 +329,11 @@ class MonitorEngine(
             disabled = disabledAddrs,
             // Every BLE event re-runs the decision step (BLE-14/UI-20) — never only stage-pack
             // ones, so fleet-wide alerts and the seize keep working when the stage is dark.
-            onPoll = { addr, raw, t -> onPoll(session, addr, raw, t); reevaluate() },
-            onReachable = { addr, reachable -> onReachable(session, addr, reachable); reevaluate() },
+            // A callback from an ended session (BLE-21) changes nothing, so it decides nothing either.
+            onPoll = { addr, raw, t -> onPoll(session, addr, raw, t); if (session == currentSession) reevaluate() },
+            onReachable = { addr, reachable ->
+                onReachable(session, addr, reachable); if (session == currentSession) reevaluate()
+            },
         )
         markStageAuthoritative()
         reevaluate()       // resolve + push the launch stage (releases BmsRepository's launch barrier)
@@ -385,6 +393,7 @@ class MonitorEngine(
                 fleet = pruneToRoster(st.fleet, roster),
                 regenAddrs = st.regenAddrs.filter { roster.batteryAt(it) != null }.toSet(),
                 linksWanted = hasDesiredLinks(roster, disabledAddrs),
+                rosterEmpty = roster.batteries.isEmpty(),
             )
         }
         if (_state.value.monitoring) {
@@ -934,15 +943,21 @@ class MonitorEngine(
         // UI-29: a frame already in flight when its pack was removed from the roster must not
         // re-add it to the fleet as a ghost (setRoster pruned it).
         if (roster.batteryAt(addr) == null) return
+        // M1: a frame already in flight when the user disconnected this pack must not revive it
+        // (reachable + a fresh stamp = LIVE, able to alert or seize, for up to 60 s) — nor be logged,
+        // decodable or not. Re-checked inside the state update below for a setDisabled that lands
+        // between here and there.
+        if (isDisabled(addr)) return
         val now = now()
         if (t == null) {
-            if (logging) repository.ingestRawOnly(addr, raw, "decode_fail", now)
+            // An undecodable frame commits no state, so this check, right before the write, is where
+            // it is accepted or refused — the decoded path's CAS below does the same job: a frame
+            // refused because its pack was disconnected or its session ended is never logged.
+            if (logging && session == currentSession && _state.value.monitoring && !isDisabled(addr)) {
+                repository.ingestRawOnly(addr, raw, "decode_fail", now)
+            }
             return
         }
-        // M1: a frame already in flight when the user disconnected this pack must not revive it
-        // (reachable + a fresh stamp = LIVE, able to alert or seize, for up to 60 s). Re-checked
-        // inside the state update below for a setDisabled that lands between here and there.
-        if (isDisabled(addr)) return
         val st0 = _state.value
         val group = roster.groupOf(addr)
         // Regen is judged against the group's last-discharge time BEFORE this sample updates it.
