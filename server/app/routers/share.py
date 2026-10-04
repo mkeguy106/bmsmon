@@ -276,7 +276,9 @@ async def share_feed(token: str, request: Request, since: str | None = None,
     # Per-share state above (expiry/410/revocation) and the guest *status* below stay
     # per-request. The trail, the last-fix fallback and the discharge lookup are
     # fleet-wide and identical for every guest, so they are cached for one poll period AND
-    # single-flighted (SRV-26): guests that miss together share one query.
+    # single-flighted (SRV-26): guests that miss together share one query. Each loader
+    # closes over the now_ms of the guest whose miss started it, so a guest served from
+    # the cache or a shared load gets an answer at most one TTL old, as before.
     points = await state.share_track_cache.get_or_compute(
         from_ms, lambda: _load_trail(pool, from_ms, now_ms))
     # `last` comes from the FULL data, never the `since` slice below. Today's trail head IS

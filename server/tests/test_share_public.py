@@ -24,7 +24,7 @@ def pinned_share_clock(monkeypatch):
     """Every test here runs at 12:00 local time today. Fixes are seeded 60-90 s before
     "now", and with the real clock a run in the first 90 s after local midnight put them in
     yesterday, outside the guest's today-only window (five tests failed that way)."""
-    noon = datetime.now().astimezone().replace(hour=12, minute=0, second=0, microsecond=0)
+    noon = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0).astimezone()
     pinned = noon.astimezone(timezone.utc)
     monkeypatch.setattr(share_mod, "utcnow", lambda: pinned)
     return pinned
@@ -595,9 +595,10 @@ async def test_latest_gps_fix_picks_newest_across_packs_and_months(app):
 async def test_feed_day_window_follows_the_share_clock(app, client, monkeypatch):
     """The feed's 'today' and its 'now' come from share.utcnow(), never the wall clock:
     pinned at 00:00:30 local, a fix from 23:59:30 is yesterday's and stays out."""
-    after_midnight = (datetime.now().astimezone()
-                      .replace(hour=0, minute=0, second=30, microsecond=0)
-                      .astimezone(timezone.utc))
+    # From a NAIVE local time, so astimezone() applies 00:00:30's own UTC offset (on a
+    # DST-change day it differs from the current one).
+    after_midnight = (datetime.now().replace(hour=0, minute=0, second=30, microsecond=0)
+                      .astimezone().astimezone(timezone.utc))
     monkeypatch.setattr(share_mod, "utcnow", lambda: after_midnight)
     now_ms = int(after_midnight.timestamp() * 1000)
     async with app.state.pool.acquire() as conn:

@@ -194,6 +194,32 @@ async def test_trend_raw_matches_old_query_on_ms_edges(app):
         assert old == [] and await q.trend_series(conn, PACKS[0], FEB28, END, 21_600_000)
 
 
+_OLD_TREND_ROUTED = q._TREND_ROUTED.replace(
+    "WHERE address = $1\n     AND ts >= to_timestamp($2",
+    "WHERE address = $1 AND ts_ms >= $2 AND ts_ms < $3\n     AND ts >= to_timestamp($2", 1
+).replace(
+    "WHERE address = $1\n     AND ts >= to_timestamp($4",
+    "WHERE address = $1 AND ts_ms >= $4 AND ts_ms < $5\n     AND ts >= to_timestamp($4", 1)
+
+
+async def test_trend_routed_matches_old_query_on_ms_edges(app):
+    assert _OLD_TREND_ROUTED.count("ts_ms >=") == 2  # both raw parts got their old predicates
+    async with app.state.pool.acquire() as conn:
+        await _seed(conn)
+        await ru.run_rollup_pass(conn, END)
+        saw = False
+        for lo, ru_lo, ru_hi, hi in ((MAR1 - 1, MAR1, MAR1 + HOUR, MAR1 + HOUR + 1),
+                                     (FEB28 + 7, FEB28 + B, END - 2 * B, END - 3),
+                                     (MAR1 - B + 1, MAR1, MAR1 + B, MAR1 + 2 * B - 1)):
+            for bucket in (1_800_000, 21_600_000):
+                args = (PACKS[0], lo, ru_lo, ru_hi, hi, bucket)
+                old = [dict(r) for r in await conn.fetch(_OLD_TREND_ROUTED, *args)]
+                new = [dict(r) for r in await conn.fetch(q._TREND_ROUTED, *args)]
+                assert new == old, (lo, hi, bucket)
+                saw = saw or bool(old)
+        assert saw
+
+
 async def test_track_series_matches_old_query_on_ms_edges(app):
     async with app.state.pool.acquire() as conn:
         await _seed(conn)

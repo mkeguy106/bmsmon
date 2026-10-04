@@ -50,8 +50,8 @@ async def test_a_failing_registry_insert_never_fails_the_write(app, monkeypatch,
             assert await q.insert_samples(conn, rows) == 1
         assert await conn.fetchval("SELECT count(*) FROM samples") == 1
     assert [r.getMessage() for r in caplog.records if r.name == "app.db.queries"] == [
-        "insert_samples: registry insert failed (UndefinedTableError); samples still stored, "
-        "maintenance will backfill"]
+        ("insert_samples: registry insert failed (UndefinedTableError); samples still stored, "
+         "maintenance will backfill")]
 
 
 async def test_ingest_registers_a_new_address_once(app, client, monkeypatch, caplog):

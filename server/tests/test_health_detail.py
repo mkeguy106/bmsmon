@@ -215,7 +215,8 @@ async def test_a_live_batch_with_one_valid_sample_refreshes_the_signal(app, clie
                       + _all_invalid())
     assert r.json() == {"accepted": 1, "dropped": 3, "last_seq": 7}
     assert await _last_seen(app, device_id) > before
-    assert "ingest" not in (await client.get(URL + "?max_ingest_age_s=60", headers=h)).json()["failing"]
+    r = await client.get(URL + "?max_ingest_age_s=60", headers=h)
+    assert "ingest" not in r.json()["failing"]
 
 
 async def test_a_resent_batch_of_stored_samples_still_counts(app, client):

@@ -244,7 +244,8 @@ async def test_an_attach_behind_a_reader_gives_up_fast_and_the_pass_moves_on(app
         # Every child is built but unattached, so the pass goes straight to the ATTACHes (a
         # build would first wait out the reader's snapshot: BUILD_LOCK_TIMEOUT).
         for part in partitions:
-            await conn.execute(f'CREATE INDEX "{child_index_name(PARENT, part)}" ON "{part}" (address)')
+            await conn.execute(
+                f'CREATE INDEX "{child_index_name(PARENT, part)}" ON "{part}" (address)')
         built = await conn.fetchval("SELECT to_regclass($1)::oid", child)
         await _declare(conn)
         try:

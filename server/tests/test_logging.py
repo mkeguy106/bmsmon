@@ -51,6 +51,15 @@ def test_access_filter_is_installed_once():
     ("/share/tok/map-config", 200, True),
     ("/api/v1/ingest", 200, True),              # uploads stay: the deploy-gap diagnosis needs them
     ("/web/fleet", 200, True),
+    # A token that is itself "feed": only the feed poll is quiet, never its other routes
+    ("/share/feed/feed", 200, False),
+    ("/share/feed/feed", 410, True),
+    ("/share/feed", 200, True),
+    ("/share/feed/map-config", 200, True),
+    ("/share/x/feed/feed", 200, True),          # not the feed route
+    # Exact paths only: a trailing-slash form is not the poll, so it is logged
+    ("/api/v1/health/", 200, True),
+    ("/api/v1/health/detail/", 200, True),
 ])
 def test_access_filter_drops_only_successful_polls(path, status, kept):
     assert QuietAccessLogFilter().filter(_access(path, status)) is kept

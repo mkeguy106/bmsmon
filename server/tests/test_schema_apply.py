@@ -161,7 +161,8 @@ async def test_a_change_a_concurrent_run_made_first_counts_as_done(app):
     second must carry on, not fail the boot."""
     async with app.state.pool.acquire() as conn:
         await apply_schema(conn)  # defines the pg_temp helpers on THIS session
-        await conn.execute("DROP TABLE IF EXISTS zz_schema_race; CREATE TABLE zz_schema_race (id int)")
+        await conn.execute(
+            "DROP TABLE IF EXISTS zz_schema_race; CREATE TABLE zz_schema_race (id int)")
         first = await asyncpg.connect(settings.database_url)
         try:
             for change, helper in (
@@ -189,7 +190,8 @@ async def test_a_real_lock_wait_is_retried_until_the_holder_lets_go(app, monkeyp
     slept: list[float] = []
     holder = await asyncpg.connect(settings.database_url)
     try:
-        await holder.execute("DROP TABLE IF EXISTS zz_schema_lock; CREATE TABLE zz_schema_lock (id int)")
+        await holder.execute(
+            "DROP TABLE IF EXISTS zz_schema_lock; CREATE TABLE zz_schema_lock (id int)")
         await holder.execute("BEGIN; LOCK TABLE zz_schema_lock IN ACCESS SHARE MODE")
 
         async def release(d: float) -> None:

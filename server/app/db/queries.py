@@ -290,9 +290,8 @@ async def recent_discharge_by_address(conn, since_ms: int, eps_a: float) -> dict
 
     Same LATERAL shape as fleet_snapshot, so each pack is one bounded backward walk of
     the PK's (address, ts) prefix; the ts predicate alone prunes partitions (SRV-28).
-    Bounded
-    by the caller's window (~15 min), which is what keeps it cheap for packs that never
-    discharge — measured on prod: ~6 ms, ~600 shared buffers for the 8-pack fleet."""
+    Bounded by the caller's window (~15 min), which is what keeps it cheap for packs that
+    never discharge — measured on prod: ~6 ms, ~600 shared buffers for the 8-pack fleet."""
     rows = await conn.fetch(
         """SELECT b.address, s.ts_ms
              FROM batteries b

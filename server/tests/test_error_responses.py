@@ -92,10 +92,9 @@ def test_websocket_db_outage_closes_1011_without_reraising():
         raise asyncpg.exceptions.CannotConnectNowError("x")
 
     app.add_api_websocket_route("/__t_ws", ws_down)
-    with TestClient(app) as tc:
-        with tc.websocket_connect("/__t_ws") as ws:
-            with pytest.raises(WebSocketDisconnect) as closed:
-                ws.receive_text()
+    with (TestClient(app) as tc, tc.websocket_connect("/__t_ws") as ws,
+          pytest.raises(WebSocketDisconnect) as closed):
+        ws.receive_text()
     assert closed.value.code == WS_INTERNAL_ERROR == 1011
 
 

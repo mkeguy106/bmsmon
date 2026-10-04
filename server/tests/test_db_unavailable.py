@@ -1,5 +1,4 @@
 """A DB outage is a marked 503 (transient, retry); a real crash stays a marked 500."""
-import asyncio
 import errno
 import socket
 
@@ -33,8 +32,7 @@ from app.middleware import API_MARKER_HEADER, API_MARKER_VALUE, is_db_unavailabl
     ConnectionRefusedError(111, "refused"),
     OSError(errno.ENETUNREACH, "unreachable"),
     socket.gaierror(-2, "unknown host"),
-    TimeoutError(),
-    asyncio.TimeoutError(),
+    TimeoutError(),  # asyncio.TimeoutError is the same class since Python 3.11
 ])
 def test_classifier_true(exc):
     assert is_db_unavailable(exc)

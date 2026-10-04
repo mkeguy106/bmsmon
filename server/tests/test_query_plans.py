@@ -3,11 +3,13 @@ the size of the month it falls in. Each test seeds one synthetic month into
 samples_2026_03: 8 packs, 2 at a 15 s stage cadence and 6 spares at 5 min; GPS 13-18 h UTC;
 charging 01-07 h UTC. That is ~410 k rows / ~7 k heap pages. The tests read the plan's
 buffer counts."""
-import inspect
+import ast
 import json
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 
+import app as app_pkg
 from app.db import queries as q
 from app.db import rollup as ru
 from app.db.online_index import complete_partitioned_indexes
@@ -126,16 +128,44 @@ async def test_rollup_reroll_reads_only_its_window(app):
     assert buffers(read_side) * 4 < pages
 
 
-_WINDOW_ON_TS_MS = re.compile(r"\bts_ms\s*(?:>=|<=|>|<)\s*\$\d")
+# A range predicate on ts_ms in any form: either operand order, BETWEEN, and any bound
+# ($N, %s, :name, or an f-string's interpolation, whose literal part still holds the op).
+_WINDOW_ON_TS_MS = re.compile(
+    r"\bts_ms\s*(?:>=|<=|>|<)|\bts_ms\s+BETWEEN\b|(?:>=|<=|>|<)\s*(?:\w+\.)?ts_ms\b",
+    re.IGNORECASE)
+
+
+def _code_strings(path: Path):
+    """Every string literal in a module except docstrings (prose, not SQL)."""
+    tree = ast.parse(path.read_text())
+    docs = {id(n.body[0].value) for n in ast.walk(tree)
+            if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.body and isinstance(n.body[0], ast.Expr)
+            and isinstance(n.body[0].value, ast.Constant)}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docs:
+            yield n.value
+
+
+def test_the_ts_ms_window_guard_catches_every_form():
+    for bad in ("ts_ms >= $1", "s.ts_ms<$2", "ts_ms BETWEEN $1 AND $2", "$1 <= ts_ms",
+                "%s > s.ts_ms", "ts_ms < :hi", "WHERE ts_ms >= "):
+        assert _WINDOW_ON_TS_MS.search(bad), bad
+    for ok in ("(ts_ms / 15000) * 15000", "ORDER BY ts_ms", "SELECT s.ts_ms FROM samples s",
+               "ts >= to_timestamp($1::double precision / 1000.0)"):
+        assert not _WINDOW_ON_TS_MS.search(ok), ok
 
 
 def test_windowed_queries_filter_on_ts_only():
     """SRV-28: a window is expressed on ts alone. ts is ts_ms at ms precision, so a second
     ts_ms predicate adds nothing but an estimate the planner multiplies in as if it were
     independent (measured 47x too low), and a window on ts_ms ALONE would scan every
-    partition."""
-    for module in (q, ru):
-        assert not _WINDOW_ON_TS_MS.findall(inspect.getsource(module)), module.__name__
+    partition. Checks the SQL in every module under app/."""
+    modules = sorted(Path(app_pkg.__file__).parent.rglob("*.py"))
+    assert len(modules) > 10
+    for path in modules:
+        hits = [m.group(0) for s in _code_strings(path) for m in _WINDOW_ON_TS_MS.finditer(s)]
+        assert not hits, (str(path), hits)
 
 
 async def test_track_window_is_half_open_to_the_millisecond(app):
