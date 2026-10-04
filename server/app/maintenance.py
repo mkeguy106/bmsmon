@@ -43,9 +43,7 @@ async def run_maintenance(pool, now_ms: int | None = None) -> dict[str, object]:
     if report["registry"]:
         logger.warning("maintenance: registered %d pack address(es) that had samples but no "
                        "registry row", report["registry"])
-    if report["indexes"]:
-        logger.info("maintenance: built and attached %d index partition(s): %s",
-                    len(report["indexes"]), ", ".join(report["indexes"]))
+    # Each attached index partition is logged by online_index as it lands.
     return report
 
 

@@ -229,42 +229,72 @@ async def test_a_build_behind_a_long_reader_gives_up_and_the_next_pass_repairs_i
             await _drop_test_indexes(conn)
 
 
-async def test_attach_gives_up_fast_behind_a_reader_of_the_partition(app):
+async def test_an_attach_behind_a_reader_gives_up_fast_and_the_pass_moves_on(app, caplog):
     """ATTACH locks the child index ACCESS EXCLUSIVE, and every insert into the partition
     locks that index too: an ATTACH left waiting behind a reader would queue ingest behind
-    it. It gives up after ATTACH_LOCK_TIMEOUT, and the next pass attaches the child it
-    already built (no rebuild)."""
-    part = _current_partition()
-    child = child_index_name(PARENT, part)
+    it. It gives up after ATTACH_LOCK_TIMEOUT, is logged, and the pass still attaches the
+    later partitions. The next pass attaches the child it already built (no rebuild)."""
+    caplog.set_level(logging.INFO, logger="app.db.online_index")
     async with app.state.pool.acquire() as conn:
         await _drop_test_indexes(conn)
-        await conn.execute(f'CREATE INDEX "{child}" ON "{part}" (address)')  # built, unattached
+        partitions = sorted(await _partitions(conn))
+        assert len(partitions) >= 2
+        blocked = partitions[0]  # the first one the pass reaches
+        child = child_index_name(PARENT, blocked)
+        # Every child is built but unattached, so the pass goes straight to the ATTACHes (a
+        # build would first wait out the reader's snapshot: BUILD_LOCK_TIMEOUT).
+        for part in partitions:
+            await conn.execute(f'CREATE INDEX "{child_index_name(PARENT, part)}" ON "{part}" (address)')
         built = await conn.fetchval("SELECT to_regclass($1)::oid", child)
         await _declare(conn)
         try:
-            # Every other partition is already done, so the pass goes straight to the ATTACH
-            # (a build would first wait out the reader's snapshot: BUILD_LOCK_TIMEOUT).
-            for other in await _partitions(conn) - {part}:
-                await conn.execute(f'CREATE INDEX "{child_index_name(PARENT, other)}" '
-                                   f'ON "{other}" (address)')
-                await conn.execute(f'ALTER INDEX {PARENT} ATTACH PARTITION '
-                                   f'"{child_index_name(PARENT, other)}"')
             reader = await asyncpg.connect(settings.database_url)
             tx = reader.transaction()
             await tx.start()
             # Planning a query on the partition takes ACCESS SHARE on each of its indexes.
-            await reader.fetch(f'SELECT 1 FROM "{part}" WHERE address = $1', A)
+            await reader.fetch(f'SELECT 1 FROM "{blocked}" WHERE address = $1', A)
             try:
                 t0 = time.monotonic()
-                with pytest.raises(asyncpg.exceptions.LockNotAvailableError):
-                    await complete_partitioned_indexes(conn)
+                done = await complete_partitioned_indexes(conn)
                 assert time.monotonic() - t0 < 5
             finally:
                 await tx.rollback()
                 await reader.close()
+            assert done == [child_index_name(PARENT, p) for p in partitions[1:]]
+            logged = [r.getMessage() for r in caplog.records if r.name == "app.db.online_index"]
+            assert f"maintenance: attaching index {child} gave up on a lock wait; the next pass " \
+                   "retries" in logged
+            assert all(f"maintenance: attached the already-built index {c}" in logged for c in done)
             assert await complete_partitioned_indexes(conn) == [child]
-            assert (await _attached(conn))[part] == child
+            assert (await _attached(conn))[blocked] == child
             assert await conn.fetchval("SELECT to_regclass($1)::oid", child) == built
+        finally:
+            await _drop_test_indexes(conn)
+
+
+async def test_only_a_definition_mismatch_rebuilds_a_same_named_child(app, monkeypatch):
+    """Rebuilding drops the same-named index first, so only ATTACH's "definitions do not
+    match" may lead there. Any other refusal of the same SQLSTATE fails the step loudly and
+    leaves the index alone. (PG16 raises this class for ATTACH only on a mismatch or a
+    constraint index, so the other refusal is simulated.)"""
+    part = _current_partition()
+    child = child_index_name(PARENT, part)
+
+    async def refused(conn, parent_index, c):
+        raise asyncpg.exceptions.InvalidObjectDefinitionError("cannot attach index")
+
+    async with app.state.pool.acquire() as conn:
+        await _drop_test_indexes(conn)
+        await conn.execute(f'CREATE INDEX "{child}" ON "{part}" (address)')
+        oid = await conn.fetchval("SELECT to_regclass($1)::oid", child)
+        await _declare(conn)
+        monkeypatch.setattr(online_index, "_attach", refused)
+        monkeypatch.setattr(online_index, "_PENDING", f"SELECT '{part}'::text AS partition "
+                            "WHERE $1::text IS NOT NULL AND $2::text IS NOT NULL")
+        try:
+            with pytest.raises(asyncpg.exceptions.InvalidObjectDefinitionError):
+                await complete_partitioned_indexes(conn)
+            assert await conn.fetchval("SELECT to_regclass($1)::oid", child) == oid
         finally:
             await _drop_test_indexes(conn)
 

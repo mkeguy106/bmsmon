@@ -14,12 +14,15 @@ Partitioned index names must start with "samples_". A child this module builds i
 samples_2026_10_charging_idx. (Postgres names the children of partitions created after the
 declaration itself; nothing here depends on a child's name once it is attached.)
 """
+import logging
 import re
 
 import asyncpg
 
 from app.db.partitions import PARTITION_LOCK_TIMEOUT
 from app.db.pool import MAINTENANCE_TIMEOUT_S
+
+logger = logging.getLogger(__name__)
 
 TABLE = "samples"
 _ON_ONLY = re.compile(r"^CREATE INDEX \S+ ON ONLY \S+ (USING .+)$")
@@ -34,6 +37,10 @@ BUILD_LOCK_TIMEOUT = "60s"
 # behind it. It gives up as fast as partition DDL does; the next pass attaches the child
 # that is already built.
 ATTACH_LOCK_TIMEOUT = PARTITION_LOCK_TIMEOUT
+# ATTACH's InvalidObjectDefinitionError detail when the child is a compatible index on the
+# right partition but its definition differs. Only then is a same-named child rebuilt; any
+# other reason (an index on another table, one attached elsewhere) is not ours to drop.
+DEFINITION_MISMATCH = "The index definitions do not match."
 
 _INVALID_PARENTS = """
 SELECT c.relname
@@ -71,16 +78,26 @@ async def _concurrently(conn: asyncpg.Connection, sql: str) -> None:
         await conn.execute("SELECT set_config('lock_timeout', $1, false)", previous)
 
 
-async def _attach(conn: asyncpg.Connection, parent_index: str, child: str) -> None:
-    async with conn.transaction():
-        await conn.execute(f"SET LOCAL lock_timeout = '{ATTACH_LOCK_TIMEOUT}'")
-        await conn.execute(f'ALTER INDEX "{parent_index}" ATTACH PARTITION "{child}"')
+async def _attach(conn: asyncpg.Connection, parent_index: str, child: str) -> bool:
+    """ATTACH under ATTACH_LOCK_TIMEOUT. False (logged) when the lock wait gave up: the
+    child stays built, and the next pass attaches it without a rebuild."""
+    try:
+        async with conn.transaction():
+            await conn.execute(f"SET LOCAL lock_timeout = '{ATTACH_LOCK_TIMEOUT}'")
+            await conn.execute(f'ALTER INDEX "{parent_index}" ATTACH PARTITION "{child}"')
+    except asyncpg.exceptions.LockNotAvailableError:
+        logger.warning("maintenance: attaching index %s gave up on a lock wait; the next pass "
+                       "retries", child)
+        return False
+    return True
 
 
 async def complete_partitioned_index(conn: asyncpg.Connection, parent_index: str) -> list[str]:
     """Build and attach the missing per-partition children of one ON ONLY parent index.
     Must run outside a transaction (CREATE INDEX CONCURRENTLY). Returns the children this
-    call attached. Raises LockNotAvailableError when a wait outlasts its lock timeout; the
+    call attached, and logs each one as it is attached. An ATTACH that gives up on its lock
+    wait is logged and the pass moves on to the next partition. A build or drop that gives
+    up raises LockNotAvailableError (its wait is the same for every partition); the
     children attached so far stay attached, and the next call carries on."""
     indexdef = await conn.fetchval("SELECT pg_get_indexdef($1::regclass)", parent_index)
     m = _ON_ONLY.match(indexdef or "")
@@ -95,17 +112,23 @@ async def complete_partitioned_index(conn: asyncpg.Connection, parent_index: str
             "SELECT x.indisvalid FROM pg_index x WHERE x.indexrelid = to_regclass($1)", child)
         if valid is True:
             try:
-                await _attach(conn, parent_index, child)
-                attached.append(child)
+                if await _attach(conn, parent_index, child):
+                    attached.append(child)
+                    logger.info("maintenance: attached the already-built index %s", child)
                 continue
-            except asyncpg.exceptions.InvalidObjectDefinitionError:
-                valid = False  # same name, different definition: rebuild it
+            except asyncpg.exceptions.InvalidObjectDefinitionError as e:
+                if e.detail != DEFINITION_MISMATCH:
+                    raise  # not a definition mismatch: never drop an index that isn't ours
+                logger.warning("maintenance: index %s does not match %s; rebuilding it",
+                               child, parent_index)
+                valid = False
         if valid is False:
             # An interrupted CONCURRENTLY build leaves an INVALID index under this name.
             await _concurrently(conn, f'DROP INDEX CONCURRENTLY IF EXISTS "{child}"')
         await _concurrently(conn, f'CREATE INDEX CONCURRENTLY "{child}" ON "{partition}" {using}')
-        await _attach(conn, parent_index, child)
-        attached.append(child)
+        if await _attach(conn, parent_index, child):
+            attached.append(child)
+            logger.info("maintenance: built and attached index %s", child)
     return attached
 
 

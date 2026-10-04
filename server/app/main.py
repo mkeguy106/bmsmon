@@ -5,17 +5,16 @@ import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-import asyncpg
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import CARTO_KEY_ENV, parse_carto_key, settings
-from app.db.partitions import precreate_partitions
+from app.db.partitions import PRECREATE_AHEAD_MS, precreate_partitions
 from app.db.pool import create_pool
 from app.db.queries import scrub_expired_gps
 from app.db.rollup import run_rollup_pass
-from app.maintenance import MAINTENANCE_INITIAL_DELAY_S, maintenance_loop
+from app.maintenance import maintenance_loop
 from app.routers import api_device, api_widget, health, share, web, ws
 
 logger = logging.getLogger(__name__)
@@ -166,13 +165,10 @@ class CachedStaticFiles(StaticFiles):
 async def lifespan(app: FastAPI):
     app.state.pool = await create_pool()
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    month = 31 * 24 * 3600 * 1000
     async with app.state.pool.acquire() as conn:
-        try:
-            await precreate_partitions(conn, now_ms - month, now_ms + month)
-        except asyncpg.exceptions.LockNotAvailableError:
-            logger.warning("startup: partition pre-create gave up on a lock wait; the "
-                           "maintenance pass retries in %d s", MAINTENANCE_INITIAL_DELAY_S)
+        # A month that gives up on a lock wait is logged and skipped, never fails the boot;
+        # the maintenance pass retries it (maintenance.MAINTENANCE_INITIAL_DELAY_S).
+        await precreate_partitions(conn, now_ms - PRECREATE_AHEAD_MS, now_ms + PRECREATE_AHEAD_MS)
     tasks = [asyncio.create_task(_rollup_loop(app.state.pool)),
              asyncio.create_task(maintenance_loop(app.state.pool))]
     # GPS retention (SEC-12): skipped entirely when disabled (retention <= 0).

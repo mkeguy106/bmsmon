@@ -87,17 +87,18 @@ async def test_precreate_refuses_to_run_inside_a_transaction(app):
                 await precreate_partitions(conn, _ms(2031, 7), _ms(2031, 7))
 
 
-async def test_precreate_gives_up_fast_behind_a_long_reader(app):
+async def test_precreate_gives_up_fast_behind_a_long_reader(app, caplog):
+    caplog.set_level(logging.WARNING, logger="app.db.partitions")
     async with app.state.pool.acquire() as conn:
         await _drop(conn, "samples_2031_09")
     holder, tx = await _long_reader()
     try:
         async with app.state.pool.acquire() as conn:
             t0 = time.monotonic()
-            with pytest.raises(asyncpg.exceptions.LockNotAvailableError):
-                await precreate_partitions(conn, _ms(2031, 9), _ms(2031, 9))
+            assert await precreate_partitions(conn, _ms(2031, 9), _ms(2031, 9)) == []
             assert time.monotonic() - t0 < 5
             assert (2031, 9) not in parts._ensured
+            assert "samples_2031_09 gave up on a lock wait" in caplog.text
     finally:
         await tx.rollback()
         await holder.close()
@@ -106,6 +107,105 @@ async def test_precreate_gives_up_fast_behind_a_long_reader(app):
             assert await precreate_partitions(conn, _ms(2031, 9), _ms(2031, 9)) == ["samples_2031_09"]
         finally:
             await _drop(conn, "samples_2031_09")
+
+
+class _BusyFor:
+    """A connection on which the CREATE of one named partition gives up on its lock wait."""
+
+    def __init__(self, real, name: str) -> None:
+        self.real, self.name = real, name
+
+    def __getattr__(self, attr):
+        return getattr(self.real, attr)
+
+    async def execute(self, sql, *args, **kwargs):
+        if sql.startswith(f"CREATE TABLE IF NOT EXISTS {self.name} "):
+            raise asyncpg.exceptions.LockNotAvailableError("canceling statement due to lock timeout")
+        return await self.real.execute(sql, *args, **kwargs)
+
+
+async def test_precreate_carries_on_past_a_month_that_gave_up(app, caplog):
+    caplog.set_level(logging.WARNING, logger="app.db.partitions")
+    async with app.state.pool.acquire() as conn:
+        await _drop(conn, "samples_2032_01", "samples_2032_02")
+        try:
+            span = (_ms(2032, 1), _ms(2032, 1) + PRECREATE_AHEAD_MS)
+            busy = _BusyFor(conn, "samples_2032_01")
+            assert await precreate_partitions(busy, *span) == ["samples_2032_02"]
+            assert [r.getMessage() for r in caplog.records if r.name == "app.db.partitions"] == [
+                "partition pre-create: samples_2032_01 gave up on a lock wait; the next pass retries"]
+            assert (2032, 1) not in parts._ensured
+            assert await precreate_partitions(conn, *span) == ["samples_2032_01"]
+        finally:
+            await _drop(conn, "samples_2032_01", "samples_2032_02")
+
+
+async def test_ensure_partition_outside_a_transaction_also_gives_up_fast(app):
+    async with app.state.pool.acquire() as conn:
+        await _drop(conn, "samples_2031_10")
+    holder, tx = await _long_reader()
+    try:
+        async with app.state.pool.acquire() as conn:
+            t0 = time.monotonic()
+            with pytest.raises(asyncpg.exceptions.LockNotAvailableError):
+                await ensure_partition(conn, 2031, 10)
+            assert time.monotonic() - t0 < 5
+            assert (2031, 10) not in parts._ensured
+    finally:
+        await tx.rollback()
+        await holder.close()
+        reset_ensured_months()
+
+
+async def test_a_boot_behind_a_long_reader_starts_and_leaves_the_month_to_the_pass(caplog):
+    """The boot's own pre-create gives up on the lock wait like the pass does: the API
+    still starts, and the month is logged for the maintenance pass to create."""
+    caplog.set_level(logging.WARNING, logger="app.db.partitions")
+    nxt = next_month_partition_name(int(time.time() * 1000))
+    conn = await asyncpg.connect(settings.database_url)
+    try:
+        await _drop(conn, nxt)
+        holder, tx = await _long_reader()
+        try:
+            application = create_app()
+            t0 = time.monotonic()
+            async with application.router.lifespan_context(application):
+                assert time.monotonic() - t0 < 5
+        finally:
+            await tx.rollback()
+            await holder.close()
+        assert f"partition pre-create: {nxt} gave up on a lock wait" in caplog.text
+        assert await conn.fetchval("SELECT to_regclass($1)", nxt) is None
+    finally:
+        reset_ensured_months()
+        now = int(time.time() * 1000)
+        await precreate_partitions(conn, now, now + PRECREATE_AHEAD_MS)
+        await conn.close()
+
+
+async def test_the_maintenance_loop_survives_a_failed_pass(monkeypatch, caplog):
+    calls: list[object] = []
+    again = asyncio.Event()
+
+    async def flaky(pool):
+        calls.append(pool)
+        if len(calls) == 1:
+            raise ConnectionRefusedError("the database is down")  # pool.acquire failing
+        again.set()
+        return {}
+
+    monkeypatch.setattr(maintenance, "run_maintenance", flaky)
+    monkeypatch.setattr(maintenance, "MAINTENANCE_INITIAL_DELAY_S", 0)
+    monkeypatch.setattr(maintenance, "MAINTENANCE_INTERVAL_S", 0)
+    caplog.set_level(logging.ERROR, logger="app.maintenance")
+    loop = asyncio.create_task(maintenance.maintenance_loop("pool"))
+    try:
+        await asyncio.wait_for(again.wait(), 5)
+    finally:
+        loop.cancel()
+        await asyncio.gather(loop, return_exceptions=True)
+    assert len(calls) >= 2
+    assert "maintenance pass failed" in caplog.text
 
 
 async def test_in_request_partition_ddl_has_a_short_lock_timeout(app):
