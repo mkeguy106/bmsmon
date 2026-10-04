@@ -98,6 +98,13 @@ class TelemetryReporter(
     // (nextSigningOffsetMs). Shared by every stream; memory only. Never applied to a sample's time.
     @Volatile private var signingOffsetMs = 0L
     @Volatile private var lastAuthLog: String? = null
+    // Vouches for this phone's clock before a correction may start (a phone running ahead must
+    // never be "corrected" into uploading future-dated samples).
+    private val independentClock = IndependentClock(appContext)
+
+    /** Whose clock the last time-rejected sign-in blamed (nextClockBlame); null once uploads succeed. */
+    @Volatile internal var clockBlame: ClockBlame? = null
+        private set
 
     init {
         // Keep the settings snapshot fresh. DataStore emits the current value on collect, so the
@@ -267,23 +274,34 @@ class TelemetryReporter(
     }
 
     /**
-     * Fold one response into the shared signing correction ([nextSigningOffsetMs]), and log a rejected
-     * sign-in once per distinct reason. Synchronized: the import and the upload loop both report here.
+     * Fold one response into the shared signing correction ([nextSigningOffsetMs]) and the clock blame
+     * ([nextClockBlame]), and log a rejected sign-in once per distinct reason. The independent clock is
+     * read at most once, and only when a rule needs it. Synchronized: the import and the upload loop
+     * both report here.
      */
     @Synchronized
     private fun noteOutcome(o: PostOutcome) {
+        val phoneClockErr by lazy(LazyThreadSafetyMode.NONE) { independentClock.measurePhoneClockErrorMs() }
         val prevOffsetMs = signingOffsetMs
-        signingOffsetMs = nextSigningOffsetMs(prevOffsetMs, o)
+        signingOffsetMs = nextSigningOffsetMs(prevOffsetMs, o) { phoneClockErr }
+        val blame = nextClockBlame(clockBlame, o) { phoneClockErr }
+        clockBlame = blame
         if (o.result == PostResult.AuthFailed) {
-            val key = "${o.code}|${o.fromApi}|${o.authReason}|${o.detail}|${signingOffsetMs / 1000}"
+            val key = "${o.code}|${o.fromApi}|${o.authReason}|${o.detail}|$blame|${signingOffsetMs / 1000}"
             if (key != lastAuthLog) {
                 lastAuthLog = key
+                val blameText = when (blame) {
+                    ClockBlame.SERVER -> "; an independent clock agrees with this phone: the server's clock is off"
+                    ClockBlame.PHONE -> "; this phone's clock looks off against an independent clock: not correcting"
+                    ClockBlame.UNKNOWN -> "; no independent clock to tell which is off: not correcting"
+                    null -> ""
+                }
                 Log.w(
                     TAG,
                     "upload: HTTP ${o.code} from ${if (o.fromApi) "the api" else "an intermediary"}: " +
                         "${o.authReason ?: "-"} (${o.detail ?: "-"}); " +
-                        "server clock minus phone clock ${o.skewMs?.let { "${it / 1000} s" } ?: "unknown"}; " +
-                        "signing correction now ${signingOffsetMs / 1000} s",
+                        "server clock minus phone clock ${o.skewMs?.let { "${it / 1000} s" } ?: "unknown"}" +
+                        "$blameText; signing correction now ${signingOffsetMs / 1000} s",
                 )
             }
         } else if (o.result == PostResult.Ok) {
