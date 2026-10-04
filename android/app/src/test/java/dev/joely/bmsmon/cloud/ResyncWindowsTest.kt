@@ -14,9 +14,9 @@ class ResyncWindowsTest {
 
     @Test fun theCodecRoundTripsAndNeverThrows() {
         val s = state(ResyncWindow(now - 5_000, now - 1_000, notBeforeMs = 7, afterTs = now - 3_000, afterId = 9))
-        assertEquals(s, decodeResync(encodeResync(s)))
-        assertEquals(ResyncState(), decodeResync(null))
-        assertEquals(ResyncState(), decodeResync("{not json"))
+        assertEquals(s, decodeResync(encodeResync(s), now))
+        assertEquals(ResyncState(), decodeResync(null, now))
+        assertEquals(ResyncState(), decodeResync("{not json", now))
     }
 
     @Test fun overlappingOrNearlyTouchingWindowsMergeAndDistantOnesDoNot() {
@@ -102,5 +102,56 @@ class ResyncWindowsTest {
             ResyncWindow(now - 7_000, now - 7_000, notBeforeMs = now + 1),
         )
         assertEquals(ResyncSummary(pending = 1, parked = 1, fromMs = now - 8_500), resyncSummary(s, now))
+    }
+
+    @Test fun capPressureMergesSameKindFirstSoAParkedRowCannotParkAReadyWindow() {
+        val ready = ResyncWindow(now - 100_000_000, now - 1_000)
+        val parked = ResyncWindow(now - 50_000_000, now - 50_000_000, notBeforeMs = now + RESYNC_PARK_MS)
+        val s = addResyncWindow(state(ready, parked), ResyncWindow(now - 200_000_000, now - 190_000_000), now, maxWindows = 2)
+        assertEquals(2, s.windows.size)
+        assertEquals(1, s.windows.count { it.isParked(now) })
+        assertEquals(now - 200_000_000, nextEligibleWindow(s, now)!!.fromMs)
+        assertTrue(nextEligibleWindow(s, now)!!.toMs >= now - 1_000)
+    }
+
+    @Test fun anElapsedParkCountsAsReadyAndMergesWithReadyWindows() {
+        val elapsed = ResyncWindow(now - 9_000, now - 9_000, notBeforeMs = now - 1)
+        assertEquals(1, add(state(ResyncWindow(now - 10_000, now - 1_000)), elapsed).windows.size)
+        assertEquals(elapsed, nextEligibleWindow(state(elapsed), now))
+    }
+
+    @Test fun decodingNormalisesAValidButMessyState() {
+        val messy = ResyncState(
+            listOf(
+                ResyncWindow(now - 1_000, now - 500),
+                ResyncWindow(now - 900_000, now - 800_000),
+                ResyncWindow(now - 100, now - 200),   // reversed
+                ResyncWindow(-5, 10),                // negative
+            ),
+        )
+        val s = decodeResync(encodeResync(messy), now)
+        assertEquals(listOf(ResyncWindow(now - 900_000, now - 800_000), ResyncWindow(now - 1_000, now - 500)), s.windows)
+    }
+
+    @Test fun decodingCapsAnOversizedState() {
+        val many = ResyncState((0 until 50).map { ResyncWindow(now - (it + 1) * 3_600_000L, now - (it + 1) * 3_600_000L + 1_000) })
+        assertEquals(RESYNC_MAX_WINDOWS, decodeResync(encodeResync(many), now).windows.size)
+    }
+
+    @Test fun theNextEligibleWindowIgnoresExpiredOnes() {
+        val expired = ResyncWindow(0L, now - (SAMPLE_RETENTION_DAYS + 1) * day)
+        assertNull(nextEligibleWindow(state(expired), now))
+    }
+
+    @Test fun completingDropsTheWindowButIsANoOpIfItChanged() {
+        val w = ResyncWindow(now - 9_000, now - 1_000)
+        assertEquals(ResyncState(), completeResync(state(w), w))
+        val changed = state(w.copy(afterTs = now - 5_000, afterId = 1))
+        assertEquals(changed, completeResync(changed, w))
+    }
+
+    @Test fun aPageEndingPastTheWindowCompletesItInsteadOfLeavingTheCursorBeyondTheEnd() {
+        val w = ResyncWindow(now - 9_000, now - 1_000)
+        assertEquals(ResyncState(), advanceResync(state(w), w, afterTs = now - 500, afterId = 3, exhausted = false))
     }
 }

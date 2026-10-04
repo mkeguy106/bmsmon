@@ -26,7 +26,7 @@ internal const val RESYNC_PARK_MS = 6 * 60 * 60_000L
 /**
  * Samples with [fromMs] <= tsMs <= [toMs] still to send. ([afterTs], [afterId]) is the keyset cursor
  * in (tsMs, id) order: everything at or before it was sent; null = nothing yet. A window whose
- * [notBeforeMs] is in the future waits ("parked").
+ * [notBeforeMs] is after "now" waits ("parked", see [isParked]).
  */
 @Serializable
 internal data class ResyncWindow(
@@ -37,7 +37,9 @@ internal data class ResyncWindow(
     val afterId: Long = -1L,
 ) {
     val cursorTs: Long get() = afterTs ?: fromMs
-    val parked: Boolean get() = notBeforeMs > 0L
+
+    /** Parked iff its wait is still in the future; an elapsed park is ready like any other window. */
+    fun isParked(nowMs: Long): Boolean = notBeforeMs > nowMs
 }
 
 @Serializable
@@ -50,9 +52,20 @@ private val codec = Json { ignoreUnknownKeys = true }
 
 internal fun encodeResync(s: ResyncState): String = codec.encodeToString(ResyncState.serializer(), s)
 
-/** A missing or unreadable blob is an empty state, never a crash — the samples are still in Room. */
-internal fun decodeResync(json: String?): ResyncState =
-    json?.let { runCatching { codec.decodeFromString(ResyncState.serializer(), it) }.getOrNull() } ?: ResyncState()
+/**
+ * A missing or unreadable blob is an empty state, never a crash — the samples are still in Room. A
+ * readable one is normalised: malformed windows (reversed or negative) are dropped and the rest are
+ * folded in through [addResyncWindow], so the result is sorted, merged and capped.
+ */
+internal fun decodeResync(json: String?, nowMs: Long): ResyncState {
+    val raw = json?.let { runCatching { codec.decodeFromString(ResyncState.serializer(), it) }.getOrNull() }
+        ?: return ResyncState()
+    return runCatching {
+        raw.windows
+            .filter { it.fromMs >= 0 && it.toMs >= it.fromMs && it.notBeforeMs >= 0 && it.afterId >= -1 }
+            .fold(ResyncState()) { acc, w -> addResyncWindow(acc, w, nowMs) }
+    }.getOrDefault(ResyncState())
+}
 
 /** The one-shot history import as a window: everything in local history up to now. */
 internal fun importWindow(nowMs: Long) = ResyncWindow(fromMs = 0L, toMs = nowMs)
@@ -98,14 +111,18 @@ internal fun addResyncWindow(
     var cur = if (w.toMs >= w.fromMs) w else w.copy(fromMs = w.toMs, toMs = w.fromMs, afterTs = null, afterId = -1L)
     val list = pruneExpired(s.windows, nowMs).toMutableList()
     while (true) {
-        val i = list.indexOfFirst { it.parked == cur.parked && touches(it, cur) }
+        val i = list.indexOfFirst { it.isParked(nowMs) == cur.isParked(nowMs) && touches(it, cur) }
         if (i < 0) break
         cur = union(list.removeAt(i), cur)
     }
     list += cur
     list.sortWith(compareBy<ResyncWindow>({ it.fromMs }, { it.toMs }))
     while (list.size > maxWindows) {
-        val i = (0 until list.size - 1).minByOrNull { list[it + 1].fromMs - list[it].toMs } ?: break
+        // Closest adjacent pair of the same kind first, so a parked row nested in a ready window
+        // can't park that window; only with no such pair does any pair merge (max(notBefore) delays).
+        val pairs = 0 until list.size - 1
+        val sameKind = pairs.filter { list[it].isParked(nowMs) == list[it + 1].isParked(nowMs) }
+        val i = (sameKind.ifEmpty { pairs.toList() }).minByOrNull { list[it + 1].fromMs - list[it].toMs } ?: break
         list[i] = union(list[i], list[i + 1])
         list.removeAt(i + 1)
     }
@@ -114,7 +131,7 @@ internal fun addResyncWindow(
 
 /** The first window that may be sent now (windows are kept sorted by fromMs). */
 internal fun nextEligibleWindow(s: ResyncState, nowMs: Long): ResyncWindow? =
-    pruneExpired(s.windows, nowMs).firstOrNull { it.notBeforeMs <= nowMs }
+    pruneExpired(s.windows, nowMs).firstOrNull { !it.isParked(nowMs) }
 
 /**
  * Move [expected]'s cursor past a page that ended at ([afterTs], [afterId]); [exhausted] (a short
@@ -145,12 +162,14 @@ internal fun completeResync(s: ResyncState, expected: ResyncWindow): ResyncState
  * sample in its own window, retried after [RESYNC_PARK_MS] until Room ages it out.
  */
 internal fun parkResyncRow(s: ResyncState, expected: ResyncWindow, tsMs: Long, id: Long, nowMs: Long): ResyncState {
-    val advanced = advanceResync(s, expected, tsMs, id, exhausted = false)
+    // A window that is itself a parked single row is replaced, not advanced past itself.
+    val wasParkedRow = expected.notBeforeMs > 0L && expected.fromMs == tsMs && expected.toMs == tsMs
+    val advanced = if (wasParkedRow) completeResync(s, expected) else advanceResync(s, expected, tsMs, id, exhausted = false)
     return addResyncWindow(advanced, ResyncWindow(tsMs, tsMs, notBeforeMs = nowMs + RESYNC_PARK_MS), nowMs)
 }
 
 internal fun resyncSummary(s: ResyncState, nowMs: Long): ResyncSummary {
     val live = pruneExpired(s.windows, nowMs)
-    val ready = live.filter { it.notBeforeMs <= nowMs }
+    val ready = live.filter { !it.isParked(nowMs) }
     return ResyncSummary(pending = ready.size, parked = live.size - ready.size, fromMs = ready.firstOrNull()?.cursorTs)
 }
