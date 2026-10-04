@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import asyncpg
 
 from app.db.partitions import ensure_partitions_for_range
+from app.db.pool import MAINTENANCE_TIMEOUT_S
 from app.db.rollup import ROLLUP_BUCKET_MS, get_high_water_ms
 
 _COLS = ["state", "soc", "current_a", "power_w", "voltage_v", "temp_c", "mosfet_temp_c",
@@ -271,6 +272,7 @@ async def scrub_expired_gps(conn, retention_days: int) -> int:
            WHERE ts < now() - ($1 * interval '1 day')
              AND (lat IS NOT NULL OR lon IS NOT NULL OR gps_accuracy_m IS NOT NULL)""",
         float(retention_days),
+        timeout=MAINTENANCE_TIMEOUT_S,
     )
     return int(status.rsplit(" ", 1)[-1])  # asyncpg status tag, e.g. "UPDATE 3"
 

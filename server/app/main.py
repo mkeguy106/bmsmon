@@ -5,15 +5,17 @@ import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
+import asyncpg
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import CARTO_KEY_ENV, parse_carto_key, settings
-from app.db.partitions import ensure_partitions_for_range
+from app.db.partitions import precreate_partitions
 from app.db.pool import create_pool
 from app.db.queries import scrub_expired_gps
 from app.db.rollup import run_rollup_pass
+from app.maintenance import MAINTENANCE_INITIAL_DELAY_S, maintenance_loop
 from app.routers import api_device, api_widget, share, web, ws
 
 logger = logging.getLogger(__name__)
@@ -166,9 +168,14 @@ async def lifespan(app: FastAPI):
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     month = 31 * 24 * 3600 * 1000
     async with app.state.pool.acquire() as conn:
-        await ensure_partitions_for_range(conn, now_ms - month, now_ms + month)
+        try:
+            await precreate_partitions(conn, now_ms - month, now_ms + month)
+        except asyncpg.exceptions.LockNotAvailableError:
+            logger.warning("startup: partition pre-create gave up on a lock wait; the "
+                           "maintenance pass retries in %d s", MAINTENANCE_INITIAL_DELAY_S)
+    tasks = [asyncio.create_task(_rollup_loop(app.state.pool)),
+             asyncio.create_task(maintenance_loop(app.state.pool))]
     # GPS retention (SEC-12): skipped entirely when disabled (retention <= 0).
-    tasks = [asyncio.create_task(_rollup_loop(app.state.pool))]
     if settings.gps_retention_days > 0:
         tasks.append(asyncio.create_task(_gps_scrub_loop(app.state.pool)))
     try:

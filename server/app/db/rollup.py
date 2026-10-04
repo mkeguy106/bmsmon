@@ -32,6 +32,8 @@ from datetime import datetime, timezone
 
 import asyncpg
 
+from app.db.pool import MAINTENANCE_TIMEOUT_S
+
 ROLLUP_BUCKET_MS = 1_800_000            # 30 min — must match queries.HISTORY_BUCKET_MS
 ROLLUP_SAFETY_LAG_MS = 5 * 60_000       # only roll buckets whose end is >= this far past
 ROLLUP_REROLL_MS = 48 * 3_600_000       # trailing window re-upserted every pass
@@ -119,7 +121,8 @@ async def run_rollup_pass(conn: asyncpg.Connection, now_ms: int | None = None) -
         # Fresh mark: backfill from the true first sample. min(ts_ms) is a full scan,
         # but it runs exactly once, in the background task. An empty DB keeps hw at 0
         # (NOT vacuously advanced) so a later multi-day backlog still backfills fully.
-        first = await conn.fetchval("SELECT min(ts_ms) FROM samples WHERE link_event IS NULL")
+        first = await conn.fetchval("SELECT min(ts_ms) FROM samples WHERE link_event IS NULL",
+                                    timeout=MAINTENANCE_TIMEOUT_S)
         if first is None:
             return 0
         lo = (int(first) // b) * b
@@ -130,7 +133,7 @@ async def run_rollup_pass(conn: asyncpg.Connection, now_ms: int | None = None) -
     total = 0
     for a, c in _month_chunks(lo, target):
         async with conn.transaction():
-            status = await conn.execute(_UPSERT, a, c)
+            status = await conn.execute(_UPSERT, a, c, timeout=MAINTENANCE_TIMEOUT_S)
             total += int(status.rsplit(" ", 1)[-1])  # "INSERT 0 N"
             await _set_high_water_ms(conn, c)
     return total
