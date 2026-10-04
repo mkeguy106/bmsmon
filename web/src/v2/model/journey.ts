@@ -108,7 +108,9 @@ export function tripSummary(points: TrackPoint[], cumMi: number[]): TripSummary 
     durationMin: points.length > 1 ? (points[points.length - 1].t - points[0].t) / 60000 : 0 };
 }
 
-/** Align the base's packs by bucket t; sum power+current, mean coords, min soc → the chair track. */
+/** Align the base's packs by bucket t; sum power+current, mean coords, min soc → the chair track.
+ *  Each bucket records how many packs reported in it (`packs`): the server returns a bucket
+ *  only for a pack that sent GPS samples in it, so a pack out of range leaves its share out. */
 export function mergeBaseTracks(tracks: Track[]): TrackPoint[] {
   const byT = new Map<number, TrackPoint[]>();
   for (const tr of tracks) for (const p of tr.points) {
@@ -129,7 +131,7 @@ export function mergeBaseTracks(tracks: Track[]): TrackPoint[] {
     out.push({ t, lat: mean((p) => p.lat), lon: mean((p) => p.lon),
       power_w: sum((p) => p.power_w), current_a: sum((p) => p.current_a),
       soc: socs.length ? Math.min(...socs) : null,
-      acc: accs.length ? accs.reduce((a, b) => a + b, 0) / accs.length : null });
+      acc: accs.length ? accs.reduce((a, b) => a + b, 0) / accs.length : null, packs: ps.length });
   }
   return out;
 }

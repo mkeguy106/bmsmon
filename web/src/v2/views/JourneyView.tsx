@@ -18,7 +18,7 @@ import { Ago } from "../../components/Ago";
 import { JourneyMap } from "../components/JourneyMap";
 import { EnergyDistanceChart } from "../components/EnergyDistanceChart";
 import { EfficiencyCard } from "../components/EfficiencyCard";
-import { efficiencySummary, projectionLive } from "../model/efficiency";
+import { efficiencySummary, everyPackLive, projectionLive } from "../model/efficiency";
 import { baseView } from "../model/baseView";
 import { Ring } from "../components/Ring";
 import { Segmented } from "../components/Segmented";
@@ -235,6 +235,8 @@ export function JourneyView({ data, base, theme, unit: _unit, mobile, mapMetric,
     charging,
     // No live pack: no projection, matching Command's offline state.
     live: projectionLive(isLive, view),
+    // Today's rate only while every pack is live and in the track (final review C1).
+    packCount: view?.packs.length ?? 0, everyPackLive: everyPackLive(view),
   }), [points, summary.activeMiles, view, charging, isLive]);
 
   const mapHeight = 480;

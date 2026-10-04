@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  outingWh, drainedPct, baseBand, bandStatus, efficiencySummary, projectionLive, MIN_OUTING_MI,
+  outingWh, drainedPct, baseBand, bandStatus, efficiencySummary, everyPackLive, projectionLive,
+  MIN_OUTING_MI,
 } from "./efficiency";
+import { mergeBaseTracks } from "./journey";
 import type { TrackPoint } from "../track";
 import type { RangeParams } from "../../range";
 import type { FleetItem } from "../../types";
@@ -38,6 +40,18 @@ describe("outingWh", () => {
   });
   it("is zero for a single point", () => {
     expect(outingWh([p({ current_a: -20, power_w: -240 })])).toBe(0);
+  });
+  // A series pair carries one current, so a bucket one pack is missing from holds about half
+  // the base's power. Counting it as-is made the outing look cheap, and "miles left at today's
+  // rate" high (final review C1).
+  it("scales a bucket a pack is missing from up to the whole base", () => {
+    const pts = [
+      p({ t: 0, power_w: -240, current_a: -20, packs: 2 }),
+      p({ t: 15 * S, power_w: -240, current_a: -20, packs: 2 }),  // both packs: 1 Wh
+      p({ t: 30 * S, power_w: -120, current_a: -10, packs: 1 }),  // one of two: 0.5 Wh → 1 Wh
+    ];
+    expect(outingWh(pts, 2)).toBeCloseTo(2, 5);
+    expect(outingWh(pts)).toBeCloseTo(1.5, 5);  // no base size given: as merged
   });
 });
 
@@ -80,12 +94,13 @@ describe("bandStatus", () => {
 
 describe("efficiencySummary", () => {
   // Track: 4 buckets @ 240 W discharge over 45 s = 3 Wh; caller supplies the miles.
-  const track = [0, 15, 30, 45].map((s) => p({ t: s * S, power_w: -240, current_a: -20, soc: 90 - s / 15 }));
+  // Merged over both packs of a two-pack base (mergeBaseTracks sets packs).
+  const track = [0, 15, 30, 45].map((s) => p({ t: s * S, power_w: -240, current_a: -20, soc: 90 - s / 15, packs: 2 }));
 
   it("computes base-total cost, band status, and drain on a past day", () => {
     const r = efficiencySummary({
       points: track, activeMiles: 1, packParams: [params({}), params({})],
-      usableWh: 1280, charging: false, live: false,
+      usableWh: 1280, charging: false, live: false, packCount: 2, everyPackLive: true,
     });
     expect(r.wh).toBeCloseTo(3, 5);
     expect(r.costPerMile).toBeCloseTo(3, 5);       // 3 Wh / 1 mi
@@ -100,7 +115,7 @@ describe("efficiencySummary", () => {
   it("gates cost below MIN_OUTING_MI", () => {
     const r = efficiencySummary({
       points: track, activeMiles: MIN_OUTING_MI - 0.01, packParams: [params({})],
-      usableWh: 640, charging: false, live: false,
+      usableWh: 640, charging: false, live: false, packCount: 2, everyPackLive: true,
     });
     expect(r.costPerMile).toBeNull();
     expect(r.status).toBeNull();
@@ -109,7 +124,7 @@ describe("efficiencySummary", () => {
   it("projects miles left from the usable base energy when live and discharging", () => {
     const r = efficiencySummary({
       points: track, activeMiles: 1, packParams: [params({ whPerMile: { lo: 2, hi: 4 } }), params({ whPerMile: { lo: 2, hi: 4 } })],
-      usableWh: 1280, charging: false, live: true,
+      usableWh: 1280, charging: false, live: true, packCount: 2, everyPackLive: true,
     });
     // usable = 2 packs × 50 Ah × 12.8 V = 1280 Wh. today rate = 3 Wh/mi → 426.7 mi.
     expect(r.milesAtTodayRate).toBeCloseTo(1280 / 3, 3);
@@ -120,7 +135,7 @@ describe("efficiencySummary", () => {
   it("suppresses the projection while charging", () => {
     const r = efficiencySummary({
       points: track, activeMiles: 1, packParams: [params({})],
-      usableWh: 640, charging: true, live: true,
+      usableWh: 640, charging: true, live: true, packCount: 2, everyPackLive: true,
     });
     expect(r.milesAtTodayRate).toBeNull();
     expect(r.milesAtUsualRate).toBeNull();
@@ -129,7 +144,7 @@ describe("efficiencySummary", () => {
   it("flags a seed band when any connected pack is unlearned", () => {
     const r = efficiencySummary({
       points: track, activeMiles: 1, packParams: [params({ learnedDays: 5 }), params({ learnedDays: 0 })],
-      usableWh: 1280, charging: false, live: false,
+      usableWh: 1280, charging: false, live: false, packCount: 2, everyPackLive: true,
     });
     expect(r.seed).toBe(true);
   });
@@ -138,7 +153,7 @@ describe("efficiencySummary", () => {
   it("projects 0 miles for an empty base instead of nothing", () => {
     const r = efficiencySummary({
       points: track, activeMiles: 1, packParams: [params({})],
-      usableWh: 0, charging: false, live: true,
+      usableWh: 0, charging: false, live: true, packCount: 2, everyPackLive: true,
     });
     expect(r.milesAtTodayRate).toBe(0);
     expect(r.milesAtUsualRate).toBe(0);
@@ -147,7 +162,7 @@ describe("efficiencySummary", () => {
   it("projects nothing when the usable energy is unknown", () => {
     const r = efficiencySummary({
       points: track, activeMiles: 1, packParams: [params({})],
-      usableWh: null, charging: false, live: true,
+      usableWh: null, charging: false, live: true, packCount: 2, everyPackLive: true,
     });
     expect(r.milesAtTodayRate).toBeNull();
     expect(r.milesAtUsualRate).toBeNull();
@@ -165,10 +180,11 @@ describe("Journey with a pack that reports no capacity", () => {
   const project = (a: number | null, b: number | null, stale: string[] = []) => {
     const view = baseView(groupBases([it2("A", a), it2("B", b)], new Set(stale))[0],
       { rangeParams: new Map(), tempConfig: null });
-    const pts = [0, 15, 30].map((s) => p({ t: s * S, power_w: -240, current_a: -20 }));
+    const pts = [0, 15, 30].map((s) => p({ t: s * S, power_w: -240, current_a: -20, packs: 2 }));
     return { view, eff: efficiencySummary({
       points: pts, activeMiles: 1, packParams: view.packParams, usableWh: view.usableWh,
       charging: view.charging, live: projectionLive(true, view),
+      packCount: view.packs.length, everyPackLive: everyPackLive(view),
     }) };
   };
   it("no-data: no usable energy, no projection, no last-known note", () => {
@@ -196,5 +212,74 @@ describe("Journey with a pack that reports no capacity", () => {
   it("both packs reporting still projects", () => {
     const { eff } = project(55, 55);
     expect(eff.milesAtTodayRate).not.toBeNull();
+  });
+});
+
+// Final review C1: "~X mi left at today's rate" divides the WHOLE base's usable energy (live
+// and last-known packs) by a cost per mile from the merged track, which holds only the packs
+// that sent GPS samples. With a pack out of range the cost read half and the projection 2×
+// high. Today's rate now needs every pack live AND a track that covers every pack.
+describe("today's rate needs every pack live and in the track", () => {
+  const T0 = 10 * 60 * MIN;
+  const item = (address: string, tsMs: number): FleetItem => ({
+    address, group_id: "2012", alias: `2012 · ${address}`, ts_ms: tsMs,
+    soc: 50, remaining_ah: 50, current_a: -10, power_w: -120, temp_c: 22, regen: false,
+  } as FleetItem);
+  // The probe: both packs hold 50 Ah, the outing was 2 mi at a true 60 Wh/mi base (each pack
+  // 120 W over 30 min = 60 Wh, 120 Wh in all).
+  const bucketsOf = (address: string, from: number, to: number) => ({
+    address,
+    points: Array.from({ length: (to - from) / (15 * S) + 1 }, (_, i) =>
+      p({ t: from + i * 15 * S, power_w: -120, current_a: -10 })),
+  });
+  const outing = (bTrack: ReturnType<typeof bucketsOf> | null, bStale: boolean) => {
+    const now = T0 + 30 * MIN;
+    const base = groupBases(
+      [item("A", now), item("B", bStale ? now - 40 * MIN : now)], new Set(bStale ? ["B"] : []))[0];
+    const view = baseView(base, { rangeParams: new Map(), tempConfig: null });
+    const tracks = [bucketsOf("A", T0, T0 + 30 * MIN), ...(bTrack ? [bTrack] : [])];
+    return efficiencySummary({
+      points: mergeBaseTracks(tracks), activeMiles: 2, packParams: view.packParams,
+      usableWh: view.usableWh, charging: view.charging, live: projectionLive(true, view),
+      packCount: view.packs.length, everyPackLive: everyPackLive(view),
+    });
+  };
+
+  it("both packs live and in the track: today's rate from the whole base's cost", () => {
+    const eff = outing(bucketsOf("B", T0, T0 + 30 * MIN), false);
+    expect(eff.costPerMile).toBeCloseTo(60, 5);
+    expect(eff.milesAtTodayRate).toBeCloseTo(1280 / 60, 5);   // ~21 mi
+    expect(eff.todayRateWithheld).toBeNull();
+  });
+
+  it("the reviewer's probe: B stale for 40 min, absent from the track → no today's rate", () => {
+    const eff = outing(null, true);
+    expect(eff.milesAtTodayRate).toBeNull();                  // was ~43 mi, 2× the truth
+    expect(eff.todayRateWithheld).toBe("pack-not-live");
+    expect(eff.milesAtUsualRate).not.toBeNull();             // band-based, may stay
+  });
+
+  it("every pack live but one pack's track is missing (a failed fetch) → no today's rate", () => {
+    const eff = outing(null, false);
+    expect(eff.milesAtTodayRate).toBeNull();
+    expect(eff.todayRateWithheld).toBe("track-incomplete");
+    expect(eff.milesAtUsualRate).not.toBeNull();
+  });
+
+  it("a pack that dropped out mid-outing and came back never raises today's rate", () => {
+    // B reported only for the last 5 min of the 30 min outing.
+    const eff = outing(bucketsOf("B", T0 + 25 * MIN, T0 + 30 * MIN), false);
+    const full = outing(bucketsOf("B", T0, T0 + 30 * MIN), false);
+    expect(eff.milesAtTodayRate).not.toBeNull();
+    expect(eff.milesAtTodayRate!).toBeLessThanOrEqual(full.milesAtTodayRate! + 1e-9);
+  });
+
+  it("a past-day summary carries no withheld reason (there is no projection to withhold)", () => {
+    const past = efficiencySummary({
+      points: mergeBaseTracks([bucketsOf("A", T0, T0 + 30 * MIN)]), activeMiles: 2,
+      packParams: [params({}), params({})], usableWh: 1280, charging: false, live: false,
+      packCount: 2, everyPackLive: false,
+    });
+    expect(past.todayRateWithheld).toBeNull();
   });
 });

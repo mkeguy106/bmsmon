@@ -15,7 +15,9 @@ const FULL_REFRESH_MS = 10 * 60_000;
  *
  * Fetches `getTrack` for each address in parallel, with a per-address `.catch(() => null)`
  * so one failing pack doesn't sink the whole trip. Surviving tracks are combined with
- * `mergeBaseTracks` (align by t, sum power/current, mean coords, min soc). Refetch fires
+ * `mergeBaseTracks` (align by t, sum power/current, mean coords, min soc, packs per bucket);
+ * a track missing a pack then reads as such, and Journey withholds its "today's rate" figure
+ * (efficiency.ts `trackCoversEveryPack`). Refetch fires
  * whenever the address set, window, or `refreshMs` changes (keyed on
  * `addresses.join(",") + ":" + fromMs + ":" + toMs + ":" + refreshMs`). Each such key change
  * also clears `points` to `[]` immediately, before the new fetch resolves, so consumers never
