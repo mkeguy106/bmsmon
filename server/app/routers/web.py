@@ -1,27 +1,30 @@
 import asyncio
 import json
+import logging
 import secrets
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Annotated
 from uuid import UUID
-from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from fastapi.responses import JSONResponse
 
-from app.auth.authentik import AuthUser, current_user, require_admin
 from app.auth.api_key import hash_key as hash_api_key
+from app.auth.authentik import AuthUser, current_user, require_admin
 from app.auth.enroll import generate_code, hash_code
 from app.charge_sessions import detect_charge_sessions
 from app.config import settings
 from app.db import queries as q
 from app.db.pool import get_pool
-from app.routers.api_device import ADDRESS_MAX_LEN
 from app.models import (ApiKeyCreateBody, ApiKeyCreateResponse, MintCodeResponse, NoteBody,
                         OkResponse, ShareCreateBody, ShareCreateResponse)
+from app.routers.api_device import ADDRESS_MAX_LEN
 from app.util import jsonable
 
 router = APIRouter(prefix="/web")
+
+logger = logging.getLogger(__name__)
 
 # SEC-13: /web/track returns GPS history (the same data class as the admin-only, 7-day
 # /web/samples), so its span is bounded. Legit callers (web/src/v2/useTrack.ts via the
@@ -213,6 +216,8 @@ async def restore(device_id: PathUuid, user: AuthUser = Depends(require_admin),
         found = await q.restore_device(conn, device_id)
     if not found:
         raise HTTPException(404, "device not found")
+    # Audit: restoring re-grants the device's existing key its write access.
+    logger.info("device restored: %s by %s", device_id, user.username)
     return {"restored": str(device_id)}
 
 

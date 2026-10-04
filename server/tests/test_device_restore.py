@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 
 from app.db import queries as q
@@ -30,6 +31,15 @@ async def test_restore_clears_revoked_and_changes_nothing_else(app, client):
     assert after["revoked"] is False
     assert bytes(after["public_key_spki"]) == spki
     assert {**after, "revoked": True} == before
+
+
+async def test_restore_is_audit_logged_with_the_admin(app, client, caplog):
+    caplog.set_level(logging.INFO, logger="app.routers.web")
+    _, _, device_id = await _revoked_device(app)
+    r = await client.post(f"/web/devices/{device_id}/restore", headers=ADMIN_H)
+    assert r.status_code == 200
+    assert [r.getMessage() for r in caplog.records if r.name == "app.routers.web"] == [
+        f"device restored: {device_id} by joel"]
 
 
 async def test_restore_of_an_active_device_is_a_harmless_200(app, client):
@@ -69,7 +79,6 @@ async def test_ingest_works_again_after_revoke_then_restore(app, client):
 
 
 async def test_enroll_of_a_revoked_device_says_restore_it(app, client):
-    from app.auth.enroll import hash_code
     from tests.test_enroll import _pub_b64, _seed_code
     await _seed_code(app, "ONE")
     r = await client.post("/api/v1/enroll", json={
@@ -93,11 +102,17 @@ async def test_cli_list_shows_no_key_material(app, capsys):
     assert base64.b64encode(spki).decode() not in out
 
 
-async def test_cli_restore(app, capsys):
+def _audit(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name == "tools.device_admin"]
+
+
+async def test_cli_restore(app, capsys, caplog):
+    caplog.set_level(logging.INFO, logger="tools.device_admin")
     _, _, device_id = await _revoked_device(app)
     assert await device_admin.main(["restore", device_id]) == 0
     assert (await _row(app, device_id))["revoked"] is False
     assert await device_admin.main(["restore", str(uuid.uuid4())]) == 1
+    assert _audit(caplog) == [f"device_admin: restored {device_id}"]
 
 
 async def test_cli_delete_needs_confirmation(app, monkeypatch):
@@ -121,11 +136,13 @@ async def test_cli_delete_removes_only_the_device_row(app, client, monkeypatch):
         assert await conn.fetchval("SELECT count(*) FROM samples") == 1
 
 
-async def test_cli_delete_yes_flag(app):
+async def test_cli_delete_yes_flag(app, caplog):
+    caplog.set_level(logging.INFO, logger="tools.device_admin")
     _, _, device_id = await _revoked_device(app)
     assert await device_admin.main(["delete", device_id, "--yes"]) == 0
     async with app.state.pool.acquire() as conn:
         assert await conn.fetchval("SELECT count(*) FROM devices") == 0
+    assert _audit(caplog) == [f"device_admin: deleted {device_id}"]
 
 
 async def test_cli_delete_of_a_code_enrolled_device_unbinds_its_code(app, client, monkeypatch):

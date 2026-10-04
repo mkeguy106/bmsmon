@@ -13,6 +13,7 @@ material is ever printed.
 
 import argparse
 import asyncio
+import logging
 import sys
 from uuid import UUID
 
@@ -20,6 +21,9 @@ import asyncpg
 
 from app.config import settings
 from app.db import queries as q
+
+# An explicit name: run with -m, this module's __name__ is "__main__".
+logger = logging.getLogger("tools.device_admin")
 
 
 def _uuid(value: str) -> UUID:
@@ -53,6 +57,8 @@ async def main(argv: list[str] | None = None) -> int:
                       f"  last seen {seen}  {row['label'] or '-'}")
         elif args.cmd == "restore":
             ok = await q.restore_device(conn, args.id)
+            if ok:
+                logger.info("device_admin: restored %s", args.id)
             print("restored" if ok else "device not found")
             return 0 if ok else 1
         elif args.cmd == "delete":
@@ -62,6 +68,8 @@ async def main(argv: list[str] | None = None) -> int:
                     print("aborted")
                     return 1
             ok = await q.delete_device_row(conn, args.id)
+            if ok:
+                logger.info("device_admin: deleted %s", args.id)
             print("deleted" if ok else "device not found")
             return 0 if ok else 1
     finally:
@@ -70,4 +78,6 @@ async def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s %(message)s")
     sys.exit(asyncio.run(main()))
