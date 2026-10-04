@@ -1791,12 +1791,15 @@ autoheal use it, and a phone that stops uploading must never get the API restart
 answers **200 when every check passes and 503 otherwise**, `Cache-Control: no-store`:
 
 ```jsonc
-{"ok": true, "failing": [],            // any of: ingest, rollup, partition, clock
+{"ok": true, "failing": [],            // any selected check: ingest, rollup, partition, clock, phone_power
  "server_time_ms": …, "last_ingest_ms": …, "last_ingest_age_s": 12,
  "auth_fail_5m": 0, "last_auth_fail": null, "last_ok_skew_s": 1,
  "rollup_lag_s": 1500, "next_month_partition": true,
  "online_indexes": {"samples_charging_idx": true},
- "limits": {"ingest_age_s": 1800, "rollup_lag_s": 10800, "clock_skew_s": 120}}
+ "limits": {"ingest_age_s": 1800, "rollup_lag_s": 10800, "clock_skew_s": 120,
+            "phone_status_fresh_s": 600},
+ "phone_power": {"fault": false, "fault_confirmed": false, "fault_since_ms": null, "level": 80, "plugged": 4,
+                 "status_age_s": 20}}   // newest non-revoked device's phone snapshot
 ```
 
 | Check | Fails when |
@@ -1805,6 +1808,15 @@ answers **200 when every check passes and 503 otherwise**, `Cache-Control: no-st
 | `rollup` | The 30-min rollup's high-water mark is more than 3 h behind, or it has never run. |
 | `partition` | Next month's `samples` partition is missing. |
 | `clock` | The last verified token's `server − iat` skew exceeds ±120 s. |
+| `phone_power` | Some non-revoked device's latest report says `phone_fault = true` (the phone says its charger is connected but the battery keeps draining) and the fault is at least 300 s old (`phone_fault_since`; NULL counts from `phone_status_at`). The fault start is server `now()` minus the fault's age on the phone's own clock (`at_ms - fault_since_ms`), so phone-vs-server clock skew cannot shift it. Staleness never clears a fault: a phone that stops reporting keeps its last verdict (so a dying phone never sends a false "resolved"), and its silence is `ingest`'s job. **Only evaluated when selected.** |
+
+`?checks=a,b` (comma-separated subset of `ingest,rollup,partition,clock,phone_power`) selects which
+checks can fail the response; `ok` and `failing` consider only those. The default, with no
+`checks`, is the first four, exactly as before, so the deadman is unaffected by `phone_power`. An
+unknown name is a 422. The `phone_power` body block and `limits.phone_status_fresh_s` are always
+present; `phone_power` describes the device with the newest status (`fault` is its latest reported fault,
+with no freshness gate; `status_age_s` and `limits.phone_status_fresh_s` are informational), and
+`fault_confirmed` is the any-device verdict the check itself uses.
 
 `auth_fail_5m` counts known-device auth failures (at most 100 per device and 5000 in all,
 oldest dropped first). It is informational; a stuck phone
@@ -1813,10 +1825,16 @@ exists to prove the alarm path end to end.
 
 Uptime Kuma monitor **`bmsmon-telemetry-deadman`** polls
 `http://bmsmon-api:8000/api/v1/health/detail` every 60 s with an API key named
-"uptime-kuma deadman", wired to the ntfy notification. To rotate that key:
+"uptime-kuma deadman", wired to the ntfy notification. The `bmsmon-phone-charger` monitor
+below carries the same key in its `headers`. To rotate that key:
 1. mint a new one (`tools.api_key_admin mint`);
-2. update the monitor's `headers` (Kuma stopped; see `~/qnap-nas-docker/CLAUDE.md`);
+2. update the `headers` of BOTH monitors, `bmsmon-telemetry-deadman` and `bmsmon-phone-charger`
+   (Kuma stopped; see `~/qnap-nas-docker/CLAUDE.md`), or the one left behind gets 401s and pages;
 3. revoke the old one.
+
+Uptime Kuma monitor **`bmsmon-phone-charger`** polls
+`http://bmsmon-api:8000/api/v1/health/detail?checks=phone_power` every 60 s and pages through the
+same ntfy notification when the phone's charger is connected but the battery is draining.
 
 **Maintenance loop** (`app/maintenance.py`). It runs 60 s after boot, then hourly. Each step
 is isolated, so a failing step is logged and the rest still run:

@@ -236,6 +236,8 @@ def create_app() -> FastAPI:
     app.state.share_touch = TouchThrottle(interval_s=TOUCH_INTERVAL_S)
     # devices.last_seen_at write throttle (see routers/api_device.py).
     app.state.device_touch = TouchThrottle(interval_s=60.0)
+    # device id -> (fault, plugged, monotonic time of the last phone-power write).
+    app.state.phone_power_cache = {}
     # One "database unavailable" WARNING per exception class per interval (middleware.py).
     app.state.db_unavailable_log = TouchThrottle(interval_s=DB_UNAVAILABLE_LOG_INTERVAL_S)
     # C3: invalid-sample/range-row WARNINGs, at most once per device per kind per interval.

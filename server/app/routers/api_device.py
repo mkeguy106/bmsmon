@@ -1,6 +1,7 @@
 import base64
 import binascii
 import logging
+import time
 import uuid
 import zlib
 from datetime import datetime, timezone
@@ -16,7 +17,7 @@ from app.db import queries as q
 from app.db.pool import get_pool
 from app.models import (
     ConfigResponse, EnrollBody, EnrollResponse, IngestEnvelope, IngestResponse,
-    RangeConfigRow, SampleIn, TempConfigBody, first_error, validate_each,
+    PhonePowerIn, RangeConfigRow, SampleIn, TempConfigBody, first_error, validate_each,
 )
 from app.observability import clean_user_agent
 from app.ratelimit import client_key
@@ -278,6 +279,45 @@ async def _touch(conn, request: Request, device_id: str, *, seen: bool) -> None:
         logger.warning("device bookkeeping failed for %s", device_id, exc_info=True)
 
 
+# Phone-power snapshot write throttle; a change of fault or plugged bypasses it.
+PHONE_POWER_WRITE_INTERVAL_S = 60.0
+
+
+async def _store_phone_power(conn, request: Request, device_id: str, raw: object) -> None:
+    """Store the optional `phone` block. Can never fail or alter the batch: an invalid
+    block is ignored with a throttled WARNING (location and type only), a write error is
+    logged and swallowed."""
+    try:
+        try:
+            p = PhonePowerIn.model_validate(raw)
+        except ValidationError as e:
+            if _may_log_reject(request, device_id, "phone"):
+                logger.warning("ingest: ignored an invalid phone block from device %s: %s "
+                               "(repeats for this device suppressed for %.0f s)",
+                               device_id, first_error(e), REJECT_LOG_INTERVAL_S)
+            return
+        cache = request.app.state.phone_power_cache
+        prev = cache.get(device_id)
+        now = time.monotonic()
+        if (prev is not None and prev[0] == p.fault and prev[1] == p.plugged
+                and now - prev[2] < PHONE_POWER_WRITE_INTERVAL_S):
+            return
+        async with conn.transaction():
+            await q.store_phone_power(conn, device_id, p.level, p.plugged, p.charge_mah,
+                                      p.fault, p.fault_since_ms, p.at_ms)
+        cache[device_id] = (p.fault, p.plugged, now)
+        if p.fault and not (prev and prev[0]):
+            logger.info("phone charger fault started device=%s level=%d plugged=%d",
+                        device_id, p.level, p.plugged)
+        elif prev and prev[0] and not p.fault:
+            logger.info("phone charger fault cleared device=%s", device_id)
+    except Exception:
+        if _may_log_reject(request, device_id, "phone:write"):
+            logger.warning("phone power snapshot failed for %s (repeats for this device "
+                           "suppressed for %.0f s)", device_id, REJECT_LOG_INTERVAL_S,
+                           exc_info=True)
+
+
 @router.post("/ingest", response_model=IngestResponse)
 async def ingest(request: Request, pool=Depends(get_pool)):
     device_id, claims = await _authenticate(request, pool)
@@ -351,6 +391,9 @@ async def ingest(request: Request, pool=Depends(get_pool)):
         if (env.batch_seq >= 0 and rows
                 and request.app.state.device_touch.should_touch(device_id)):
             await _touch(conn, request, device_id, seen=True)
+        # The phone's charger snapshot rides live batches only (imports are old history).
+        if env.batch_seq >= 0 and env.phone is not None:
+            await _store_phone_power(conn, request, device_id, env.phone)
     # batch_seq < 0 (-1) marks a historical-import batch (see IngestEnvelope): store it,
     # but don't flood the live WS dashboards with thousands of stale frames (WEB-5).
     if env.batch_seq >= 0:
