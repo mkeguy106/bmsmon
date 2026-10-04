@@ -184,6 +184,22 @@ describe("connectLive", () => {
     stop();
   });
 
+  // Re-review minor: open() on refocus detaches the old socket's onclose, so the stable-uptime
+  // reset must also apply there — a failure count from before hours of good uptime must not
+  // make the first retry after the machine wakes wait a grown backoff.
+  it("replacing a socket that stayed healthy for STABLE_MS starts the next failure at the base step", () => {
+    const { stop } = setup();
+    for (let i = 0; i < 3; i++) { lastSocket().fireClose(); advance(60_000); }
+    lastSocket().goLive();
+    advance(STABLE_MS + STALE_MS + 1);      // healthy long enough, then went quiet (zombie)
+    visibilityHandler!();                    // refocus replaces it
+    const n = sockets().length;
+    lastSocket().fireClose();                // the replacement fails at once
+    advance(3_000);                          // base step (1.5–3 s), not the grown 24 s
+    expect(sockets()).toHaveLength(n + 1);
+    stop();
+  });
+
   it("backs off exponentially while sockets keep failing, caps at 60 s, and resets on a snapshot", () => {
     const { statuses, stop } = setup();
     // Each socket closes without delivering anything (random pinned to 1: the top of each step).

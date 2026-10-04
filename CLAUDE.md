@@ -1471,12 +1471,12 @@ render as the fleet (`web/src/useStaleAddrs.ts`), so no stale pack paints live, 
 
 **The live link** (`web/src/ws.ts` + pure `web/src/liveLink.ts`):
 - It reports LIVE from its first snapshot, not on socket open.
-- It reconnects with exponential backoff and jitter (1.5 s, doubling to 60 s, reset by a snapshot).
+- It reconnects with exponential backoff and jitter (1.5 s, doubling to 60 s; the count resets only once a socket has stayed healthy for 30 s, so a snapshot-then-die server keeps backing off).
 - A 4401/4403 close, or three silent sockets followed by a `GET /web/alert-config` probe that does
   not follow redirects, becomes a session verdict. A probe that answers after a socket has
   delivered a snapshot is dropped: the link recovered while it was in flight.
 - v2 then shows a banner under the TopBar on every layout: "Session expired" / "Not authorized"
-  with Reload, or "Can't reach the server".
+  with Reload, "The server is having trouble" (a marked 503), or "Can't reach the server".
 
 The header's SYNCED pill means at least one pack has fresh telemetry.
 

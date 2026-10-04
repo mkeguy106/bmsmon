@@ -175,6 +175,10 @@ export function connectLive(
       // The replacement is still CONNECTING: LIVE must drop until it delivers a snapshot, and
       // the REST fallback must run meanwhile (open() detaches the old socket's onclose).
       if (reportedLive) { reportedLive = false; onStatus(false); }
+      // open() detaches the old socket's onclose, so apply its stable-uptime rule here: a
+      // socket that stayed healthy for STABLE_MS before going quiet clears the failure count,
+      // or a count left over from before hours of good uptime would slow the first retry.
+      if (healthy && performance.now() - healthySince >= STABLE_MS) failures = 0;
       open();
     }
   };
