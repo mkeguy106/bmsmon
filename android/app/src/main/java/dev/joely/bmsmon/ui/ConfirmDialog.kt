@@ -4,6 +4,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.compositionLocalOf
 import dev.joely.bmsmon.ui.theme.Bm
 
 /** The words of one destructive-action confirmation (UI-22, UI-28): what happens, and what is lost. */
@@ -44,8 +46,16 @@ object Confirmations {
     )
 }
 
+/** True while open transients must close for the alert overlay ([dismissTransientsFor]); provided by App. */
+val LocalDismissTransients = compositionLocalOf { false }
+
 @Composable
 fun ConfirmDialog(copy: ConfirmCopy, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    if (LocalDismissTransients.current) {
+        // The alert overlay is up: close instead of covering it. The action can be asked for again.
+        LaunchedEffect(Unit) { onDismiss() }
+        return
+    }
     val c = Bm.colors
     AlertDialog(
         onDismissRequest = onDismiss,

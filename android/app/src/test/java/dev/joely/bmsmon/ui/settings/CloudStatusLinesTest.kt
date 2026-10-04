@@ -48,6 +48,8 @@ class CloudStatusLinesTest {
         val line = authLine(UploadStatus(authFailed = true, authSkewMs = 585_000, clockBlame = ClockBlame.PHONE))!!
         assertTrue(line, line.startsWith("Phone clock looks off"))
         assertTrue(line, line.contains("585 s behind the server"))
+        // The voucher may be network time or a satellite fix's time, so the line names neither alone.
+        assertTrue(line, line.contains("an independent clock (network or GPS time) disagrees with it"))
         assertFalse(line, line.contains("compensating"))
     }
 
@@ -115,13 +117,16 @@ class CloudStatusLinesTest {
         assertNull(holdLine(UploadStatus(hold = UploadHold.SERVER_REJECTING, keyMissing = true)))
     }
 
-    @Test fun evictionsAreCountedAndPromiseTheResend() {
+    // A re-send comes from local history, which holds a sample only while usage logging is on and for
+    // 14 days: the line says so rather than promising every dropped sample comes back.
+    @Test fun evictionsAreCountedAndTheResendIsNotOverPromised() {
         assertEquals(
-            "1 sample was dropped from the full upload queue (all time); dropped samples are re-sent from " +
-                "this phone's 14-day history.",
+            "1 sample was dropped from the full upload queue (all time). Dropped samples are re-sent from " +
+                "this phone's local history while it still holds them (usage logging on, last 14 days).",
             evictedLine(1),
         )
         assertTrue(evictedLine(1_200)!!.startsWith("1200 samples were dropped"))
+        assertTrue(evictedLine(1_200)!!.endsWith("(usage logging on, last 14 days)."))
     }
 
     // Task 7: "import done" now only means "queued"; the history line comes from the re-sync summary.

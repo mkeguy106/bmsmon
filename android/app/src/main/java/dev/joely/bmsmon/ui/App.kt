@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -335,8 +336,13 @@ fun App(vm: BatteryViewModel) {
     // overlay while it flashes; once acknowledged, the status-line pill on Home and a banner elsewhere.
     val alert = state.stageAlert()
     val presentation = alertPresentation(alert, state.screen)
+    // A flashing alert closes the transients that would sit above it in their own windows: an open
+    // confirmation (via LocalDismissTransients) and the scan sheet. Both can be opened again.
+    val dismissTransients = dismissTransientsFor(presentation)
+    LaunchedEffect(dismissTransients) { if (dismissTransients) showScan = false }
 
     BmTheme(dark = state.isDark, accent = state.accent, power = state.power) {
+      CompositionLocalProvider(LocalDismissTransients provides dismissTransients) {
         Box(Modifier.fillMaxSize().background(Bm.colors.bg)) {
           val lockStrip = state.locked && (state.lockShowTime || state.lockShowWifi || state.lockShowBattery)
           Column(Modifier.fillMaxSize()) {
@@ -440,7 +446,7 @@ fun App(vm: BatteryViewModel) {
                 if (presentation == AlertPresentation.OVERLAY) DangerOverlay(alert, vm::acknowledgeAlert)
             }
           }
-            if (showScan) {
+            if (showScan && !dismissTransients) {
                 ScanSheet(
                     roster = state.roster,
                     onAdd = { address, name -> vm.addBattery(address, name) },
@@ -448,6 +454,7 @@ fun App(vm: BatteryViewModel) {
                 )
             }
         }
+      }
     }
 }
 

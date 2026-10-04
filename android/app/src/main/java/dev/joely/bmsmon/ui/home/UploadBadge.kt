@@ -16,7 +16,7 @@ internal fun uploadBadge(s: UploadStatus): Pair<String, BadgeTone> = when {
     s.keyMissing -> "↑ re-enroll" to BadgeTone.CRITICAL
     s.authFailed && s.authSkewMs != null -> "↑ clock skew" to BadgeTone.CRITICAL
     s.authFailed -> "↑ auth failed" to BadgeTone.CRITICAL
-    s.hold != UploadHold.NONE -> "↑ held · ${s.outboxDepth}" to BadgeTone.WARN
+    s.hold != UploadHold.NONE -> "↑ held · ${s.outboxDepth} queued" to BadgeTone.WARN
     s.kbps > 0.05 -> "↑ %.1f KB/s".format(s.kbps) to BadgeTone.GOOD
     s.outboxDepth > 0 -> "↑ ${s.outboxDepth} queued" to BadgeTone.WARN
     s.resync.pending > 0 -> "↑ re-sending" to BadgeTone.WARN

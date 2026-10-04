@@ -2,6 +2,7 @@ package dev.joely.bmsmon.ui.all
 
 import dev.joely.bmsmon.ui.Confirmations
 import dev.joely.bmsmon.ui.ConfirmDialog
+import dev.joely.bmsmon.ui.LocalDismissTransients
 import dev.joely.bmsmon.model.allTargets
 import dev.joely.bmsmon.model.addresses
 import androidx.compose.animation.core.Animatable
@@ -47,6 +48,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -308,7 +310,10 @@ private fun SwipeableBatteryRow(
         )
     }
 
-    if (confirmDelete) {
+    // Like every confirmation, it closes while the alert overlay is up ([LocalDismissTransients]).
+    if (confirmDelete && LocalDismissTransients.current) {
+        LaunchedEffect(Unit) { confirmDelete = false }
+    } else if (confirmDelete) {
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
             containerColor = c.card,

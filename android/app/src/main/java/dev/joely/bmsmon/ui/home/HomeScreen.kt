@@ -386,7 +386,7 @@ private fun UploadBadge(state: UiState, modifier: Modifier = Modifier) {
     }
     Text(
         text, color = color, fontSize = 9.5.sp, fontWeight = FontWeight.Medium,
-        letterSpacing = 0.6.sp, modifier = modifier,
+        letterSpacing = 0.6.sp, maxLines = 1, modifier = modifier,
     )
 }
 

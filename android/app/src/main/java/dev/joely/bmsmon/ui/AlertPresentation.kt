@@ -16,3 +16,11 @@ fun alertPresentation(alert: StageAlert, screen: Screen): AlertPresentation = wh
     screen == Screen.Home -> AlertPresentation.STATUS_PILL
     else -> AlertPresentation.BANNER
 }
+
+/**
+ * Whether open transients close for [presentation]: a destructive-action confirmation and the scan sheet
+ * open in their own windows, above the full-screen overlay, so while the alert flashes they close. An
+ * active danger alert outranks anything transient and re-openable. The overlay stays in the activity
+ * window; App provides this to the confirmations as [LocalDismissTransients] and closes the scan sheet.
+ */
+fun dismissTransientsFor(presentation: AlertPresentation): Boolean = presentation == AlertPresentation.OVERLAY

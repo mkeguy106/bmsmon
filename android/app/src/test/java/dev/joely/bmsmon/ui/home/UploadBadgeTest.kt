@@ -41,8 +41,8 @@ class UploadBadgeTest {
 
     // The DATA-22 follow-up: a breaker holding used to read as an ordinary "N queued".
     @Test fun aHeldQueueSaysHeld() {
-        assertEquals("↑ held · 120" to BadgeTone.WARN, uploadBadge(UploadStatus(hold = UploadHold.SERVER_FAULTING, outboxDepth = 120)))
-        assertEquals("↑ held · 3" to BadgeTone.WARN, uploadBadge(UploadStatus(hold = UploadHold.SERVER_REJECTING, outboxDepth = 3, kbps = 1.0)))
+        assertEquals("↑ held · 120 queued" to BadgeTone.WARN, uploadBadge(UploadStatus(hold = UploadHold.SERVER_FAULTING, outboxDepth = 120)))
+        assertEquals("↑ held · 3 queued" to BadgeTone.WARN, uploadBadge(UploadStatus(hold = UploadHold.SERVER_REJECTING, outboxDepth = 3, kbps = 1.0)))
     }
 
     @Test fun normalStates() {

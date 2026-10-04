@@ -58,7 +58,7 @@ internal fun authLine(s: UploadStatus): String? {
                 "${serverClockOff(skew)} Retrying; samples stay buffered on the phone."
             ClockBlame.PHONE ->
                 "Phone clock looks off: it is ${clockGap(skew)} ${if (skew > 0) "behind" else "ahead of"} the server, " +
-                    "and network time disagrees with it too. Turn on automatic date and time. " +
+                    "and an independent clock (network or GPS time) disagrees with it. Turn on automatic date and time. " +
                     "Samples stay buffered on the phone."
             ClockBlame.UNKNOWN, null ->
                 "Upload sign-in rejected: the server's and this phone's clocks are ${clockGap(skew)} apart, and with " +
@@ -91,15 +91,16 @@ internal fun holdLine(s: UploadStatus): String? = when {
     }
 }
 
-/** All-time outbox evictions at the cap (DATA-19); each evicted span is queued for a re-send from local history. */
-internal fun evictedLine(evicted: Long): String? = when {
-    evicted <= 0L -> null
-    evicted == 1L ->
-        "1 sample was dropped from the full upload queue (all time); dropped samples are re-sent from " +
-            "this phone's $SAMPLE_RETENTION_DAYS-day history."
-    else ->
-        "$evicted samples were dropped from the full upload queue (all time); dropped samples are re-sent from " +
-            "this phone's $SAMPLE_RETENTION_DAYS-day history."
+/**
+ * All-time outbox evictions at the cap (DATA-19). Each evicted span is queued for a re-send from local
+ * history, which has a sample only if usage logging was on and only for [SAMPLE_RETENTION_DAYS] days, so
+ * the line promises no more than that.
+ */
+internal fun evictedLine(evicted: Long): String? {
+    if (evicted <= 0L) return null
+    val count = if (evicted == 1L) "1 sample was" else "$evicted samples were"
+    return "$count dropped from the full upload queue (all time). Dropped samples are re-sent from this " +
+        "phone's local history while it still holds them (usage logging on, last $SAMPLE_RETENTION_DAYS days)."
 }
 
 /**
