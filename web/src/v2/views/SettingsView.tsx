@@ -34,7 +34,6 @@ function AboutRow({ text }: { text: string }) {
 export function SettingsView({ settings, patch }: {
   settings: V2Settings; patch: (p: Partial<V2Settings>) => void;
 }) {
-
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 480, margin: "0 auto" }}>
       <SettingsCard title="Units">
