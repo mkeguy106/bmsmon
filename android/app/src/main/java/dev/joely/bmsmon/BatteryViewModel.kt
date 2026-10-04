@@ -226,6 +226,9 @@ data class UiState(
      *  with the headless restore (T1.2) — see seizeThresholdFor. */
     val seizeThreshold: Int? get() = seizeThresholdFor(alertsOn, seizeLowToStage, enabledThresholds)
 
+    /** The user's capacity ladder, as the alerts and the SOC severity colors read it. */
+    val alertConfig: AlertConfig get() = AlertConfig(alertsOn, enabledThresholds, criticalThreshold)
+
     /** Highest enabled capacity threshold, pushed to the cloud so the WebUI drives its own low-pack
      *  stage seize (defaults to 30 when the ladder is empty, matching the web fallback). */
     val cloudSeizeSoc: Int get() = enabledThresholds.maxOrNull() ?: 30
@@ -418,7 +421,7 @@ data class UiState(
         packs.map { (addr, t) ->
             PackSoc(t.soc, t.state == BatteryState.Charging && (countRegenAsCharging || addr !in regenAddrs))
         },
-        AlertConfig(alertsOn, enabledThresholds, criticalThreshold),
+        alertConfig,
     )
 
     /**
@@ -471,10 +474,7 @@ data class UiState(
         val kept = if (eval.charging) {
             emptySet()
         } else {
-            heldCapAcks(
-                acknowledgedThresholds, packs.minOf { it.second.soc },
-                AlertConfig(alertsOn, enabledThresholds, criticalThreshold),
-            )
+            heldCapAcks(acknowledgedThresholds, packs.minOf { it.second.soc }, alertConfig)
         }
         return if (kept == acknowledgedThresholds) this else copy(acknowledgedThresholds = kept)
     }
@@ -1126,9 +1126,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
 
     // --- low-battery alerts ---
     /** Mirror the current alert settings down to the headless engine so it can notify off-screen. */
-    private fun pushAlertConfig() = engine.setAlertConfig(
-        AlertConfig(_state.value.alertsOn, _state.value.enabledThresholds, _state.value.criticalThreshold),
-    )
+    private fun pushAlertConfig() = engine.setAlertConfig(_state.value.alertConfig)
     fun setAlertsOn(enabled: Boolean) {
         _state.update { it.copy(alertsOn = enabled) }
         viewModelScope.launch { store.setAlertsOn(enabled) }

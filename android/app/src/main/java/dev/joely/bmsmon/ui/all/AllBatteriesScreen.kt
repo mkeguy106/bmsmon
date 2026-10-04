@@ -65,6 +65,7 @@ import kotlinx.coroutines.launch
 import dev.joely.bmsmon.FilterKey
 import dev.joely.bmsmon.SortKey
 import dev.joely.bmsmon.UiState
+import dev.joely.bmsmon.model.AlertConfig
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.BmsTarget
@@ -80,7 +81,9 @@ import dev.joely.bmsmon.ui.RosterActions
 import dev.joely.bmsmon.ui.rememberBoltAlpha
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
-import dev.joely.bmsmon.ui.theme.socSeverity
+import dev.joely.bmsmon.ui.theme.socSeverityFor
+import dev.joely.bmsmon.ui.theme.tag
+import dev.joely.bmsmon.ui.theme.textColor
 import kotlin.math.roundToInt
 
 /** A row's group context: id+label, or null when the battery is ungrouped. */
@@ -211,6 +214,7 @@ fun AllBatteriesScreen(
                     disabled = row.target.address in state.disabled,
                     monitoring = state.monitoring,
                     fresh = freshness(row.status, state.nowElapsedMs),
+                    alertConfig = state.alertConfig,
                     onOpenDetail = { fleet.onOpenDetail(row.target.address) },
                     onPin = { if (row.group != null) fleet.onPinBase(row.group.id) else fleet.onPinSingle(row.target.address) },
                     onDisconnect = { fleet.onDisconnect(row.target.address) },
@@ -263,6 +267,7 @@ private fun SwipeableBatteryRow(
     disabled: Boolean,
     monitoring: Boolean,
     fresh: Freshness,
+    alertConfig: AlertConfig,
     onOpenDetail: () -> Unit,
     onPin: () -> Unit,
     onDisconnect: () -> Unit,
@@ -279,7 +284,7 @@ private fun SwipeableBatteryRow(
     SwipeLeftToDelete(onTriggered = { confirmDelete = true }) {
         BatteryRow(
             row = row, groups = groups, isStage = isStage, isDailyDriver = isDailyDriver,
-            disabled = disabled, monitoring = monitoring, fresh = fresh,
+            disabled = disabled, monitoring = monitoring, fresh = fresh, alertConfig = alertConfig,
             onOpenDetail = onOpenDetail, onPin = onPin,
             onDisconnect = onDisconnect, onReconnect = onReconnect,
             onRemoveRequest = { confirmDelete = true },
@@ -369,6 +374,7 @@ private fun BatteryRow(
     disabled: Boolean,
     monitoring: Boolean,
     fresh: Freshness,
+    alertConfig: AlertConfig,
     onOpenDetail: () -> Unit,
     onPin: () -> Unit,
     onDisconnect: () -> Unit,
@@ -395,13 +401,17 @@ private fun BatteryRow(
     val (stateLabel, stateColor) = when {
         disabled -> "Disconnected" to c.text3
         !live -> (freshnessLabel(fresh, monitoring) ?: "—") to c.text3
-        t?.state == BatteryState.Discharging -> "Discharging" to Bm.power
-        t?.state == BatteryState.Charging -> "Charging" to Bm.accent
+        t?.state == BatteryState.Discharging -> "Discharging" to Bm.powerText
+        t?.state == BatteryState.Charging -> "Charging" to Bm.accentText
         t?.state == BatteryState.Idle -> "Idle" to c.text2
         else -> "—" to c.text3
     }
     val borderColor = if (isStage) Bm.accent else c.border
-    val socColor = if (t != null) socSeverity(t.soc, Bm.accent) else c.text3
+    // UI-21: severity on the user's own ladder (the alerts' rule, not fixed 15/30 bands), readable in
+    // either theme. A dimmed (non-LIVE) row keeps its severity hue at half alpha, as before, beside its
+    // "Last seen…" status; only a LIVE row adds the LOW/CRIT word, so a stale row never reads as live.
+    val severity = t?.let { socSeverityFor(it.soc, alertConfig) }
+    val socColor = severity?.textColor() ?: c.text3
 
     Column(
         Modifier
@@ -450,6 +460,13 @@ private fun BatteryRow(
             Text(if (t != null) "${t.soc.roundToInt()}%" else "—",
                 color = socColor, fontFamily = MonoFont, fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.alpha(if (dim) 0.5f else 1f).padding(start = 8.dp))
+            // The non-colour cue: on a light theme LOW amber and normal orange differ by hue alone.
+            severity?.tag()?.takeIf { !dim }?.let { tag ->
+                Text(
+                    tag, color = socColor, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.6.sp,
+                    modifier = Modifier.padding(start = 4.dp),
+                )
+            }
             if (monitoring) {
                 Box(
                     Modifier.padding(start = 4.dp).size(30.dp).clip(RoundedCornerShape(8.dp))

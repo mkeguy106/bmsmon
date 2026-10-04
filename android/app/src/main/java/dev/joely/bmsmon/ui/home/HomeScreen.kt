@@ -43,6 +43,8 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -58,7 +60,7 @@ import dev.joely.bmsmon.ui.theme.AlertCritical
 import dev.joely.bmsmon.ui.theme.AlertWarn
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
-import dev.joely.bmsmon.ui.theme.RegenGreen
+import dev.joely.bmsmon.ui.theme.readableOn
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -105,6 +107,7 @@ fun HomeScreen(
                         tempGaugeSide = state.tempGaugeSide,
                         thresholds = state.tempThresholdsFor(state.stageProfile().id),
                         envelope = state.stageProfile().tempEnvelope,
+                        alertConfig = state.alertConfig,
                     )
                     else -> AllBatteriesScreen(
                         state = state,
@@ -242,11 +245,11 @@ private fun stageState(state: UiState, locked: Boolean): StageStateLabel {
     val c = Bm.colors
     val (text, color) = when {
         !state.monitoring -> "MONITORING OFF" to c.text3
-        state.stageRegen -> "REGEN ↻" to RegenGreen
-        state.pinned -> "PINNED" to Bm.accent
+        state.stageRegen -> "REGEN ↻" to Bm.goodText
+        state.pinned -> "PINNED" to Bm.accentText
         !state.dynamicStage -> "MANUAL" to c.text2
-        state.stageActivity == GroupActivity.Discharging -> "DISCHARGING" to Bm.power
-        state.stageActivity == GroupActivity.Charging -> "CHARGING" to Bm.accent
+        state.stageActivity == GroupActivity.Discharging -> "DISCHARGING" to Bm.powerText
+        state.stageActivity == GroupActivity.Charging -> "CHARGING" to Bm.accentText
         state.stageActivity == GroupActivity.Idle -> "IDLE" to c.text2
         else -> "…" to c.text3
     }
@@ -257,16 +260,20 @@ private fun stageState(state: UiState, locked: Boolean): StageStateLabel {
 @Composable
 private fun AlertPill(alert: StageAlert) {
     val c = Bm.colors
+    val wash = AlertCritical.copy(alpha = 0.10f)
+    // UI-21: the icon and headline are text on the red wash, not on bg — so the readable red is checked
+    // against the wash itself (light theme: 4.1:1 on the wash otherwise). Wash and border stay raw red.
+    val ink = Color(0xFF000000.toInt() or readableOn(Bm.criticalText.toArgb(), listOf(wash.compositeOver(c.bg).toArgb())))
     Row(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
-            .background(AlertCritical.copy(alpha = 0.10f))
+            .background(wash)
             .border(1.dp, AlertCritical.copy(alpha = 0.55f), RoundedCornerShape(10.dp))
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(Icons.Filled.Warning, null, Modifier.size(14.dp), tint = AlertCritical)
+        Icon(Icons.Filled.Warning, null, Modifier.size(14.dp), tint = ink)
         Column(Modifier.weight(1f).padding(start = 10.dp)) {
-            Text(alert.headline, color = AlertCritical, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+            Text(alert.headline, color = ink, fontSize = 11.sp, fontWeight = FontWeight.Bold,
                 letterSpacing = 0.5.sp, fontFamily = MonoFont)
             Text(alert.detail.ifBlank { "${alert.lowSoc}%" }, color = c.text2, fontSize = 9.sp,
                 fontFamily = MonoFont, maxLines = 1)
@@ -345,9 +352,9 @@ private fun UploadBadge(state: UiState, modifier: Modifier = Modifier) {
     val c = Bm.colors
     val kbps = state.cloudUploadKbps
     val (text, color) = when {
-        state.cloudAuthFailed -> "↑ auth failed" to AlertCritical
-        kbps > 0.05f -> "↑ %.1f KB/s".format(kbps) to RegenGreen
-        state.cloudOutboxDepth > 0 -> "↑ ${state.cloudOutboxDepth} queued" to AlertWarn
+        state.cloudAuthFailed -> "↑ auth failed" to Bm.criticalText
+        kbps > 0.05f -> "↑ %.1f KB/s".format(kbps) to Bm.goodText
+        state.cloudOutboxDepth > 0 -> "↑ ${state.cloudOutboxDepth} queued" to Bm.warnText
         state.cloudLastUploadMs > 0L -> "↑ synced" to c.text3
         else -> "↑ idle" to c.text3
     }
