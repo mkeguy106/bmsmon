@@ -9,6 +9,7 @@ import { Ring } from "./Ring";
 import { StatTile, CellTiles, Chip, LastKnownNote } from "./Atoms";
 import { sohColor } from "../colors";
 import { fmtDist, type DistUnit } from "../../units";
+import { floorBand } from "../../range";
 
 const STATUS_COLOR: Record<BaseStatus, string> = {
   "in-use": "var(--ok)", charging: "var(--warn)", backup: "var(--ok)",
@@ -99,13 +100,14 @@ function ThermalBanner({ t, tempF }: { t: ThermalView; tempF: boolean }) {
   );
 }
 
-/** Runtime band (the weaker pack bounds it) or time-to-full while charging. */
+/** Runtime band (the weaker pack bounds it; floored, never shown above the estimate) or
+ *  time-to-full while charging. */
 function runtimeTile(range: RangeState): { label: string; value: string; sub?: ReactNode } {
   if (range.kind === "charging") return { label: "TIME TO FULL", value: fmtEta(range.etaFullMin) };
   if (range.kind !== "estimate") return { label: "EST. RUNTIME", value: "—" };
   const r = range.range;
   return {
-    label: "EST. RUNTIME", value: `~${Math.round(r.activeHLo)}–${Math.round(r.activeHHi)}h`,
+    label: "EST. RUNTIME", value: `~${floorBand(r.activeHLo, r.activeHHi, 1)}h`,
     sub: range.lastKnown ? <LastKnownNote lk={range.lastKnown} /> : undefined,
   };
 }

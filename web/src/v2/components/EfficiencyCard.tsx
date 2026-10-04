@@ -5,6 +5,7 @@ import type { EfficiencySummary, BandStatus, TodayRateGap } from "../model/effic
 import type { LastKnownRef } from "../model/baseView";
 import { Chip, LastKnownNote } from "./Atoms";
 import { distLabel, fmtDist, perDist, toDist, type DistUnit } from "../../units";
+import { floorFixed } from "../../range";
 
 const STATUS_LABEL: Record<BandStatus, string> = {
   below: "below band", inside: "in band", above: "above band",
@@ -29,7 +30,8 @@ function Cell({ label, value }: { label: string; value: string }) {
   );
 }
 
-const mi = (n: number) => (n < 10 ? n.toFixed(1) : String(Math.round(n)));
+/** A projected distance, floored (never shown above the projection): tenths under 10. */
+const mi = (n: number) => floorFixed(n, n < 10 ? 1 : 0);
 
 export function EfficiencyCard({ summary, live, charging, distUnit, lastKnown = null }: {
   summary: EfficiencySummary; live: boolean; charging: boolean; distUnit: DistUnit;

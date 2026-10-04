@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import type { BaseView } from "../model/baseView";
-import { formatRangeLine } from "../../range";
+import { floorBand, floorFixed, formatRangeLine } from "../../range";
 import type { Trip, TripVerdict } from "../trips";
 import { classifyTrip } from "../trips";
 import { Ago } from "../../components/Ago";
@@ -14,10 +14,10 @@ const VERDICT_LABEL: Record<TripVerdict, string> = {
   go: "GO", tight: "TIGHT", "no-go": "NO-GO",
 };
 
-/** The range band in the display unit (the model is in miles). */
+/** The range band in the display unit (the model is in miles), floored: never shown higher
+ *  than the estimate. */
 function distText(loMi: number, hiMi: number, u: DistUnit): string {
-  const lo = toDist(loMi, u), hi = toDist(hiMi, u);
-  return hi < 10 ? `${lo.toFixed(1)}–${hi.toFixed(1)}` : `${Math.round(lo)}–${Math.round(hi)}`;
+  return floorBand(toDist(loMi, u), toDist(hiMi, u), 10);
 }
 
 /** "Can you make it?": the staged base's range, bounded by its weaker pack (baseView). */
@@ -60,7 +60,7 @@ export function CommandRange({ view, trips, onEditTrips, distUnit }: {
 
   const r = range.range;
   const lk = range.lastKnown;
-  const typical = Math.round(toDist((r.milesLo + r.milesHi) / 2, distUnit));
+  const typical = floorFixed(toDist((r.milesLo + r.milesHi) / 2, distUnit));
 
   return (
     <div className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
