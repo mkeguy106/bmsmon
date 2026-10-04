@@ -112,7 +112,7 @@ data class PhonePowerSnapshot(
 )
 
 internal fun PhonePowerSnapshot.toJson() = PhonePowerJson(
-    level = levelPct,
+    level = levelPct.coerceIn(0, 100),
     plugged = plugged,
     charge_mah = chargeMah,
     fault = fault,

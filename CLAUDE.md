@@ -323,7 +323,7 @@ an empty roster).
 **Screen policy is plug-aware, and monitoring holds a wakelock.** The display is the phone's
 dominant drain — measured on the Pixel 6 at ~136 mAh/h against ~22 for GNSS and ~1.6 for
 Bluetooth, with the app the top consumer at 600 mAh over 4 h — so `FLAG_KEEP_SCREEN_ON` is held
-only while the phone is on external power AND above a low-battery latch. External power is any
+only while the phone is on external power AND above a low-battery latch AND free of a charger fault (below). External power is any
 nonzero `EXTRA_PLUGGED` (AC, USB, wireless **and dock** — never a single-constant equality test).
 The latch (`model/PowerPolicy.kt`, pure + unit-tested) **sets below 5% and clears at 15%**, holding
 its value in between so it cannot flap; it exists because holding the screen at very low charge
@@ -357,7 +357,10 @@ declares a fault when it has lost >= 25 mAh (`CHARGER_FAULT_DROP_MAH`) over 15 m
 (`CHARGER_FAULT_WINDOW_MS`). It clears on a rise of 6 mAh above the lowest value seen in the fault
 (`CHARGER_CLEAR_RISE_MAH`) or on unplug; unplugged or no counter reading resets it, so no reading
 never faults. Readings are buffered at most one per 30 s over a 20 min span. Releasing the screen
-does not clear the fault, because on a dead pad the counter still falls at the lower drain.
+does not clear the fault on a dead pad, because the counter still falls at the lower drain. A pad
+that can carry the screen-off load but not the screen-on load charges again once the screen sleeps
+and the fault clears. A clear does not re-wake the display (a real re-plug does); the hold resumes
+when the user wakes it, and if the pad still can't keep up the fault and the page recur.
 `powerDecision` then treats the phone as unplugged for `holdScreen` only (the low-power latch and
 GPS mode are unchanged), and Settings > Battery saver shows a read-only line while it holds.
 `PowerMonitor` re-reads the sticky intent every 60 s, since a dead pad changes neither plug nor
@@ -375,7 +378,10 @@ during 80%-limit charge cycling; healthy FULL/flat holds never tripped.
 **Upload and page.** Live ingest batches (never re-sync or import) carry a signed `phone` block:
 `level`, `plugged`, `charge_mah`, `fault`, `fault_since_ms`, `at_ms` (epoch ms), taken from the
 engine's `MonitorState.phonePower` (null while monitoring is off or before the first real reading).
-The server stores it per device, and its `phone_power` health check, which the Uptime Kuma monitor
+The block rides only on live batches that carry rows: with Bluetooth off or every pack out of range
+there is nothing to upload, and the ingest deadman covers that silence. A monitoring restart or an
+app update during a fault re-arms the 15-minute window: the next snapshot says `fault=false`, so the
+server clears, and the page recurs if the pad is still dead. The server stores it per device, and its `phone_power` health check, which the Uptime Kuma monitor
 `bmsmon-phone-charger` polls, fails only once a fault has persisted 5 minutes, so a short blip never
 pages.
 
