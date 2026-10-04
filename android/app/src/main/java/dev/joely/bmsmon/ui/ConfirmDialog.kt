@@ -31,8 +31,8 @@ object Confirmations {
     val clearData = ConfirmCopy(
         title = "Clear all logged history?",
         body = "Deletes every logged sample, session and debug frame on this phone. History and Review start " +
-            "empty, the learned range estimates fall back to defaults, and samples waiting to be re-sent to " +
-            "the cloud can no longer be re-sent. This can't be undone.",
+            "empty. Samples already queued for upload still send, but anything cleared here can no longer " +
+            "be re-sent to the cloud. This can't be undone.",
         confirm = "Clear data",
     )
 

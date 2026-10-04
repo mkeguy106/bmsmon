@@ -175,10 +175,10 @@ fun AllBatteriesScreen(
         ) {
             Text("All Batteries", color = c.text, fontSize = 21.sp, fontWeight = FontWeight.Bold)
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (state.monitoring) {
+                run {
                     // Decided on the ROSTER, not the filtered rows: with "Reachable" on, disconnected
                     // packs are filtered out, which used to hide "Reconnect all" entirely.
-                    val links = fleetHeaderActions(state.roster, state.disabled)
+                    val links = fleetHeaderActions(state.roster, state.disabled, state.monitoring)
                     if (links.reconnectAll) {
                         Text("Reconnect all", color = Bm.accent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.clickable(onClick = fleet.onReconnectAll).padding(4.dp))
@@ -222,7 +222,7 @@ fun AllBatteriesScreen(
                     groups = groupViews.map { RowGroup(it.id, it.label) },
                     isStage = state.monitoring && row.target.address.uppercase() in stageAddrs,
                     isDailyDriver = row.group?.id == state.dailyDriverId,
-                    disabled = row.target.address in state.disabled,
+                    disabled = isUserDisconnected(row.target.address, state.disabled),
                     monitoring = state.monitoring,
                     fresh = freshness(row.status, state.nowElapsedMs),
                     alertConfig = state.alertConfig,

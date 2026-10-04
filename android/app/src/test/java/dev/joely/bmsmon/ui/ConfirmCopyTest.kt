@@ -13,7 +13,9 @@ class ConfirmCopyTest {
         val body = Confirmations.clearData.body
         assertTrue(body.contains("can't be undone"))
         assertTrue(body.contains("re-sent"))
-        assertTrue(body.contains("range"))
+        assertTrue(body.contains("history") || body.contains("History"))
+        assertTrue(body.contains("queued for upload"))
+        assertTrue(!body.contains("range"))
     }
 
     @Test fun disconnectingSaysItSurvivesARestart() {

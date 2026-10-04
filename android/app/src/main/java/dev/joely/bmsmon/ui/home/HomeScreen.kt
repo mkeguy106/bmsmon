@@ -104,7 +104,7 @@ fun HomeScreen(
                 locked = locked,
             )
             // UI-28: user-disconnected packs no longer alert; keep that visible on the stage.
-            if (state.monitoring) {
+            run {
                 disconnectedChipText(userDisconnectedCount(state.roster, state.disabled))?.let { text ->
                     Text(
                         text, color = Bm.warnText, fontSize = 10.sp, fontWeight = FontWeight.SemiBold,

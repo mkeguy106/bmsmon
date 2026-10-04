@@ -16,6 +16,17 @@ class FleetLinksTest {
         assertEquals(FleetHeaderActions(disconnectAll = true, reconnectAll = true), fleetHeaderActions(DEFAULT_ROSTER, setOf(all.first())))
     }
 
+    @Test fun reconnectAllIsOfferedWithMonitoringOffButDisconnectAllIsNot() {
+        val one = setOf(all.first())
+        assertEquals(FleetHeaderActions(disconnectAll = false, reconnectAll = true), fleetHeaderActions(DEFAULT_ROSTER, one, monitoring = false))
+        assertEquals(FleetHeaderActions(disconnectAll = false, reconnectAll = false), fleetHeaderActions(DEFAULT_ROSTER, emptySet(), monitoring = false))
+    }
+
+    @Test fun rowMembershipIsCaseInsensitive() {
+        assertEquals(true, isUserDisconnected("c8:47:80:15:25:01", setOf("C8:47:80:15:25:01")))
+        assertEquals(false, isUserDisconnected("C8:47:80:15:25:02", setOf("C8:47:80:15:25:01")))
+    }
+
     @Test fun addressesCompareCaseInsensitively() {
         assertEquals(1, userDisconnectedCount(DEFAULT_ROSTER, setOf(DEFAULT_ROSTER.batteries.first().address.lowercase())))
     }
