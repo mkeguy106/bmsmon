@@ -104,7 +104,7 @@ object CloudJson {
                 charge_lock_cold_c = env.chargeLockColdC, charge_lock_hot_c = env.chargeLockHotC,
                 charge_resume_cold_c = env.chargeResumeColdC,
                 seize_soc = seizeSoc, alerts_on = alertsOn,
-                ranges = ranges?.takeIf { it.isNotEmpty() }?.map { (addr, r) ->
+                ranges = ranges?.filterValues { it.isFinite() }?.takeIf { it.isNotEmpty() }?.map { (addr, r) ->
                     RangeConfigJson(
                         addr,
                         r.whPerDay.lo, r.whPerDay.hi,
@@ -116,6 +116,10 @@ object CloudJson {
             ),
         )
 }
+
+/** DATA-25: kotlinx JSON throws on NaN/Infinity; a non-finite learned band is left out of the push. */
+private fun RangeParams.isFinite(): Boolean =
+    listOf(whPerDay.lo, whPerDay.hi, activeW.lo, activeW.hi, whPerMile.lo, whPerMile.hi).all { it.isFinite() }
 
 @Serializable
 data class TempConfigJson(

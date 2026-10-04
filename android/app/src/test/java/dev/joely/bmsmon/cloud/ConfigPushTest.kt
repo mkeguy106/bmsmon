@@ -51,4 +51,28 @@ class ConfigPushTest {
         assertEquals(now + 30_000L, outage.retryAtMs)
         assertEquals(1, outage.poisonSkips)
     }
+
+    // DATA-18: the clear is compare-and-clear. When a newer config arrived mid-flight the clear finds
+    // the value changed and removes nothing; that is a successful no-op, not a failure: the newer
+    // config stays pending, the drop/accept is committed, and the push gate is not pushed out.
+    @Test fun aClearThatFindsANewerConfigIsASuccessfulNoOp() = runBlocking {
+        pending = """{"profile":"newer"}"""
+        val sent = cfg
+        val s = configPushStep(
+            ConfigPushState(poisonSkips = 0, backoffMs = 8_000L), sent, ok, authFailed = false, nowElapsedMs = now,
+            clear = { if (pending == sent) pending = null },
+            warn = { m, _ -> logs += m },
+        )
+        assertEquals("""{"profile":"newer"}""", pending)
+        assertEquals(ConfigPushState(poisonSkips = 0, backoffMs = INITIAL_BACKOFF_MS, retryAtMs = 0L), s)
+        assertTrue(logs.isEmpty())
+        val dropped = configPushStep(
+            ConfigPushState(), sent, poison, authFailed = false, nowElapsedMs = now,
+            clear = { if (pending == sent) pending = null },
+            warn = { m, _ -> logs += m },
+        )
+        assertEquals(1, dropped.poisonSkips)
+        assertEquals(0L, dropped.retryAtMs)
+        assertEquals("""{"profile":"newer"}""", pending)
+    }
 }

@@ -300,8 +300,9 @@ class SettingsStore(private val context: Context) {
     suspend fun setCloudSyncAlerts(on: Boolean) = context.dataStore.edit { it[K.CLOUD_SYNC_ALERTS] = on }.let {}
     suspend fun setPendingTempConfig(json: String) =
         context.dataStore.edit { it[K.PENDING_TEMP_CONFIG] = json }.let {}
-    suspend fun clearPendingTempConfig() =
-        context.dataStore.edit { it.remove(K.PENDING_TEMP_CONFIG) }.let {}
+    /** Clear the pending config push only if it is still the one that was sent (DATA-18). */
+    suspend fun clearPendingTempConfigIf(sent: String) =
+        context.dataStore.edit { it.removeIfEquals(K.PENDING_TEMP_CONFIG, sent) }.let {}
     /**
      * The re-sync windows blob, or null when none is stored. cloud/Resync.kt owns the format; this store
      * only keeps the string. Unlike [load], a read failure THROWS (IOException) instead of reading as

@@ -465,7 +465,7 @@ class TelemetryReporter(
                         noteOutcome(outcome)
                         config = configPushStep(
                             config, cfg, outcome, ingest.authFailed, SystemClock.elapsedRealtime(),
-                            clear = { settings.clearPendingTempConfig() },
+                            clear = { settings.clearPendingTempConfigIf(cfg) },
                             warn = { msg, e -> Log.w(TAG, msg, e) },
                         )
                     }
