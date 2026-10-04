@@ -62,6 +62,14 @@ internal suspend fun <T> rollingBackNewKey(hadKey: Boolean, deleteKey: () -> Uni
         throw e
     }
 
+/**
+ * "Send GPS location" after a successful enroll. A first enrollment ([wasEnrolled] false) turns it on, the
+ * default with cloud sync. A re-enroll, which an enrolled phone does to fix a missing key or a rejected
+ * sign-in, keeps [current], the setting as the user sees it: re-enrolling restores uploading and never
+ * changes what is shared.
+ */
+internal fun gpsAfterEnroll(wasEnrolled: Boolean, current: Boolean): Boolean = if (wasEnrolled) current else true
+
 class EnrollClient(private val http: OkHttpClient) {
     suspend fun enroll(baseUrl: String, code: String, installUuid: String,
                        publicKeySpkiB64: String): Result<String> = withContext(Dispatchers.IO) {

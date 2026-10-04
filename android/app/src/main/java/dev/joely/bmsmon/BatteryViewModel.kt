@@ -1078,6 +1078,8 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         // HTTPS-only at the entry point (DATA-11): a manually typed http:// or bare host is
         // normalized before ever being used or persisted.
         val base = dev.joely.bmsmon.data.normalizeApiBaseUrl(baseUrl)
+        // Whether this is a re-enroll (fixing a missing key or a rejected sign-in), which keeps the GPS choice.
+        val wasEnrolled = _state.value.enrolled
         _state.update { it.copy(enrolling = true, enrollError = null) }
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             // DATA-25: Keystore, network and parse failures all land here, never in viewModelScope's
@@ -1102,9 +1104,12 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                 store.setDeviceId(id)
                 store.setEnrolled(true)
                 store.setCloudEnabled(true)
-                store.setGpsEnabled(true)
+                // GPS on for a first enrollment only. Persisted either way: a never-set value reads as
+                // the cloud-sync setting, which was just turned on.
+                val gps = dev.joely.bmsmon.cloud.gpsAfterEnroll(wasEnrolled, _state.value.gpsEnabled)
+                store.setGpsEnabled(gps)
                 _state.update {
-                    it.copy(apiBaseUrl = base, enrolled = true, cloudEnabled = true, gpsEnabled = true, enrolling = false)
+                    it.copy(apiBaseUrl = base, enrolled = true, cloudEnabled = true, gpsEnabled = gps, enrolling = false)
                 }
                 app.reporter.start()
                 app.reporter.queueImport()
