@@ -1218,12 +1218,20 @@ config lives in the `device_temp_config` table
 seize threshold** rides the same `POST /api/v1/config` body (optional flat `seize_soc`/`alerts_on`
 fields on `TempConfigBody`) into the device-level `device_alert_config` table (latest-wins); the
 WebUI reads it via `GET /web/alert-config` and seizes its main stage for the lowest fresh pack
-`≤ (alerts_on ? seize_soc ?? 30 : ∅)` (since Tier 2 `seize_soc` is the phone's dedicated seize level, 10–30) — over pins and auto-selection, with a **"LOW"** marker,
-no audible alarm: v2 (`/`) via `useV2Configs` + `web/src/v2/model/stageBase.ts`
-`selectStageBase` (Command stage, Journey and the Fleet Health hero; LOW chip in
+`≤ (alerts_on ? seize_soc ?? 30 : ∅)` (since Tier 2 `seize_soc` is the phone's dedicated seize
+level, 10–30) — ahead of pins and auto-selection, with a **"LOW"** marker, no audible alarm. The
+candidates mirror the phone (UI-19): when any base is in use (every base with a fresh discharging
+pack, else the one base that discharged within the 15 min stage hold; v1 keeps no hold memory, so
+only the discharging test) only packs on those bases may seize, so an idle spare on a charger never
+displaces the chair; a charging pack (`state` Charging or current above +0.05 A) never seizes
+unless it is regenerating (its base discharged within 30 s, or the row's `regen` flag, or a pack on
+its base discharging in the same render); lowest SOC wins, then the daily driver, then the lowest
+pack address (as the phone's `seizeCandidate`). The seize runs in v2 (`/`) via `useV2Configs` +
+`web/src/v2/model/stageBase.ts` `selectStageBase` (Command stage, Journey and the Fleet Health hero; LOW chip in
 `CommandStage.tsx`; no seize until the config's first answer, and the 30 default only if
 that fetch fails, so a guessed threshold can't leave the stage parked on a seized base),
-v1 (`/v1/`) via `web/src/stage.ts` `selectStageItems` (`MainStage.tsx`).
+and in v1 (`/v1/`) via `web/src/stage.ts` `selectStageItems` (`MainStage.tsx`; ties go to input
+order).
 Only the seize is synced — v2's capacity ALERT ladder is still the fixed 30…5 / critical 15.
 Schema is idempotent SQL in `server/app/db/schema.sql`, run on pool creation — so **schema
 changes apply automatically on container start; there is no separate migration step**.
@@ -1499,6 +1507,8 @@ artefacts and handing it only to viewers and live share links.
 by Command, Journey and the Fleet Health hero, replaces the old hardcoded `DAILY_DRIVER_BASE`
 staging. Ladder, first match wins: **(1) seize** — a fresh pack ≤ the synced seize threshold
 (`/web/alert-config`) stages its base with a LOW chip, overriding the pin as on Android and v1;
+only packs on a base in use are candidates when any base is in use, and a charging pack that is
+not regenerating never seizes (`seizeLead`);
 **(2) pin** — a fleet-rail tap, persisted in `localStorage["bmsmon-v2-stage-pin"]`, outranks the
 base in use for 30 min (android `PIN_HOLD_MS`; PINNED chip + AUTO to release; a pin dated 30 min
 or more ahead of the clock has expired too); **(3) in use** — deepest draw wins; **(4) hold** —

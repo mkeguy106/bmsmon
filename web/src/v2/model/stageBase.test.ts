@@ -52,9 +52,63 @@ describe("selectStageBase", () => {
     expect(sel).toEqual({ baseId: "2016", reason: "in-use" });
   });
 
-  it("seizes for the lowest FRESH pack at/below the threshold, over the base in use", () => {
+  it("seizes for the lowest SOC among the packs of the base in use, over a pin", () => {
+    const pin = { baseId: "2023", atMs: NOW - 60_000 };
+    const items = fleet({ "2016A": { current_a: -6, soc: 25 }, "2016B": { current_a: -6, soc: 18 } });
+    expect(run(items, { pin })).toEqual({ baseId: "2016", reason: "seize" });
+  });
+
+  it("an idle low spare never displaces the discharging base", () => {
     const sel = run(fleet({ "2016A": { current_a: -6 }, "2023B": { soc: 22 }, "2024A": { soc: 18 } }));
-    expect(sel).toEqual({ baseId: "2024", reason: "seize" });
+    expect(sel).toEqual({ baseId: "2016", reason: "in-use" });
+  });
+
+  it("a charging low spare never seizes, even with nothing else in use", () => {
+    expect(run(fleet({ "2023A": { soc: 10, current_a: 5 } }))).toEqual({ baseId: "2012", reason: "default" });
+    expect(run(fleet({ "2023A": { soc: 10, state: "Charging" } }))).toEqual({ baseId: "2012", reason: "default" });
+  });
+
+  it("breaks an equal-SOC seize tie by pack address after the daily driver, as the phone does", () => {
+    // Nothing in use; two idle low spares at the same SOC. Base id order would pick 2016, the
+    // phone picks the lowest pack ADDRESS, here 2024's.
+    const items = [
+      pack("Z1", "2016", { soc: 25 }), pack("Z2", "2016", { soc: 80 }),
+      pack("A1", "2024", { soc: 25 }), pack("A2", "2024", { soc: 80 }),
+    ];
+    expect(run(items)).toEqual({ baseId: "2024", reason: "seize" });
+  });
+  it("prefers the daily driver on an equal-SOC seize tie whatever the addresses", () => {
+    const items = [
+      pack("Z1", "2012", { soc: 25 }), pack("Z2", "2012", { soc: 80 }),
+      pack("A1", "2024", { soc: 25 }), pack("A2", "2024", { soc: 80 }),
+    ];
+    expect(run(items)).toEqual({ baseId: "2012", reason: "seize" });
+  });
+  it("with two bases discharging, a low pack on the non-daily-driver one still seizes", () => {
+    const sel = run(fleet({ "2012A": { current_a: -6 }, "2016A": { current_a: -6, soc: 20 } }));
+    expect(sel).toEqual({ baseId: "2016", reason: "seize" });
+  });
+
+  it("a regen (Charging-state) pack on the in-use base still seizes", () => {
+    const sel = run(fleet({ "2016A": { current_a: -6 }, "2016B": { state: "Charging", current_a: 2, soc: 15 } }));
+    expect(sel).toEqual({ baseId: "2016", reason: "seize" });
+    const own = run(fleet({ "2016B": { state: "Charging", current_a: 2, soc: 15, regen: true } }));
+    expect(own).toEqual({ baseId: "2016", reason: "seize" });
+    const mem = run(fleet({ "2016B": { state: "Charging", current_a: 2, soc: 15 } }),
+      { lastDischargeMs: new Map([["2016", NOW - 10_000]]) });
+    expect(mem).toEqual({ baseId: "2016", reason: "seize" });
+  });
+
+  it("with no base in use, a low idle spare seizes", () => {
+    expect(run(fleet({ "2024A": { soc: 12 } }))).toEqual({ baseId: "2024", reason: "seize" });
+  });
+
+  it("the held base (discharged within the hold) counts as in use for the seize", () => {
+    const lastDischargeMs = new Map([["2016", NOW - 60_000]]);
+    expect(run(fleet({ "2023B": { soc: 22 }, "2016A": { soc: 28 } }), { lastDischargeMs }))
+      .toEqual({ baseId: "2016", reason: "seize" });
+    expect(run(fleet({ "2023B": { soc: 22 } }), { lastDischargeMs }))
+      .toEqual({ baseId: "2016", reason: "hold" });
   });
 
   it("fires the seize at exactly the threshold (≤, the ladder convention)", () => {
@@ -66,6 +120,7 @@ describe("selectStageBase", () => {
       .toEqual({ baseId: "2012", reason: "default" });
     expect(run(fleet({ "2023A": { soc: 5 } }), { seizeThreshold: null }))
       .toEqual({ baseId: "2012", reason: "default" });
+    expect(run(fleet({ "2023A": { soc: 31 } }))).toEqual({ baseId: "2012", reason: "default" });
   });
 
   it("breaks an exact seize tie toward the daily driver", () => {

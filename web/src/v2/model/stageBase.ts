@@ -7,7 +7,15 @@
 // share dock's resolve_active_group (server/app/routers/share.py) (XC-2):
 //   1. SEIZE   a FRESH pack at/below the seize threshold stages its base; lowest SOC wins,
 //              the daily driver breaks ties. Overrides the pin (android + v1 parity), so a
-//              pack draining toward damage can never sit hidden off-stage.
+//              pack draining toward damage can never sit hidden off-stage. Candidates are
+//              limited to the bases in use (every base with a discharging fresh pack, else
+//              the one base that discharged within ACTIVE_HOLD_MS) whenever any is in use,
+//              so an idle spare on a charger never displaces the chair; with none in use any
+//              fresh pack may seize. A pack that is charging (state Charging or current above
+//              +0.05 A) never seizes unless it is regenerating: its base discharged within
+//              REGEN_WINDOW_MS, a pack on its base is discharging in this same render (kept
+//              so the answer never depends on the session memory having been folded yet), or
+//              the row's own regen flag is set.
 //   2. PIN     a rail pin made less than PIN_HOLD_MS ago (android PIN_HOLD_MS): tapping a
 //              spare shows it even while the chair is in use, and a forgotten pin can't
 //              hide the chair for more than 30 minutes. A pin dated PIN_HOLD_MS or more
@@ -35,6 +43,10 @@ import { DAILY_DRIVER_BASE, isDischarging } from "../fleet";
 export const ACTIVE_HOLD_MS = 15 * 60_000;
 /** mirrors android PIN_HOLD_MS. */
 export const PIN_HOLD_MS = 30 * 60_000;
+/** mirrors android's regen window: a charging reading this soon after a discharge is braking. */
+export const REGEN_WINDOW_MS = 30_000;
+/** Current above which a pack counts as charging (mirrors android). */
+const CHARGING_A = 0.05;
 /** C6: the seize threshold when the phone has pushed none (same as v1 App.tsx). */
 export const DEFAULT_SEIZE_SOC = 30;
 
@@ -83,22 +95,57 @@ function newestBase(bases: Base[], freshOnly: boolean): string | null {
   return newest?.id ?? null;
 }
 
+/** The SEIZE rung: the base of the lowest-SOC candidate pack, or null. Candidates are fresh
+ *  packs at/below the threshold, on a base in use whenever any base is, and not charging
+ *  unless regenerating (see the header): the base discharged within REGEN_WINDOW_MS, a pack
+ *  on it discharges in this render (so this never relies on lastDischargeMs having been
+ *  folded), or the row's regen flag. Ties go to the daily driver, then `before`. */
+/** Equal-SOC seize tie, as android `seizeCandidate`: a pack on the daily-driver base first, then
+ *  the lowest pack address (ordinal string order, like Kotlin's String.compareTo). */
+const seizeTieBefore = (baseA: string, addrA: string, baseB: string, addrB: string): boolean =>
+  (baseA === dd) !== (baseB === dd) ? baseA === dd : addrA < addrB;
+
+function seizeLead(i: StageInputs): string | null {
+  if (i.seizeThreshold == null) return null;
+  const inUse = new Set<string>();
+  for (const b of i.bases) {
+    if (b.packs.some((p) => p.connected && isDischarging(p.item))) inUse.add(b.id);
+  }
+  if (inUse.size === 0) {
+    let held: { id: string; ts: number } | null = null;
+    for (const [id, ts] of i.lastDischargeMs) {
+      if (!i.bases.some((b) => b.id === id) || i.nowMs - ts >= ACTIVE_HOLD_MS) continue;
+      if (!held || ts > held.ts) held = { id, ts };
+    }
+    if (held) inUse.add(held.id);
+  }
+  let lead: { id: string; soc: number; addr: string } | null = null;
+  for (const b of i.bases) {
+    if (inUse.size > 0 && !inUse.has(b.id)) continue;
+    const seen = i.lastDischargeMs.get(b.id);
+    const driving = b.packs.some((p) => p.connected && isDischarging(p.item)) ||
+      (seen != null && i.nowMs - seen < REGEN_WINDOW_MS);
+    for (const p of b.packs) {
+      const soc = p.item.soc;
+      if (!p.connected || soc == null || soc > i.seizeThreshold) continue;
+      const charging = p.item.state === "Charging" || (p.item.current_a ?? 0) > CHARGING_A;
+      if (charging && !driving && !p.item.regen) continue;
+      const addr = p.item.address;
+      if (!lead || soc < lead.soc || (soc === lead.soc && seizeTieBefore(b.id, addr, lead.id, lead.addr))) {
+        lead = { id: b.id, soc, addr };
+      }
+    }
+  }
+  return lead?.id ?? null;
+}
+
 export function selectStageBase(i: StageInputs): StageSelection | null {
   if (i.bases.length === 0) return null;
   const byId = new Map(i.bases.map((b) => [b.id, b] as const));
 
   // 1. SEIZE
-  if (i.seizeThreshold != null) {
-    let lead: { id: string; soc: number } | null = null;
-    for (const b of i.bases) {
-      for (const p of b.packs) {
-        const soc = p.item.soc;
-        if (!p.connected || soc == null || soc > i.seizeThreshold) continue;
-        if (!lead || soc < lead.soc || (soc === lead.soc && before(b.id, lead.id))) lead = { id: b.id, soc };
-      }
-    }
-    if (lead) return { baseId: lead.id, reason: "seize" };
-  }
+  const seized = seizeLead(i);
+  if (seized) return { baseId: seized, reason: "seize" };
 
   // 2. PIN — expires both ways, so a future-dated pin can't hold the stage forever.
   if (i.pin && byId.has(i.pin.baseId) && Math.abs(i.nowMs - i.pin.atMs) < PIN_HOLD_MS) {
