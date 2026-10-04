@@ -7,6 +7,7 @@ import json
 from datetime import datetime, timezone
 
 from app.db import queries as q
+from app.db import rollup as ru
 from app.db.online_index import complete_partitioned_indexes
 from app.db.partitions import ensure_partitions_for_range
 
@@ -84,4 +85,42 @@ async def test_charge_sessions_read_only_the_charging_index(app):
         plan = await explain(conn, q._CHARGE_SESSION_BUCKETS, STAGE[0], MARCH + DAY)
     assert child in index_names(plan)
     assert PART not in seq_scanned(plan)
-    assert buffers(plan) * 4 < pages
+    # The Insert node's own total includes the rollup rows' index/heap writes; the read
+    # side is its single child.
+    (read_side,) = plan["Plans"]
+    assert buffers(read_side) * 4 < pages
+
+
+async def test_share_trail_reads_only_its_window(app):
+    async with app.state.pool.acquire() as conn:
+        pages = await seed_month(conn)
+        lo = MARCH + 20 * DAY + 12 * HOUR
+        plan = await explain(conn, q._GPS_TRACK_ALL, lo, lo + 6 * HOUR, q.GPS_ACCURACY_MAX_M)
+    assert PART not in seq_scanned(plan)
+    assert buffers(plan) * 10 < pages
+
+
+async def test_history_raw_parts_read_only_their_windows(app):
+    async with app.state.pool.acquire() as conn:
+        pages = await seed_month(conn)
+        b = q.HISTORY_BUCKET_MS
+        hw = END - HOUR                      # rolled up to an hour before the month's end
+        since = END - 25 * HOUR - 600_000
+        ru_lo = -(-since // b) * b
+        routed = await explain(conn, q._HISTORY_ROUTED, since, ru_lo, hw, b)
+        raw = await explain(conn, q._HISTORY_RAW, END - HOUR, b)
+    for plan in (routed, raw):
+        assert PART not in seq_scanned(plan)
+        assert buffers(plan) * 10 < pages
+
+
+async def test_rollup_reroll_reads_only_its_window(app):
+    async with app.state.pool.acquire() as conn:
+        pages = await seed_month(conn)
+        # EXPLAIN ANALYZE executes the upsert; the next test's TRUNCATE cleans it up.
+        plan = await explain(conn, ru._UPSERT, END - 48 * HOUR, END)
+    assert PART not in seq_scanned(plan)
+    # The Insert node's own total includes the rollup rows' index/heap writes; the read
+    # side is its single child.
+    (read_side,) = plan["Plans"]
+    assert buffers(read_side) * 4 < pages

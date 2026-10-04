@@ -78,8 +78,8 @@ DISCHARGE_EPS = 0.1           # A — same threshold as the app/WebUI (BMS deadb
 ACTIVE_HOLD_MS = 15 * 60_000  # mirrors android DEFAULT_STAGE_HOLD_MIN
 _DISCHARGE_CACHE_KEY = "recent_discharge"  # fleet-wide, so one key (see TRACK_CACHE_TTL_S)
 
-# Guest polls arrive every ~10 s per guest; the fleet GPS track query is the expensive
-# part (~200 ms over today's whole window in prod). Cache it process-wide for one poll
+# Guest polls arrive every ~4 s per guest; the fleet GPS track (queries._GPS_TRACK_ALL, one
+# (address, ts) range read per pack over today's window) is the expensive part. Cache it process-wide for one poll
 # period so N guests collapse onto <=1 query per TRACK_TTL_S. The cache key is the day
 # window's START (local midnight, epoch ms): to_ms is "now" and changes every request,
 # but the trail is append-only within a day, so a <=10 s-stale tail is fine — and a new

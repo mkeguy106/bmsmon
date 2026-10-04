@@ -433,15 +433,27 @@ async def revoke_device(conn, device_id) -> None:
 
 HISTORY_BUCKET_MS = ROLLUP_BUCKET_MS  # 30-minute buckets — history buckets ARE rollup buckets
 
+# SRV-16: fleet-wide windows. samples' only index is the (address, ts, ...) key and PG16
+# has no skip scan, so a window filtered on ts alone seq-scans the WHOLE month-to-date
+# partition however small the window (measured at month end: a 15 h share trail read 81 k
+# buffers / 437 ms). Driving each read per pack from the small batteries registry makes it
+# one (address, ts) range scan per pack (5 k buffers / 35 ms). Completeness rests on the
+# registry invariant (insert_samples). tests/test_query_plans.py pins the cost. A LATERAL
+# subquery with its own GROUP BY stays correlated by construction; one without needs the
+# OFFSET 0 fence (see _GPS_TRACK_ALL). ts predicates only (SRV-28): ts is ts_ms at ms
+# precision, so it alone prunes partitions and keeps the planner's estimates honest.
 _HISTORY_RAW = """
-SELECT address,
-       (ts_ms / $2) * $2 AS bucket_ms,
-       avg(soc)::real AS soc
-  FROM samples
- WHERE ts_ms >= $1 AND ts >= to_timestamp($1::double precision / 1000.0)
-   AND link_event IS NULL AND soc IS NOT NULL
- GROUP BY address, bucket_ms
- ORDER BY address, bucket_ms
+SELECT b.address, h.bucket_ms, h.soc
+  FROM batteries b
+  CROSS JOIN LATERAL (
+    SELECT (s.ts_ms / $2) * $2 AS bucket_ms, avg(s.soc)::real AS soc
+      FROM samples s
+     WHERE s.address = b.address
+       AND s.ts >= to_timestamp($1::double precision / 1000.0)
+       AND s.link_event IS NULL AND s.soc IS NOT NULL
+     GROUP BY 1
+  ) h
+ ORDER BY b.address, h.bucket_ms
 """
 
 # SRV-14 routed variant: rollup rows for the fully-rolled middle [$2, $3), raw for the
@@ -449,31 +461,34 @@ SELECT address,
 # pure-raw partial-bucket semantics) and for the live tail [$3, now). The three parts
 # are disjoint, so summing sums/counts per bucket reproduces avg(soc) exactly.
 # soc_n > 0 mirrors the raw soc IS NOT NULL filter: a bucket whose every soc was NULL
-# yields no row, same as raw.
+# yields no row, same as raw. All three parts are read per pack (the rollup part through
+# samples_rollup's (address, bucket_ms) key, SRV-27).
 _HISTORY_ROUTED = """
-WITH parts AS (
-  SELECT address, (ts_ms / $4) * $4 AS bucket_ms,
-         sum(soc::float8) AS soc_sum, count(soc)::bigint AS soc_n
-    FROM samples
-   WHERE ts_ms >= $1 AND ts_ms < $2
-     AND ts >= to_timestamp($1::double precision / 1000.0)
-     AND ts < to_timestamp($2::double precision / 1000.0)
-     AND link_event IS NULL AND soc IS NOT NULL
-   GROUP BY address, bucket_ms
-  UNION ALL
-  SELECT address, bucket_ms, soc_sum, soc_n::bigint
-    FROM samples_rollup
-   WHERE bucket_ms >= $2 AND bucket_ms < $3 AND soc_n > 0
-  UNION ALL
-  SELECT address, (ts_ms / $4) * $4 AS bucket_ms,
-         sum(soc::float8), count(soc)::bigint
-    FROM samples
-   WHERE ts_ms >= $3 AND ts >= to_timestamp($3::double precision / 1000.0)
-     AND link_event IS NULL AND soc IS NOT NULL
-   GROUP BY address, bucket_ms
-)
-SELECT address, bucket_ms, (sum(soc_sum) / nullif(sum(soc_n), 0))::real AS soc
-  FROM parts GROUP BY address, bucket_ms ORDER BY address, bucket_ms
+SELECT b.address, p.bucket_ms, (sum(p.soc_sum) / nullif(sum(p.soc_n), 0))::real AS soc
+  FROM batteries b
+  CROSS JOIN LATERAL (
+    SELECT (s.ts_ms / $4) * $4 AS bucket_ms,
+           sum(s.soc::float8) AS soc_sum, count(s.soc)::bigint AS soc_n
+      FROM samples s
+     WHERE s.address = b.address
+       AND s.ts >= to_timestamp($1::double precision / 1000.0)
+       AND s.ts < to_timestamp($2::double precision / 1000.0)
+       AND s.link_event IS NULL AND s.soc IS NOT NULL
+     GROUP BY 1
+    UNION ALL
+    SELECT r.bucket_ms, r.soc_sum, r.soc_n::bigint
+      FROM samples_rollup r
+     WHERE r.address = b.address AND r.bucket_ms >= $2 AND r.bucket_ms < $3 AND r.soc_n > 0
+    UNION ALL
+    SELECT (s.ts_ms / $4) * $4, sum(s.soc::float8), count(s.soc)::bigint
+      FROM samples s
+     WHERE s.address = b.address
+       AND s.ts >= to_timestamp($3::double precision / 1000.0)
+       AND s.link_event IS NULL AND s.soc IS NOT NULL
+     GROUP BY 1
+  ) p
+ GROUP BY b.address, p.bucket_ms
+ ORDER BY b.address, p.bucket_ms
 """
 
 
@@ -487,8 +502,7 @@ async def history_series(conn, since_ms: int) -> list[dict]:
     (SRV-14, ~48 rows/pack/day); the partial head bucket and the live tail come from
     raw, so results are identical to the pure-raw computation (see tests/test_rollup.py).
 
-    The ts predicate mirrors the ts_ms one (ts is derived from ts_ms at insert time) so
-    the planner can prune the monthly RANGE(ts) partitions — ts_ms alone can't."""
+    Every part is read per pack from the batteries registry (SRV-16); see _HISTORY_RAW."""
     hw = await get_high_water_ms(conn)
     b = HISTORY_BUCKET_MS
     ru_lo = -(-since_ms // b) * b  # first FULL bucket at/after since_ms
@@ -707,25 +721,34 @@ async def revoke_location_share(conn, share_id: int, now_ms: int) -> None:
         share_id, now_ms)
 
 
+# Fleet-wide GPS buckets for the public share trail. The inner select has no GROUP BY, so
+# without the OFFSET 0 fence the planner de-correlates the LATERAL straight back into the
+# month-wide scan (measured: 450 ms vs 35 ms). Keep the fence.
+_GPS_TRACK_ALL = """
+SELECT (s.ts_ms / 15000) * 15000 AS bucket_ms,
+       avg(s.lat)::double precision AS lat, avg(s.lon)::double precision AS lon,
+       avg(s.power_w)::real AS power_w, avg(s.current_a)::real AS current_a
+  FROM batteries b
+  CROSS JOIN LATERAL (
+    SELECT s.ts_ms, s.lat, s.lon, s.power_w, s.current_a
+      FROM samples s
+     WHERE s.address = b.address
+       AND s.ts >= to_timestamp($1::double precision / 1000.0)
+       AND s.ts < to_timestamp($2::double precision / 1000.0)
+       AND s.link_event IS NULL AND s.lat IS NOT NULL AND s.lon IS NOT NULL
+       AND (s.gps_accuracy_m IS NULL OR s.gps_accuracy_m <= $3)
+    OFFSET 0
+  ) s
+ GROUP BY 1 ORDER BY 1
+"""
+
+
 async def gps_track_all(conn, from_ms: int, to_ms: int) -> list[dict]:
     """15-second buckets of GPS fixes across the whole fleet. Feeds the public
     location-share guest page: coordinates plus per-bucket discharge context
     (power/current — the 2026-07-14 trail-detail relaxation) and deliberately
-    nothing else (no SOC, voltage, temperature, or cells).
-    The redundant ts predicates exist purely for partition pruning (see history_series)."""
-    rows = await conn.fetch(
-        """SELECT (ts_ms / 15000) * 15000 AS bucket_ms,
-                  avg(lat)::double precision AS lat, avg(lon)::double precision AS lon,
-                  avg(power_w)::real AS power_w, avg(current_a)::real AS current_a
-             FROM samples
-            WHERE ts_ms >= $1 AND ts_ms < $2
-              AND ts >= to_timestamp($1::double precision / 1000.0)
-              AND ts < to_timestamp($2::double precision / 1000.0)
-              AND link_event IS NULL AND lat IS NOT NULL AND lon IS NOT NULL
-              AND (gps_accuracy_m IS NULL OR gps_accuracy_m <= $3)
-            GROUP BY bucket_ms ORDER BY bucket_ms""",
-        from_ms, to_ms, GPS_ACCURACY_MAX_M,
-    )
+    nothing else (no SOC, voltage, temperature, or cells). Read per pack (SRV-16)."""
+    rows = await conn.fetch(_GPS_TRACK_ALL, from_ms, to_ms, GPS_ACCURACY_MAX_M)
     return [dict(r) for r in rows]
 
 
