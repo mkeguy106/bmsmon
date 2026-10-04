@@ -1,5 +1,6 @@
 package dev.joely.bmsmon
 
+import dev.joely.bmsmon.model.CHARGER_BUFFER_SPACING_MS
 import dev.joely.bmsmon.model.ChargeReading
 import dev.joely.bmsmon.model.ChargerFaultState
 import dev.joely.bmsmon.model.foldChargerFault
@@ -47,9 +48,10 @@ class ChargerFaultTest {
             if (s.fault && faultAtMin == null) faultAtMin = j
         }
         assertTrue(s.fault)
-        // 3 mAh/min is 180 mA: the 25 mAh drop against the 15-min-old anchor lands well inside
-        // the first full 15-min window of falling, and not before the fall began.
-        assertTrue("fault at $faultAtMin", faultAtMin!! in 1..15)
+        // 3 mAh/min is 180 mA: it takes several minutes of falling to open a 25 mAh gap against
+        // the anchor (so no fault in the first few minutes), and it lands inside the first full
+        // 15-min window of falling.
+        assertTrue("fault at $faultAtMin", faultAtMin!! in 5..15)
         assertEquals((59 + faultAtMin) * min, s.faultSinceElapsedMs)
     }
 
@@ -145,7 +147,72 @@ class ChargerFaultTest {
     }
 
     @Test fun dropExactlyAtThresholdFaults() {
-        val (s, first) = fold(steps = 40) { i -> if (i < 10) 3000 else 2975 }
+        val (s, _) = fold(steps = 40) { i -> if (i < 10) 3000 else 2975 }
         assertTrue(s.fault)
+    }
+
+    @Test fun readingsEverySecondWithASteadyFallStillFault() {
+        // 1 Hz for 20 min, falling 3 mAh/min (180 mA): the buffer spacing keeps the anchor alive.
+        var s = ChargerFaultState()
+        var faulted = false
+        for (i in 0..1200) {
+            s = foldChargerFault(s, ChargeReading(i * 1_000L, true, 3000 - (i * 3) / 60))
+            if (s.fault) faulted = true
+        }
+        assertTrue(faulted)
+        assertTrue(s.fault)
+    }
+
+    @Test fun bufferHoldsAtMostOneReadingPerSpacing() {
+        var s = ChargerFaultState()
+        for (i in 0..600) s = foldChargerFault(s, ChargeReading(i * 1_000L, true, 3000))
+        val times = s.readings.map { it.first }
+        assertTrue(times.zipWithNext().all { (a, b) -> b - a >= CHARGER_BUFFER_SPACING_MS })
+    }
+
+    @Test fun aReadingInsideTheSpacingStillRunsTheDropCheck() {
+        // Buffered at 0 and just under 15 min.
+        var s = foldChargerFault(ChargerFaultState(), ChargeReading(0, true, 3000))
+        s = foldChargerFault(s, ChargeReading(15 * min - 10_000L, true, 3000))
+        assertFalse(s.fault)
+        // 10 s later: not appended, yet it compares against the anchor at 0 and faults.
+        s = foldChargerFault(s, ChargeReading(15 * min, true, 2970))
+        assertTrue(s.fault)
+    }
+
+    @Test fun anchorExactlyFifteenMinutesOldCounts() {
+        var s = foldChargerFault(ChargerFaultState(), ChargeReading(0, true, 3000))
+        s = foldChargerFault(s, ChargeReading(7 * min, true, 2990))
+        s = foldChargerFault(s, ChargeReading(15 * min, true, 2975))
+        assertTrue(s.fault)
+        assertEquals(15 * min, s.faultSinceElapsedMs)
+    }
+
+    @Test fun anchorJustUnderFifteenMinutesDoesNot() {
+        var s = foldChargerFault(ChargerFaultState(), ChargeReading(1, true, 3000))
+        s = foldChargerFault(s, ChargeReading(15 * min, true, 2900))
+        assertFalse(s.fault)
+    }
+
+    @Test fun singleReadingNeverFaults() {
+        val s = foldChargerFault(ChargerFaultState(), ChargeReading(0, true, 100))
+        assertFalse(s.fault)
+        assertEquals(listOf(0L to 100), s.readings)
+    }
+
+    @Test fun twoReadingsExactlyFifteenMinutesApartFault() {
+        var s = foldChargerFault(ChargerFaultState(), ChargeReading(0, true, 3000))
+        s = foldChargerFault(s, ChargeReading(15 * min, true, 2975))
+        assertTrue(s.fault)
+    }
+
+    @Test fun counterJumpingUpThenFallingComparesAgainstTheNewestAnchor() {
+        var s = foldChargerFault(ChargerFaultState(), ChargeReading(0, true, 3000))
+        s = foldChargerFault(s, ChargeReading(5 * min, true, 3100))
+        // 20 min in the newest reading at least 15 min old is the 5-min one (3100).
+        val small = foldChargerFault(s, ChargeReading(20 * min, true, 3080))
+        assertFalse(small.fault)
+        val big = foldChargerFault(s, ChargeReading(20 * min, true, 3070))
+        assertTrue(big.fault)
     }
 }

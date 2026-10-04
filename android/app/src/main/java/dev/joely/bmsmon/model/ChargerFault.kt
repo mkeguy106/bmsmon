@@ -16,6 +16,12 @@ const val CHARGER_CLEAR_RISE_MAH = 6
 /** How much history the fold keeps (20 min: the window plus slack for sparse readings). */
 const val CHARGER_BUFFER_MS = 20 * 60_000L
 
+/**
+ * Minimum gap between buffered readings. Battery broadcasts can arrive every second or so, and the
+ * count cap would then evict the 15-min anchor; spacing keeps ~40 entries across the buffer.
+ */
+const val CHARGER_BUFFER_SPACING_MS = 30_000L
+
 /** Hard cap on buffered readings, so a fast reading rate can never grow the state without bound. */
 const val CHARGER_BUFFER_MAX = 256
 
@@ -53,7 +59,7 @@ data class ChargerFaultState(
  * 2. In fault, the minimum counter seen is tracked, and a rise of [CHARGER_CLEAR_RISE_MAH] above
  *    it clears the fault (fresh buffer from that reading). Falling at a lower drain, as when the
  *    screen is released, does not clear it: the counter still falls on a dead pad.
- * 3. Otherwise the reading is buffered and compared with the newest reading at least
+ * 3. Otherwise the reading is buffered (at most one per [CHARGER_BUFFER_SPACING_MS]) and compared with the newest reading at least
  *    [CHARGER_FAULT_WINDOW_MS] old; a loss of [CHARGER_FAULT_DROP_MAH] or more is a fault.
  *
  * Pure and total: no clock, no Android types.
@@ -74,7 +80,10 @@ fun foldChargerFault(prev: ChargerFaultState, r: ChargeReading): ChargerFaultSta
         return prev.copy(minMahSinceFault = lowest)
     }
 
-    val buffered = (prev.readings + (at to mah))
+    // A reading less than CHARGER_BUFFER_SPACING_MS after the newest buffered one still runs the
+    // drop check below, but is not itself kept.
+    val spaced = last == null || at - last >= CHARGER_BUFFER_SPACING_MS
+    val buffered = (if (spaced) prev.readings + (at to mah) else prev.readings)
         .filter { it.first >= at - CHARGER_BUFFER_MS }
         .takeLast(CHARGER_BUFFER_MAX)
     val anchor = buffered.lastOrNull { it.first <= at - CHARGER_FAULT_WINDOW_MS }
