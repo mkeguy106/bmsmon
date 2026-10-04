@@ -1,11 +1,22 @@
 import base64
 import hashlib
+import math
 import time
+from typing import Callable
 
 import jwt
 from cryptography.hazmat.primitives.serialization import load_der_public_key
 
-LEEWAY_SECONDS = 60
+# SRV-19: how far the server's clock may disagree with the phone's before a genuine token
+# is refused. The phone mints a 60 s token per request (DeviceKeys.kt), so a token passes
+# while  iat <= server_now + IAT_LEEWAY_S  (server up to 10 min BEHIND the phone)  and
+#        server_now <= exp + EXP_LEEWAY_S  (server up to 10 min AHEAD of it).
+# 2026-09-16: a 585 s backward step of the NAS clock refused every token under the old
+# one-minute leeway. Replay stays bounded: the jti cache remembers a token until
+# exp + EXP_LEEWAY_S (when it stops being acceptable anyway), and the body-hash binding
+# means a replay can only resubmit the identical body, which the samples key absorbs.
+IAT_LEEWAY_S = 600
+EXP_LEEWAY_S = 600
 
 # DATA-11: expected audience for device JWTs. Newer app builds set aud="bmsmon-api";
 # tokens WITHOUT an aud claim stay valid (older app versions). Enforced manually in
@@ -37,8 +48,9 @@ def _skew_from_unverified(token: str) -> int | None:
 
 def skew_of(claims: dict) -> int:
     """server_now - iat of a verified token, in whole seconds (positive: server ahead).
-    Integer arithmetic on purpose: PyJWT has already checked int(iat), and float() of a
-    huge integer iat would overflow, so this can never fail on an accepted token."""
+    Integer arithmetic on purpose: verify_token has already checked that iat is a finite
+    number, and float() of a huge integer iat would overflow, so this can never fail on an
+    accepted token."""
     return round(time.time()) - int(claims["iat"])
 
 
@@ -47,29 +59,37 @@ def body_hash(body: bytes) -> str:
 
 
 class JtiCache:
-    """JWT-replay guard: remembers seen jti values until their exp passes.
+    """JWT-replay guard: remembers seen jti values until their token can no longer be
+    accepted (the caller passes exp + EXP_LEEWAY_S).
 
     SINGLE-WORKER CONSTRAINT (SRV-8): this cache is process-local. Running
     uvicorn with --workers >1 silently defeats replay protection — a replayed
     token just needs to land on a worker that hasn't seen the jti. A restart
-    also clears it (bounded by the short token TTL + LEEWAY). Keep the server
+    also clears it (bounded by the token TTL + EXP_LEEWAY_S). Keep the server
     single-process (see the Dockerfile CMD note) or move this to a shared
     store first.
     """
 
-    def __init__(self) -> None:
-        self._seen: dict[str, int] = {}
+    PRUNE_INTERVAL_S = 1.0  # an outbox drain of ~16 POST/s must not rebuild the map 16x/s
+
+    def __init__(self, clock: Callable[[], float] = time.time) -> None:
+        self._clock = clock
+        self._seen: dict[str, float] = {}
+        self._pruned_at = clock()
 
     def contains(self, jti: str) -> bool:
         """Read-only replay probe: True while [jti] is burned and unexpired. Records
         nothing. It lets a request be refused as a replay BEFORE its body is read (SEC-18)."""
         exp = self._seen.get(jti)
-        return exp is not None and exp > int(time.time())
+        return exp is not None and exp > self._clock()
 
-    def seen(self, jti: str, exp: int) -> bool:
-        now = int(time.time())
-        self._seen = {k: v for k, v in self._seen.items() if v > now}  # prune
-        if jti in self._seen:
+    def seen(self, jti: str, exp: float) -> bool:
+        now = self._clock()
+        if now - self._pruned_at >= self.PRUNE_INTERVAL_S:
+            self._seen = {k: v for k, v in self._seen.items() if v > now}
+            self._pruned_at = now
+        prev = self._seen.get(jti)
+        if prev is not None and prev > now:
             return True
         self._seen[jti] = exp
         return False
@@ -84,8 +104,9 @@ def unverified_sub(token: str) -> str:
 
 def verify_token(token: str, public_key_spki: bytes) -> dict:
     """SEC-18 stage 1: everything that does NOT need the body. ES256 signature (alg
-    pinned), required claims, exp/iat with LEEWAY_SECONDS, and aud verify-if-present.
-    Never touches the replay cache, so it is safe to run before the body is read."""
+    pinned), required claims, exp with EXP_LEEWAY_S, iat with IAT_LEEWAY_S, and aud
+    verify-if-present. Never touches the replay cache, so it is safe to run before the
+    body is read."""
     try:
         pub = load_der_public_key(public_key_spki)
         # verify_aud=False: PyJWT would otherwise raise InvalidAudienceError for any
@@ -93,14 +114,23 @@ def verify_token(token: str, public_key_spki: bytes) -> dict:
         # checked manually below, verify-if-present (see AUDIENCE).
         claims = jwt.decode(token, pub, algorithms=["ES256"],
                             options={"require": ["exp", "sub", "jti", "bh", "iat"],
-                                     "verify_aud": False},
-                            leeway=LEEWAY_SECONDS)
+                                     "verify_aud": False, "verify_iat": False},
+                            leeway=EXP_LEEWAY_S)
     except (jwt.ExpiredSignatureError, jwt.ImmatureSignatureError) as e:
         raise JwtError(str(e), "clock_skew", _skew_from_unverified(token)) from e
     except Exception as e:
         raise JwtError(str(e)) from e
     if not isinstance(claims["jti"], str) or not isinstance(claims["bh"], str):
         raise JwtError("bad claim types")
+    iat = claims["iat"]
+    if isinstance(iat, bool) or not isinstance(iat, (int, float)) or (
+            isinstance(iat, float) and not math.isfinite(iat)):
+        # PyJWT's own iat check (off above) ran int(iat), which refused NaN and Infinity.
+        raise JwtError("bad claim types")
+    if int(iat) > time.time() + IAT_LEEWAY_S:
+        # PyJWT applies ONE leeway to exp, nbf and iat; iat is checked here with its own,
+        # in PyJWT's own terms. skew_of, not float maths: float() of a huge iat overflows.
+        raise JwtError("token issued in the future (iat)", "clock_skew", skew_of(claims))
     aud = claims.get("aud")
     if aud is not None:  # verify-if-present; absent = older app, still valid
         # RFC 7519 allows aud to be a string or an array of strings; anything else fails.
@@ -118,7 +148,7 @@ def verify_body(claims: dict, body: bytes, jti_cache: JtiCache) -> None:
     same request would be refused as a replay."""
     if claims["bh"] != body_hash(body):
         raise JwtError("body hash mismatch", "body_mismatch")
-    if jti_cache.seen(claims["jti"], int(claims["exp"]) + LEEWAY_SECONDS):
+    if jti_cache.seen(claims["jti"], int(claims["exp"]) + EXP_LEEWAY_S):
         raise JwtError("replay", "replay")
 
 
