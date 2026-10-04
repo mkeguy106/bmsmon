@@ -5,6 +5,12 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+// DATA-28: uploads name the exact build (User-Agent). Falls back to "unknown" outside a git checkout.
+val gitSha: String = runCatching {
+    providers.exec { commandLine("git", "rev-parse", "--short=12", "HEAD") }
+        .standardOutput.asText.get().trim()
+}.getOrNull()?.takeIf { it.isNotEmpty() } ?: "unknown"
+
 android {
     namespace = "dev.joely.bmsmon"
     compileSdk = 34
@@ -16,6 +22,7 @@ android {
         versionCode = 1
         versionName = "1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
     }
 
     // Release signing: reads the keystore path/credentials from ~/.gradle/gradle.properties
@@ -53,6 +60,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.10"

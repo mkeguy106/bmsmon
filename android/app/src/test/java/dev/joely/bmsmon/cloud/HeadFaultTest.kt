@@ -376,4 +376,11 @@ class HeadFaultTest {
         assertEquals(HeadFaultAction.SKIP_HEAD_ROW, action)
         assertNull(after.searchEndId)
     }
+
+    @Test fun aMissingKeyNeitherResetsNorAdvancesTheStreak() {
+        val two = fresh().faults(head = 1, sent = 200, times = listOf(0, 1 * min))
+        val (next, action) = two.step(head = 1, sent = 200, r = PostResult.KeyMissing, at = 2 * min)
+        assertEquals(HeadFaultAction.NONE, action)
+        assertEquals(two, next)
+    }
 }

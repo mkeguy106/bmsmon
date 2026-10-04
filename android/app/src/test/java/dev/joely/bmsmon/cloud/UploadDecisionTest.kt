@@ -127,4 +127,14 @@ class UploadDecisionTest {
         assertFalse(c.followRedirects)
         assertFalse(c.followSslRedirects)
     }
+
+    // DATA-17: a phone moved to new hardware has its enrollment but not its Keystore key. Nothing was
+    // sent, so nothing is decided about the rows: hold them, leave the poison breaker and the auth
+    // badge alone (the UI shows its own "re-enroll required" state).
+    @Test fun aMissingKeyHoldsTheRowsWithoutTouchingTheBreakerOrTheAuthBadge() {
+        assertEquals(
+            UploadDecision(BatchStep.BACK_OFF_AUTH, poisonSkipsSinceOk = 1, authFailed = false),
+            decideUpload(PostResult.KeyMissing, poisonSkipsSinceOk = 1, authFailed = false),
+        )
+    }
 }

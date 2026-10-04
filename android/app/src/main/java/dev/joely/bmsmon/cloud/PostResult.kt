@@ -35,6 +35,13 @@ sealed class PostResult {
     /** 401/403 — revoked device or >60 s clock skew. Rows are kept; needs user attention. */
     object AuthFailed : PostResult()
 
+    /**
+     * The device key is gone from the Keystore — a device-to-device transfer copies the enrollment but
+     * never the key (DATA-17). Nothing was sent; the rows are kept until the phone is re-enrolled.
+     * Never produced by [classifyPost]: no HTTP response can mean this.
+     */
+    object KeyMissing : PostResult()
+
     /** 400/413/422 carrying [API_MARKER_HEADER] — the app itself permanently rejects this batch. */
     object Poison : PostResult()
 }

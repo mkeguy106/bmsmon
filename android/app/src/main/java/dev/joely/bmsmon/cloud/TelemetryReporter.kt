@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.SystemClock
 import android.util.Log
 import java.io.ByteArrayOutputStream
+import java.security.PrivateKey
 import java.util.zip.GZIPOutputStream
 import dev.joely.bmsmon.data.Persisted
 import dev.joely.bmsmon.data.SettingsStore
@@ -70,7 +71,7 @@ class TelemetryReporter(
     private val settings: SettingsStore,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val http = uploadHttpClient()
+    private val http = uploadHttpClient(appUserAgent())
     private val conn = Connectivity(appContext)
     private val enqueueChannel = Channel<OutboxEntity>(Channel.UNLIMITED)
     @Volatile private var started = false
@@ -213,7 +214,7 @@ class TelemetryReporter(
                 }
                 // seq = -1 marks this as an import batch; the server ignores seq ordering for imports.
                 val body = CloudJson.encodeBatch(seq = -1, rows = rows)
-                val result = postSigned(ingestUrl, p.deviceId, body)
+                val result = postSigned(ingestUrl, p.deviceId, body).result
                 val d = decideUpload(result, poisonSkips, authFailed = false)
                 poisonSkips = d.poisonSkipsSinceOk
                 when (d.step) {
@@ -260,26 +261,36 @@ class TelemetryReporter(
 
     /**
      * Sign [body] with the device key and POST [wire] (its gzipped form) to [url]. Classified by
-     * HTTP status. [wire] defaults to gzipping here; the upload loop passes it precomputed so the
-     * same bytes feed both the request body and the upload-rate indicator (gzip once).
+     * HTTP status, plus what the response said beyond it ([outcomeOf]). [wire] defaults to gzipping
+     * here; the upload loop passes it precomputed so the same bytes feed both the request body and
+     * the upload-rate indicator (gzip once). A Keystore with no device key sends nothing
+     * ([PostResult.KeyMissing], DATA-17).
      */
-    private fun postSigned(url: String, deviceId: String, body: ByteArray, wire: ByteArray = gzip(body)): PostResult =
-        try {
+    private fun postSigned(url: String, deviceId: String, body: ByteArray, wire: ByteArray = gzip(body)): PostOutcome {
+        val key: PrivateKey? = try {
+            DeviceKeys.privateKeyOrNull()
+        } catch (e: Exception) {
+            return PostOutcome(PostResult.Transient)   // a Keystore hiccup is not proof the key is gone
+        }
+        if (key == null) return PostOutcome(PostResult.KeyMissing)
+        return try {
             // Sign the PLAINTEXT body (the server's body-hash is over the decompressed JSON), then
             // send the gzipped wire bytes as a transport layer (~85% saved on this repetitive JSON).
-            val token = Jwt.signEs256(DeviceKeys.privateKey(), deviceId, body, System.currentTimeMillis())
+            val sentAt = System.currentTimeMillis()
+            val token = Jwt.signEs256(key, deviceId, body, sentAt)
             val req = Request.Builder()
                 .url(url)
                 .header("Authorization", "Bearer $token")
                 .header("Content-Encoding", "gzip")
                 .post(wire.toRequestBody("application/json".toMediaType()))
                 .build()
-            http.newCall(req).execute().use { classifyPost(it.code, fromApi = it.header(API_MARKER_HEADER) != null) }
+            http.newCall(req).execute().use { outcomeOf(it, sentAt, System.currentTimeMillis()) }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            PostResult.Transient // network/IO — retry with backoff
+            PostOutcome(PostResult.Transient)   // network/IO — retry with backoff
         }
+    }
 
     private suspend fun uploadLoop() {
         var backoff = 1000L
@@ -319,7 +330,7 @@ class TelemetryReporter(
                 // the config stays pending instead of being thrown away.
                 if (conn.online.value && SystemClock.elapsedRealtime() >= configRetryAt) {
                     p.pendingTempConfig?.let { cfg ->
-                        val result = postSigned(CloudConfig(base).configUrl, p.deviceId, cfg.toByteArray())
+                        val result = postSigned(CloudConfig(base).configUrl, p.deviceId, cfg.toByteArray()).result
                         val d = decideUpload(result, configPoisonSkips, authFailed)
                         configPoisonSkips = d.poisonSkipsSinceOk
                         when (d.step) {
@@ -372,7 +383,7 @@ class TelemetryReporter(
                 // rate indicator records the actual wire bytes, not the plaintext size.
                 val body = CloudJson.encodeBatch(seq, rows.map { it.payload })
                 val wire = gzip(body)
-                val result = postSigned(CloudConfig(base).ingestUrl, p.deviceId, body, wire)
+                val result = postSigned(CloudConfig(base).ingestUrl, p.deviceId, body, wire).result
                 val (nextFault, faultAction) = stepHeadFault(
                     headFault, rows.first().id, rows.size, result, SystemClock.elapsedRealtime(), BATCH,
                     tailId = rows.last().id,
