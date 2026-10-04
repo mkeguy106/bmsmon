@@ -31,12 +31,12 @@ RUN useradd --system --no-create-home --uid 10001 app
 USER app
 EXPOSE 8000
 # The image's default healthcheck. The prod compose file defines its own, with a far
-# longer start_period (a startup may wait minutes for the schema lock, app/db/pool.py),
+# longer start_period (a startup that adds a column may wait for its lock, app/db/pool.py),
 # and that one wins. python urllib because slim has no curl; urlopen raises on any
 # non-2xx/timeout, failing the check.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=4)"]
-# SINGLE WORKER ONLY — do not add --workers: the jti replay cache (app/auth/device_jwt.py)
-# and the live WS bus (app/live/bus.py) are process-local; >1 worker silently breaks
-# replay protection and live updates.
+# SINGLE WORKER ONLY — do not add --workers: the jti cache (app/auth/device_jwt.py), the
+# rate limiters and the live WS bus (app/live/bus.py) keep process-local state that every
+# request has to share.
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
