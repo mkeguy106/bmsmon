@@ -78,7 +78,6 @@ data class Persisted(
     val deviceId: String?,
     val enrolled: Boolean,
     val gpsEnabled: Boolean?,
-    val importWatermark: Long,
     val importDone: Boolean,
     val tempThresholdsByProfile: Map<String, TempThresholds>,
     val chargeTailMinByAddress: Map<String, Float> = emptyMap(),
@@ -133,7 +132,6 @@ class SettingsStore(private val context: Context) {
         val DEVICE_ID = stringPreferencesKey("device_id")
         val ENROLLED = booleanPreferencesKey("enrolled")
         val GPS_ENABLED = booleanPreferencesKey("gps_enabled")
-        val IMPORT_WATERMARK = longPreferencesKey("import_watermark")
         val IMPORT_DONE = booleanPreferencesKey("import_done")
         val INSTALL_UUID = stringPreferencesKey("install_uuid")
         val TEMP_THRESHOLDS = stringPreferencesKey("temp_thresholds_by_profile")
@@ -221,7 +219,6 @@ class SettingsStore(private val context: Context) {
             deviceId = p[K.DEVICE_ID],
             enrolled = p[K.ENROLLED] ?: false,
             gpsEnabled = p[K.GPS_ENABLED],
-            importWatermark = p[K.IMPORT_WATERMARK] ?: 0L,
             importDone = p[K.IMPORT_DONE] ?: false,
             tempThresholdsByProfile = p[K.TEMP_THRESHOLDS]?.let(::decodeTempThresholds) ?: emptyMap(),
             chargeTailMinByAddress = p[K.CHARGE_TAIL_MIN]?.let(::decodeChargeTail) ?: emptyMap(),
@@ -279,7 +276,6 @@ class SettingsStore(private val context: Context) {
     suspend fun setDeviceId(id: String) = context.dataStore.edit { it[K.DEVICE_ID] = id }.let {}
     suspend fun setEnrolled(on: Boolean) = context.dataStore.edit { it[K.ENROLLED] = on }.let {}
     suspend fun setGpsEnabled(on: Boolean) = context.dataStore.edit { it[K.GPS_ENABLED] = on }.let {}
-    suspend fun setImportWatermark(v: Long) = context.dataStore.edit { it[K.IMPORT_WATERMARK] = v }.let {}
     suspend fun setImportDone(on: Boolean) = context.dataStore.edit { it[K.IMPORT_DONE] = on }.let {}
     suspend fun setTempThresholds(map: Map<String, TempThresholds>) =
         context.dataStore.edit { it[K.TEMP_THRESHOLDS] = encodeTempThresholds(map) }.let {}

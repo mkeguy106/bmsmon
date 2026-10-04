@@ -214,6 +214,10 @@ data class UiState(
      * all-time eviction (DATA-19) and server-fault skip (DATA-22) counters.
      */
     val cloud: UploadStatus = UploadStatus(),
+    /** An enrollment is in flight (the Enroll buttons show progress and ignore taps). */
+    val enrolling: Boolean = false,
+    /** Why the last enrollment failed, in words the user can act on (DATA-25); null = none. */
+    val enrollError: String? = null,
 ) {
     val isDark get() = mode == Mode.Dark
     val dailyDriver: BatteryGroup
@@ -1069,38 +1073,61 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun enroll(baseUrl: String, code: String) {
+        if (_state.value.enrolling) return
         // HTTPS-only at the entry point (DATA-11): a manually typed http:// or bare host is
         // normalized before ever being used or persisted.
         val base = dev.joely.bmsmon.data.normalizeApiBaseUrl(baseUrl)
+        _state.update { it.copy(enrolling = true, enrollError = null) }
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            dev.joely.bmsmon.cloud.DeviceKeys.ensureKeyPair()
-            val installUuid = store.installUuid()
-            val res = dev.joely.bmsmon.cloud.EnrollClient(okhttp3.OkHttpClient())
-                .enroll(base, code, installUuid, dev.joely.bmsmon.cloud.DeviceKeys.publicKeySpkiB64())
-            res.onSuccess { id ->
+            // DATA-25: Keystore, network and parse failures all land here, never in viewModelScope's
+            // (absent) handler, which would kill the process and monitoring with it. Nothing is
+            // persisted until the server has said yes, so a failure leaves the previous state as it was.
+            // This is also the re-enroll path for a phone whose key is missing (DATA-17):
+            // ensureKeyPair makes a new key and the server re-keys the same install.
+            try {
+                dev.joely.bmsmon.cloud.DeviceKeys.ensureKeyPair()
+                val installUuid = store.installUuid()
+                val id = dev.joely.bmsmon.cloud.EnrollClient(
+                    dev.joely.bmsmon.cloud.uploadHttpClient(dev.joely.bmsmon.cloud.appUserAgent()),
+                ).enroll(base, code, installUuid, dev.joely.bmsmon.cloud.DeviceKeys.publicKeySpkiB64()).getOrThrow()
+                val app = getApplication<BmsApp>()
+                // Re-sends queued under the old key are dropped and the history import is queued afresh
+                // (idempotent on the server); clear first and wait, so the import isn't wiped behind it.
+                app.reporter.clearResync().join()
+                store.setImportDone(false)
                 store.setApiBaseUrl(base)
                 store.setDeviceId(id)
                 store.setEnrolled(true)
                 store.setCloudEnabled(true)
                 store.setGpsEnabled(true)
-                _state.update { it.copy(apiBaseUrl = base, enrolled = true, cloudEnabled = true, gpsEnabled = true) }
-                val app = getApplication<BmsApp>()
+                _state.update {
+                    it.copy(apiBaseUrl = base, enrolled = true, cloudEnabled = true, gpsEnabled = true, enrolling = false)
+                }
                 app.reporter.start()
-                app.reporter.startImportIfNeeded(_state.value.roster)
+                app.reporter.queueImport()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // The exception text can hold the server's detail; log only its class and HTTP status.
+                val status = (e as? dev.joely.bmsmon.cloud.EnrollException)?.code
+                android.util.Log.w("BatteryViewModel", "enroll failed: ${e.javaClass.simpleName} status=$status")
+                _state.update { it.copy(enrolling = false, enrollError = dev.joely.bmsmon.cloud.enrollErrorMessage(e)) }
             }
         }
     }
 
     fun forgetDevice() {
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            dev.joely.bmsmon.cloud.DeviceKeys.deleteKey()
+            // A Keystore failure must not crash the process (DATA-25); the enrollment is forgotten regardless.
+            runCatching { dev.joely.bmsmon.cloud.DeviceKeys.deleteKey() }
+                .onFailure { android.util.Log.w("BatteryViewModel", "deleteKey failed: ${it.javaClass.simpleName}") }
             store.setEnrolled(false)
             store.setCloudEnabled(false)
             store.setDeviceId("")
             store.setImportDone(false)
-            store.setImportWatermark(0)
             store.setGpsEnabled(false)
-            _state.update { it.copy(enrolled = false, cloudEnabled = false, gpsEnabled = false) }
+            getApplication<BmsApp>().reporter.clearResync()
+            _state.update { it.copy(enrolled = false, cloudEnabled = false, gpsEnabled = false, enrollError = null) }
             engine.setGpsActive(false)
         }
     }

@@ -467,7 +467,7 @@ class ResyncSendTest {
         lockShowTime = true, lockShowWifi = true, lockShowBattery = true, lockLowRefresh = true,
         lockDimScreen = false, lockDimLevel = 0.3f, gpsPauseParked = true, disabledAddrs = null,
         cloudEnabled = cloudEnabled, apiBaseUrl = apiBaseUrl, deviceId = deviceId, enrolled = enrolled,
-        gpsEnabled = gpsEnabled, importWatermark = 0L, importDone = importDone,
+        gpsEnabled = gpsEnabled, importDone = importDone,
         tempThresholdsByProfile = emptyMap(), tempAlertsEnabled = true, showTempGauge = true,
         tempGaugeSide = null, cloudSyncAlerts = true, pendingTempConfig = null,
     )

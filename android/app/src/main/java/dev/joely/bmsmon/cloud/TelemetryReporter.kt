@@ -281,9 +281,8 @@ class TelemetryReporter(
     /** Older entry point (MonitorEngine init, enroll), retired in Task 15; the re-sender reads the persisted roster itself. */
     fun startImportIfNeeded(@Suppress("UNUSED_PARAMETER") roster: Roster) = queueImport()
 
-    /** Forget every pending re-send (the device was forgotten; a new enrollment queues a fresh import). */
-    fun clearResync() {
-        scope.launch {
+    /** Forget every pending re-send (the device was forgotten; a new enrollment queues a fresh import). Join to order it before a following [queueImport]. */
+    fun clearResync(): Job = scope.launch {
             try {
                 ledger.mutateResync { ResyncState() }
             } catch (e: CancellationException) {
@@ -291,7 +290,6 @@ class TelemetryReporter(
             } catch (e: Exception) {
                 Log.w(TAG, "re-sync: could not clear the pending re-sends", e)
             }
-        }
     }
 
     /**

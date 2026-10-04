@@ -65,7 +65,7 @@ class MonitorRestoreTest {
         gpsPauseParked = gpsPauseParked,
         disabledAddrs = disabledAddrs, cloudEnabled = cloudEnabled, apiBaseUrl = null,
         deviceId = null, enrolled = enrolled, gpsEnabled = gpsEnabled,
-        importWatermark = 0L, importDone = false, tempThresholdsByProfile = emptyMap(),
+        importDone = false, tempThresholdsByProfile = emptyMap(),
         tempAlertsEnabled = tempAlertsEnabled, showTempGauge = true, tempGaugeSide = null,
         cloudSyncAlerts = true, pendingTempConfig = null,
     )

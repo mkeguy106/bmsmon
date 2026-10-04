@@ -83,7 +83,7 @@ internal fun ColumnScope.CloudSyncContent(
     }
 
     // --- Connection (shown only before enrollment) ---
-    if (!state.enrolled) {
+    if (!state.enrolled || state.cloud.keyMissing) {
         val context = LocalContext.current
         val scanToEnroll = {
             val opts = GmsBarcodeScannerOptions.Builder()
@@ -100,18 +100,18 @@ internal fun ColumnScope.CloudSyncContent(
                 }
         }
 
-        SectionLabel("Connection")
+        SectionLabel(if (state.cloud.keyMissing) "Re-enroll this phone" else "Connection")
         PlainCard {
             Box(
                 Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(8.dp))
                     .background(Bm.accent)
-                    .clickable { scanToEnroll() }
+                    .clickable(enabled = !state.enrolling) { scanToEnroll() }
                     .padding(vertical = 12.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("Scan QR to enroll", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Text(if (state.enrolling) "Enrolling…" else "Scan QR to enroll", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
             }
             Text(
                 "Open Cloud sync on the bmsmon web dashboard, tap Enroll device, and scan the QR.",
@@ -144,11 +144,14 @@ internal fun ColumnScope.CloudSyncContent(
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(8.dp))
                     .background(Bm.accent)
-                    .clickable { onEnroll(serverUrl, enrollCode) }
+                    .clickable(enabled = !state.enrolling) { onEnroll(serverUrl, enrollCode) }
                     .padding(vertical = 12.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("Enroll", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Text(if (state.enrolling) "Enrolling…" else "Enroll", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            }
+            state.enrollError?.let { err ->
+                Text(err, color = Bm.criticalText, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
             }
         }
     }
