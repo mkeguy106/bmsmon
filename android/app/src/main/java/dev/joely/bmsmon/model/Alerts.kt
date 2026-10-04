@@ -143,27 +143,58 @@ fun nextNotifyDecision(eval: AlertEval, lastNotified: Int?): NotifyDecision {
     return NotifyDecision(notify = notify, cancel = false, newLastNotified = active)
 }
 
-/** Per-address plan for the fleet-wide notifier: who to [notify], who to [cancel], and the new
- *  per-address baselines to carry forward. */
+/**
+ * How long a low pack that drops out of the decision view (a link flap, or silent past the freshness
+ * backstop) keeps its notification and baseline (BLE-24) — see [reconcileFleetNotifications].
+ */
+const val NOTIFY_VANISH_GRACE_MS = 10 * 60_000L
+
+/** Per-address plan for the fleet-wide notifier: who to [notify], who to [cancel], the new
+ *  per-address baselines to carry forward, and — for packs held through an absence — when each
+ *  vanished ([vanishedAt], to pass back in on the next call). */
 data class FleetNotify(
     val newLast: Map<String, Int?>,
     val cancel: Set<String>,
     val notify: Set<String>,
+    val vanishedAt: Map<String, Long> = emptyMap(),
 )
 
 /**
  * Fleet-wide notification reconciliation (pure). Every reachable pack is evaluated independently
  * (its own [AlertEval]) and deduped against its own baseline in [last] via [nextNotifyDecision],
  * so two packs can hold two live low-battery notifications at once and a second low pack is never
- * masked by the first. A pack that has recovered/charged cancels; a pack that has dropped out of
- * [evals] entirely (unreachable / off BLE) also cancels — we alert on live data, not on absence.
- * Only packs present in [last] (i.e. currently notified) are ever cancelled (BLE-28).
+ * masked by the first. A pack that has recovered/charged cancels at once. Only packs present in
+ * [last] (i.e. currently notified) are ever cancelled (BLE-28).
+ *
+ * A notified pack that drops out of [evals] (unreachable, or silent past the backstop) is NOT a
+ * recovery (BLE-24): if it is in [holdable] it keeps its notification and its baseline until
+ * [graceMs] after it first vanished ([vanishedAt]), so a link that flaps every few minutes no longer
+ * cancels and re-alarms the sound+vibration critical alert each time — a reconnect in the same band
+ * stays quiet, a lower band still alarms. Past the grace, or outside [holdable] (disconnected by the
+ * user, removed, alerts off), it cancels: we alert on live data, not on absence. The defaults
+ * (nothing holdable, no grace) cancel every vanished pack at once.
  */
-fun reconcileFleetNotifications(evals: Map<String, AlertEval>, last: Map<String, Int?>): FleetNotify {
+fun reconcileFleetNotifications(
+    evals: Map<String, AlertEval>,
+    last: Map<String, Int?>,
+    vanishedAt: Map<String, Long> = emptyMap(),
+    holdable: Set<String> = emptySet(),
+    nowMs: Long = 0L,
+    graceMs: Long = 0L,
+): FleetNotify {
     val newLast = mutableMapOf<String, Int?>()
     val cancel = mutableSetOf<String>()
     val notify = mutableSetOf<String>()
-    cancel += last.keys - evals.keys  // packs that vanished this round
+    val held = mutableMapOf<String, Long>()
+    for (addr in last.keys - evals.keys) {   // packs that dropped out this round
+        val since = vanishedAt[addr] ?: nowMs
+        if (addr.uppercase() in holdable && nowMs - since < graceMs) {
+            newLast[addr] = last[addr]       // keep the notification AND its baseline
+            held[addr] = since
+        } else {
+            cancel += addr
+        }
+    }
     for ((addr, eval) in evals) {
         val d = nextNotifyDecision(eval, last[addr])
         when {
@@ -173,7 +204,7 @@ fun reconcileFleetNotifications(evals: Map<String, AlertEval>, last: Map<String,
             else -> newLast[addr] = d.newLastNotified  // same band → keep baseline, stay quiet
         }
     }
-    return FleetNotify(newLast, cancel, notify)
+    return FleetNotify(newLast, cancel, notify, held)
 }
 
 /** Every alert-driving pack's own [AlertEval] plus the advanced per-pack charge latch. */

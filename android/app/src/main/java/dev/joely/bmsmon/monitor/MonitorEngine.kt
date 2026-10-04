@@ -50,7 +50,6 @@ import dev.joely.bmsmon.model.learnTailFold
 import dev.joely.bmsmon.model.formatDelta
 import dev.joely.bmsmon.model.todayUsage
 import dev.joely.bmsmon.model.tempMarginToCutoffC
-import dev.joely.bmsmon.model.tempZone
 import dev.joely.bmsmon.model.batteryAt
 import dev.joely.bmsmon.model.GroupActivity
 import dev.joely.bmsmon.model.Roster
@@ -62,6 +61,8 @@ import dev.joely.bmsmon.model.groupOf
 import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.model.hasDesiredLinks
 import dev.joely.bmsmon.model.pruneToRoster
+import dev.joely.bmsmon.model.wantedAddrs
+import dev.joely.bmsmon.model.worstStageTemp
 import dev.joely.bmsmon.model.MotionGate
 import dev.joely.bmsmon.model.MotionReading
 import dev.joely.bmsmon.model.foldMotion
@@ -541,16 +542,18 @@ class MonitorEngine(
     @Synchronized
     private fun reevaluate() {
         val st = _state.value
+        val nowE = elapsedNow()
+        val cfg = alertConfig
         val d = engineDecision(
             roster = roster,
             fleet = st.fleet,
-            nowElapsedMs = elapsedNow(),
+            nowElapsedMs = nowE,
             nowMs = now(),
             lastDischargeAt = st.lastDischargeAt,
             stageCfg = stageConfig,
             current = st.stageTarget,
             disabled = disabledAddrs,
-            alertCfg = alertConfig,
+            alertCfg = cfg,
             chargeAt = packChargeAt,
             regenAddrs = st.regenAddrs,
         )
@@ -562,9 +565,13 @@ class MonitorEngine(
                 caps.mapValues { (addr, eval) ->
                     PackAlert(eval, roster.batteryAt(addr)?.alias ?: st.fleet[addr]?.telemetry?.name)
                 },
+                // BLE-24: a low pack that drops out of the view keeps its notification through a
+                // short flap — never one the user disconnected or removed, nor with alerts off.
+                holdable = if (cfg?.alertsOn == true) wantedAddrs(roster, disabledAddrs) else emptySet(),
+                nowElapsedMs = nowE,
             )
         }
-        evaluateTempAlerts(d.view, stageAddrs.firstNotNullOfOrNull { roster.groupOf(it)?.id })
+        evaluateTempAlerts(d.view, stageAddrs.firstNotNullOfOrNull { roster.groupOf(it)?.id }, nowE)
     }
 
     /** Publish a resolved stage (lock held by [reevaluate]): mirror it into [MonitorState], persist
@@ -615,30 +622,33 @@ class MonitorEngine(
         }
     }
 
-    /** Worst reachable stage pack's temperature zone → headless temperature notification. */
-    private fun evaluateTempAlerts(fleet: Map<String, BatteryStatus>, label: String?) {
-        if (!tempAlertsEnabled) { alertNotifier.updateTemp(TempRank.SAFE, TempSide.NONE, label, ""); return }
-        val worst = stageAddrs
-            .mapNotNull { a -> fleet[a]?.takeIf { it.reachable }?.telemetry?.let { a to it } }
-            .map { (a, t) ->
-                val profile = ProfileRegistry.profileFor(roster.batteryAt(a)?.advertisedName)
-                    ?: RedodoBekenProfile
-                val thr = tempThresholdsByProfile[profile.id] ?: profile.tempEnvelope.defaults
-                Triple(a, t, tempZone(t.temp, thr, profile.tempEnvelope) to profile.tempEnvelope)
-            }
-            .maxByOrNull { it.third.first.rank.ordinal }
-        if (worst == null) { alertNotifier.updateTemp(TempRank.SAFE, TempSide.NONE, label, ""); return }
-        val (addr, tel, zoneEnv) = worst
-        val (zone, env) = zoneEnv
-        val name = roster.batteryAt(addr)?.alias ?: tel.name
-        val side = if (zone.side == TempSide.COLD) "COLD" else "HOT"
-        val detail = if (zone.rank == TempRank.CUTOFF) {
+    /** Worst alert-driving stage pack's temperature zone → headless temperature notification. [view]
+     *  is the freshness decision view, so a seed or a silent pack never raises or holds the alarm; a
+     *  dark stage holds an active alarm through a short flap (BLE-24). */
+    private fun evaluateTempAlerts(view: Map<String, BatteryStatus>, label: String?, nowE: Long) {
+        // The stage has packs the user hasn't disconnected: an absence there is a flap to ride out.
+        val holdable = stageAddrs.isNotEmpty()
+        if (!tempAlertsEnabled) {
+            alertNotifier.updateTemp(null, label, "", present = true, holdable = holdable, nowElapsedMs = nowE)
+            return
+        }
+        val worst = worstStageTemp(view, stageAddrs) { a ->
+            val profile = ProfileRegistry.profileFor(roster.batteryAt(a)?.advertisedName) ?: RedodoBekenProfile
+            (tempThresholdsByProfile[profile.id] ?: profile.tempEnvelope.defaults) to profile.tempEnvelope
+        }
+        if (worst == null) {
+            alertNotifier.updateTemp(null, label, "", present = false, holdable = holdable, nowElapsedMs = nowE)
+            return
+        }
+        val name = roster.batteryAt(worst.addr)?.alias ?: worst.telemetry.name
+        val side = if (worst.zone.side == TempSide.COLD) "COLD" else "HOT"
+        val detail = if (worst.zone.rank == TempRank.CUTOFF) {
             "$side · $name · load disconnected"
         } else {
             // Margin formatted in the user's °C/°F preference (mirrored via setTempAlertConfig).
-            "$side · $name · ${formatDelta(tempMarginToCutoffC(tel.temp, zone.side, env), tempUnit)} to cutoff"
+            "$side · $name · ${formatDelta(tempMarginToCutoffC(worst.telemetry.temp, worst.zone.side, worst.env), tempUnit)} to cutoff"
         }
-        alertNotifier.updateTemp(zone.rank, zone.side, label, detail)
+        alertNotifier.updateTemp(worst.zone, label, detail, present = true, holdable = holdable, nowElapsedMs = nowE)
     }
 
     /** Backfill the legacy CSVs into the DB exactly once (guarded by a persisted flag). */

@@ -11,8 +11,10 @@ import androidx.core.app.NotificationManagerCompat
 import dev.joely.bmsmon.MainActivity
 import dev.joely.bmsmon.R
 import dev.joely.bmsmon.model.AlertEval
+import dev.joely.bmsmon.model.NOTIFY_VANISH_GRACE_MS
 import dev.joely.bmsmon.model.TempRank
-import dev.joely.bmsmon.model.TempSide
+import dev.joely.bmsmon.model.TempZone
+import dev.joely.bmsmon.model.nextTempNotify
 import dev.joely.bmsmon.model.reconcileFleetNotifications
 
 /**
@@ -31,48 +33,71 @@ class AlertNotifier(private val context: Context) {
     private val lastByAddr = mutableMapOf<String, Int?>()
     /** Stable notification id per address so two low packs show two distinct notifications. */
     private val idByAddr = mutableMapOf<String, Int>()
+    /** When each low pack held through an absence dropped out of the evaluations (BLE-24), on the
+     *  engine's monotonic clock. Like every field here, confined to MonitorEngine's lock (BLE-20):
+     *  all calls come from its @Synchronized reevaluate() or stop()'s synchronized block. */
+    private val vanishedAt = mutableMapOf<String, Long>()
     private var nextCapId = NOTIF_CAP_BASE
     private var lastTempKey: String? = null
+    private var tempVanishedAt: Long? = null
 
     init { createChannels() }
 
     /**
      * Apply the latest fleet-wide capacity evaluation: post / escalate / stay quiet / cancel, per
      * pack. Every reachable low pack gets its own notification (deduped per address), so a second
-     * low pack is never masked by the one currently on the stage. Packs absent from [evals] (gone
-     * unreachable or recovered) are cancelled.
+     * low pack is never masked by the one currently on the stage. A recovered or charging pack is
+     * cancelled at once; one that drops out of [evals] keeps its notification for
+     * [NOTIFY_VANISH_GRACE_MS] if it is in [holdable] (BLE-24), then is cancelled.
      */
-    fun updateFleet(evals: Map<String, PackAlert>) {
-        val plan = reconcileFleetNotifications(evals.mapValues { it.value.eval }, lastByAddr)
+    fun updateFleet(evals: Map<String, PackAlert>, holdable: Set<String>, nowElapsedMs: Long) {
+        val plan = reconcileFleetNotifications(
+            evals.mapValues { it.value.eval }, lastByAddr, vanishedAt, holdable, nowElapsedMs, NOTIFY_VANISH_GRACE_MS,
+        )
         plan.cancel.forEach { addr -> idByAddr[addr]?.let { nm.cancel(it) } }
         plan.notify.forEach { addr -> evals[addr]?.let { post(addr, it.eval, it.label) } }
         lastByAddr.clear()
         lastByAddr.putAll(plan.newLast)
+        vanishedAt.clear()
+        vanishedAt.putAll(plan.vanishedAt)
     }
 
     /**
      * Headless temperature alert: posts on the critical channel when the worst stage pack is at
      * rank >= CRITICAL (loud — same urgency as a critical capacity alert), deduped by side+rank so it
-     * fires once per crossing/escalation; cancels when temperature recovers below CRITICAL.
+     * fires once per crossing/escalation; cancels when temperature recovers below CRITICAL. [zone] is
+     * the worst stage zone, null when [present] is false (no alert-driving stage reading): that
+     * absence holds the alarm for [NOTIFY_VANISH_GRACE_MS] while [holdable] (BLE-24, [nextTempNotify]).
      */
-    fun updateTemp(rank: TempRank, side: TempSide, stageLabel: String?, detail: String) {
-        val key = if (rank.ordinal >= TempRank.CRITICAL.ordinal) "$side:$rank" else null
-        if (key == null) {
-            if (lastTempKey != null) { lastTempKey = null; nm.cancel(NOTIF_TEMP_ID) }
-            return
+    fun updateTemp(
+        zone: TempZone?,
+        stageLabel: String?,
+        detail: String,
+        present: Boolean,
+        holdable: Boolean,
+        nowElapsedMs: Long,
+    ) {
+        val key = zone?.takeIf { it.rank.ordinal >= TempRank.CRITICAL.ordinal }?.let { "${it.side}:${it.rank}" }
+        val step = nextTempNotify(
+            lastTempKey, tempVanishedAt, key, present, holdable, nowElapsedMs, NOTIFY_VANISH_GRACE_MS,
+        )
+        if (step.cancel) nm.cancel(NOTIF_TEMP_ID)
+        if (step.post && zone != null) {
+            val where = stageLabel?.let { " · $it" } ?: ""
+            val title = if (zone.rank == TempRank.CUTOFF) "Temperature cutoff$where" else "Critical temperature$where"
+            postCritical(NOTIF_TEMP_ID, title, detail)
         }
-        if (key == lastTempKey) return  // same band — no repeat
-        lastTempKey = key
-        val where = stageLabel?.let { " · $it" } ?: ""
-        val title = if (rank == TempRank.CUTOFF) "Temperature cutoff$where" else "Critical temperature$where"
-        postCritical(NOTIF_TEMP_ID, title, detail)
+        lastTempKey = step.key
+        tempVanishedAt = step.vanishedAt
     }
 
     /** Clear any active alert notification (e.g. monitoring stopped). */
     fun clear() {
         idByAddr.values.forEach { nm.cancel(it) }
         lastByAddr.clear()
+        vanishedAt.clear()
         lastTempKey = null
+        tempVanishedAt = null
         nm.cancel(NOTIF_TEMP_ID)
     }
 

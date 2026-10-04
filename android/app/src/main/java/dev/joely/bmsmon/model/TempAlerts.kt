@@ -74,3 +74,55 @@ fun formatTemp(c: Float, unit: TempUnit): String =
 /** Render a temperature *difference* (no +32 offset): Δ°F = round(Δ°C × 9/5). */
 fun formatDelta(dC: Int, unit: TempUnit): String =
     if (unit == TempUnit.F) "${(dC * 9f / 5f).roundToInt()}°F" else "${dC}°C"
+
+/** The worst stage pack's temperature, for the headless temperature alarm. */
+data class StageTemp(val addr: String, val telemetry: Telemetry, val zone: TempZone, val env: TempEnvelope)
+
+/**
+ * The worst temperature zone among the stage packs whose reading may drive alerts — pass the
+ * freshness decision view ([decisionView]), so a carried seed or a silent pack never raises (or
+ * holds) the alarm. [limitsFor] gives a pack's thresholds and envelope (its battery profile). Null
+ * when no stage pack has such a reading: an ABSENCE, not a recovery — see [nextTempNotify].
+ */
+fun worstStageTemp(
+    view: Map<String, BatteryStatus>,
+    stageAddrs: Set<String>,
+    limitsFor: (String) -> Pair<TempThresholds, TempEnvelope>,
+): StageTemp? = stageAddrs
+    .mapNotNull { a -> view[a]?.takeIf { it.reachable }?.telemetry?.let { a to it } }
+    .map { (a, t) ->
+        val (thr, env) = limitsFor(a)
+        StageTemp(a, t, tempZone(t.temp, thr, env), env)
+    }
+    .maxByOrNull { it.zone.rank.ordinal }
+
+/** One headless temperature-notification step: [post] / [cancel], and the state to carry forward. */
+data class TempNotifyStep(val post: Boolean, val cancel: Boolean, val key: String?, val vanishedAt: Long?)
+
+/**
+ * The temperature alarm's dedup, with BLE-24's grace. [key] = "SIDE:RANK" while the worst stage
+ * reading is CRITICAL or CUTOFF, else null; [present] = some stage pack had an alert-driving reading
+ * at all; [holdable] = the stage has packs the user hasn't disconnected. A new or changed key posts
+ * (an escalation always alarms); the same key stays quiet; a recovery cancels at once. An absence
+ * (a dark stage — link flap, silent packs) holds the alarm for [graceMs] from when it began, so a
+ * reconnect at the same rank doesn't re-alarm; past the grace, or when not [holdable], it cancels.
+ */
+fun nextTempNotify(
+    prevKey: String?,
+    prevVanishedAt: Long?,
+    key: String?,
+    present: Boolean,
+    holdable: Boolean,
+    nowMs: Long,
+    graceMs: Long,
+): TempNotifyStep = when {
+    !present && prevKey == null -> TempNotifyStep(post = false, cancel = false, key = null, vanishedAt = null)
+    !present -> {
+        val since = prevVanishedAt ?: nowMs
+        if (holdable && nowMs - since < graceMs) TempNotifyStep(false, false, prevKey, since)
+        else TempNotifyStep(false, true, null, null)
+    }
+    key == null -> TempNotifyStep(false, prevKey != null, null, null)
+    key == prevKey -> TempNotifyStep(false, false, key, null)
+    else -> TempNotifyStep(true, false, key, null)
+}

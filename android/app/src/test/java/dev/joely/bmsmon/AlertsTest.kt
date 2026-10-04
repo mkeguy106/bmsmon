@@ -7,6 +7,7 @@ import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.CAP_SEVERITY_CRITICAL
 import dev.joely.bmsmon.model.CAP_SEVERITY_WARNING
 import dev.joely.bmsmon.model.CHARGE_SUPPRESS_HOLD_MS
+import dev.joely.bmsmon.model.NOTIFY_VANISH_GRACE_MS
 import dev.joely.bmsmon.model.PackSoc
 import dev.joely.bmsmon.model.SEVERITY_NONE
 import dev.joely.bmsmon.model.TempRank
@@ -302,5 +303,69 @@ class AlertsTest {
         val plan2 = reconcileFleetNotifications(after.evals, plan1.newLast)
         assertTrue(plan2.cancel.isEmpty())
         assertTrue(plan2.notify.isEmpty())
+    }
+
+    // --- BLE-24: a low pack on a flapping link keeps its notification through a short absence ---
+
+    private val grace = NOTIFY_VANISH_GRACE_MS
+
+    @Test fun aLowPackThatDropsOffKeepsItsNotificationAndBaseline() {
+        val r = reconcileFleetNotifications(
+            emptyMap(), last = mapOf("A" to 15), holdable = setOf("A"), nowMs = 1_000L, graceMs = grace,
+        )
+        assertTrue(r.cancel.isEmpty())
+        assertEquals(15, r.newLast["A"])
+        assertEquals(mapOf("A" to 1_000L), r.vanishedAt)
+    }
+
+    // Review Focus 3: five reconnect cycles, two minutes out of range each — one alarm, no cancel.
+    @Test fun flappingLowPackAlarmsOnceAcrossReconnects() {
+        var last: Map<String, Int?> = emptyMap()
+        var gone: Map<String, Long> = emptyMap()
+        var alarms = 0
+        var cancels = 0
+        var t = 0L
+        repeat(5) {
+            val up = reconcileFleetNotifications(mapOf("A" to eval(15)), last, gone, setOf("A"), t, grace)
+            alarms += up.notify.size; cancels += up.cancel.size; last = up.newLast; gone = up.vanishedAt
+            t += 60_000L
+            val down = reconcileFleetNotifications(emptyMap(), last, gone, setOf("A"), t, grace)
+            alarms += down.notify.size; cancels += down.cancel.size; last = down.newLast; gone = down.vanishedAt
+            t += 120_000L
+        }
+        assertEquals(1, alarms)
+        assertEquals(0, cancels)
+    }
+
+    @Test fun aReturnToALowerBandStillAlarms() {
+        val r = reconcileFleetNotifications(
+            mapOf("A" to eval(10)), last = mapOf("A" to 15), vanishedAt = mapOf("A" to 0L),
+            holdable = setOf("A"), nowMs = 60_000L, graceMs = grace,
+        )
+        assertEquals(setOf("A"), r.notify)
+        assertTrue(r.vanishedAt.isEmpty())
+    }
+
+    @Test fun theGraceRunsFromTheFirstDropThenCancels() {
+        val held = reconcileFleetNotifications(emptyMap(), mapOf("A" to 15), mapOf("A" to 0L), setOf("A"), grace - 1, grace)
+        assertTrue(held.cancel.isEmpty())
+        assertEquals("the clock is not restarted by later evaluations", 0L, held.vanishedAt["A"])
+        val expired = reconcileFleetNotifications(emptyMap(), held.newLast, held.vanishedAt, setOf("A"), grace, grace)
+        assertEquals(setOf("A"), expired.cancel)
+        assertNull(expired.newLast["A"])
+        assertTrue(expired.vanishedAt.isEmpty())
+    }
+
+    @Test fun aPackOutsideTheHoldableSetCancelsAtOnce() {
+        // user-disconnected, removed, or alerts off — the engine leaves it out of holdable
+        val r = reconcileFleetNotifications(emptyMap(), mapOf("A" to 15), holdable = emptySet(), nowMs = 1_000L, graceMs = grace)
+        assertEquals(setOf("A"), r.cancel)
+    }
+
+    @Test fun aPackThatReturnsChargingCancelsAtOnce() {
+        val r = reconcileFleetNotifications(
+            mapOf("A" to eval(15, charging = true)), mapOf("A" to 15), mapOf("A" to 0L), setOf("A"), 60_000L, grace,
+        )
+        assertEquals(setOf("A"), r.cancel)
     }
 }
