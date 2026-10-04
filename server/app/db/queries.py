@@ -333,6 +333,9 @@ async def scrub_expired_gps(conn, retention_days: int, now_ms: int | None = None
     mark = await conn.fetchval("SELECT scrubbed_before_ms FROM gps_scrub_state WHERE id = 1")
     if mark is not None and mark >= cutoff:
         return 0
+    # The scrub can run before the maintenance backfill; an address without a registry
+    # row would be skipped and then fall behind the mark for good.
+    await register_orphan_addresses(conn)
     total = 0
     for row in await conn.fetch("SELECT address FROM batteries ORDER BY address"):
         first = await conn.fetchval(

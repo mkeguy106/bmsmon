@@ -137,6 +137,31 @@ async def test_scrub_records_a_watermark_and_walks_only_forward(app):
         assert await conn.fetchval("SELECT lat FROM samples WHERE ts_ms = $1", between) is None
 
 
+class _CountingConn:
+    """Delegates to a real connection, counting the per-chunk scrub UPDATEs."""
+
+    def __init__(self, conn):
+        self._conn, self.chunks = conn, 0
+
+    async def execute(self, query, *args, **kw):
+        if query == q._SCRUB_CHUNK:
+            self.chunks += 1
+        return await self._conn.execute(query, *args, **kw)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+async def test_scrub_covers_an_address_with_no_registry_row(app):
+    async with app.state.pool.acquire() as conn:
+        await _device(conn)
+        old = _ms(datetime.now(timezone.utc)) - (RETENTION_DAYS + 10) * DAY
+        await q.insert_samples(conn, [q.sample_row(DEV, A, _sample(old))])
+        await conn.execute("DELETE FROM batteries WHERE address = $1", A)
+        assert await q.scrub_expired_gps(conn, RETENTION_DAYS) == 1
+        assert await conn.fetchval("SELECT lat FROM samples WHERE ts_ms = $1", old) is None
+
+
 async def test_lowering_retention_scrubs_everything_in_small_chunks(app, monkeypatch):
     monkeypatch.setattr(q, "GPS_SCRUB_CHUNK_MS", 3_600_000)  # one hour per statement
     async with app.state.pool.acquire() as conn:
@@ -145,7 +170,10 @@ async def test_lowering_retention_scrubs_everything_in_small_chunks(app, monkeyp
         await q.insert_samples(conn, [q.sample_row(DEV, A, _sample(now - d * DAY))
                                       for d in (10, 11, 12)])
         assert await q.scrub_expired_gps(conn, RETENTION_DAYS) == 0
-        assert await q.scrub_expired_gps(conn, 5) == 3  # retention lowered to 5 days
+        counter = _CountingConn(conn)
+        assert await q.scrub_expired_gps(counter, 5) == 3  # retention lowered to 5 days
+        # ~7 days of history walked in one-hour statements, not one giant UPDATE
+        assert counter.chunks >= 40
         assert await conn.fetchval("SELECT count(*) FROM samples WHERE lat IS NOT NULL") == 0
 
 
