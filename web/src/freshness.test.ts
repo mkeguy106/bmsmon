@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createStore } from "./store";
-import { STALE_MS, anyFresh, isPackStale, staleAddresses } from "./freshness";
+import { STALE_MS, anyFresh, isPackStale, judgeStale, staleAddresses } from "./freshness";
 import type { FleetItem } from "./types";
 
 const T = 1_000_000;
@@ -47,5 +47,39 @@ describe("anyFresh", () => {
     expect(anyFresh(items, new Set(["A"]))).toBe(true);
     expect(anyFresh(items, new Set(["A", "B"]))).toBe(false);
     expect(anyFresh([], new Set())).toBe(false);
+  });
+});
+
+describe("judgeStale", () => {
+  const fresh = pack({ address: "A" });
+  const old = pack({ address: "B", ts_ms: T - STALE_MS - 1 });
+
+  // The first judgement comes from the items, never an empty "nobody is stale" default that
+  // would paint every pack live until a later effect caught up.
+  it("judges the very first items list instead of defaulting to nobody stale", () => {
+    const j = judgeStale(null, [fresh, old], T);
+    expect(j.stale).toEqual(new Set(["B"]));
+  });
+
+  it("re-judges a new items list, keeping the Set identity when membership is unchanged", () => {
+    const first = judgeStale(null, [fresh, old], T);
+    const sameMembers = judgeStale(first, [fresh, { ...old, soc: 10 }], T);
+    expect(sameMembers).not.toBe(first);
+    expect(sameMembers.stale).toBe(first.stale);
+    const newlyStale = judgeStale(first, [fresh, old, pack({ address: "C", ts_ms: T - STALE_MS - 5 })], T);
+    expect(newlyStale.stale).toEqual(new Set(["B", "C"]));
+  });
+
+  it("returns the previous judgement itself when nothing changed (a tick re-renders nothing)", () => {
+    const items = [fresh, old];
+    const first = judgeStale(null, items, T);
+    expect(judgeStale(first, items, T + 1_000)).toBe(first);
+  });
+
+  it("a tick that ages a pack past STALE_MS publishes a new Set", () => {
+    const items = [fresh];
+    const first = judgeStale(null, items, T);
+    const later = judgeStale(first, items, T + STALE_MS + 1);
+    expect(later.stale).toEqual(new Set(["A"]));
   });
 });

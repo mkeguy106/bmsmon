@@ -1,4 +1,5 @@
 import type { FleetItem } from "./types";
+import { stableSet } from "./util";
 
 /** A pack is stale (shown as last known, never as live) once its newest TELEMETRY is older
  *  than this. The phone polls background packs slowly (a pack can go about a minute between
@@ -21,4 +22,25 @@ export function staleAddresses(items: readonly FleetItem[], nowMs: number): Set<
  *  which used to mirror the socket and stayed green while every pack was stale (WEB-27). */
 export function anyFresh(items: readonly FleetItem[], staleAddrs: ReadonlySet<string>): boolean {
   return items.some((i) => !staleAddrs.has(i.address));
+}
+
+/** Which packs were stale, and for which items list. The items are part of the judgement so a
+ *  new list is always re-judged before anything renders it. */
+export interface StaleJudgement {
+  items: readonly FleetItem[];
+  stale: Set<string>;
+}
+
+/** Judge [items] at [nowMs]. [prev] null means "not yet judged": the first judgement is then
+ *  computed from the items themselves, never defaulted to an empty set, which would read
+ *  every pack as live. Returns [prev] itself when the items and the stale membership are
+ *  unchanged (so a React state update bails out), and keeps prev's Set identity when only
+ *  the items changed. */
+export function judgeStale(
+  prev: StaleJudgement | null, items: readonly FleetItem[], nowMs: number,
+): StaleJudgement {
+  const next = staleAddresses(items, nowMs);
+  if (prev == null) return { items, stale: next };
+  const stale = stableSet(prev.stale, next);
+  return stale === prev.stale && items === prev.items ? prev : { items, stale };
 }

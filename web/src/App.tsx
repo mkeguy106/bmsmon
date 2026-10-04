@@ -13,15 +13,9 @@ import {
 } from "./temp";
 import { selectRangeParams, type RangeParams } from "./range";
 import { readStored, useLocalStorage, type Codec } from "./useLocalStorage";
-import { stableSet } from "./util";
-import { staleAddresses } from "./freshness";
+import { useStaleAddrs } from "./useStaleAddrs";
 import { visibleInterval } from "./visiblePoll";
 import type { FleetItem } from "./types";
-
-// Staleness (freshness.ts: 90 s without telemetry, or a reported disconnect) only needs
-// coarse resolution against that 90 s threshold: re-check on this
-// cadence (and on every fleet change). Visible age text ticks in <Ago>/useNow leaves.
-const STALE_TICK_MS = 5_000;
 
 // WEB-8: while the WS is down, fall back to REST snapshots at this cadence.
 const REST_FALLBACK_MS = 10_000;
@@ -152,20 +146,10 @@ export default function App() {
     () => Object.values(store.getFleet()).sort((a, b) => (a.alias ?? "").localeCompare(b.alias ?? "")),
     [store, v],
   );
-  // Identity-stable staleness: recompute on a coarse tick (and whenever the fleet
-  // changes), but only publish a NEW Set when membership actually changed —
-  // stableSet + the functional setState make React bail out entirely otherwise,
-  // so the old 1 Hz whole-app re-render is gone.
-  const [staleAddrs, setStaleAddrs] = useState<Set<string>>(() => new Set());
-  useEffect(() => {
-    const check = () => {
-      const next = staleAddresses(items, Date.now());
-      setStaleAddrs((prev) => stableSet(prev, next));
-    };
-    check();
-    const t = setInterval(check, STALE_TICK_MS);
-    return () => clearInterval(t);
-  }, [items]);
+  // Judged in the same render as the items (no pack paints live before its freshness is
+  // known), identity-stable, and re-judged on a coarse tick that re-renders nothing unless
+  // the stale membership changed.
+  const staleAddrs = useStaleAddrs(items);
   const gpsActive = useMemo(
     () => items.some((i) => !staleAddrs.has(i.address) && i.lat != null),
     [items, staleAddrs],

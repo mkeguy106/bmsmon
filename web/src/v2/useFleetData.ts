@@ -3,8 +3,8 @@ import { createStore } from "../store";
 import { connectLive } from "../ws";
 import { getFleet, getRangeConfig } from "../api";
 import { selectRangeParams, type RangeParams } from "../range";
-import { stableSet } from "../util";
-import { anyFresh, staleAddresses } from "../freshness";
+import { anyFresh } from "../freshness";
+import { useStaleAddrs } from "../useStaleAddrs";
 import type { Session } from "../liveLink";
 import { visibleInterval } from "../visiblePoll";
 import type { FleetItem } from "../types";
@@ -14,10 +14,6 @@ import type { FleetItem } from "../types";
 // 10 s while the WS is down; applySnapshot merges through the store's ts-guard so a
 // late/stale REST response can never regress fresher WS data.
 const REST_FALLBACK_MS = 10_000;
-// Staleness only needs coarse resolution against the 90 s threshold. It is
-// re-checked on this cadence (and on every fleet change), NOT every second —
-// components that render live age text subscribe to useNow(1000) themselves.
-const STALE_TICK_MS = 5_000;
 
 export interface FleetData {
   items: FleetItem[];
@@ -68,20 +64,9 @@ export function useFleetData(): FleetData {
     () => Object.values(store.getFleet()).sort((a, b) => (a.alias ?? "").localeCompare(b.alias ?? "")),
     [store, v]);
 
-  // Identity-stable staleness: recompute on a coarse tick (and whenever the
-  // fleet changes), but only publish a NEW Set when membership actually
-  // changed — stableSet + the functional setState make React bail out
-  // entirely otherwise, so nothing downstream re-renders on the tick.
-  const [staleAddrs, setStaleAddrs] = useState<Set<string>>(() => new Set());
-  useEffect(() => {
-    const check = () => {
-      const next = staleAddresses(items, Date.now());
-      setStaleAddrs((prev) => stableSet(prev, next));
-    };
-    check();
-    const t = setInterval(check, STALE_TICK_MS);
-    return () => clearInterval(t);
-  }, [items]);
+  // Judged in the same render as the items, so no pack ever paints live before its freshness
+  // is known; identity-stable, so nothing downstream re-renders on the coarse tick.
+  const staleAddrs = useStaleAddrs(items);
 
   const gps = useMemo(
     () => items.some((i) => !staleAddrs.has(i.address) && i.lat != null), [items, staleAddrs]);
