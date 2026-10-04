@@ -146,6 +146,8 @@ class SettingsStore(private val context: Context) {
         val CLOUD_SYNC_ALERTS = booleanPreferencesKey("cloud_sync_alerts")
         val PENDING_TEMP_CONFIG = stringPreferencesKey("pending_temp_config")
         val SERVER_FAULT_SKIPS = longPreferencesKey("server_fault_skips")
+        val RESYNC_STATE = stringPreferencesKey("resync_state")
+        val OUTBOX_EVICTED = longPreferencesKey("outbox_evicted")
     }
 
     suspend fun load(): Persisted =
@@ -171,6 +173,12 @@ class SettingsStore(private val context: Context) {
     val serverFaultSkips: Flow<Long> =
         context.dataStore.data.retryOnIoError(onError = ::logReadFailure)
             .map { it[K.SERVER_FAULT_SKIPS] ?: 0L }
+            .distinctUntilChanged()
+
+    /** Live all-time count of outbox rows evicted at the cap (DATA-19), for the Cloud sync page. */
+    val outboxEvicted: Flow<Long> =
+        context.dataStore.data.retryOnIoError(onError = ::logReadFailure)
+            .map { it[K.OUTBOX_EVICTED] ?: 0L }
             .distinctUntilChanged()
 
     private fun decode(p: Preferences): Persisted {
@@ -294,9 +302,17 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { it[K.PENDING_TEMP_CONFIG] = json }.let {}
     suspend fun clearPendingTempConfig() =
         context.dataStore.edit { it.remove(K.PENDING_TEMP_CONFIG) }.let {}
-    /** One more sample skipped for a persistent server fault (DATA-22) — read-modify-write in one edit. */
-    suspend fun incrementServerFaultSkips() =
-        context.dataStore.edit { it[K.SERVER_FAULT_SKIPS] = (it[K.SERVER_FAULT_SKIPS] ?: 0L) + 1 }.let {}
+    /** The re-sync windows blob. cloud/Resync.kt owns the format; this store only keeps the string. */
+    suspend fun loadResyncJson(): String? =
+        context.dataStore.data.orEmptyOnIoError(::logReadFailure).first()[K.RESYNC_STATE]
+    suspend fun setResyncJson(json: String) =
+        context.dataStore.edit { it[K.RESYNC_STATE] = json }.let {}
+    /** [n] more outbox rows evicted at the cap — read-modify-write in one edit. */
+    suspend fun addOutboxEvicted(n: Long) =
+        context.dataStore.edit { it[K.OUTBOX_EVICTED] = (it[K.OUTBOX_EVICTED] ?: 0L) + n }.let {}
+    /** [n] more samples skipped for a persistent server fault (DATA-22) — read-modify-write in one edit. */
+    suspend fun addServerFaultSkips(n: Long) =
+        context.dataStore.edit { it[K.SERVER_FAULT_SKIPS] = (it[K.SERVER_FAULT_SKIPS] ?: 0L) + n }.let {}
 
     suspend fun installUuid(): String {
         val existing = context.dataStore.data.first()[K.INSTALL_UUID]

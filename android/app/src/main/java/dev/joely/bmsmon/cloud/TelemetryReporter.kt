@@ -523,7 +523,7 @@ class TelemetryReporter(
                                 "(seq=$seq, ${head.payload.toByteArray().size} bytes)",
                         )
                         db.outbox().deleteUpTo(head.id)   // the head is the lowest id: exactly this row
-                        settings.incrementServerFaultSkips()
+                        settings.addServerFaultSkips(1)
                         val remaining = db.outbox().count()
                         if (remaining == 0) draining = false
                         onStatus?.invoke(
