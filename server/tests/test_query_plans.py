@@ -85,10 +85,7 @@ async def test_charge_sessions_read_only_the_charging_index(app):
         plan = await explain(conn, q._CHARGE_SESSION_BUCKETS, STAGE[0], MARCH + DAY)
     assert child in index_names(plan)
     assert PART not in seq_scanned(plan)
-    # The Insert node's own total includes the rollup rows' index/heap writes; the read
-    # side is its single child.
-    (read_side,) = plan["Plans"]
-    assert buffers(read_side) * 4 < pages
+    assert buffers(plan) * 4 < pages
 
 
 async def test_share_trail_reads_only_its_window(app):
