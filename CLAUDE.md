@@ -314,7 +314,10 @@ A user Stop (notification or in-app; both route through `ACTION_STOP`) also pers
 undo it. A Recents swipe (`onTaskRemoved`) deliberately does NOT persist false: it means "close the
 app", and the next open or reboot resumes monitoring. Just backgrounding (Home) keeps it running.
 Needs `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_CONNECTED_DEVICE` + runtime
-`POST_NOTIFICATIONS` (requested opportunistically; never gates monitoring).
+`POST_NOTIFICATIONS` (requested opportunistically; never gates monitoring). The ongoing
+notification counts only packs with a reading from this session (`monitoringNotificationText`:
+the restored seed and a pack silent past the freshness backstop are not "connected", and never set
+its "lowest"), and reads "All packs disconnected" after "Disconnect all".
 
 **Screen policy is plug-aware, and monitoring holds a wakelock.** The display is the phone's
 dominant drain — measured on the Pixel 6 at ~136 mAh/h against ~22 for GNSS and ~1.6 for
@@ -352,9 +355,13 @@ icon was.
 
 Because the BLE poll loop is a coroutine `delay()` — which does NOT fire while the CPU is
 suspended — keep-screen-on had been load-bearing for poll cadence *by accident*.
-`MonitoringService` now holds a `PARTIAL_WAKE_LOCK` (`bmsmon:monitoring`) for the monitoring
-session, so cadence, alerts, logging and GPS capture are identical with the screen dark. **Do not
-remove that wakelock without replacing the timer with an `AlarmManager`-backed one.**
+`MonitoringService` now holds a `PARTIAL_WAKE_LOCK` (`bmsmon:monitoring`) while the monitoring
+session has a pack to poll, so cadence, alerts, logging and GPS capture are identical with the
+screen dark. **Do not remove that wakelock without replacing the timer with an
+`AlarmManager`-backed one.** It is released only when no pack is wanted
+(`MonitorState.linksWanted` = false — "Disconnect all", or an empty roster), when nothing is polled
+and GPS is off too, since fixes only ever ride BLE samples; Reconnect takes it again (BLE-27,
+`wantsCpuWakeLock()` in `MonitorRestore.kt`).
 
 The same latch drops GPS to `PRIORITY_BALANCED_POWER_ACCURACY` (20 s) — **only** in that
 low-battery window (entered below 5%, held until 15% — on a charging chair-mounted phone that can
@@ -451,7 +458,10 @@ folds in the parked state and remains the **single writer** of `gpsActive`. `app
 `@Synchronized` because several threads drive it — the ViewModel (main), the BLE poll callback
 (`Dispatchers.IO`), the range loop — and the read-decide-act must be atomic, or an interleaving can
 leave `gpsActive = false` with the fused request still registered: exactly the silent GNSS drain the
-gate exists to remove. **Three gate drivers, all load-bearing:** the BLE poll (primary, but it only
+gate exists to remove. `gpsActive` is published only for a fused request that is actually
+registered: the gate drives `LocationSource` through `driveLocation()` on every evaluation, so a
+location permission granted after GPS was switched on starts capture at the next BLE frame (BLE-19),
+and with no pack wanted the gate stops GPS outright. **Three gate drivers, all load-bearing:** the BLE poll (primary, but it only
 fires when a frame arrives), `setDisabled()` (**"Disconnect all"** cancels every worker, so `onPoll`
 may never fire again with monitoring still on), and `startRangeLoop()`'s **5-minute tick** (Bluetooth
 off or every pack out of range stalls `onPoll` indefinitely, freezing `lastDischargeAt` and pinning
@@ -794,8 +804,17 @@ seed or a silent pack) against the ladder and fires a **per-pack** headless noti
 `NOTIF_CAP_BASE`; per-pack charge-hold latch). The pure `reconcileFleetNotifications()`
 (`model/Alerts.kt`) does the fan-out dedup: notify the fresh crossings, cancel
 recovered/charging/vanished packs. A second low pack is never masked by the one on stage.
-(Temperature notifications stay stage-worst-driven.) Only packs that are actually showing a
-notification are ever cancelled (BLE-28).
+(Temperature notifications stay stage-worst-driven, over the same decision view, so a seed or a
+silent stage pack never raises or holds that alarm either — `worstStageTemp()` in `TempAlerts.kt`.)
+Only packs that are actually showing a notification are ever cancelled (BLE-28). **A short absence
+is not a recovery** (BLE-24): a low pack that drops out of the decision view (a link flap, or silent
+past the backstop) keeps its notification and its baseline for `NOTIFY_VANISH_GRACE_MS` (10 min), so
+a reconnect in the same band stays quiet and only a lower band re-alarms; past the grace it is
+cancelled. Packs the user disconnected or removed, and every pack while alerts are off, still cancel
+at once. The temperature alarm rides out a dark stage the same way (`nextTempNotify()`). A pack
+inside its regen window never counts as charging for the notifier (`fleetCapacityEvals(regenAddrs)`,
+the same rule as the stage's ack re-arm below), so a regen burst reporting `state=Charging` no
+longer cancels a low pack's notification mid-drive and re-alarms it once the charge latch expires.
 
 **Low pack seizes the stage (safety override).** `resolveStage()` (`model/Fleet.kt`) has a
 pre-emptive branch — before the manual-pin check — that stages the base of the **lowest
@@ -1017,8 +1036,21 @@ Reconnect all**. "Disconnect all" is therefore distinct from *stopping monitorin
 foreground-service Stop), which tears the engine down entirely. A frame or connect already in
 flight when a pack is disconnected never touches the engine's fleet state (`onPoll`/`onReachable`
 check the disabled set inside their state update), so the pack can't flash back to connected — or
-drive an alert or the seize — while its worker tears down. (A frame that lands in that instant may
-still be logged and uploaded as an ordinary sample.)
+drive an alert or the seize — while its worker tears down; a frame refused that way is not logged or
+uploaded either. The same holds across a monitoring Stop (BLE-21): `start()` mints a session id that
+the engine's BLE callbacks carry, and `stop()` clears it first, so a callback already running on the
+control loop when monitoring stopped changes nothing.
+
+**BLE attempt model.** Every connect attempt has an id (`LinkLedger`, `ble/LinkLedger.kt`), and
+only the current attempt's outcome and frames change state: a Disconnect → Reconnect during a slow
+connect holds one GATT link, never two (the stale session is closed, and a planner drop cancels a
+connect still in flight). The connect gate keeps one of its two permits for stage packs
+(`ConnectGate`), so a stage pack that drops reconnects without waiting behind absent spares. The
+app-resume kick that resets every backoff always resets the stage packs, while spares are kicked at
+most once per `RESUME_KICK_MIN_INTERVAL_MS` (5 min); a user Reconnect and Bluetooth coming back on
+still kick everything at once. A pack whose sessions
+answer only with undecodable frames backs off along the connect ladder (5 s → … → 120 s,
+`reconnectDelayMs()`) instead of reconnecting every ~8–10 s; its first decodable frame resets that.
 
 **Low-battery alerts (configurable ladder + critical tier).** `ALERT_THRESHOLDS`
 (BatteryViewModel.kt) is the full selectable 5% ladder **95%→5%**; `DEFAULT_THRESHOLDS`
@@ -1053,7 +1085,10 @@ The engine's effective GPS-active = `monitoring && gpsEnabled && enrolled && clo
 Needs `ACCESS_FINE/COARSE_LOCATION` + `ACCESS_BACKGROUND_LOCATION` + a `location` FGS type
 (`MonitoringService` ORs `FOREGROUND_SERVICE_TYPE_LOCATION` only when GPS-active AND location is
 granted — required to avoid an Android-14 SecurityException). Background-location was the
-explicit design choice for pocket/driving capture.
+explicit design choice for pocket/driving capture. A cached fix is attached only while it is ≤ 120 s
+old — checked when it is read, not only when it is cached — and a `lastLocation` seed from an
+earlier start is ignored (`FixCache` in `LocationSource.kt`, BLE-23), so an old fix is never stamped
+onto a new sample.
 
 **Main-stage upload indicator.** The Home top bar shows a small glanceable cloud-upload status
 next to the stage label, only when cloud sync is enrolled: `↑ X.X KB/s` (green) while uploading,
@@ -1092,7 +1127,9 @@ those would need map-matching/geofencing (backtest: the Jul-12 raw track's
 it drops to balanced power (20 s) ONLY inside the low-battery latch window (below 5% until 15%),
 see the screen-policy section)
 with a line-for-line TS twin in `web/src/range.ts` (no tilt on web — documented divergence).
-The engine learns every 6 h from the local 14-day Room history (GPS now stored locally —
+The engine learns every 6 h from the local 14-day Room history, streamed through a
+`RangeAccumulator` in 5 000-row (tsMs, id) keyset pages so the window is never held in memory
+(BLE-25; `forEachRangeRow`) (GPS now stored locally —
 samples db v4), refreshes today's tilt inputs every 5 min, computes the per-pack estimate once
 per poll onto `BatteryStatus.range` (same single-writer pattern as `etaFullMin`), persists
 params in SettingsStore, and pushes them over the one-way config channel (optional `ranges`
