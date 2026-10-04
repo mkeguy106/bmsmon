@@ -1156,14 +1156,18 @@ WebUI reads it via `GET /web/alert-config` and seizes its main stage for the low
 no audible alarm: v2 (`/`) via `useV2Configs` + `web/src/v2/model/stageBase.ts`
 `selectStageBase` (Command stage, Journey and the Fleet Health hero; LOW chip in
 `CommandStage.tsx`; no seize until the config's first answer, and the 30 default only if
-that fetch fails, so a guessed threshold can't leave the stage parked on a seized base), v1 (`/v1/`) via `web/src/stage.ts` `selectStageItems` (`MainStage.tsx`).
-Only the seize is synced — v2's capacity ALERT ladder is still the fixed 30…5 / critical 15. Schema is idempotent SQL in `server/app/db/schema.sql`, run on pool creation — so **schema
+that fetch fails, so a guessed threshold can't leave the stage parked on a seized base),
+v1 (`/v1/`) via `web/src/stage.ts` `selectStageItems` (`MainStage.tsx`).
+Only the seize is synced — v2's capacity ALERT ladder is still the fixed 30…5 / critical 15.
+Schema is idempotent SQL in `server/app/db/schema.sql`, run on pool creation — so **schema
 changes apply automatically on container start; there is no separate migration step**.
 Columns are added with `SELECT pg_temp.add_column_if_missing('<table>', '<column>', '<type>')`
-(dropped with `pg_temp.drop_column_if_present`), **never a bare `ALTER TABLE`**: the helpers
-read the catalog first, so a boot against an up-to-date database takes no table lock and never
-waits for the nightly `pg_dump` (`tests/test_schema_apply.py` holds ROW EXCLUSIVE on every
-table and allows zero retries). An index on `samples` is only **declared** there —
+(dropped with `pg_temp.drop_column_if_present`), **never a bare `ALTER TABLE … ADD/DROP
+COLUMN`**: the helpers read the catalog first, so a boot against an up-to-date database takes
+no table lock and never waits for the nightly `pg_dump` (`tests/test_schema_apply.py` holds
+ROW EXCLUSIVE on every table and allows zero retries). A change that a concurrent schema run
+made first counts as done. Any other `ALTER TABLE` there sits behind its own catalog check.
+An index on `samples` is only **declared** there —
 `CREATE INDEX samples_<name> ON ONLY samples …` inside an `IF to_regclass(…) IS NULL` guard —
 and the hourly maintenance pass builds it on every existing partition with
 `CREATE INDEX CONCURRENTLY` and attaches it (`app/db/online_index.py`); partitions created
@@ -1613,7 +1617,10 @@ docker exec -it bmsmon-api python -m tools.api_key_admin list
 docker exec -it bmsmon-api python -m tools.api_key_admin revoke <id>
 ```
 
-Devices have a sibling CLI, `python -m tools.device_admin list | restore <id> | delete <id> [--yes]` (run the same way); `delete` removes only the device row and keeps its telemetry.
+Devices have a sibling CLI, `python -m tools.device_admin list | restore <id> | delete <id>
+[--yes]` (run the same way); `delete` removes only the device row and keeps its telemetry.
+Every restore is logged at INFO (the WebUI's with the admin's username), and so is every CLI
+delete.
 
 ### Operational health and background maintenance (2026-10 review, T2.2/T2.4/T2.5)
 
@@ -1638,7 +1645,8 @@ answers **200 when every check passes and 503 otherwise**, `Cache-Control: no-st
 | `partition` | Next month's `samples` partition is missing. |
 | `clock` | The last verified token's `server − iat` skew exceeds ±120 s. |
 
-`auth_fail_5m` counts known-device auth failures. It is informational; a stuck phone
+`auth_fail_5m` counts known-device auth failures (at most 100 per device and 5000 in all,
+oldest dropped first). It is informational; a stuck phone
 trips `ingest` anyway. `?max_ingest_age_s=N` can only **tighten** the ingest limit; it
 exists to prove the alarm path end to end.
 
@@ -1651,12 +1659,17 @@ Uptime Kuma monitor **`bmsmon-telemetry-deadman`** polls
 
 **Maintenance loop** (`app/maintenance.py`). It runs 60 s after boot, then hourly. Each step
 is isolated, so a failing step is logged and the rest still run:
-- **Partitions:** this month and the next. Each CREATE gives up after 0.5 s
-  (`PARTITION_LOCK_TIMEOUT`) instead of queueing ingest behind a long reader, and the next
-  pass retries. A partition created inside an ingest transaction (only for an odd old
-  timestamp) has the same timeout and becomes a marked 503.
+- **Partitions:** every month from now to 31 days ahead, so always next month (the boot
+  also covers the 31 days behind). Each CREATE gives up after 0.5 s
+  (`PARTITION_LOCK_TIMEOUT`) instead of queueing ingest behind a long reader; that month is
+  logged, the later months are still tried, and the next pass retries it. A partition
+  created inside an ingest transaction (only for an odd old timestamp) has the same timeout
+  and becomes a marked 503.
 - **Registry backfill:** a registry row for any `samples` address without one.
-- **Online index builds:** see the schema mechanism above.
+- **Online index builds:** see the schema mechanism above. Each index partition is logged
+  as it attaches (`maintenance: built and attached index …`). An ATTACH that gives up on its
+  0.5 s lock wait is logged and the pass moves on; the next pass attaches the built child.
+  A same-named child is rebuilt only when Postgres reports the definitions do not match.
 
 The pool has `command_timeout = 30 s`, so a timed-out request statement is a marked 503.
 Background statements pass `MAINTENANCE_TIMEOUT_S` (1 h).
@@ -1669,7 +1682,8 @@ month-to-date partition: a 15 h share trail at month end read 81 k buffers in 43
 against 5 k buffers and 35 ms per pack. Two things are load-bearing:
 - `_GPS_TRACK_ALL`'s **`OFFSET 0` fence**. Its inner select has no GROUP BY, and without
   the fence the planner de-correlates back into the full scan.
-- **The registry invariant.** `insert_samples` registers every address it writes, and the
+- **The registry invariant.** Ingest registers every address it writes (`upsert_battery`,
+  in the batch's transaction), `insert_samples` does it for every other writer, and the
   maintenance pass backfills.
 
 Windows are expressed on `ts` alone (SRV-28: `ts` is `ts_ms` at ms precision). Two test
@@ -1922,7 +1936,8 @@ image, and every `main` build that runs also stays pullable as `:<full sha>`. `b
 `bmsmon-db` are opted out of watchtower (`com.centurylinklabs.watchtower.enable: "false"`), so
 nothing recreates them unattended; the qnap-nas-docker deploy runner only fires on
 `docker-compose.yml`/`.env` changes, and `up -d` alone never re-pulls. Avoid 07:35–08:45 UTC: the
-nightly `pg_dump` runs then. A routine boot no longer waits for it, but a deploy that adds a column (an ACCESS EXCLUSIVE `ALTER`) would. A normal deploy — once the
+nightly `pg_dump` runs then. A routine boot no longer waits for it, but a deploy that adds a
+column (an ACCESS EXCLUSIVE `ALTER`) would. A normal deploy — once the
 `promote` job has succeeded — leaves `BMSMON_TAG` unset and pulls `:latest` (which also keeps the
 NAS's cached `:latest` current for any later `up -d`), recreates only the API (`--no-deps`), then
 records the deploy (below):
