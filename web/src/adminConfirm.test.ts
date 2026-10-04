@@ -25,10 +25,12 @@ describe("revokeDeviceConfirm (WEB-21)", () => {
     expect(revokeDeviceConfirm(old, [old], NOW)).not.toContain("phone on the chair");
   });
 
+  // Task 10 carry: say outright that the chair stops uploading, then what that stops.
   it("says everything stops when it is the only active device, and just its uploads otherwise", () => {
     const d = dev();
-    expect(revokeDeviceConfirm(d, [d, dev({ id: "d2", revoked: true })], NOW))
-      .toContain("only active device: the dashboard, shared location links and desktop widgets stop updating");
+    const only = revokeDeviceConfirm(d, [d, dev({ id: "d2", revoked: true })], NOW);
+    expect(only).toContain("only active device: all uploads from the chair stop until it is restored");
+    expect(only).toContain("the dashboard, shared location links and desktop widgets stop updating");
     expect(revokeDeviceConfirm(d, [d, dev({ id: "d2" })], NOW)).toContain("It stops uploading telemetry at once.");
   });
 

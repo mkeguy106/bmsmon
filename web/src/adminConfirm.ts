@@ -24,7 +24,7 @@ export function revokeDeviceConfirm(d: DeviceRow, all: readonly DeviceRow[], now
     parts.push(`It last uploaded ${relAgo(seen, nowMs)}, so this looks like the phone on the chair.`);
   }
   parts.push(othersActive === 0
-    ? "It is the only active device: the dashboard, shared location links and desktop widgets stop updating until it is restored."
+    ? "It is the only active device: all uploads from the chair stop until it is restored, so the dashboard, shared location links and desktop widgets stop updating."
     : "It stops uploading telemetry at once.");
   parts.push("You can undo this with Restore in Settings › Devices.");
   return parts.join("\n\n");
