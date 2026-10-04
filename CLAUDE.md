@@ -700,6 +700,24 @@ install with `adb shell am start -n dev.joely.bmsmon/.MainActivity` and confirm 
 (`adb shell monkey -p dev.joely.bmsmon -c android.intent.category.LAUNCHER 1`) reports
 `Events injected: 1` but does **not** start this app on this device.
 
+**Installing while the app is in lock mode (screen pinned) wedges the display on Android 17.**
+The system replaces an updating app's activity with SystemUI's `PackageUpdateActivity`
+("Updating…") and hands the task back when the update lands, but it skips that hand-off while
+lock-task mode is on ("Skip applying hierarchy operation setPackageUpdateHandled while in lock
+task mode"). The chair-mounted screen then shows "Updating…" instead of the batteries, and
+`am start` is delivered to the placeholder. Monitoring and uploads keep running underneath.
+Seen 2026-10-04. So when `dumpsys activity activities | grep mLockTaskModeState` reads `PINNED`:
+
+1. `adb shell am task lock stop` (unpin) **before** `adb install -r`.
+2. After the install, `adb shell am start -n dev.joely.bmsmon/.MainActivity`.
+3. The app's lock mode re-pins itself; confirm the "App is pinned" prompt with **Got it**, which
+   restores the user's chosen state.
+
+If it is already wedged: `am task lock stop`, then start the activity in a new task with
+`am start -n dev.joely.bmsmon/.MainActivity -f 0x18000000` (NEW_TASK | MULTIPLE_TASK), then
+**Got it**. Never remove the wedged task (`am stack remove`, a Recents swipe). Removing a task
+from this app runs the service's `onTaskRemoved` clean shutdown, which stops monitoring.
+
 **ADB authorization lapses after ~7 days unused.** Android revokes the debug authorization; USB then
 shows "unauthorized" and wireless TLS fails with `CERTIFICATE_UNKNOWN`. Recover with Developer
 options → Wireless debugging → "Pair device with pairing code", then
