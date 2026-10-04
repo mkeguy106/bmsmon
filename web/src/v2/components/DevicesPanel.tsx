@@ -107,7 +107,7 @@ export function DevicesPanel() {
           <thead>
             <tr style={{ textAlign: "left" }}>
               <th className="eyebrow" style={{ fontWeight: 400, paddingBottom: 6 }}>LABEL</th>
-              <th className="eyebrow" style={{ fontWeight: 400 }}>LAST SEEN</th>
+              <th className="eyebrow" style={{ fontWeight: 400 }}>LAST UPLOAD</th>
               <th />
             </tr>
           </thead>

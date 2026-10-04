@@ -88,7 +88,7 @@ export function AdminDevices() {
       ) : (
       <table style={{ width: "100%", marginTop: 12, borderCollapse: "collapse", fontSize: 13 }}>
         <thead><tr style={{ color: "var(--text3)", textAlign: "left" }}>
-          <th>Label</th><th>Last seen</th><th></th></tr></thead>
+          <th>Label</th><th>Last upload</th><th></th></tr></thead>
         <tbody>
           {devices.map((d) => (
             <tr key={d.id} style={{ borderTop: "1px solid var(--border)", opacity: d.revoked ? 0.4 : 1 }}>
