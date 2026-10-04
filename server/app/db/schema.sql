@@ -1,10 +1,12 @@
 -- Boot-time column changes go through these two session-local helpers, never a bare
--- ALTER TABLE (a guard test greps for one): ALTER TABLE takes ACCESS EXCLUSIVE even when
--- its IF [NOT] EXISTS turns it into a no-op, so every boot queued behind any
--- reader of the table (the nightly pg_dump holds ACCESS SHARE on every table for minutes)
--- and every later query queued behind the boot. The helpers read the catalog first, so a
--- boot against an up-to-date database takes no table lock at all
--- (tests/test_schema_apply.py pins that). pg_temp: they vanish with the session.
+-- ADD/DROP COLUMN with IF [NOT] EXISTS (a guard test greps for both forms): ALTER TABLE
+-- takes ACCESS EXCLUSIVE even when its IF [NOT] EXISTS turns it into a no-op, so every
+-- boot queued behind any reader of the table (the nightly pg_dump holds ACCESS SHARE on
+-- every table for minutes) and every later query queued behind the boot. Any other
+-- ALTER TABLE in this file must sit behind its own catalog check, as the PK migration
+-- below does. The helpers read the catalog first, so a boot against an up-to-date
+-- database takes no table lock at all (tests/test_schema_apply.py pins that). A change a
+-- concurrent schema run made first counts as done. pg_temp: they vanish with the session.
 -- Indexes on samples are DECLARED here only (ON ONLY, inside a to_regclass guard); the
 -- maintenance pass builds them online (app/db/online_index.py).
 CREATE OR REPLACE FUNCTION pg_temp.add_column_if_missing(tbl regclass, col text, typ text)
@@ -12,7 +14,11 @@ RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_attribute
                   WHERE attrelid = tbl AND attname = col AND attnum > 0 AND NOT attisdropped) THEN
-    EXECUTE format('ALTER TABLE %s ADD COLUMN %I %s', tbl, col, typ);
+    BEGIN
+      EXECUTE format('ALTER TABLE %s ADD COLUMN %I %s', tbl, col, typ);
+    EXCEPTION WHEN duplicate_column THEN
+      NULL;  -- a concurrent run added it after the check above: already present
+    END;
   END IF;
 END $$;
 
@@ -21,7 +27,11 @@ RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_attribute
               WHERE attrelid = tbl AND attname = col AND attnum > 0 AND NOT attisdropped) THEN
-    EXECUTE format('ALTER TABLE %s DROP COLUMN %I', tbl, col);
+    BEGIN
+      EXECUTE format('ALTER TABLE %s DROP COLUMN %I', tbl, col);
+    EXCEPTION WHEN undefined_column THEN
+      NULL;  -- a concurrent run dropped it after the check above: already gone
+    END;
   END IF;
 END $$;
 

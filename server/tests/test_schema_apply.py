@@ -2,6 +2,7 @@
 (e.g. behind the nightly pg_dump's AccessShareLock) — it retries under a short
 lock_timeout instead, so other queries never queue behind it for more than ~0.5 s."""
 
+import asyncio
 import logging
 import re
 
@@ -89,11 +90,13 @@ async def test_schema_retries_after_a_deadlock(app, caplog):
         "schema: deadlock detected (attempt 1); retrying in 0.0s"]
 
 
-async def test_boot_on_an_up_to_date_database_takes_no_table_lock(app):
-    """A second session holds ROW EXCLUSIVE on every table: stronger than the nightly
-    pg_dump's ACCESS SHARE, and what an in-flight ingest holds. With ZERO retries allowed,
-    one lock wait would raise. Bare ALTER TABLE ... IF NOT EXISTS (ACCESS EXCLUSIVE even as
-    a no-op) and CREATE INDEX IF NOT EXISTS (SHARE even when present) both fail this."""
+async def test_boot_on_an_up_to_date_database_waits_for_neither_ingest_nor_the_dump(app):
+    """A second session holds ROW EXCLUSIVE on every table: what an in-flight ingest holds,
+    and it also blocks every mode that would conflict with the nightly pg_dump's ACCESS
+    SHARE. With ZERO retries allowed, one lock wait would raise. So the boot takes no lock
+    that conflicts with ROW EXCLUSIVE (a weaker one, e.g. SHARE UPDATE EXCLUSIVE, would
+    pass). Bare ALTER TABLE ... IF NOT EXISTS (ACCESS EXCLUSIVE even as a no-op) and
+    CREATE INDEX IF NOT EXISTS (SHARE even when present) both fail this."""
     holder = await asyncpg.connect(settings.database_url)
     tx = holder.transaction()
     await tx.start()
@@ -115,9 +118,12 @@ def test_schema_sql_has_no_bare_column_alters_or_blocking_index_builds():
     assert not re.search(r"DROP\s+COLUMN\s+IF\s+EXISTS", sql, re.I)
     # An index may only be DECLARED here: ON ONLY the parent (metadata, no data read) and
     # inside an IF (a to_regclass guard), so a boot never builds or even re-checks one.
-    for m in re.finditer(r"(\S+)\s+CREATE\s+(?:UNIQUE\s+)?INDEX\b([^;]*)", sql, re.I):
-        assert m.group(1).upper() == "THEN", m.group(0)
-        assert re.search(r"\bON\s+ONLY\b", m.group(2), re.I), m.group(0)
+    decls = list(re.finditer(r"\bCREATE\s+(?:UNIQUE\s+)?INDEX\b([^;]*)", sql, re.I))
+    assert decls, "no index declaration found: this check would be vacuous"
+    for m in decls:
+        before = sql[:m.start()].split()
+        assert before and before[-1].upper() == "THEN", m.group(0)
+        assert re.search(r"\bON\s+ONLY\b", m.group(1), re.I), m.group(0)
 
 
 async def test_column_helpers_add_and_drop_only_when_needed(app):
@@ -139,6 +145,67 @@ async def test_column_helpers_add_and_drop_only_when_needed(app):
             assert await cols() == {"id"}
         finally:
             await conn.execute("DROP TABLE IF EXISTS zz_schema_guard")
+
+
+async def _until_waiting_on_a_lock(observer, pid: int) -> None:
+    for _ in range(250):
+        if await observer.fetchval(
+                "SELECT wait_event_type = 'Lock' FROM pg_stat_activity WHERE pid = $1", pid):
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("the second schema run never waited on the lock")
+
+
+async def test_a_change_a_concurrent_run_made_first_counts_as_done(app):
+    """Two schema runs both see the change as still needed; the one that gets the lock
+    second must carry on, not fail the boot."""
+    async with app.state.pool.acquire() as conn:
+        await apply_schema(conn)  # defines the pg_temp helpers on THIS session
+        await conn.execute("DROP TABLE IF EXISTS zz_schema_race; CREATE TABLE zz_schema_race (id int)")
+        first = await asyncpg.connect(settings.database_url)
+        try:
+            for change, helper in (
+                    ("ADD COLUMN x real", "add_column_if_missing('zz_schema_race', 'x', 'real')"),
+                    ("DROP COLUMN x", "drop_column_if_present('zz_schema_race', 'x')")):
+                tx = first.transaction()
+                await tx.start()
+                await first.execute(f"ALTER TABLE zz_schema_race {change}")  # not committed yet
+                second = asyncio.ensure_future(conn.execute(f"SELECT pg_temp.{helper}"))
+                await _until_waiting_on_a_lock(first, conn.get_server_pid())
+                await tx.commit()
+                await asyncio.wait_for(second, 5)
+        finally:
+            await first.close()  # rolls back anything left open, releasing its lock
+        await conn.execute("DROP TABLE zz_schema_race")
+
+
+async def test_a_real_lock_wait_is_retried_until_the_holder_lets_go(app, monkeypatch, caplog):
+    """The helpers' ALTER behind a real ACCESS SHARE holder (what pg_dump takes) gives up
+    after SCHEMA_LOCK_TIMEOUT, and the next attempt, once the holder is gone, finishes."""
+    caplog.set_level(logging.WARNING, logger="app.db.pool")
+    helpers = pool_mod._SCHEMA.split("CREATE TABLE IF NOT EXISTS devices")[0]
+    monkeypatch.setattr(pool_mod, "_SCHEMA", helpers +
+                        "SELECT pg_temp.add_column_if_missing('zz_schema_lock', 'x', 'real');")
+    slept: list[float] = []
+    holder = await asyncpg.connect(settings.database_url)
+    try:
+        await holder.execute("DROP TABLE IF EXISTS zz_schema_lock; CREATE TABLE zz_schema_lock (id int)")
+        await holder.execute("BEGIN; LOCK TABLE zz_schema_lock IN ACCESS SHARE MODE")
+
+        async def release(d: float) -> None:
+            slept.append(d)
+            await holder.execute("ROLLBACK")
+
+        async with app.state.pool.acquire() as conn:
+            await apply_schema(conn, sleep=release, delays=(0.0, 0.0))
+        assert await holder.fetchval("SELECT count(*) FROM pg_attribute WHERE "
+                                     "attrelid = 'zz_schema_lock'::regclass AND attname = 'x'") == 1
+    finally:
+        await holder.execute("ROLLBACK; DROP TABLE IF EXISTS zz_schema_lock")
+        await holder.close()
+    assert slept == [0.0]
+    assert [r.getMessage() for r in caplog.records if r.name == "app.db.pool"] == [
+        "schema: lock wait timed out (attempt 1); retrying in 0.0s"]
 
 
 async def test_create_pool_closes_the_pool_when_the_schema_finally_fails(monkeypatch):
