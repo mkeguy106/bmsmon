@@ -18,6 +18,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 
 /** The phone's own power situation — not to be confused with any BMS pack state. */
 data class PowerStatus(
@@ -52,7 +53,8 @@ internal fun chargeMahOf(extraMicroAh: Int, propertyMicroAh: () -> Long?): Int? 
  * Watches the phone's charger and battery level via ACTION_BATTERY_CHANGED.
  *
  * That broadcast is sticky, so [start] gets the current state back from registerReceiver
- * immediately — there is nothing to poll. Follows the same register/unregister shape as the
+ * immediately; a 60 s ticker then re-reads it, because the charge counter must keep being sampled
+ * when no broadcast arrives (a dead pad changes neither plug nor level). Follows the same register/unregister shape as the
  * engine's Bluetooth adapter receiver.
  */
 class PowerMonitor(private val context: Context) {
@@ -63,15 +65,29 @@ class PowerMonitor(private val context: Context) {
     private val batteryManager: BatteryManager? =
         runCatching { context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager }.getOrNull()
 
-    private fun read(intent: Intent?): PowerStatus = runCatching {
-        readPowerStatus(intent, SystemClock.elapsedRealtime()) {
-            batteryManager?.getLongProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
-        }
-    }.getOrDefault(SAFE_DEFAULT)
+    /** A real reading, or null when there is no intent or the read threw: nothing is published then. */
+    private fun read(intent: Intent?): PowerStatus? {
+        if (intent == null) return null
+        return runCatching {
+            readPowerStatus(intent, SystemClock.elapsedRealtime()) {
+                batteryManager?.getLongProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
+            }
+        }.getOrNull()
+    }
+
+    /**
+     * Publishes [new] unless it is older than what is already published. The receiver (main thread)
+     * and the ticker (Default) each stamp the time and then assign; without this a racing pair could
+     * make the clock appear to run backwards.
+     */
+    private fun publish(new: PowerStatus?) {
+        if (new == null) return
+        _status.update { cur -> if (new.atElapsedMs >= cur.atElapsedMs) new else cur }
+    }
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            _status.value = read(intent)
+            publish(read(intent))
         }
     }
 
@@ -87,7 +103,7 @@ class PowerMonitor(private val context: Context) {
             // live rather than the safe default.
             val sticky = context.registerReceiver(receiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
             registered = true
-            _status.value = read(sticky)
+            publish(read(sticky))
             startTicker()
         }
     }
@@ -105,7 +121,7 @@ class PowerMonitor(private val context: Context) {
                 delay(TICK_MS)
                 runCatching {
                     val sticky = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-                    if (registered) _status.value = read(sticky)
+                    if (registered) publish(read(sticky))
                 }.onFailure { Log.w("PowerMonitor", "power tick failed", it) }
             }
         }

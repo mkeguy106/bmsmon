@@ -14,6 +14,7 @@ import dev.joely.bmsmon.location.driveLocation
 import dev.joely.bmsmon.motion.MotionSource
 import dev.joely.bmsmon.ble.profile.ProfileRegistry
 import dev.joely.bmsmon.ble.profile.RedodoBekenProfile
+import dev.joely.bmsmon.cloud.PhonePowerJson
 import dev.joely.bmsmon.cloud.TelemetryReporter
 import dev.joely.bmsmon.data.FailureLogThrottle
 import dev.joely.bmsmon.data.SettingsStore
@@ -100,11 +101,6 @@ import kotlinx.coroutines.launch
 internal fun isNewFixForPack(lastUploadedFixMs: Long?, fixTimeMs: Long): Boolean =
     lastUploadedFixMs == null || fixTimeMs > lastUploadedFixMs
 
-/**
- * The BLE-derived state the engine maintains, independent of any UI lifecycle. Mirrored into the
- * ViewModel's UiState while the app is foregrounded, and read by the foreground-service
- * notification while it isn't.
- */
 /** The phone's own power at [atWallMs] (epoch ms), as the engine's power loop last folded it. */
 data class PhonePowerSnapshot(
     val levelPct: Int,
@@ -115,6 +111,20 @@ data class PhonePowerSnapshot(
     val atWallMs: Long,
 )
 
+internal fun PhonePowerSnapshot.toJson() = PhonePowerJson(
+    level = levelPct,
+    plugged = plugged,
+    charge_mah = chargeMah,
+    fault = fault,
+    fault_since_ms = faultSinceWallMs,
+    at_ms = atWallMs,
+)
+
+/**
+ * The BLE-derived state the engine maintains, independent of any UI lifecycle. Mirrored into the
+ * ViewModel's UiState while the app is foregrounded, and read by the foreground-service
+ * notification while it isn't.
+ */
 data class MonitorState(
     val monitoring: Boolean = false,
     val fleet: Map<String, BatteryStatus> = emptyMap(),
@@ -863,7 +873,15 @@ class MonitorEngine(
         powerJob = scope.launch {
             var first = true
             var faultState = ChargerFaultState()
+            var lastFoldedAt = 0L
             powerMonitor.status.collect { ps ->
+                // No real reading yet (the monitor's SAFE_DEFAULT, stamped 0): never fold or upload
+                // a made-up "unplugged, 100%"; it would reset the fold and clear the low-power latch.
+                if (ps.atElapsedMs <= 0L) return@collect
+                // A reading older than the last folded one (a racing ticker and receiver) is
+                // ignored, not folded: time running backwards would reset the detector.
+                if (ps.atElapsedMs < lastFoldedAt) return@collect
+                lastFoldedAt = ps.atElapsedMs
                 // runCatching: an uncaught throw here would kill the whole process (no
                 // CoroutineExceptionHandler on this scope) — and with it the foreground service,
                 // which ActivityManager may then not reschedule for up to an hour. A null-Looper
@@ -917,6 +935,9 @@ class MonitorEngine(
             }
         }
     }
+
+    /** The phone-power block for the next live upload batch; null while monitoring is off or unread. */
+    fun phonePowerJson(): PhonePowerJson? = _state.value.phonePower?.toJson()
 
     private fun stopPowerLoop() {
         powerJob?.cancel()

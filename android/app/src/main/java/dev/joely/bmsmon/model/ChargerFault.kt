@@ -59,8 +59,8 @@ data class ChargerFaultState(
  * 2. In fault, the minimum counter seen is tracked, and a rise of [CHARGER_CLEAR_RISE_MAH] above
  *    it clears the fault (fresh buffer from that reading). Falling at a lower drain, as when the
  *    screen is released, does not clear it: the counter still falls on a dead pad.
- * 3. Otherwise the reading is buffered (at most one per [CHARGER_BUFFER_SPACING_MS]) and compared with the newest reading at least
- *    [CHARGER_FAULT_WINDOW_MS] old; a loss of [CHARGER_FAULT_DROP_MAH] or more is a fault.
+ * 3. Otherwise the reading is buffered (at most one per [CHARGER_BUFFER_SPACING_MS]) and compared
+ *    with the newest reading at least [CHARGER_FAULT_WINDOW_MS] old; a loss of [CHARGER_FAULT_DROP_MAH] or more is a fault.
  *
  * Pure and total: no clock, no Android types.
  */

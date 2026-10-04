@@ -39,6 +39,20 @@ data class SampleJson(
     val cells: List<Float>? = null,
 )
 
+/**
+ * The phone's own power snapshot, riding live ingest batches only (never re-sync or import).
+ * [at_ms] and [fault_since_ms] are wall-clock epoch ms.
+ */
+@Serializable
+data class PhonePowerJson(
+    val level: Int,
+    val plugged: Int,
+    val charge_mah: Int? = null,
+    val fault: Boolean,
+    val fault_since_ms: Long? = null,
+    val at_ms: Long,
+)
+
 object CloudJson {
     val json = Json { encodeDefaults = true; explicitNulls = false }
 
@@ -82,8 +96,15 @@ object CloudJson {
     )
 
     /** Wrap pre-serialized sample JSON object strings into the ingest batch body bytes. */
-    fun encodeBatch(seq: Int, rows: List<String>): ByteArray =
-        ("""{"batch_seq":$seq,"samples":[""" + rows.joinToString(",") + "]}").toByteArray()
+    fun encodeBatch(seq: Int, rows: List<String>, phone: PhonePowerJson? = null): ByteArray {
+        // Live batches only (seq >= 0): re-sync and import batches (seq = -1) never carry it.
+        val block = if (phone != null && seq >= 0) {
+            ""","phone":""" + json.encodeToString(PhonePowerJson.serializer(), phone)
+        } else {
+            ""
+        }
+        return ("""{"batch_seq":$seq,"samples":[""" + rows.joinToString(",") + "]" + block + "}").toByteArray()
+    }
 
     /**
      * One-way temperature-alert config push body (phone → cloud). [unit] is "C"/"F". Includes the

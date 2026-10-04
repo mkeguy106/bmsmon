@@ -17,6 +17,6 @@ import dev.joely.bmsmon.monitor.MonitorEngine
 class BmsApp : Application() {
     val settings by lazy { SettingsStore(this) }
     val db by lazy { BmsDatabase.create(this) }
-    val reporter by lazy { TelemetryReporter(applicationContext, db, settings) }
-    val engine by lazy { MonitorEngine(applicationContext, db, reporter, settings) }
+    val reporter: TelemetryReporter by lazy { TelemetryReporter(applicationContext, db, settings, phonePower = { engine.phonePowerJson() }) }
+    val engine: MonitorEngine by lazy { MonitorEngine(applicationContext, db, reporter, settings) }
 }

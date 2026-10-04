@@ -207,4 +207,20 @@ class EngineWiringTest {
         assertTrue(pass.contains("repository.forEachRangeRow(addr, since)"))
         assertFalse(pass.contains("repository.rangeRows("))
     }
+
+    // A2 review M4: powerDecision's chargerFault defaults to false, so dropping the argument would
+    // silently turn the screen release off with every other test still green.
+    @Test fun thePowerLoopFeedsTheChargerFaultIntoThePowerDecision() {
+        val powerLoop = flat.substringAfter("private fun startPowerLoop() {").substringBefore("private fun stopPowerLoop()")
+        assertTrue(powerLoop.contains("chargerFault = faultState.fault"))
+    }
+
+    // A3 / A2 review M1-M3: the loop never folds the monitor's safe default (stamped 0, so it can't
+    // reset the fold or the low-power latch with a fake 100%), ignores a reading older than the last
+    // folded one, and so never uploads a made-up snapshot.
+    @Test fun thePowerLoopSkipsUnreadAndOutOfOrderReadings() {
+        val powerLoop = flat.substringAfter("private fun startPowerLoop() {").substringBefore("private fun stopPowerLoop()")
+        assertTrue(powerLoop.contains("if (ps.atElapsedMs <= 0L) return@collect"))
+        assertTrue(powerLoop.contains("if (ps.atElapsedMs < lastFoldedAt) return@collect"))
+    }
 }
