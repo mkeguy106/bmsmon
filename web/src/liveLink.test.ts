@@ -50,15 +50,27 @@ describe("sessionFromProbe", () => {
     expect(sessionFromProbe({ type: "basic", status: 502 })).toBe("unreachable");
     expect(sessionFromProbe("network-error")).toBe("unreachable");
   });
+
+  it("reads the app's own marked 503 as degraded, an unmarked 503 as unreachable", () => {
+    expect(sessionFromProbe({ type: "basic", status: 503, marked: true })).toBe("degraded");
+    expect(sessionFromProbe({ type: "basic", status: 503, marked: false })).toBe("unreachable");
+    expect(sessionFromProbe({ type: "basic", status: 503 })).toBe("unreachable");
+  });
 });
 
 describe("probeSession", () => {
   it("GETs /web/alert-config without following redirects", async () => {
     const f = vi.fn(async () => new Response(null, { status: 401 }));
     vi.stubGlobal("fetch", f);
-    await expect(probeSession()).resolves.toEqual({ type: "default", status: 401 });
+    await expect(probeSession()).resolves.toEqual({ type: "default", status: 401, marked: false });
     expect(f).toHaveBeenCalledWith("/web/alert-config",
       expect.objectContaining({ redirect: "manual", cache: "no-store" }));
+  });
+
+  it("flags a response carrying the app marker header", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(null, { status: 503, headers: { "X-Bmsmon-Api": "1" } })));
+    await expect(probeSession()).resolves.toEqual({ type: "default", status: 503, marked: true });
   });
 
   it("returns network-error when the fetch rejects", async () => {

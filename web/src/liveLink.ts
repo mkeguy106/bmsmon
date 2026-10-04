@@ -18,8 +18,9 @@ const PROBE_TIMEOUT_MS = 8_000;
  * - "expired": no valid sign-in.
  * - "forbidden": signed in, but this account may not view bmsmon.
  * - "unreachable": the server does not answer at all.
+ * - "degraded": the server answers with its marked 503 (its database is down).
  */
-export type Session = "ok" | "expired" | "forbidden" | "unreachable";
+export type Session = "ok" | "expired" | "forbidden" | "unreachable" | "degraded";
 
 /** Exponential backoff with "equal jitter": half of each step is fixed and half is random,
  *  so tabs reconnecting after an outage spread out instead of arriving together.
@@ -40,7 +41,10 @@ export function sessionFromClose(code: number): Session | null {
 
 /** What the HTTP probe saw: the response's type and status, or "network-error" when the
  *  fetch itself failed (offline, DNS, timeout). */
-export type ProbeResult = { type: string; status: number } | "network-error";
+export type ProbeResult = { type: string; status: number; marked?: boolean } | "network-error";
+
+/** The header every response from the app itself carries (server/app/middleware.py). */
+const API_MARKER_HEADER = "X-Bmsmon-Api";
 
 /** An expired Authentik session answers a same-origin fetch with a redirect to its sign-in
  *  page; with redirect: "manual" that arrives as an "opaqueredirect" response. The app
@@ -50,6 +54,7 @@ export function sessionFromProbe(p: ProbeResult): Session {
   if (p.type === "opaqueredirect" || p.status === 401) return "expired";
   if (p.status === 403) return "forbidden";
   if (p.status >= 200 && p.status < 300) return "ok";
+  if (p.status === 503 && p.marked === true) return "degraded";
   return "unreachable";
 }
 
@@ -59,7 +64,7 @@ export async function probeSession(): Promise<ProbeResult> {
   const timer = setTimeout(() => ctl.abort(), PROBE_TIMEOUT_MS);
   try {
     const r = await fetch(PROBE_URL, { redirect: "manual", cache: "no-store", signal: ctl.signal });
-    return { type: r.type, status: r.status };
+    return { type: r.type, status: r.status, marked: r.headers.get(API_MARKER_HEADER) === "1" };
   } catch {
     return "network-error";
   } finally {

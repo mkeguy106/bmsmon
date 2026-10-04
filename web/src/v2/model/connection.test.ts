@@ -16,6 +16,12 @@ describe("connectionBanner", () => {
     expect(connectionBanner("expired")!.title).toBe("Session expired");
   });
 
+  it("says the server is having trouble when it answered with its marked 503", () => {
+    const b = connectionBanner("degraded")!;
+    expect(b.title).toBe("The server is having trouble");
+    expect(b.reload).toBe(false);
+  });
+
   it("warns without a reload while the server is unreachable", () => {
     const b = connectionBanner("unreachable")!;
     expect(b.tone).toBe("warn");

@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { connectionBanner } from "../model/connection";
 import { ConnectionBanner } from "./ConnectionBanner";
 
-const render = (s: "expired" | "forbidden" | "unreachable") =>
+const render = (s: "expired" | "forbidden" | "unreachable" | "degraded") =>
   renderToStaticMarkup(<ConnectionBanner banner={connectionBanner(s)!} />);
 
 describe("ConnectionBanner", () => {

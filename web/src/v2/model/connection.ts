@@ -26,5 +26,8 @@ export function connectionBanner(session: Session): Banner | null {
     case "unreachable":
       return { tone: "warn", title: "Can't reach the server",
         detail: "Retrying. Everything shown is last known.", reload: false };
+    case "degraded":
+      return { tone: "warn", title: "The server is having trouble",
+        detail: "Retrying. Everything shown is last known.", reload: false };
   }
 }
