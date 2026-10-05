@@ -5,6 +5,7 @@ import type { RangeConfigRow } from "./range";
 import type { HistSeries } from "./v2/history";
 import type { TrendSeries, ChargeSession, NoteRow } from "./v2/trends";
 import type { Track } from "./v2/track";
+import type { PhoneAlert } from "./v2/model/phoneAlert";
 
 const j = async (r: Response): Promise<unknown> => {
   if (!r.ok) throw new Error(String(r.status));
@@ -194,3 +195,25 @@ export const getApiKeys = async (): Promise<{ keys: ApiKeyRow[] }> => {
 
 export const revokeApiKey = async (id: string): Promise<unknown> =>
   fetch(`/web/api-keys/${id}`, { method: "DELETE" }).then(j);
+
+// ---- phone battery alert threshold (viewer GET, admin PUT) ----
+
+const decodePhoneAlert = (r: unknown): PhoneAlert => {
+  if (isObj(r) && (r.low_pct === null || typeof r.low_pct === "number")
+      && typeof r.updated_at_ms === "number"
+      && (r.updated_by === "phone" || r.updated_by === "web" || r.updated_by === "default")) {
+    return { low_pct: r.low_pct, updated_at_ms: r.updated_at_ms, updated_by: r.updated_by,
+             ...(typeof r.can_edit === "boolean" ? { can_edit: r.can_edit } : {}) };
+  }
+  throw new Error("malformed /web/phone-alert response");
+};
+
+export const getPhoneAlert = async (): Promise<PhoneAlert> =>
+  decodePhoneAlert(await fetch("/web/phone-alert").then(j));
+
+export const putPhoneAlert = async (lowPct: number | null): Promise<PhoneAlert> =>
+  decodePhoneAlert(await fetch("/web/phone-alert", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ low_pct: lowPct }),
+  }).then(j));
