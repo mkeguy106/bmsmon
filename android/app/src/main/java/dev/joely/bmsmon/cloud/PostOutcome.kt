@@ -1,5 +1,7 @@
 package dev.joely.bmsmon.cloud
 
+import dev.joely.bmsmon.model.PhoneAlertSync
+import dev.joely.bmsmon.model.parsePhoneAlert
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import kotlinx.serialization.json.Json
@@ -31,7 +33,7 @@ private val AUTH_REASON_TOKEN = Regex("[a-z0-9_]{1,64}")
  * is the response's Retry-After (the app sends one with a marked 503). [skewMs] is the server's clock
  * ([SERVER_TIME_HEADER], else `Date`) minus this phone's clock at the request's midpoint (null when
  * neither is usable). [detail] is the app's reason string and [authReason] its [AUTH_REASON_HEADER]
- * token, both read only on a 401/403. Nothing here ever holds a token or a payload.
+ * token, both read only on a 401/403. [phoneAlert] is read only on a marked 2xx. Nothing here ever holds a token or a payload.
  */
 internal data class PostOutcome(
     val result: PostResult,
@@ -41,18 +43,21 @@ internal data class PostOutcome(
     val skewMs: Long? = null,
     val detail: String? = null,
     val authReason: String? = null,
+    /** The server's phone-battery alarm threshold, read from a MARKED 2xx body only; null otherwise. */
+    val phoneAlert: PhoneAlertSync? = null,
 )
 
 /**
  * Read one HTTP response into a [PostOutcome]. [sentAtMs]/[receivedAtMs] are this phone's wall clock
  * either side of the round trip. The result is exactly [classifyPost]'s, and nothing read beyond the
- * status can change it or throw: the body is read only on a 401/403, only its first
+ * status can change it or throw: the body is read only on a 401/403 or a marked 2xx, only its first
  * [DETAIL_PEEK_BYTES] bytes, and a failed read just leaves [PostOutcome.detail] null.
  */
 internal fun outcomeOf(resp: Response, sentAtMs: Long, receivedAtMs: Long): PostOutcome {
     val fromApi = resp.header(API_MARKER_HEADER) != null
     val result = classifyPost(resp.code, fromApi)
     val authFailed = result == PostResult.AuthFailed
+    val markedOk = fromApi && result == PostResult.Ok
     return PostOutcome(
         result = result,
         code = resp.code,
@@ -61,6 +66,11 @@ internal fun outcomeOf(resp: Response, sentAtMs: Long, receivedAtMs: Long): Post
         skewMs = clockSkewMs(serverClockMs(resp.header(SERVER_TIME_HEADER), resp.header("Date")), sentAtMs, receivedAtMs),
         detail = if (authFailed) apiDetail(runCatching { resp.peekBody(DETAIL_PEEK_BYTES).string() }.getOrNull()) else null,
         authReason = if (authFailed) parseAuthReason(resp.header(AUTH_REASON_HEADER)) else null,
+        phoneAlert = if (markedOk) {
+            runCatching { parsePhoneAlert(resp.peekBody(DETAIL_PEEK_BYTES).string()) }.getOrNull()
+        } else {
+            null
+        },
     )
 }
 

@@ -14,6 +14,7 @@ import dev.joely.bmsmon.data.SettingsStore
 import dev.joely.bmsmon.data.db.BmsDatabase
 import dev.joely.bmsmon.data.db.OutboxEntity
 import dev.joely.bmsmon.model.Telemetry
+import dev.joely.bmsmon.model.sentPhoneAlert
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -370,6 +371,18 @@ class TelemetryReporter(
     @Synchronized
     private fun noteOutcome(o: PostOutcome) {
         if (o.result == PostResult.Ok) serverOks.incrementAndGet()
+        o.phoneAlert?.let { server ->
+            // Reconcile in one DataStore edit (last change wins); the settings flow carries the result to the UI.
+            scope.launch {
+                try {
+                    settings.reconcilePhoneAlertWith(server)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "phone alert: could not store the server's threshold", e)
+                }
+            }
+        }
         val phoneClockErr by lazy(LazyThreadSafetyMode.NONE) { independentClock.measurePhoneClockErrorMs() }
         val prevOffsetMs = signingOffsetMs
         signing = nextSigningCorrection(signing, o) { phoneClockErr }
@@ -495,6 +508,18 @@ class TelemetryReporter(
                             clear = { settings.clearPendingTempConfigIf(cfg) },
                             warn = { msg, e -> Log.w(TAG, msg, e) },
                         )
+                        // A 2xx acknowledges the phone's own pick: drop its dirty flag, but only if it is
+                        // still the pick that was sent. A failure here is harmless: the next server answer
+                        // reconciles it (the server's change time is then at least ours).
+                        if (outcome.result == PostResult.Ok) sentPhoneAlert(cfg)?.let { sent ->
+                            try {
+                                settings.clearPhoneAlertDirtyIf(sent)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                Log.w(TAG, "phone alert: could not clear the sent pick's dirty flag", e)
+                            }
+                        }
                     }
                 }
                 // Cap the outbox: evict the oldest rows if over the limit, counted and re-queued.

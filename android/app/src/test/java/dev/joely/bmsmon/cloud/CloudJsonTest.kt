@@ -114,6 +114,32 @@ class CloudJsonTest {
         assertTrue(s.contains("\"updated_at_ms\":123"))
     }
 
+    private fun phoneCfg(pa: dev.joely.bmsmon.model.PhoneAlertLocal?) = CloudJson.encodeTempConfig(
+        profileId = "p", t = dev.joely.bmsmon.model.TempThresholds(), env = dev.joely.bmsmon.model.TempEnvelope(),
+        unit = "C", updatedAtMs = 1L, phoneAlert = pa,
+    )
+
+    @Test fun tempConfig_carries_a_dirty_phone_alert_pick_only() {
+        val pa = dev.joely.bmsmon.model.PhoneAlertLocal(40, known = true, changedMs = 777L, dirty = true)
+        val s = phoneCfg(pa)
+        assertTrue(s.contains("\"phone_low_pct\":40"))
+        assertTrue(s.contains("\"phone_low_pct_changed_ms\":777"))
+        for (none in listOf(null, pa.copy(dirty = false), pa.copy(known = false))) {
+            val t = phoneCfg(none)
+            assertFalse(t.contains("phone_low_pct"))
+        }
+    }
+
+    @Test fun tempConfig_sends_off_as_an_explicit_null() {
+        val s = phoneCfg(dev.joely.bmsmon.model.PhoneAlertLocal(null, known = true, changedMs = 5L, dirty = true))
+        assertTrue(s.contains("\"phone_low_pct\":null"))
+        assertTrue(s.contains("\"phone_low_pct_changed_ms\":5"))
+        assertEquals(
+            dev.joely.bmsmon.model.PhoneAlertSent(null, 5L),
+            dev.joely.bmsmon.model.sentPhoneAlert(s),
+        )
+    }
+
     // UI-19: seize_soc now carries the seize's own level instead of the ladder top; the wire shape
     // is unchanged — an int, alongside the alerts_on flag, both present on every capacity push.
     @Test fun tempConfig_carries_seize_level_and_alerts_on() {

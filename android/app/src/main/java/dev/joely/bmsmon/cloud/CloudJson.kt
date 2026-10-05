@@ -1,10 +1,14 @@
 package dev.joely.bmsmon.cloud
 
+import dev.joely.bmsmon.model.PhoneAlertLocal
 import dev.joely.bmsmon.model.RangeParams
 import dev.joely.bmsmon.model.TempEnvelope
 import dev.joely.bmsmon.model.TempThresholds
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 @Serializable
 data class SampleJson(
@@ -115,9 +119,9 @@ object CloudJson {
         profileId: String, t: TempThresholds, env: TempEnvelope, unit: String, updatedAtMs: Long,
         seizeSoc: Int? = null, alertsOn: Boolean? = null,
         ranges: Map<String, RangeParams>? = null,
-    ): String =
-        json.encodeToString(
-            TempConfigJson.serializer(),
+        phoneAlert: PhoneAlertLocal? = null,
+    ): String {
+        val cfg =
             TempConfigJson(
                 profileId, t.coldCautionC, t.hotCautionC, t.coldCritC, t.hotCritC,
                 unit, updatedAtMs,
@@ -134,8 +138,18 @@ object CloudJson {
                         r.learnedDays, r.updatedMs,
                     )
                 },
+            )
+        val text = json.encodeToString(TempConfigJson.serializer(), cfg)
+        // Only an un-acknowledged local pick rides along. Off is an explicit null (the server reads an
+        // absent key as "no change"), which explicitNulls = false would otherwise drop.
+        if (phoneAlert == null || !phoneAlert.dirty || !phoneAlert.known) return text
+        return JsonObject(
+            (json.parseToJsonElement(text) as JsonObject) + mapOf(
+                "phone_low_pct" to (phoneAlert.lowPct?.let { JsonPrimitive(it) } ?: JsonNull),
+                "phone_low_pct_changed_ms" to JsonPrimitive(phoneAlert.changedMs),
             ),
-        )
+        ).toString()
+    }
 }
 
 /** DATA-25: kotlinx JSON throws on NaN/Infinity; a non-finite learned band is left out of the push. */
