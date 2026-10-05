@@ -93,7 +93,9 @@ import dev.joely.bmsmon.luxToFraction
 import dev.joely.bmsmon.model.BatteryGroup
 import dev.joely.bmsmon.model.GaugeSide
 import dev.joely.bmsmon.model.MIN_DIM_LEVEL
+import dev.joely.bmsmon.model.PHONE_ALERT_OPTIONS
 import dev.joely.bmsmon.model.SEIZE_SOC_OPTIONS
+import dev.joely.bmsmon.model.phoneAlertLabel
 import dev.joely.bmsmon.model.STAGE_HOLD_OPTIONS_MIN
 import dev.joely.bmsmon.model.TempThresholds
 import dev.joely.bmsmon.model.TempUnit
@@ -162,7 +164,7 @@ fun SettingsScreen(
         SettingsPage.Alerts -> DetailScaffold("Alerts", { page = null }) {
             AlertsContent(state, alerts.onSetAlertsOn, alerts.onToggleThreshold,
                 alerts.onSetCriticalThreshold, alerts.onSetSeizeLowToStage, alerts.onResetAlerts,
-                alerts.onSetSeizeSoc)
+                alerts.onSetSeizeSoc, alerts.onSetPhoneAlert)
         }
         SettingsPage.Temperature -> DetailScaffold("Temperature", { page = null }) {
             TemperatureContent(state, temp.onSetTempAlertsEnabled, temp.onSetShowTempGauge,
@@ -656,6 +658,7 @@ private fun ColumnScope.AlertsContent(
     onSetSeizeLowToStage: (Boolean) -> Unit,
     onResetAlerts: () -> Unit,
     onSetSeizeSoc: (Int) -> Unit,
+    onSetPhoneAlert: (Int?) -> Unit,
 ) {
     val c = Bm.colors
     GroupedCard {
@@ -721,6 +724,28 @@ private fun ColumnScope.AlertsContent(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 SEIZE_SOC_OPTIONS.forEach { t ->
                     SelectChip("$t%", state.seizeSoc == t, mono = true) { onSetSeizeSoc(t) }
+                }
+            }
+        }
+    }
+
+    SectionLabel("Phone battery alert (pages your iPhone)")
+    PlainCard {
+        Text(
+            "Pages you when this phone's own battery falls below the level. Shared with the WebUI: the most " +
+                "recent change, made here or there, wins. Now: ${phoneAlertLabel(state.phoneAlert)}",
+            color = c.text2, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.padding(bottom = 12.dp),
+        )
+        val pa = state.phoneAlert
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            val options: List<Int?> = listOf(null) + PHONE_ALERT_OPTIONS
+            for (row in options.chunked(4)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    row.forEach { t ->
+                        SelectChip(t?.let { "$it%" } ?: "Off", pa.known && pa.lowPct == t, mono = true) {
+                            onSetPhoneAlert(t)
+                        }
+                    }
                 }
             }
         }

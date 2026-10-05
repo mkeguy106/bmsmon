@@ -64,6 +64,7 @@ data class AlertActions(
     val onSetSeizeLowToStage: (Boolean) -> Unit,
     val onResetAlerts: () -> Unit,
     val onSetSeizeSoc: (Int) -> Unit,
+    val onSetPhoneAlert: (Int?) -> Unit,
 )
 
 /** Settings › Temperature. */

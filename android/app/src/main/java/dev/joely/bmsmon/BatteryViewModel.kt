@@ -44,6 +44,8 @@ import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.DEFAULT_GROUP_ID
 import dev.joely.bmsmon.model.DEFAULT_ROSTER
 import dev.joely.bmsmon.model.DEFAULT_SEIZE_SOC
+import dev.joely.bmsmon.model.PhoneAlertLocal
+import dev.joely.bmsmon.model.isPhoneAlertLevel
 import dev.joely.bmsmon.model.DEFAULT_STAGE_HOLD_MIN
 import dev.joely.bmsmon.model.Freshness
 import dev.joely.bmsmon.model.GroupActivity
@@ -173,6 +175,8 @@ data class UiState(
     // a too-low pack can't hide off-stage.
     val seizeLowToStage: Boolean = true,
     val seizeSoc: Int = DEFAULT_SEIZE_SOC,
+    /** The phone-battery alarm threshold shared with the server and the WebUI (last change wins). */
+    val phoneAlert: PhoneAlertLocal = PhoneAlertLocal(),
     // temperature alerts (per-profile thresholds; unit reuses tempFahrenheit below)
     val tempAlertsEnabled: Boolean = true,
     val tempThresholdsByProfile: Map<String, TempThresholds> = emptyMap(),
@@ -588,6 +592,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
                     criticalThreshold = p.criticalThreshold ?: s.criticalThreshold,
                     seizeLowToStage = p.seizeLowToStage,
                     seizeSoc = p.seizeSoc,
+                    phoneAlert = p.phoneAlert,
                     keepScreenOn = p.keepScreenOn,
                     tempFahrenheit = p.tempFahrenheit,
                     tempAlertsEnabled = p.tempAlertsEnabled,
@@ -1203,6 +1208,15 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         enqueueCapacityConfig()
         pushStageConfig()
     }
+    /** Set the phone-battery alarm level (null = Off): stamped now, dirty until the server acknowledges it.
+     *  The pick rides the cloud config push; the most recent change, here or in the WebUI, wins. */
+    fun setPhoneAlert(level: Int?) {
+        if (level != null && !isPhoneAlertLevel(level)) return
+        val now = clockMs()
+        _state.update { it.copy(phoneAlert = PhoneAlertLocal(level, known = true, changedMs = now, dirty = true)) }
+        viewModelScope.launch { store.setPhoneAlert(level, now) }
+        enqueueCapacityConfig()
+    }
     /** Restore every alert setting (toggle, thresholds, critical level, seize) to its default. */
     fun resetAlertsToDefaults() {
         _state.update {
@@ -1284,9 +1298,10 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         val seizeSoc = _state.value.seizeSoc
         val alertsOn = _state.value.alertsOn
         val ranges = engine.state.value.rangeParamsByAddress
+        val phoneAlert = _state.value.phoneAlert
         viewModelScope.launch {
             store.setPendingTempConfig(
-                CloudJson.encodeTempConfig(profileId, t, env, unit, clockMs(), seizeSoc, alertsOn, ranges),
+                CloudJson.encodeTempConfig(profileId, t, env, unit, clockMs(), seizeSoc, alertsOn, ranges, phoneAlert),
             )
         }
     }

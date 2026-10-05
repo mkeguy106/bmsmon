@@ -289,6 +289,7 @@ fun App(vm: BatteryViewModel) {
         onSetSeizeLowToStage = vm::setSeizeLowToStage,
         onResetAlerts = vm::resetAlertsToDefaults,
         onSetSeizeSoc = vm::setSeizeSoc,
+        onSetPhoneAlert = vm::setPhoneAlert,
     )
     val tempActions = TempActions(
         onSetTempAlertsEnabled = vm::setTempAlertsEnabled,

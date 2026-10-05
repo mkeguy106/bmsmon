@@ -22,7 +22,12 @@ import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.Telemetry
 import dev.joely.bmsmon.model.TempThresholds
 import dev.joely.bmsmon.model.normalizeSeizeSoc
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
+import dev.joely.bmsmon.model.PhoneAlertLocal
+import dev.joely.bmsmon.model.PhoneAlertSent
+import dev.joely.bmsmon.model.PhoneAlertSync
+import dev.joely.bmsmon.model.reconcilePhoneAlert
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
@@ -92,6 +97,8 @@ data class Persisted(
     val pendingTempConfig: String?,
     /** The low-pack seize level (UI-19), normalized on read; [DEFAULT_SEIZE_SOC] when never set. */
     val seizeSoc: Int = DEFAULT_SEIZE_SOC,
+    /** This phone's copy of the server's phone-battery alarm threshold (see [PhoneAlertLocal]). */
+    val phoneAlert: PhoneAlertLocal = PhoneAlertLocal(),
 )
 
 /** Persists user preferences (colors, appearance override, BMS addresses) via DataStore. */
@@ -113,6 +120,10 @@ class SettingsStore(private val context: Context) {
         val CRITICAL_THRESHOLD = intPreferencesKey("alert_critical_threshold")
         val SEIZE_LOW_TO_STAGE = booleanPreferencesKey("seize_low_to_stage")
         val SEIZE_SOC = intPreferencesKey("seize_soc")
+        val PHONE_LOW_PCT = intPreferencesKey("phone_low_pct")   // absent = Off
+        val PHONE_LOW_KNOWN = booleanPreferencesKey("phone_low_known")
+        val PHONE_LOW_CHANGED_MS = longPreferencesKey("phone_low_changed_ms")
+        val PHONE_LOW_DIRTY = booleanPreferencesKey("phone_low_dirty")
         val KEEP_SCREEN_ON = booleanPreferencesKey("keep_screen_on")
         val SORT_KEY = stringPreferencesKey("all_sort")
         val FILTERS = stringSetPreferencesKey("all_filters")
@@ -235,6 +246,7 @@ class SettingsStore(private val context: Context) {
             cloudSyncAlerts = p[K.CLOUD_SYNC_ALERTS] ?: true,
             pendingTempConfig = p[K.PENDING_TEMP_CONFIG],
             seizeSoc = normalizeSeizeSoc(p[K.SEIZE_SOC]),
+            phoneAlert = p.phoneAlert(),
         )
     }
 
@@ -303,6 +315,43 @@ class SettingsStore(private val context: Context) {
     suspend fun setCloudSyncAlerts(on: Boolean) = context.dataStore.edit { it[K.CLOUD_SYNC_ALERTS] = on }.let {}
     suspend fun setPendingTempConfig(json: String) =
         context.dataStore.edit { it[K.PENDING_TEMP_CONFIG] = json }.let {}
+    private fun Preferences.phoneAlert() = PhoneAlertLocal(
+        lowPct = this[K.PHONE_LOW_PCT],
+        known = this[K.PHONE_LOW_KNOWN] ?: false,
+        changedMs = this[K.PHONE_LOW_CHANGED_MS] ?: 0L,
+        dirty = this[K.PHONE_LOW_DIRTY] ?: false,
+    )
+    private fun MutablePreferences.writePhoneAlert(a: PhoneAlertLocal) {
+        if (a.lowPct == null) remove(K.PHONE_LOW_PCT) else this[K.PHONE_LOW_PCT] = a.lowPct
+        this[K.PHONE_LOW_KNOWN] = a.known
+        this[K.PHONE_LOW_CHANGED_MS] = a.changedMs
+        this[K.PHONE_LOW_DIRTY] = a.dirty
+    }
+    /** A user pick of the phone-battery alarm level (null = Off): value, now, dirty. */
+    suspend fun setPhoneAlert(lowPct: Int?, changedMs: Long) = context.dataStore.edit {
+        it.writePhoneAlert(PhoneAlertLocal(lowPct, known = true, changedMs = changedMs, dirty = true))
+    }.let {}
+    /** Apply a server answer through [reconcilePhoneAlert] in one edit; true if the stored copy changed. */
+    suspend fun reconcilePhoneAlertWith(server: PhoneAlertSync): Boolean {
+        var changed = false
+        context.dataStore.edit {
+            val before = it.phoneAlert()
+            val after = reconcilePhoneAlert(before, server)
+            if (after != before) { it.writePhoneAlert(after); changed = true }
+        }
+        return changed
+    }
+    /** Clear the dirty flag only if the pick is still the one that was sent (value and change time). */
+    suspend fun clearPhoneAlertDirtyIf(sent: PhoneAlertSent): Boolean {
+        var cleared = false
+        context.dataStore.edit {
+            val cur = it.phoneAlert()
+            if (cur.dirty && cur.lowPct == sent.lowPct && cur.changedMs == sent.changedMs) {
+                it.writePhoneAlert(cur.copy(dirty = false)); cleared = true
+            }
+        }
+        return cleared
+    }
     /** Clear the pending config push only if it is still the one that was sent (DATA-18); true if it was removed. */
     suspend fun clearPendingTempConfigIf(sent: String): Boolean {
         var removed = false
