@@ -37,17 +37,19 @@ PHONE_LOW_PCT_DEFAULT = 75
 
 
 def parse_phone_low_pct(raw: str | None) -> tuple[int, str | None]:
-    """BMSMON_PHONE_LOW_PCT -> (percent, problem). Unset -> (75, None). Valid is a whole
-    number 1..100; anything else (empty, garbage, out of range) falls back to 75 with a
-    `problem` for the one startup warning (main.py log_phone_low_pct_status)."""
+    """BMSMON_PHONE_LOW_PCT -> (percent, problem). Unset -> (75, None). Valid is one of the
+    values the phone and the WebUI offer (10, 15, ... 95); anything else (empty, garbage,
+    out of range, off-step) falls back to 75 with a `problem` for the one startup warning
+    (main.py log_phone_low_pct_status). It is only the fallback until either side sets the
+    shared threshold (phone_alert_config)."""
     if raw is None:
         return PHONE_LOW_PCT_DEFAULT, None
     try:
         v = int(raw.strip())
     except ValueError:
         return PHONE_LOW_PCT_DEFAULT, "it is not a whole number"
-    if not 1 <= v <= 100:
-        return PHONE_LOW_PCT_DEFAULT, "it is outside 1..100"
+    if not 10 <= v <= 95 or v % 5:
+        return PHONE_LOW_PCT_DEFAULT, "it is not one of 10, 15, ... 95"
     return v, None
 
 

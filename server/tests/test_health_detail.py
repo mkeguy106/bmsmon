@@ -492,11 +492,11 @@ def test_phone_low_pct_env_parsing(monkeypatch, caplog):
     from app.main import log_phone_low_pct_status
     monkeypatch.delenv(PHONE_LOW_PCT_ENV, raising=False)
     assert Settings().phone_low_pct == 75
-    for raw, want in (("75", 75), ("1", 1), ("100", 100), (" 60 ", 60)):
+    for raw, want in (("75", 75), ("10", 10), ("95", 95), (" 60 ", 60)):
         monkeypatch.setenv(PHONE_LOW_PCT_ENV, raw)
         assert Settings().phone_low_pct == want
         assert parse_phone_low_pct(raw) == (want, None)
-    for raw in ("0", "101", "-5", "abc", "", "7.5"):
+    for raw in ("0", "101", "-5", "abc", "", "7.5", "1", "100", "72", "5"):
         monkeypatch.setenv(PHONE_LOW_PCT_ENV, raw)
         assert Settings().phone_low_pct == 75, raw
         caplog.clear()

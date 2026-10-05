@@ -1863,7 +1863,7 @@ answers **200 when every check passes and 503 otherwise**, `Cache-Control: no-st
 | `partition` | Next month's `samples` partition is missing. |
 | `clock` | The last verified token's `server − iat` skew exceeds ±120 s. |
 | `phone_power` | Some non-revoked device's latest report says `phone_fault = true` (the phone says its charger is connected but the battery keeps draining) and the fault is at least 300 s old (`phone_fault_since`; NULL counts from `phone_status_at`). The fault start is server `now()` minus the fault's age on the phone's own clock (`at_ms - fault_since_ms`), so phone-vs-server clock skew cannot shift it. Staleness never clears a fault: a phone that stops reporting keeps its last verdict (so a dying phone never sends a false "resolved"), and its silence is `ingest`'s job. **Only evaluated when selected.** |
-| `phone_battery` | The newest non-revoked device's latest reported `phone_level` is below `BMSMON_PHONE_LOW_PCT` (default **75**; valid 1..100, anything else falls back to 75 with one startup warning); exactly the threshold is ok, and a NULL level (nothing reported yet) is ok. No freshness requirement: a phone that stops reporting keeps its last level, so a dying phone keeps the alarm down instead of sending a false "resolved", and its silence is `ingest`'s job. **Only evaluated when selected.** |
+| `phone_battery` | The newest non-revoked device's latest reported `phone_level` is below the shared threshold (set from the phone's Settings › Alerts or the WebUI Settings, last change wins; until either sets it, `BMSMON_PHONE_LOW_PCT`, default **75**, one of 10, 15, … 95, anything else falls back to 75 with one startup warning; OFF never fails); exactly the threshold is ok, and a NULL level (nothing reported yet) is ok. No freshness requirement: a phone that stops reporting keeps its last level, so a dying phone keeps the alarm down instead of sending a false "resolved", and its silence is `ingest`'s job. **Only evaluated when selected.** |
 
 `?checks=a,b` (comma-separated subset of `ingest,rollup,partition,clock,phone_power,phone_battery`) selects which
 checks can fail the response; `ok` and `failing` consider only those. The default, with no
@@ -1893,7 +1893,7 @@ same ntfy notification when the phone's charger is connected but the battery is 
 
 Uptime Kuma monitor **`bmsmon-phone-battery`** polls
 `http://bmsmon-api:8000/api/v1/health/detail?checks=phone_battery` every 60 s with the same key and
-notification, and pages while the phone's battery is below `BMSMON_PHONE_LOW_PCT` (default 75%).
+notification, and pages while the phone's battery is below the shared threshold (see "Phone battery alert threshold").
 
 **Maintenance loop** (`app/maintenance.py`). It runs 60 s after boot, then hourly. Each step
 is isolated, so a failing step is logged and the rest still run:
