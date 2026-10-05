@@ -745,10 +745,9 @@ Seen 2026-10-04. So when `dumpsys activity activities | grep mLockTaskModeState`
    restores the user's chosen state.
 
 Unpinning can drop this phone to the **lock screen** (screen pinning asks for the unlock before
-unpinning), so install while the user can unlock it. After the unlock, an activity that merely
-resumes does not re-pin: start it again with `am start -n dev.joely.bmsmon/.MainActivity -f
-0x10008000` (NEW_TASK | CLEAR_TASK, which recreates it in the same task; it is not a task removal)
-and confirm **Got it**.
+unpinning), so install while the user can unlock it. Locked mode re-pins on every resume while
+nothing is pinned (`ui/LockTask.kt` `shouldRepin`, wired as an `ON_RESUME` observer in `ui/App.kt`),
+so after the unlock the "App is pinned" prompt comes back by itself: confirm **Got it**.
 
 If it is already wedged: `am task lock stop`, then start the activity in a new task with
 `am start -n dev.joely.bmsmon/.MainActivity -f 0x18000000` (NEW_TASK | MULTIPLE_TASK), then
