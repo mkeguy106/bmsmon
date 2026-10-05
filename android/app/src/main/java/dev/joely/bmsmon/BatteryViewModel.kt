@@ -46,6 +46,8 @@ import dev.joely.bmsmon.model.DEFAULT_ROSTER
 import dev.joely.bmsmon.model.DEFAULT_SEIZE_SOC
 import dev.joely.bmsmon.model.PhoneAlertLocal
 import dev.joely.bmsmon.model.isPhoneAlertLevel
+import dev.joely.bmsmon.model.phoneAlertEditable
+import dev.joely.bmsmon.model.shouldEnqueuePhoneAlert
 import dev.joely.bmsmon.model.DEFAULT_STAGE_HOLD_MIN
 import dev.joely.bmsmon.model.Freshness
 import dev.joely.bmsmon.model.GroupActivity
@@ -705,6 +707,17 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             getApplication<BmsApp>().reporter.status.collect { st -> _state.update { it.copy(cloud = st) } }
         }
+        // The phone-battery threshold follows the settings store, so a server answer adopted by the
+        // uploader reaches the UI. A dirty pick with no push pending (a dropped push, or a newer local
+        // pick the server hasn't seen) gets one enqueued, which the push's own backoff throttles.
+        viewModelScope.launch {
+            store.persisted.collect { p ->
+                _state.update { if (it.phoneAlert == p.phoneAlert) it else it.copy(phoneAlert = p.phoneAlert) }
+                if (shouldEnqueuePhoneAlert(p.phoneAlert, p.pendingTempConfig, p.cloudSyncAlerts, p.enrolled)) {
+                    enqueueCapacityConfig()
+                }
+            }
+        }
         startFreshnessTicker()
     }
 
@@ -1212,6 +1225,7 @@ class BatteryViewModel(app: Application) : AndroidViewModel(app) {
      *  The pick rides the cloud config push; the most recent change, here or in the WebUI, wins. */
     fun setPhoneAlert(level: Int?) {
         if (level != null && !isPhoneAlertLevel(level)) return
+        if (!phoneAlertEditable(_state.value.cloudSyncAlerts, _state.value.enrolled)) return
         val now = clockMs()
         _state.update { it.copy(phoneAlert = PhoneAlertLocal(level, known = true, changedMs = now, dirty = true)) }
         viewModelScope.launch { store.setPhoneAlert(level, now) }

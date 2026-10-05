@@ -95,6 +95,7 @@ import dev.joely.bmsmon.model.GaugeSide
 import dev.joely.bmsmon.model.MIN_DIM_LEVEL
 import dev.joely.bmsmon.model.PHONE_ALERT_OPTIONS
 import dev.joely.bmsmon.model.SEIZE_SOC_OPTIONS
+import dev.joely.bmsmon.model.phoneAlertEditable
 import dev.joely.bmsmon.model.phoneAlertLabel
 import dev.joely.bmsmon.model.STAGE_HOLD_OPTIONS_MIN
 import dev.joely.bmsmon.model.TempThresholds
@@ -737,17 +738,24 @@ private fun ColumnScope.AlertsContent(
             color = c.text2, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.padding(bottom = 12.dp),
         )
         val pa = state.phoneAlert
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            val options: List<Int?> = listOf(null) + PHONE_ALERT_OPTIONS
-            for (row in options.chunked(4)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    row.forEach { t ->
-                        SelectChip(t?.let { "$it%" } ?: "Off", pa.known && pa.lowPct == t, mono = true) {
-                            onSetPhoneAlert(t)
+        if (phoneAlertEditable(state.cloudSyncAlerts, state.enrolled)) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                val options: List<Int?> = listOf(null) + PHONE_ALERT_OPTIONS
+                for (row in options.chunked(4)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        row.forEach { t ->
+                            SelectChip(t?.let { "$it%" } ?: "Off", pa.known && pa.lowPct == t, mono = true) {
+                                onSetPhoneAlert(t)
+                            }
                         }
                     }
                 }
             }
+        } else {
+            Text(
+                "Turn on cloud alert sync to change this here — or change it in the WebUI",
+                color = c.text2, fontSize = 12.sp, lineHeight = 17.sp,
+            )
         }
     }
 

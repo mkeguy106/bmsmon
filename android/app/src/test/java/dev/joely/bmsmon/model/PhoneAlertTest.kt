@@ -64,4 +64,20 @@ class PhoneAlertTest {
         assertEquals("Off", phoneAlertLabel(PhoneAlertLocal(null, true)))
         assertEquals("75%", phoneAlertLabel(PhoneAlertLocal(75, true)))
     }
+
+    @Test fun editableOnlyWhereThePickCanBePushed() {
+        assertEquals(true, phoneAlertEditable(cloudSyncAlerts = true, enrolled = true))
+        assertEquals(false, phoneAlertEditable(cloudSyncAlerts = false, enrolled = true))
+        assertEquals(false, phoneAlertEditable(cloudSyncAlerts = true, enrolled = false))
+    }
+
+    @Test fun aDirtyPickWithNothingPendingIsEnqueued() {
+        val dirty = PhoneAlertLocal(40, true, 5, dirty = true)
+        assertEquals(true, shouldEnqueuePhoneAlert(dirty, null, true, true))
+        assertEquals(false, shouldEnqueuePhoneAlert(dirty, "{}", true, true))
+        assertEquals(false, shouldEnqueuePhoneAlert(dirty.copy(dirty = false), null, true, true))
+        assertEquals(false, shouldEnqueuePhoneAlert(dirty.copy(known = false), null, true, true))
+        assertEquals(false, shouldEnqueuePhoneAlert(dirty, null, false, true))
+        assertEquals(false, shouldEnqueuePhoneAlert(dirty, null, true, false))
+    }
 }

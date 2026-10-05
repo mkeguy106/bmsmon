@@ -69,3 +69,13 @@ fun sentPhoneAlert(cfg: String): PhoneAlertSent? {
 /** The Alerts picker's current-value text: a dash until the first answer, then "Off" or "NN%". */
 fun phoneAlertLabel(p: PhoneAlertLocal): String =
     if (!p.known) "—" else p.lowPct?.let { "$it%" } ?: "Off"
+
+/** The picker can change the threshold only where [BatteryViewModel]'s config push can carry the pick. */
+fun phoneAlertEditable(cloudSyncAlerts: Boolean, enrolled: Boolean): Boolean = cloudSyncAlerts && enrolled
+
+/**
+ * A dirty pick must always reach the server, including after a dropped push: enqueue a config push
+ * when one is dirty, none is pending, and pushing is possible.
+ */
+fun shouldEnqueuePhoneAlert(local: PhoneAlertLocal, pendingConfig: String?, cloudSyncAlerts: Boolean, enrolled: Boolean): Boolean =
+    local.dirty && local.known && pendingConfig == null && phoneAlertEditable(cloudSyncAlerts, enrolled)
