@@ -26,8 +26,12 @@ export function PhoneAlertRow() {
       .then((a) => { setAlert(a); setErr(null); return refresh(); })
       .catch((e) => {
         const k = failureKind(e);
-        if (k === "auth") setReadOnly(true);
-        setErr(k === "auth" ? "Only an admin can change this."
+        // 403 = signed in but not an admin: lock the row. 401 = the session expired: say so
+        // and leave the row editable, so a reload and retry works.
+        const forbidden = e instanceof Error && e.message === "403";
+        if (forbidden) setReadOnly(true);
+        setErr(forbidden ? "Only an admin can change this."
+          : k === "auth" ? "Your sign-in expired — reload the page and try again."
           : k === "refused" ? "That value was refused."
           : "Couldn't save — check the connection and try again.");
       })
@@ -54,7 +58,7 @@ export function PhoneAlertRow() {
         </select>
       </div>
       <span style={{ fontSize: 12, color: "var(--text-3)" }}>
-        Pages your iPhone when the chair phone's battery is at or below this.
+        Pages your iPhone when the chair phone's battery drops below this.
         {alert && ` ${phoneAlertStatus(alert, Date.now())}.`}
       </span>
       {(readOnly || (alert !== null && !phoneAlertEditable(alert))) && <span style={{ fontSize: 12, color: "var(--text-3)" }}>
