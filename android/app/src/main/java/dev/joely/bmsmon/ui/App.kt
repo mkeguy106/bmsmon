@@ -2,6 +2,7 @@ package dev.joely.bmsmon.ui
 
 import android.Manifest
 import android.app.Activity
+import android.app.ActivityManager
 import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Context
@@ -10,17 +11,16 @@ import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.os.Build
 import android.view.WindowManager
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.content.ContextCompat
-import androidx.core.view.WindowCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
@@ -35,11 +35,17 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
 import dev.joely.bmsmon.BatteryViewModel
 import dev.joely.bmsmon.BmsDeviceAdminReceiver
 import dev.joely.bmsmon.Screen
@@ -58,7 +64,6 @@ import dev.joely.bmsmon.ui.history.loadHistory
 import dev.joely.bmsmon.ui.home.AlertPill
 import dev.joely.bmsmon.ui.home.DangerOverlay
 import dev.joely.bmsmon.ui.home.HomeScreen
-import androidx.activity.compose.BackHandler
 import dev.joely.bmsmon.ui.scan.ScanSheet
 import dev.joely.bmsmon.ui.settings.SettingsScreen
 import dev.joely.bmsmon.ui.theme.Bm
@@ -155,6 +160,24 @@ fun App(vm: BatteryViewModel) {
             runCatching { act.stopLockTask() }
             act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         }
+    }
+
+    // The effect above runs only when the activity or `locked` changes, so a pin that ended
+    // some other way (the lock screen after an unpin for an install, the system's unpin gesture)
+    // stayed ended on a mere resume. Re-pin on every resume while locked and unpinned.
+    val lockedNow by rememberUpdatedState(state.locked)
+    DisposableEffect(activity) {
+        val act = activity
+        val owner = act as? LifecycleOwner
+        val observer = LifecycleEventObserver { _, event ->
+            if (event != Lifecycle.Event.ON_RESUME || act == null) return@LifecycleEventObserver
+            val mode = runCatching {
+                (act.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).lockTaskModeState
+            }.getOrNull() ?: return@LifecycleEventObserver
+            if (shouldRepin(lockedNow, mode)) startLockTaskCompat(act)
+        }
+        owner?.lifecycle?.addObserver(observer)
+        onDispose { owner?.lifecycle?.removeObserver(observer) }
     }
 
     // The two permissions monitoring would LIKE but never needs: POST_NOTIFICATIONS (13+) for the
