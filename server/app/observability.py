@@ -90,7 +90,8 @@ CLOCK_SKEW_MAX_S = 120
 
 PHONE_STATUS_FRESH_S = 600
 PHONE_FAULT_CONFIRM_S = 300
-HEALTH_CHECKS = ("ingest", "rollup", "partition", "clock", "phone_power")
+HEALTH_CHECKS = ("ingest", "rollup", "partition", "clock", "phone_power",
+                "phone_battery")
 DEFAULT_HEALTH_CHECKS = ("ingest", "rollup", "partition", "clock")
 
 
@@ -99,7 +100,7 @@ def evaluate_health(*, now_ms: int, last_ingest_ms: int | None, rollup_high_wate
                     last_auth_fail: dict | None, last_ok_skew_s: int | None,
                     online_indexes: dict[str, bool], ingest_limit_s: int,
                     checks: tuple[str, ...] = DEFAULT_HEALTH_CHECKS,
-                    phone: dict | None = None) -> dict:
+                    phone: dict | None = None, phone_low_pct: int = 75) -> dict:
     """The /api/v1/health/detail body. ok is False when any SELECTED check fails (`checks`;
     the default is the four deadman checks, so phone_power never affects a caller that does
     not ask for it). A missing signal (no upload ever, no rollup yet) is a failure, never a
@@ -122,6 +123,12 @@ def evaluate_health(*, now_ms: int, last_ingest_ms: int | None, rollup_high_wate
         failing.append("clock")
     if "phone_power" in checks and phone and phone.get("fault_confirmed"):
         failing.append("phone_power")
+    # phone_battery: the newest device's last reported level is below the threshold. No
+    # freshness gate (a silent phone keeps its last level; silence is ingest's job), and
+    # a NULL level (nothing reported yet) is ok.
+    level = phone.get("level") if phone else None
+    if "phone_battery" in checks and level is not None and level < phone_low_pct:
+        failing.append("phone_battery")
     status_age = (None if not phone or phone.get("status_ms") is None
                   else max(0, (now_ms - phone["status_ms"]) // 1000))
     phone_power = {
@@ -149,6 +156,7 @@ def evaluate_health(*, now_ms: int, last_ingest_ms: int | None, rollup_high_wate
         "online_indexes": online_indexes,
         "limits": {"ingest_age_s": ingest_limit_s, "rollup_lag_s": ROLLUP_LAG_MAX_S,
                    "clock_skew_s": CLOCK_SKEW_MAX_S,
-                   "phone_status_fresh_s": PHONE_STATUS_FRESH_S},
+                   "phone_status_fresh_s": PHONE_STATUS_FRESH_S,
+                   "phone_low_pct": phone_low_pct},
         "phone_power": phone_power,
     }

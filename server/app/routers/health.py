@@ -54,7 +54,7 @@ async def health_detail(request: Request,
     """max_ingest_age_s can only TIGHTEN the ingest limit (it proves the alarm path end to
     end); it can never hide a failure. Ingest age comes from devices.last_seen_at, which
     only a live upload that stores at least one valid sample refreshes, at most once a
-    minute. `checks` (comma-separated subset of ingest, rollup, partition, clock, phone_power)
+    minute. `checks` (comma-separated subset of ingest, rollup, partition, clock, phone_power, phone_battery)
     selects what can fail the response; the default is the first four, so the deadman monitor
     is unaffected by phone_power."""
     selected = DEFAULT_HEALTH_CHECKS
@@ -87,6 +87,6 @@ async def health_detail(request: Request,
         rollup_high_water_ms=high_water, next_month_partition=bool(next_ok),
         auth_fail_5m=stats.failures_in_window(), last_auth_fail=stats.last_failure,
         last_ok_skew_s=stats.last_ok_skew_s, online_indexes=indexes, ingest_limit_s=limit,
-        checks=selected, phone=phone)
+        checks=selected, phone=phone, phone_low_pct=settings.phone_low_pct)
     return JSONResponse(body, status_code=200 if body["ok"] else 503,
                         headers={"Cache-Control": "no-store"})

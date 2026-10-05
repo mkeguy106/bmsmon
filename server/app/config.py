@@ -32,6 +32,25 @@ def parse_carto_key(raw: str | None) -> tuple[str | None, str | None]:
     return v, None
 
 
+PHONE_LOW_PCT_ENV = "BMSMON_PHONE_LOW_PCT"
+PHONE_LOW_PCT_DEFAULT = 75
+
+
+def parse_phone_low_pct(raw: str | None) -> tuple[int, str | None]:
+    """BMSMON_PHONE_LOW_PCT -> (percent, problem). Unset -> (75, None). Valid is a whole
+    number 1..100; anything else (empty, garbage, out of range) falls back to 75 with a
+    `problem` for the one startup warning (main.py log_phone_low_pct_status)."""
+    if raw is None:
+        return PHONE_LOW_PCT_DEFAULT, None
+    try:
+        v = int(raw.strip())
+    except ValueError:
+        return PHONE_LOW_PCT_DEFAULT, "it is not a whole number"
+    if not 1 <= v <= 100:
+        return PHONE_LOW_PCT_DEFAULT, "it is outside 1..100"
+    return v, None
+
+
 @dataclass(frozen=True)
 class Settings:
     database_url: str = os.environ.get(
@@ -87,6 +106,10 @@ class Settings:
     # phone uploads every ~15 s while monitoring; 30 min rides out a deploy or a short
     # connectivity gap and still catches a server-side ingest failure within one outing.
     deadman_ingest_s: int = int(os.environ.get("BMSMON_DEADMAN_INGEST_S", "1800"))
+    # The `phone_battery` health check fails while the chair phone's last reported battery
+    # level is below this percent (1..100; invalid -> 75 with a startup warning).
+    phone_low_pct: int = field(
+        default_factory=lambda: parse_phone_low_pct(os.environ.get(PHONE_LOW_PCT_ENV))[0])
     # In local dev (no Authentik in front), trust a synthetic identity so /web/* works.
     # Guarded: only honored when DATABASE_URL points at a local dev DB — see
     # auth.authentik.dev_trust_active().
