@@ -11,14 +11,14 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from fastapi.responses import JSONResponse
 
 from app.auth.api_key import hash_key as hash_api_key
-from app.auth.authentik import AuthUser, current_user, require_admin
+from app.auth.authentik import AuthUser, current_user, is_admin, require_admin
 from app.auth.enroll import generate_code, hash_code
 from app.charge_sessions import detect_charge_sessions
 from app.config import settings
 from app.db import queries as q
 from app.db.pool import get_pool
 from app.models import (ApiKeyCreateBody, ApiKeyCreateResponse, MintCodeResponse, NoteBody,
-                        OkResponse, ShareCreateBody, ShareCreateResponse)
+                        OkResponse, PhoneAlertBody, ShareCreateBody, ShareCreateResponse)
 from app.routers.api_device import ADDRESS_MAX_LEN
 from app.util import jsonable
 
@@ -78,6 +78,25 @@ async def alert_config(user: AuthUser = Depends(current_user), pool=Depends(get_
         return {"seize_soc": None, "alerts_on": True, "updated_at_ms": 0}
     return {"seize_soc": cfg["seize_soc"], "alerts_on": cfg["alerts_on"],
             "updated_at_ms": cfg["updated_at_ms"]}
+
+
+@router.get("/phone-alert")
+async def phone_alert_get(user: AuthUser = Depends(current_user), pool=Depends(get_pool)):
+    """The shared phone-battery alarm threshold (viewers may read it)."""
+    async with pool.acquire() as conn:
+        state = await q.get_phone_alert(conn, settings.phone_low_pct)
+    return {**state, "can_edit": is_admin(user)}
+
+
+@router.put("/phone-alert")
+async def phone_alert_put(body: PhoneAlertBody, user: AuthUser = Depends(require_admin),
+                          pool=Depends(get_pool)):
+    """Change the threshold (admin only: it controls paging). Stamped with server time, so
+    it beats any earlier phone change; a later phone change beats it."""
+    async with pool.acquire() as conn:
+        await q.upsert_phone_alert(conn, body.low_pct, int(time.time() * 1000), "web")
+        state = await q.get_phone_alert(conn, settings.phone_low_pct)
+    return {**state, "can_edit": True}
 
 
 @router.get("/range-config")

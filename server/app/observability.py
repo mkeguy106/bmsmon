@@ -100,7 +100,7 @@ def evaluate_health(*, now_ms: int, last_ingest_ms: int | None, rollup_high_wate
                     last_auth_fail: dict | None, last_ok_skew_s: int | None,
                     online_indexes: dict[str, bool], ingest_limit_s: int,
                     checks: tuple[str, ...] = DEFAULT_HEALTH_CHECKS,
-                    phone: dict | None = None, phone_low_pct: int = 75) -> dict:
+                    phone: dict | None = None, phone_low_pct: int | None = 75) -> dict:
     """The /api/v1/health/detail body. ok is False when any SELECTED check fails (`checks`;
     the default is the four deadman checks, so phone_power never affects a caller that does
     not ask for it). A missing signal (no upload ever, no rollup yet) is a failure, never a
@@ -127,7 +127,8 @@ def evaluate_health(*, now_ms: int, last_ingest_ms: int | None, rollup_high_wate
     # freshness gate (a silent phone keeps its last level; silence is ingest's job), and
     # a NULL level (nothing reported yet) is ok.
     level = phone.get("level") if phone else None
-    if "phone_battery" in checks and level is not None and level < phone_low_pct:
+    if "phone_battery" in checks and level is not None \
+            and phone_low_pct is not None and level < phone_low_pct:
         failing.append("phone_battery")
     status_age = (None if not phone or phone.get("status_ms") is None
                   else max(0, (now_ms - phone["status_ms"]) // 1000))

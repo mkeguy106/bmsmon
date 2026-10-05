@@ -1,6 +1,7 @@
 """SEC-23/SRV-17: /api/v1/health/detail is the deadman an uptime monitor polls. 200 only
 while telemetry arrives and the background jobs keep up; 503 naming what failed. A missing
 signal is a failure, never a pass. /api/v1/health stays a bare DB ping (autoheal uses it)."""
+from tests import counts
 import json
 import secrets
 import time
@@ -198,7 +199,7 @@ async def test_a_batch_whose_every_sample_is_dropped_leaves_the_deadman_failing(
     assert (await _ingest(client, priv, device_id, [_sample()])).status_code == 200
     before = await _age_last_upload(app, device_id, 5)
     r = await _ingest(client, priv, device_id, _all_invalid())
-    assert r.status_code == 200 and r.json() == {"accepted": 0, "dropped": 3, "last_seq": 7}
+    assert r.status_code == 200 and counts(r.json()) == {"accepted": 0, "dropped": 3, "last_seq": 7}
     assert await _last_seen(app, device_id) == before
     r = await client.get(URL + "?max_ingest_age_s=1", headers=h)
     assert r.status_code == 503 and r.json()["failing"] == ["ingest"]
@@ -213,7 +214,7 @@ async def test_a_live_batch_with_one_valid_sample_refreshes_the_signal(app, clie
     before = await _age_last_upload(app, device_id, 5)
     r = await _ingest(client, priv, device_id, [_sample(ts_ms=int(time.time() * 1000) + 1)]
                       + _all_invalid())
-    assert r.json() == {"accepted": 1, "dropped": 3, "last_seq": 7}
+    assert counts(r.json()) == {"accepted": 1, "dropped": 3, "last_seq": 7}
     assert await _last_seen(app, device_id) > before
     r = await client.get(URL + "?max_ingest_age_s=60", headers=h)
     assert "ingest" not in r.json()["failing"]
@@ -491,11 +492,11 @@ def test_phone_low_pct_env_parsing(monkeypatch, caplog):
     from app.main import log_phone_low_pct_status
     monkeypatch.delenv(PHONE_LOW_PCT_ENV, raising=False)
     assert Settings().phone_low_pct == 75
-    for raw, want in (("75", 75), ("1", 1), ("100", 100), (" 60 ", 60)):
+    for raw, want in (("75", 75), ("10", 10), ("95", 95), (" 60 ", 60)):
         monkeypatch.setenv(PHONE_LOW_PCT_ENV, raw)
         assert Settings().phone_low_pct == want
         assert parse_phone_low_pct(raw) == (want, None)
-    for raw in ("0", "101", "-5", "abc", "", "7.5"):
+    for raw in ("0", "101", "-5", "abc", "", "7.5", "1", "100", "72", "5"):
         monkeypatch.setenv(PHONE_LOW_PCT_ENV, raw)
         assert Settings().phone_low_pct == 75, raw
         caplog.clear()

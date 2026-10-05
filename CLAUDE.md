@@ -1744,6 +1744,29 @@ Enforced in the app itself (not delegated to Traefik/Authentik) and pinned by te
   invalid ingest/config envelope (422) is logged with its first error's location and type,
   never its contents.
 
+### Phone battery alert threshold (shared, last change wins)
+
+The `phone_battery` health check's threshold is editable from the Android app (Settings >
+Alerts) and the WebUI (Settings), and the most recent change wins. The server holds it in the
+single-row `phone_alert_config` table (`low_pct` NULL = OFF, else one of 10, 15, ..., 95; plus
+`updated_at` and `updated_by` phone|web); `BMSMON_PHONE_LOW_PCT` is only the fallback while no
+row exists. A change applies only if its time is strictly newer than the stored one
+(`queries.upsert_phone_alert`), so an offline phone change uploaded late never overwrites a newer
+WebUI change. WebUI changes are stamped with server time; phone changes carry
+`phone_low_pct_changed_ms` (phone clock, clamped to now).
+
+- `GET /web/phone-alert` (viewer) -> `{low_pct, updated_at_ms, updated_by: phone|web|default, can_edit}`;
+  `PUT /web/phone-alert` (admin) with `{"low_pct": int|null}`, 422 when invalid, same shape back.
+- `POST /api/v1/config` takes optional `phone_low_pct` (null = OFF, absent = no change) and
+  `phone_low_pct_changed_ms`. Invalid values are ignored with a throttled WARNING and the
+  config still answers 200, never 422.
+- `POST /api/v1/ingest` and `/api/v1/config` replies carry `phone_alert`
+  (`{low_pct, updated_at_ms, updated_by}`; `updated_at_ms` 0 and `updated_by` "default" with no
+  row), which is how the phone learns a WebUI change. This deliberately widens the otherwise
+  one-way phone-to-server channel by exactly this field.
+- `/api/v1/health/detail?checks=phone_battery` uses the row (OFF never fails); `limits.phone_low_pct`
+  reports the effective value, null when OFF. The default check set is unchanged.
+
 ### Read-only API keys (`/api/v1/groups`, desktop widgets)
 
 A third identity path, added 2026-08-25 for the KDE desktop widgets. The other two cannot
@@ -1840,7 +1863,7 @@ answers **200 when every check passes and 503 otherwise**, `Cache-Control: no-st
 | `partition` | Next month's `samples` partition is missing. |
 | `clock` | The last verified token's `server − iat` skew exceeds ±120 s. |
 | `phone_power` | Some non-revoked device's latest report says `phone_fault = true` (the phone says its charger is connected but the battery keeps draining) and the fault is at least 300 s old (`phone_fault_since`; NULL counts from `phone_status_at`). The fault start is server `now()` minus the fault's age on the phone's own clock (`at_ms - fault_since_ms`), so phone-vs-server clock skew cannot shift it. Staleness never clears a fault: a phone that stops reporting keeps its last verdict (so a dying phone never sends a false "resolved"), and its silence is `ingest`'s job. **Only evaluated when selected.** |
-| `phone_battery` | The newest non-revoked device's latest reported `phone_level` is below `BMSMON_PHONE_LOW_PCT` (default **75**; valid 1..100, anything else falls back to 75 with one startup warning); exactly the threshold is ok, and a NULL level (nothing reported yet) is ok. No freshness requirement: a phone that stops reporting keeps its last level, so a dying phone keeps the alarm down instead of sending a false "resolved", and its silence is `ingest`'s job. **Only evaluated when selected.** |
+| `phone_battery` | The newest non-revoked device's latest reported `phone_level` is below the shared threshold (set from the phone's Settings › Alerts or the WebUI Settings, last change wins; until either sets it, `BMSMON_PHONE_LOW_PCT`, default **75**, one of 10, 15, … 95, anything else falls back to 75 with one startup warning; OFF never fails); exactly the threshold is ok, and a NULL level (nothing reported yet) is ok. No freshness requirement: a phone that stops reporting keeps its last level, so a dying phone keeps the alarm down instead of sending a false "resolved", and its silence is `ingest`'s job. **Only evaluated when selected.** |
 
 `?checks=a,b` (comma-separated subset of `ingest,rollup,partition,clock,phone_power,phone_battery`) selects which
 checks can fail the response; `ok` and `failing` consider only those. The default, with no
@@ -1870,7 +1893,7 @@ same ntfy notification when the phone's charger is connected but the battery is 
 
 Uptime Kuma monitor **`bmsmon-phone-battery`** polls
 `http://bmsmon-api:8000/api/v1/health/detail?checks=phone_battery` every 60 s with the same key and
-notification, and pages while the phone's battery is below `BMSMON_PHONE_LOW_PCT` (default 75%).
+notification, and pages while the phone's battery is below the shared threshold (see "Phone battery alert threshold").
 
 **Maintenance loop** (`app/maintenance.py`). It runs 60 s after boot, then hourly. Each step
 is isolated, so a failing step is logged and the rest still run:

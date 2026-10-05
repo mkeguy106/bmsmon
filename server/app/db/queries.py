@@ -216,6 +216,32 @@ async def get_alert_config(conn) -> dict | None:
     return dict(row) if row else None
 
 
+async def upsert_phone_alert(conn, low_pct: int | None, at_ms: int, by: str) -> bool:
+    """Last-writer-wins by change time: the row is replaced only when `at_ms` is strictly
+    newer than the stored updated_at. Returns True when this change was applied."""
+    row = await conn.fetchrow(
+        """INSERT INTO phone_alert_config (id, low_pct, updated_at, updated_by)
+           VALUES (1, $1, to_timestamp($2::float8 / 1000.0), $3)
+           ON CONFLICT (id) DO UPDATE SET
+             low_pct = EXCLUDED.low_pct, updated_at = EXCLUDED.updated_at,
+             updated_by = EXCLUDED.updated_by
+           WHERE phone_alert_config.updated_at < EXCLUDED.updated_at
+           RETURNING id""",
+        low_pct, at_ms, by)
+    return row is not None
+
+
+async def get_phone_alert(conn, default_low_pct: int | None) -> dict:
+    """The shared phone-alert threshold as the wire shape; with no row, the env default."""
+    row = await conn.fetchrow(
+        "SELECT low_pct, (extract(epoch FROM updated_at) * 1000)::bigint AS ms, updated_by "
+        "FROM phone_alert_config WHERE id = 1")
+    if row is None:
+        return {"low_pct": default_low_pct, "updated_at_ms": 0, "updated_by": "default"}
+    return {"low_pct": row["low_pct"], "updated_at_ms": int(row["ms"]),
+            "updated_by": row["updated_by"]}
+
+
 async def upsert_range_config(conn, device_id, row: dict) -> None:
     """Store one pack's learned discharge-range bands (one-way phone push, latest-wins
     guarded on updated_at_ms — mirrors upsert_temp_config)."""

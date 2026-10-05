@@ -1,5 +1,6 @@
 """Task S1: the phone's charger snapshot (the optional `phone` block of a live ingest
 batch) is stored on devices. It must NEVER cost a batch: the phone deletes 4xx'd batches."""
+from tests import counts
 import json
 import logging
 import time
@@ -47,7 +48,7 @@ async def test_valid_block_is_stored(app, client, dev):
     priv, did = dev
     r = await _post(client, priv, did, _block())
     assert r.status_code == 200
-    assert r.json() == {"accepted": 1, "dropped": 0, "last_seq": 7}
+    assert counts(r.json()) == {"accepted": 1, "dropped": 0, "last_seq": 7}
     row = await _row(app, did)
     assert (row["phone_level"], row["phone_plugged"], row["phone_charge_mah"],
             row["phone_fault"]) == (80, 4, 3000, False)
@@ -80,7 +81,7 @@ async def test_malformed_blocks_never_cost_the_batch(app, client, dev, bad):
     priv, did = dev
     r = await _post(client, priv, did, bad)
     assert r.status_code == 200
-    assert r.json() == {"accepted": 1, "dropped": 0, "last_seq": 7}
+    assert counts(r.json()) == {"accepted": 1, "dropped": 0, "last_seq": 7}
     row = await _row(app, did)
     assert row["phone_status_at"] is None and row["phone_level"] is None
     async with app.state.pool.acquire() as conn:

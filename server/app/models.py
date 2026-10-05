@@ -207,6 +207,8 @@ class IngestResponse(BaseModel):
     accepted: int
     dropped: int = 0
     last_seq: int
+    # The shared phone-alert threshold (see queries.get_phone_alert); null if unreadable.
+    phone_alert: dict | None = None
 
 
 class RangeConfigRow(BaseModel):
@@ -253,6 +255,11 @@ class TempConfigBody(BaseModel):
     # Raw here: each row is validated on its own (RangeConfigRow via validate_each in the
     # router), so one bad row is dropped instead of 422ing the whole push (C3).
     ranges: list[Any] | None = None
+    # Phone-battery alarm threshold change (phone -> server, last change wins). Raw here
+    # and validated in the router (valid_phone_low_pct): an invalid value is ignored, never
+    # a 422 (the phone re-POSTs or deletes on 4xx). Absent = no change; null = OFF.
+    phone_low_pct: Any = None
+    phone_low_pct_changed_ms: Any = None
 
 
 class NoteBody(BaseModel):
@@ -282,6 +289,7 @@ class OkResponse(BaseModel):
 class ConfigResponse(OkResponse):
     # dropped = ranges[] rows refused by validation (C3); diagnostics only.
     dropped: int = 0
+    phone_alert: dict | None = None
 
 
 M = TypeVar("M", bound=BaseModel)
@@ -357,3 +365,24 @@ class ShareCreateResponse(BaseModel):
     name: str
     expires_at: int
     path: str  # "/share/<token>" — the client prepends window.location.origin
+
+
+PHONE_LOW_PCT_CHOICES = tuple(range(10, 100, 5))
+
+
+def valid_phone_low_pct(v: object) -> bool:
+    """None (OFF) or an int in 10, 15, ..., 95. bool and floats are not ints here."""
+    return v is None or (type(v) is int and v in PHONE_LOW_PCT_CHOICES)
+
+
+class PhoneAlertBody(BaseModel):
+    """PUT /web/phone-alert. Unlike the device config this is a human request, so an invalid
+    value is a 422."""
+    low_pct: int | None
+
+    @field_validator("low_pct", mode="before")
+    @classmethod
+    def _choice(cls, v):
+        if not valid_phone_low_pct(v):
+            raise ValueError("low_pct must be null or one of 10, 15, ..., 95")
+        return v

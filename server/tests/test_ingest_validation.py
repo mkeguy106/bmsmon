@@ -1,5 +1,6 @@
 """C3/SRV-18: samples are validated one by one. A bad sample is dropped and logged and
 never 422s the batch (the phone deletes 4xx'd batches); only a malformed envelope 422s."""
+from tests import counts
 import json
 import logging
 import time
@@ -32,7 +33,7 @@ async def test_one_wrong_typed_sample_is_dropped_not_the_batch(app, client):
         _ok(now)]}
     r = await _post(client, priv, device_id, payload)
     assert r.status_code == 200
-    assert r.json() == {"accepted": 2, "dropped": 1, "last_seq": 21}
+    assert counts(r.json()) == {"accepted": 2, "dropped": 1, "last_seq": 21}
     async with app.state.pool.acquire() as conn:
         stored = sorted(x["ts_ms"] for x in await conn.fetch("SELECT ts_ms FROM samples"))
     assert stored == [now - 2000, now]
@@ -52,7 +53,7 @@ async def test_every_kind_of_bad_sample_is_dropped(app, client):
     ]
     r = await _post(client, priv, device_id, {"batch_seq": 22, "samples": [*bad, _ok(now)]})
     assert r.status_code == 200
-    assert r.json() == {"accepted": 1, "dropped": len(bad), "last_seq": 22}
+    assert counts(r.json()) == {"accepted": 1, "dropped": len(bad), "last_seq": 22}
 
 
 async def test_drop_reasons_add_up(app, client):
@@ -65,7 +66,7 @@ async def test_drop_reasons_add_up(app, client):
         {**_ok(now - 1), "address": "junk addr"},     # address rule
         _ok(now - 2)]}
     r = await _post(client, priv, device_id, payload)
-    assert r.json() == {"accepted": 1, "dropped": 3, "last_seq": 23}
+    assert counts(r.json()) == {"accepted": 1, "dropped": 3, "last_seq": 23}
 
 
 async def test_unknown_fields_are_ignored_not_dropped(app, client):
@@ -75,7 +76,7 @@ async def test_unknown_fields_are_ignored_not_dropped(app, client):
     now = int(time.time() * 1000)
     payload = {"batch_seq": 24, "samples": [_ok(now, some_future_field={"x": 1})]}
     r = await _post(client, priv, device_id, payload)
-    assert r.json() == {"accepted": 1, "dropped": 0, "last_seq": 24}
+    assert counts(r.json()) == {"accepted": 1, "dropped": 0, "last_seq": 24}
 
 
 async def test_all_invalid_batch_is_200_and_touches_nothing(app, client):
@@ -84,7 +85,7 @@ async def test_all_invalid_batch_is_200_and_touches_nothing(app, client):
     now = int(time.time() * 1000)
     r = await _post(client, priv, device_id,
                     {"batch_seq": 25, "samples": [_ok(now, soh="x"), 7]})
-    assert r.json() == {"accepted": 0, "dropped": 2, "last_seq": 25}
+    assert counts(r.json()) == {"accepted": 0, "dropped": 2, "last_seq": 25}
     async with app.state.pool.acquire() as conn:
         assert await conn.fetchval("SELECT count(*) FROM batteries") == 0
 
@@ -165,7 +166,7 @@ async def test_config_drops_a_bad_range_row_and_keeps_the_rest(app, client):
     bad = {**_range_row("C8:47:80:15:07:DE"), "wh_per_day_lo": "lots"}
     r = await _post(client, priv, device_id, _cfg(ranges=[bad, good]), path="/api/v1/config")
     assert r.status_code == 200
-    assert r.json() == {"ok": True, "dropped": 1}
+    assert counts(r.json()) == {"ok": True, "dropped": 1}
     async with app.state.pool.acquire() as conn:
         addrs = [x["address"] for x in await conn.fetch("SELECT address FROM device_range_config")]
         temp_rows = await conn.fetchval("SELECT count(*) FROM device_temp_config")
@@ -187,7 +188,7 @@ async def test_config_range_row_drop_is_logged_without_values(app, client, caplo
     device_id = await _enroll_device(app, spki)
     bad = {**_range_row("C8:47:80:15:07:DE"), "wh_per_day_lo": "lots"}
     r = await _post(client, priv, device_id, _cfg(ranges=[bad]), path="/api/v1/config")
-    assert r.json() == {"ok": True, "dropped": 1}
+    assert counts(r.json()) == {"ok": True, "dropped": 1}
     lines = [rec.getMessage() for rec in caplog.records
              if rec.name == LOGGER and "range row" in rec.getMessage()]
     assert len(lines) == 1
