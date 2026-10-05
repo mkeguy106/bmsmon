@@ -9,7 +9,8 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.config import CARTO_KEY_ENV, parse_carto_key, settings
+from app.config import (CARTO_KEY_ENV, PHONE_LOW_PCT_ENV, parse_carto_key,
+                        parse_phone_low_pct, settings)
 from app.db.partitions import PRECREATE_AHEAD_MS, precreate_partitions
 from app.db.pool import create_pool
 from app.db.queries import scrub_expired_gps
@@ -82,6 +83,16 @@ def log_carto_key_status() -> None:
     if problem:
         logger.warning("%s ignored: %s. The Journey and share maps will show CARTO's "
                        "keyless placeholder tiles.", CARTO_KEY_ENV, problem)
+
+
+def log_phone_low_pct_status() -> None:
+    """One startup WARNING when BMSMON_PHONE_LOW_PCT is set but invalid (the phone_battery
+    check then uses 75). Silent when unset or valid."""
+    raw = os.environ.get(PHONE_LOW_PCT_ENV)
+    _pct, problem = parse_phone_low_pct(raw)
+    if problem:
+        logger.warning("%s ignored: %s. Using %d.", PHONE_LOW_PCT_ENV, problem,
+                       settings.phone_low_pct)
 
 
 # GPS retention scrub cadence: once shortly after startup, then daily.
@@ -190,6 +201,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     configure_logging()
     log_carto_key_status()
+    log_phone_low_pct_status()
     app = FastAPI(title="bmsmon", lifespan=lifespan)
     from starlette.middleware.gzip import GZipMiddleware
 

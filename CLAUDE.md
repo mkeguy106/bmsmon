@@ -1822,7 +1822,7 @@ autoheal use it, and a phone that stops uploading must never get the API restart
 answers **200 when every check passes and 503 otherwise**, `Cache-Control: no-store`:
 
 ```jsonc
-{"ok": true, "failing": [],            // any selected check: ingest, rollup, partition, clock, phone_power
+{"ok": true, "failing": [],            // any selected check: ingest, rollup, partition, clock, phone_power, phone_battery
  "server_time_ms": …, "last_ingest_ms": …, "last_ingest_age_s": 12,
  "auth_fail_5m": 0, "last_auth_fail": null, "last_ok_skew_s": 1,
  "rollup_lag_s": 1500, "next_month_partition": true,
@@ -1840,12 +1840,13 @@ answers **200 when every check passes and 503 otherwise**, `Cache-Control: no-st
 | `partition` | Next month's `samples` partition is missing. |
 | `clock` | The last verified token's `server − iat` skew exceeds ±120 s. |
 | `phone_power` | Some non-revoked device's latest report says `phone_fault = true` (the phone says its charger is connected but the battery keeps draining) and the fault is at least 300 s old (`phone_fault_since`; NULL counts from `phone_status_at`). The fault start is server `now()` minus the fault's age on the phone's own clock (`at_ms - fault_since_ms`), so phone-vs-server clock skew cannot shift it. Staleness never clears a fault: a phone that stops reporting keeps its last verdict (so a dying phone never sends a false "resolved"), and its silence is `ingest`'s job. **Only evaluated when selected.** |
+| `phone_battery` | The newest non-revoked device's latest reported `phone_level` is below `BMSMON_PHONE_LOW_PCT` (default **75**; valid 1..100, anything else falls back to 75 with one startup warning); exactly the threshold is ok, and a NULL level (nothing reported yet) is ok. No freshness requirement: a phone that stops reporting keeps its last level, so a dying phone keeps the alarm down instead of sending a false "resolved", and its silence is `ingest`'s job. **Only evaluated when selected.** |
 
-`?checks=a,b` (comma-separated subset of `ingest,rollup,partition,clock,phone_power`) selects which
+`?checks=a,b` (comma-separated subset of `ingest,rollup,partition,clock,phone_power,phone_battery`) selects which
 checks can fail the response; `ok` and `failing` consider only those. The default, with no
-`checks`, is the first four, exactly as before, so the deadman is unaffected by `phone_power`. An
+`checks`, is the first four, exactly as before, so the deadman is unaffected by `phone_power` and `phone_battery`. An
 unknown name is a 422. The `phone_power` body block and `limits.phone_status_fresh_s` are always
-present; `phone_power` describes the device with the newest status (`fault` is its latest reported fault,
+present, as is `limits.phone_low_pct`; `phone_power` describes the device with the newest status (`fault` is its latest reported fault,
 with no freshness gate; `status_age_s` and `limits.phone_status_fresh_s` are informational), and
 `fault_confirmed` is the any-device verdict the check itself uses.
 
@@ -1866,6 +1867,10 @@ below carries the same key in its `headers`. To rotate that key:
 Uptime Kuma monitor **`bmsmon-phone-charger`** polls
 `http://bmsmon-api:8000/api/v1/health/detail?checks=phone_power` every 60 s and pages through the
 same ntfy notification when the phone's charger is connected but the battery is draining.
+
+Uptime Kuma monitor **`bmsmon-phone-battery`** polls
+`http://bmsmon-api:8000/api/v1/health/detail?checks=phone_battery` every 60 s with the same key and
+notification, and pages while the phone's battery is below `BMSMON_PHONE_LOW_PCT` (default 75%).
 
 **Maintenance loop** (`app/maintenance.py`). It runs 60 s after boot, then hourly. Each step
 is isolated, so a failing step is logged and the rest still run:

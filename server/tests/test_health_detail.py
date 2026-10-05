@@ -401,3 +401,110 @@ async def test_max_ingest_age_still_only_tightens_with_checks(app, client):
         await conn.execute("UPDATE devices SET last_seen_at = now() - interval '5 seconds'")
     assert (await _phone_get(client, h, "?checks=ingest&max_ingest_age_s=0")).status_code == 503
     assert (await _phone_get(client, h, "?checks=ingest&max_ingest_age_s=999999")).status_code == 200
+
+
+# phone_battery: fails while the newest device's last reported level is below the threshold.
+
+async def _bat(client, h, query="?checks=phone_battery"):
+    return await client.get(URL + query, headers=h)
+
+
+async def test_phone_battery_below_threshold_fails(app, client):
+    async with app.state.pool.acquire() as conn:
+        h = await _key(conn)
+        await _phone(conn, fault=False, level=74)
+    r = await _bat(client, h)
+    assert r.status_code == 503 and r.json()["failing"] == ["phone_battery"]
+    assert r.json()["limits"]["phone_low_pct"] == 75
+    assert r.json()["phone_power"]["level"] == 74
+
+
+async def test_phone_battery_at_threshold_is_ok(app, client):
+    async with app.state.pool.acquire() as conn:
+        h = await _key(conn)
+        await _phone(conn, fault=False, level=75)
+    r = await _bat(client, h)
+    assert r.status_code == 200 and r.json()["failing"] == []
+
+
+async def test_phone_battery_null_level_is_ok(app, client):
+    async with app.state.pool.acquire() as conn:
+        h = await _key(conn)
+        await _phone(conn, fault=False, level=None)
+    assert (await _bat(client, h)).status_code == 200
+
+
+async def test_phone_battery_ignores_revoked_devices(app, client):
+    async with app.state.pool.acquire() as conn:
+        h = await _key(conn)
+        await _phone(conn, fault=False, level=10, revoked=True)
+    assert (await _bat(client, h)).status_code == 200
+
+
+async def test_phone_battery_stale_low_level_still_fails(app, client):
+    async with app.state.pool.acquire() as conn:
+        h = await _key(conn)
+        await _phone(conn, fault=False, level=20, status_ago=3600)
+    r = await _bat(client, h)
+    assert r.status_code == 503 and r.json()["failing"] == ["phone_battery"]
+    assert r.json()["phone_power"]["status_age_s"] >= 3500
+
+
+async def test_default_checks_ignore_a_low_phone_battery(app, client):
+    async with app.state.pool.acquire() as conn:
+        h = await _key(conn)
+        await _phone(conn, fault=False, level=5)
+        await _rollup_ran(conn)
+    r = await client.get(URL, headers=h)
+    assert r.status_code == 200 and r.json()["failing"] == []
+    assert (await _bat(client, h, "?checks=phone_power")).status_code == 200
+
+
+async def test_phone_battery_combined_with_ingest(app, client):
+    async with app.state.pool.acquire() as conn:
+        h = await _key(conn)
+        await _phone(conn, fault=False, level=40)
+        await _rollup_ran(conn)
+    r = await _bat(client, h, "?checks=ingest,phone_battery")
+    assert r.status_code == 503 and r.json()["failing"] == ["phone_battery"]
+    async with app.state.pool.acquire() as conn:
+        await conn.execute("UPDATE devices SET last_seen_at = now() - interval '2 hours'")
+    r = await _bat(client, h, "?checks=ingest,phone_battery")
+    assert r.json()["failing"] == ["ingest", "phone_battery"]
+
+
+async def test_phone_battery_uses_the_configured_threshold(app, client, monkeypatch):
+    from app.config import Settings
+    monkeypatch.setenv("BMSMON_PHONE_LOW_PCT", "50")
+    monkeypatch.setattr(health_router, "settings", Settings())
+    async with app.state.pool.acquire() as conn:
+        h = await _key(conn)
+        await _phone(conn, fault=False, level=60)
+    r = await _bat(client, h)
+    assert r.status_code == 200 and r.json()["limits"]["phone_low_pct"] == 50
+
+
+def test_phone_low_pct_env_parsing(monkeypatch, caplog):
+    import logging
+
+    from app.config import PHONE_LOW_PCT_ENV, Settings, parse_phone_low_pct
+    from app.main import log_phone_low_pct_status
+    monkeypatch.delenv(PHONE_LOW_PCT_ENV, raising=False)
+    assert Settings().phone_low_pct == 75
+    for raw, want in (("75", 75), ("1", 1), ("100", 100), (" 60 ", 60)):
+        monkeypatch.setenv(PHONE_LOW_PCT_ENV, raw)
+        assert Settings().phone_low_pct == want
+        assert parse_phone_low_pct(raw) == (want, None)
+    for raw in ("0", "101", "-5", "abc", "", "7.5"):
+        monkeypatch.setenv(PHONE_LOW_PCT_ENV, raw)
+        assert Settings().phone_low_pct == 75, raw
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            log_phone_low_pct_status()
+        recs = [r for r in caplog.records if PHONE_LOW_PCT_ENV in r.getMessage()]
+        assert len(recs) == 1 and recs[0].levelno == logging.WARNING, raw
+    monkeypatch.setenv(PHONE_LOW_PCT_ENV, "80")
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        log_phone_low_pct_status()
+    assert not [r for r in caplog.records if PHONE_LOW_PCT_ENV in r.getMessage()]
