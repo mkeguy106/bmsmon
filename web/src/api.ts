@@ -202,7 +202,8 @@ const decodePhoneAlert = (r: unknown): PhoneAlert => {
   if (isObj(r) && (r.low_pct === null || typeof r.low_pct === "number")
       && typeof r.updated_at_ms === "number"
       && (r.updated_by === "phone" || r.updated_by === "web" || r.updated_by === "default")) {
-    return { low_pct: r.low_pct, updated_at_ms: r.updated_at_ms, updated_by: r.updated_by };
+    return { low_pct: r.low_pct, updated_at_ms: r.updated_at_ms, updated_by: r.updated_by,
+             ...(typeof r.can_edit === "boolean" ? { can_edit: r.can_edit } : {}) };
   }
   throw new Error("malformed /web/phone-alert response");
 };

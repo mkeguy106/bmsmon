@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PHONE_ALERT_OPTIONS, phoneAlertFromValue, phoneAlertStatus, phoneAlertValue } from "./phoneAlert";
+import { PHONE_ALERT_OPTIONS, phoneAlertEditable, phoneAlertFromValue, phoneAlertStatus, phoneAlertValue } from "./phoneAlert";
 
 const NOW = 10_000_000_000;
 
@@ -37,5 +37,17 @@ describe("phoneAlertStatus", () => {
   });
   it("default", () => {
     expect(phoneAlertStatus({ low_pct: 75, updated_at_ms: 0, updated_by: "default" }, NOW)).toBe("Default");
+  });
+});
+
+describe("phoneAlertEditable", () => {
+  const a = { low_pct: 50, updated_at_ms: 1, updated_by: "web" as const };
+  it("true for admins and for an older server without can_edit", () => {
+    expect(phoneAlertEditable({ ...a, can_edit: true })).toBe(true);
+    expect(phoneAlertEditable(a)).toBe(true);
+  });
+  it("false for viewers and before the first answer", () => {
+    expect(phoneAlertEditable({ ...a, can_edit: false })).toBe(false);
+    expect(phoneAlertEditable(null)).toBe(false);
   });
 });

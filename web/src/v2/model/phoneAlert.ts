@@ -5,7 +5,12 @@ export interface PhoneAlert {
   low_pct: number | null;
   updated_at_ms: number;
   updated_by: "phone" | "web" | "default";
+  /** Server says whether this viewer may change it; absent (older server) counts as true. */
+  can_edit?: boolean;
 }
+
+export const phoneAlertEditable = (a: PhoneAlert | null): boolean =>
+  a !== null && a.can_edit !== false;
 
 export const PHONE_ALERT_OPTIONS: { value: string; label: string }[] = [
   { value: "off", label: "Off" },
