@@ -1744,6 +1744,29 @@ Enforced in the app itself (not delegated to Traefik/Authentik) and pinned by te
   invalid ingest/config envelope (422) is logged with its first error's location and type,
   never its contents.
 
+### Phone battery alert threshold (shared, last change wins)
+
+The `phone_battery` health check's threshold is editable from the Android app (Settings >
+Alerts) and the WebUI (Settings), and the most recent change wins. The server holds it in the
+single-row `phone_alert_config` table (`low_pct` NULL = OFF, else one of 10, 15, ..., 95; plus
+`updated_at` and `updated_by` phone|web); `BMSMON_PHONE_LOW_PCT` is only the fallback while no
+row exists. A change applies only if its time is strictly newer than the stored one
+(`queries.upsert_phone_alert`), so an offline phone change uploaded late never overwrites a newer
+WebUI change. WebUI changes are stamped with server time; phone changes carry
+`phone_low_pct_changed_ms` (phone clock, clamped to now).
+
+- `GET /web/phone-alert` (viewer) -> `{low_pct, updated_at_ms, updated_by: phone|web|default, can_edit}`;
+  `PUT /web/phone-alert` (admin) with `{"low_pct": int|null}`, 422 when invalid, same shape back.
+- `POST /api/v1/config` takes optional `phone_low_pct` (null = OFF, absent = no change) and
+  `phone_low_pct_changed_ms`. Invalid values are ignored with a throttled WARNING and the
+  config still answers 200, never 422.
+- `POST /api/v1/ingest` and `/api/v1/config` replies carry `phone_alert`
+  (`{low_pct, updated_at_ms, updated_by}`; `updated_at_ms` 0 and `updated_by` "default" with no
+  row), which is how the phone learns a WebUI change. This deliberately widens the otherwise
+  one-way phone-to-server channel by exactly this field.
+- `/api/v1/health/detail?checks=phone_battery` uses the row (OFF never fails); `limits.phone_low_pct`
+  reports the effective value, null when OFF. The default check set is unchanged.
+
 ### Read-only API keys (`/api/v1/groups`, desktop widgets)
 
 A third identity path, added 2026-08-25 for the KDE desktop widgets. The other two cannot

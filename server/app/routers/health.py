@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse
 
 from app.auth.api_key import require_api_key
 from app.config import settings
+from app.db import queries as q
 from app.db.online_index import online_index_status
 from app.db.partitions import next_month_partition_name
 from app.db.pool import get_pool
@@ -73,6 +74,7 @@ async def health_detail(request: Request,
         indexes = await online_index_status(conn)
         now_ts = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
         row = await conn.fetchrow(_PHONE_SQL, now_ts, PHONE_FAULT_CONFIRM_S)
+        phone_low_pct = (await q.get_phone_alert(conn, settings.phone_low_pct))["low_pct"]
     phone = None if row is None else {
         "level": row["phone_level"], "plugged": row["phone_plugged"],
         "fault": bool(row["phone_fault"]), "fault_since_ms": _ms(row["phone_fault_since"]),
@@ -87,6 +89,6 @@ async def health_detail(request: Request,
         rollup_high_water_ms=high_water, next_month_partition=bool(next_ok),
         auth_fail_5m=stats.failures_in_window(), last_auth_fail=stats.last_failure,
         last_ok_skew_s=stats.last_ok_skew_s, online_indexes=indexes, ingest_limit_s=limit,
-        checks=selected, phone=phone, phone_low_pct=settings.phone_low_pct)
+        checks=selected, phone=phone, phone_low_pct=phone_low_pct)
     return JSONResponse(body, status_code=200 if body["ok"] else 503,
                         headers={"Cache-Control": "no-store"})

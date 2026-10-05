@@ -17,7 +17,8 @@ from app.db import queries as q
 from app.db.pool import get_pool
 from app.models import (
     ConfigResponse, EnrollBody, EnrollResponse, IngestEnvelope, IngestResponse,
-    PhonePowerIn, RangeConfigRow, SampleIn, TempConfigBody, first_error, validate_each,
+    PhonePowerIn, RangeConfigRow, SampleIn, TempConfigBody, first_error, valid_phone_low_pct,
+    validate_each,
 )
 from app.observability import clean_user_agent
 from app.ratelimit import client_key
@@ -318,6 +319,36 @@ async def _store_phone_power(conn, request: Request, device_id: str, raw: object
                            exc_info=True)
 
 
+async def _phone_alert_reply(request: Request, pool, device_id: str) -> dict | None:
+    """The shared phone-alert threshold for a 2xx reply. It rides a request that already
+    succeeded, so a read failure is logged (throttled) and omitted, never an error."""
+    try:
+        async with pool.acquire() as conn:
+            return await q.get_phone_alert(conn, settings.phone_low_pct)
+    except Exception:
+        if _may_log_reject(request, device_id, "phone_alert:read"):
+            logger.warning("phone_alert read failed for %s (repeats for this device "
+                           "suppressed for %.0f s)", device_id, REJECT_LOG_INTERVAL_S,
+                           exc_info=True)
+        return None
+
+
+async def _apply_phone_alert(conn, request: Request, device_id: str, cfg) -> None:
+    """Apply the phone's threshold change, if it sent one. Invalid input is ignored with a
+    throttled WARNING (field name only); can never fail the config push."""
+    if "phone_low_pct" not in cfg.model_fields_set:
+        return
+    pct, at = cfg.phone_low_pct, cfg.phone_low_pct_changed_ms
+    if not valid_phone_low_pct(pct) or type(at) is not int or at <= 0:
+        if _may_log_reject(request, device_id, "phone_low_pct"):
+            logger.warning("config: ignored an invalid phone_low_pct change from device %s "
+                           "(repeats for this device suppressed for %.0f s)",
+                           device_id, REJECT_LOG_INTERVAL_S)
+        return
+    at = min(at, int(time.time() * 1000))
+    await q.upsert_phone_alert(conn, pct, at, "phone")
+
+
 @router.post("/ingest", response_model=IngestResponse)
 async def ingest(request: Request, pool=Depends(get_pool)):
     device_id, claims = await _authenticate(request, pool)
@@ -399,7 +430,8 @@ async def ingest(request: Request, pool=Depends(get_pool)):
     if env.batch_seq >= 0:
         for d in dumped:
             await request.app.state.bus.publish({"type": "sample", **d})
-    return IngestResponse(accepted=accepted, dropped=dropped, last_seq=env.batch_seq)
+    return IngestResponse(accepted=accepted, dropped=dropped, last_seq=env.batch_seq,
+                          phone_alert=await _phone_alert_reply(request, pool, device_id))
 
 
 @router.post("/config", response_model=ConfigResponse)
@@ -429,7 +461,9 @@ async def config(request: Request, pool=Depends(get_pool)):
         # (ranges None) leaves the stored rows untouched.
         for row in ranges:
             await q.upsert_range_config(conn, device_id, row.model_dump())
+        await _apply_phone_alert(conn, request, device_id, cfg)
         # The app build only: a config push is not telemetry, so it never moves the
         # deadman's last_seen_at.
         await _touch(conn, request, device_id, seen=False)
-    return ConfigResponse(dropped=len(rejects))
+    return ConfigResponse(dropped=len(rejects),
+                          phone_alert=await _phone_alert_reply(request, pool, device_id))

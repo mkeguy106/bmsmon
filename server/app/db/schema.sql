@@ -229,6 +229,15 @@ CREATE TABLE IF NOT EXISTS device_alert_config (
   updated_at_ms bigint
 );
 
+-- The phone-battery alarm threshold, shared by the phone and the WebUI (single row, last
+-- change wins by updated_at). low_pct NULL = the alarm is OFF. No row = the env fallback.
+CREATE TABLE IF NOT EXISTS phone_alert_config (
+  id smallint PRIMARY KEY CHECK (id = 1),
+  low_pct smallint,
+  updated_at timestamptz NOT NULL,
+  updated_by text NOT NULL CHECK (updated_by IN ('phone', 'web'))
+);
+
 -- Learned discharge-range parameter bands pushed from the phone (one-way, latest-wins per
 -- device+pack). The webui's range.ts formula twin reads these; no write path back from web.
 CREATE TABLE IF NOT EXISTS device_range_config (

@@ -6,6 +6,7 @@ to fail the whole batch with a 500 — and the phone retries a 500 forever, so t
 head-of-line-blocks its upload queue. Optional fields degrade to NULL (NaN/±inf too, and
 NUL bytes are stripped); required config fields fail validation instead (the range row
 is dropped, or the config envelope 422s), because NULL would violate NOT NULL."""
+from tests import counts
 import json
 import time
 
@@ -41,7 +42,7 @@ async def test_ints_outside_int4_store_null_and_the_batch_lands(app, client):
         {"ts_ms": now - 1000, "address": A, "soc": 81.0, "cycles": INT32_MAX}]}
     r = await _post(client, priv, device_id, payload)
     assert r.status_code == 200
-    assert r.json() == {"accepted": 2, "dropped": 0, "last_seq": 1}
+    assert counts(r.json()) == {"accepted": 2, "dropped": 0, "last_seq": 1}
     row = await _row(app, now, "soc, cycles, soh, mosfet_temp_c")
     assert row["soc"] == 80.0
     assert (row["cycles"], row["soh"], row["mosfet_temp_c"]) == (None, None, None)
@@ -59,7 +60,7 @@ async def test_nul_bytes_are_stripped_from_every_text_field(app, client):
          "alias": "2012\x00 · A", "advertised_name": "\x00R-12100", "group_id": "20\x0012"}]}
     r = await _post(client, priv, device_id, payload)
     assert r.status_code == 200
-    assert r.json() == {"accepted": 2, "dropped": 0, "last_seq": 2}
+    assert counts(r.json()) == {"accepted": 2, "dropped": 0, "last_seq": 2}
     row = await _row(app, now, "state, motion_activity")
     assert (row["state"], row["motion_activity"]) == ("Idle", "STILL")
     assert (await _row(app, now - 1000, "link_event"))["link_event"] == "Connected"
@@ -80,7 +81,7 @@ async def test_floats_outside_float4_or_non_finite_store_null(app, client):
         {"ts_ms": now - 1000, "address": A, "soc": 50.0}]}
     r = await _post(client, priv, device_id, payload)
     assert r.status_code == 200
-    assert r.json() == {"accepted": 2, "dropped": 0, "last_seq": 3}
+    assert counts(r.json()) == {"accepted": 2, "dropped": 0, "last_seq": 3}
     row = await _row(app, now, "soc, current_a, voltage_v, temp_c, power_w, lat, lon, "
                                "gps_accuracy_m")
     for col in ("soc", "current_a", "voltage_v", "temp_c", "lat", "lon"):
@@ -96,7 +97,7 @@ async def test_a_nan_soc_stores_null(app, client):
     now = int(time.time() * 1000)
     r = await _post(client, priv, device_id,
                     {"batch_seq": 4, "samples": [{"ts_ms": now, "address": A, "soc": float("nan")}]})
-    assert r.json() == {"accepted": 1, "dropped": 0, "last_seq": 4}
+    assert counts(r.json()) == {"accepted": 1, "dropped": 0, "last_seq": 4}
     assert (await _row(app, now, "soc"))["soc"] is None
 
 
@@ -108,7 +109,7 @@ async def test_bad_cells_become_null_in_place(app, client):
     payload = {"batch_seq": 5, "samples": [
         {"ts_ms": now, "address": A, "cells": [3.31, 1e39, float("nan"), 3.34]}]}
     r = await _post(client, priv, device_id, payload)
-    assert r.json() == {"accepted": 1, "dropped": 0, "last_seq": 5}
+    assert counts(r.json()) == {"accepted": 1, "dropped": 0, "last_seq": 5}
     row = await _row(app, now, "cell1_v, cell2_v, cell3_v, cell4_v")
     assert row["cell1_v"] == pytest.approx(3.31, abs=1e-5)
     assert (row["cell2_v"], row["cell3_v"]) == (None, None)
@@ -135,7 +136,7 @@ async def test_config_range_row_with_unstorable_values_is_dropped_not_500(app, c
     good = _range_row("C8:47:80:15:25:01\x00")
     r = await _post(client, priv, device_id, _cfg(ranges=[*bad, good]), path="/api/v1/config")
     assert r.status_code == 200
-    assert r.json() == {"ok": True, "dropped": len(bad)}
+    assert counts(r.json()) == {"ok": True, "dropped": len(bad)}
     async with app.state.pool.acquire() as conn:
         addrs = [x["address"] for x in await conn.fetch("SELECT address FROM device_range_config")]
     assert addrs == ["C8:47:80:15:25:01"]  # stored with the NUL stripped
