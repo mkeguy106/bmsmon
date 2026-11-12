@@ -28,6 +28,29 @@ Re-run the standing items (4 and 5 above) plus whatever #3 leaves open, and re-v
 constants the way the 2026-08-04 pass did (`POWER_RING_FULL_W`, `REGEN_EPS`/`REGEN_WINDOW_MS`,
 `SEED_TAIL_MIN`, GPS gates).
 
+**Pack-to-pack balance (series pairs).** Added 2026-11-12 after 2012-B missed its BMS full-detect
+on the 2026-11-11 charge (peaked 13.977 V; counter pinned at the 120 Ah ceiling, SOC stuck at 99 %).
+The 24 V charger holds the pair at ~28.37 V and terminates on taper (~2 A), so the fuller pack takes
+the larger share of the voltage; no BMS protection trips. Nothing in a series pair equalizes the
+two packs: each BMS balances only its own cells.
+
+- **Metric (per charge, per base):** lag between the two packs first crossing 13.7 V while
+  `Charging`, × the CC current (~7.8 A) = Ah imbalance. Also record each pack's peak `voltage_v`
+  and `cell_max_v`.
+- **2012 baseline:** 98 s / 0.21 Ah (10-02), 117 s (10-15), 125 s (11-04), **152 s / 0.33 Ah
+  (11-11)**. 2012-B's peak fell 14.07 → 13.98 V. 2012-A's peak rose 14.29 → 14.40 V, cell max
+  3.599 → 3.622 V. 2012-B's full-detect sits between 13.977 V (missed) and 14.028 V (hit 11-04).
+- **Done when:** the lag is re-measured for every base with charges since, and the trend is
+  recorded. Act when 2012-B misses full-detect on two consecutive charges, or when 2012-A's
+  `cell_max_v` reaches 3.64 V. The owner can't reach the packs, so any fix is a service-visit job:
+  either a one-off 12 V LiFePO4 top-up of the low pack, or (preferred, since it never needs another
+  visit) a fused pack-to-pack balancer. The balancer's current must stay inside the BMS's 1.04 A
+  deadband, so it can't read as discharge. Status 2026-11-12: a technician install guide for a
+  Victron Battery Balancer on 2012's existing bolted harness exists (owner's Claude Docs); the
+  owner hasn't decided whether to buy it.
+- **Query:** `min(ts) filter (where voltage_v >= 13.7)` per address per charge night, over
+  `state = 'Charging'` rows (worked example in the 2026-11-12 session).
+
 ## Opportunistic — next time the code is touched
 
 - **Settings › Battery saver "Motion sensing active" line:** both permission states (granted /
