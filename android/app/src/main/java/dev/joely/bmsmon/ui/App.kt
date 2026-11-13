@@ -52,6 +52,7 @@ import dev.joely.bmsmon.agent.AgentSession
 import dev.joely.bmsmon.agent.agentActive
 import dev.joely.bmsmon.BatteryViewModel
 import dev.joely.bmsmon.BmsDeviceAdminReceiver
+import dev.joely.bmsmon.MainActivity
 import dev.joely.bmsmon.Screen
 import dev.joely.bmsmon.ble.blePermissions
 import dev.joely.bmsmon.ble.hasBlePermissions
@@ -74,6 +75,7 @@ import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.BmTheme
 import dev.joely.bmsmon.ui.theme.ThemeTransitionMillis
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 
 @Composable
 fun App(vm: BatteryViewModel) {
@@ -175,7 +177,9 @@ fun App(vm: BatteryViewModel) {
     // else on the next resume via the observer below.
     val agentDeadline by AgentSession.deadline.collectAsState()
     val agentNow by rememberUpdatedState(agentActive(agentDeadline, SystemClock.elapsedRealtime()))
-    LaunchedEffect(activity, agentDeadline) {
+    val topResumed by ((activity as? MainActivity)?.isTopResumed ?: remember { MutableStateFlow(true) })
+        .collectAsState()
+    LaunchedEffect(activity, agentDeadline, topResumed) {
         val act = activity ?: return@LaunchedEffect
         val mode = runCatching {
             (act.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).lockTaskModeState
@@ -188,10 +192,10 @@ fun App(vm: BatteryViewModel) {
             delay((deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0))
             AgentSession.expire(deadline)
         } else {
-            // Re-pin right away when the session ended while we're on screen.
-            val resumed = (act as? LifecycleOwner)?.lifecycle?.currentState
-                ?.isAtLeast(Lifecycle.State.RESUMED) == true
-            if (resumed && shouldRepin(lockedNow, mode)) startLockTaskCompat(act)
+            // Re-pin once the session has ended and we hold top focus. While the agent's app on the
+            // hidden display holds it, Android refuses the pin; touching our screen or the hidden
+            // display closing hands focus back and this runs again.
+            if (topResumed && shouldRepin(lockedNow, mode)) startLockTaskCompat(act)
         }
     }
     // The banner's countdown: ticks once a second only while a session runs.

@@ -44,6 +44,15 @@ class LockTaskTest {
         // The agent session lifts the pin and its timer ends the session (agent/AgentSession.kt).
         assertTrue(src.contains("shouldUnpinForAgent("))
         assertTrue(src.contains("AgentSession.expire("))
+        // Android 17 refuses startLockTask ("Can't lock due to auth") unless we are the top-resumed
+        // activity; after a session times out the agent's app on the hidden display holds top focus,
+        // so the re-pin waits for MainActivity to become top-resumed again (measured 2026-11-13).
+        assertTrue(src.contains("if (topResumed && shouldRepin(lockedNow, mode)) startLockTaskCompat(act)"))
+        val main = listOf("src/main/java", "app/src/main/java")
+            .map { File(it, "dev/joely/bmsmon/MainActivity.kt") }
+            .first { it.isFile }
+            .readText()
+        assertTrue(main.contains("override fun onTopResumedActivityChanged(isTopResumedActivity: Boolean)"))
         assertTrue(src.contains("owner?.lifecycle?.addObserver(observer)"))
     }
 }
