@@ -40,7 +40,10 @@ class LockTaskTest {
             .readText()
             .replace(Regex("\\s+"), " ")
         assertTrue(src.contains("event != Lifecycle.Event.ON_RESUME"))
-        assertTrue(src.contains("if (shouldRepin(lockedNow, mode)) startLockTaskCompat(act)"))
+        assertTrue(src.contains("if (shouldRepin(lockedNow, mode, agentNow)) startLockTaskCompat(act)"))
+        // The agent session lifts the pin and its timer ends the session (agent/AgentSession.kt).
+        assertTrue(src.contains("shouldUnpinForAgent("))
+        assertTrue(src.contains("AgentSession.expire("))
         assertTrue(src.contains("owner?.lifecycle?.addObserver(observer)"))
     }
 }
