@@ -9,7 +9,12 @@ const val LOCK_TASK_MODE_NONE = 0
  * an install drops this phone to the lock screen, and the system's swipe-up-and-hold gesture
  * unpins it outright. An activity that merely resumes after that would otherwise stay unpinned
  * until it was recreated or locked mode was toggled. Only when nothing is pinned, so a resume
- * while already pinned (or pinned as a device-owner kiosk) never re-prompts.
+ * while already pinned (or pinned as a device-owner kiosk) never re-prompts. Never while an agent
+ * session is running: the agent lifted the pin on purpose (see agent/AgentSession.kt).
  */
-fun shouldRepin(locked: Boolean, lockTaskModeState: Int): Boolean =
-    locked && lockTaskModeState == LOCK_TASK_MODE_NONE
+fun shouldRepin(locked: Boolean, lockTaskModeState: Int, agentActive: Boolean = false): Boolean =
+    locked && lockTaskModeState == LOCK_TASK_MODE_NONE && !agentActive
+
+/** Whether a running agent session should lift the pin now: only while something is pinned. */
+fun shouldUnpinForAgent(lockTaskModeState: Int, agentActive: Boolean): Boolean =
+    agentActive && lockTaskModeState != LOCK_TASK_MODE_NONE

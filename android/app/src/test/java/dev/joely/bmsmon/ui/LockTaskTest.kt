@@ -21,6 +21,16 @@ class LockTaskTest {
         assertFalse(shouldRepin(locked = true, lockTaskModeState = 2))
     }
 
+    @Test fun noRepinDuringAgentSession() {
+        assertFalse(shouldRepin(locked = true, lockTaskModeState = LOCK_TASK_MODE_NONE, agentActive = true))
+    }
+
+    @Test fun unpinsOnlyWhenPinnedAndActive() {
+        assertTrue(shouldUnpinForAgent(lockTaskModeState = 2, agentActive = true))
+        assertFalse(shouldUnpinForAgent(lockTaskModeState = LOCK_TASK_MODE_NONE, agentActive = true))
+        assertFalse(shouldUnpinForAgent(lockTaskModeState = 2, agentActive = false))
+    }
+
     /** The decision is pure; the part only a device can run is that App.kt asks on every
      *  resume. Pin that wiring textually so dropping it can't pass silently. */
     @Test fun theAppAsksOnEveryResume() {
