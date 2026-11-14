@@ -754,6 +754,44 @@ If it is already wedged: `am task lock stop`, then start the activity in a new t
 **Got it**. Never remove the wedged task (`am stack remove`, a Recents swipe). Removing a task
 from this app runs the service's `onTaskRemoved` clean shutdown, which stops monitoring.
 
+**Agent sessions: lifting the pin for an adb-driven task (2026-11-13).** While bmsmon is pinned,
+Android refuses every other app launch and every tap on another app, including on phonedriver's
+hidden virtual display ("Attempted Lock Task Mode violation"). An agent session lifts the pin for
+a bounded time (`agent/AgentSession.kt`, spec
+`docs/superpowers/specs/2026-11-13-agent-session-unpin-design.md`):
+
+```bash
+adb shell am broadcast -n dev.joely.bmsmon/.agent.AgentSessionReceiver --es op start --ei minutes 15
+adb shell am broadcast -n dev.joely.bmsmon/.agent.AgentSessionReceiver --es op end
+adb shell am start -n dev.joely.bmsmon/.MainActivity   # always, after every task
+```
+
+- The receiver is guarded by `android.permission.DUMP` (`signature|privileged|development`). adb's
+  shell holds it. An installed app can get it only from a privileged image or an explicit
+  `pm grant`. No third-party app on the phone held it on 2026-11-13. Re-check with
+  `adb shell 'for p in $(pm list packages -3 | cut -d: -f2); do dumpsys package $p | grep -q "android.permission.DUMP: granted=true" && echo $p; done'`.
+- `minutes` defaults to 15 and clamps to 60. A repeated `start` restarts the timer.
+- While a session runs, bmsmon unpins itself, skips its on-resume re-pin, and shows "CLAUDE IS
+  USING THE PHONE · mm:ss" with RE-PIN NOW. The `locked` setting and the locked stage are untouched.
+- A session ends on `op end`, on its timeout, or on RE-PIN NOW. State is in memory only, so a
+  process restart ends it too.
+- **Re-pinning needs top focus.** Android 17 refuses `startLockTask` ("Can't lock due to auth")
+  while another app, such as one on the hidden display, is the top-resumed activity. So
+  `App.kt` re-pins when `MainActivity.onTopResumedActivityChanged` reports true.
+  - The `am start` above hands focus back.
+  - After a timeout with no PC, focus returns, and the pin with it, as soon as the owner touches
+    bmsmon's screen. Verified on device 2026-11-13. What a PC drop does to phonedriver's hidden
+    display (closed, or its apps moved to the real screen) is not verified.
+  - While locked mode is on, nothing is pinned and no session runs, the stage shows
+    "● NOT PINNED · TAP TO PIN" (`PinLiftedBanner`, mode polled once a second), so a lifted pin
+    is never silent.
+  - The owner then taps **Got it** on the system's pin prompt.
+- A session lifts only a pin that locked mode set (`shouldUnpinForAgent` requires `locked`).
+- `op start` takes effect when bmsmon is started. If the phone's screen is off, wake it or
+  `am start` bmsmon first.
+- The owner's rule: when a phonedriver task is done, bmsmon goes back up pinned (`op end` +
+  `am start`, then confirm `mLockTaskModeState=PINNED`).
+
 **ADB authorization lapses after ~7 days unused.** Android revokes the debug authorization; USB then
 shows "unauthorized" and wireless TLS fails with `CERTIFICATE_UNKNOWN`. Recover with Developer
 options → Wireless debugging → "Pair device with pairing code", then

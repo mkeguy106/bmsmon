@@ -6,9 +6,22 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import dev.joely.bmsmon.ui.App
+import kotlinx.coroutines.flow.MutableStateFlow
 
 class MainActivity : ComponentActivity() {
     private val vm: BatteryViewModel by viewModels()
+
+    /**
+     * Whether this is the system's top-resumed activity. With phonedriver's hidden display another
+     * app can hold top focus while we stay resumed on the real screen, and Android 17 refuses
+     * startLockTask then ("Can't lock due to auth"), so App re-pins when this turns true.
+     */
+    val isTopResumed = MutableStateFlow(false)
+
+    override fun onTopResumedActivityChanged(isTopResumedActivity: Boolean) {
+        super.onTopResumedActivityChanged(isTopResumedActivity)
+        isTopResumed.value = isTopResumedActivity
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()

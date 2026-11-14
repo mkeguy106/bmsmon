@@ -90,6 +90,16 @@
             </intent-filter>
         </receiver>
 
+        <!-- Agent session (unpin for an adb-driven task, docs/superpowers/specs/2026-11-13-agent-
+             session-unpin-design.md). Exported but guarded by DUMP (signature|privileged|development):
+             adb's shell holds it; an installed app gets it only from a privileged image or an
+             explicit `adb shell pm grant`, so starting a session stays inside the adb trust boundary.
+             Re-check which apps hold it with the command in CLAUDE.md ("Agent sessions"). -->
+        <receiver
+            android:name=".agent.AgentSessionReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
+
         <receiver
             android:name=".BmsDeviceAdminReceiver"
             android:exported="true"

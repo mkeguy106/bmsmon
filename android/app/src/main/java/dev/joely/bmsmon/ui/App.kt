@@ -10,6 +10,7 @@ import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.SystemClock
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -32,6 +33,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -46,8 +48,11 @@ import androidx.core.view.WindowCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
+import dev.joely.bmsmon.agent.AgentSession
+import dev.joely.bmsmon.agent.agentActive
 import dev.joely.bmsmon.BatteryViewModel
 import dev.joely.bmsmon.BmsDeviceAdminReceiver
+import dev.joely.bmsmon.MainActivity
 import dev.joely.bmsmon.Screen
 import dev.joely.bmsmon.ble.blePermissions
 import dev.joely.bmsmon.ble.hasBlePermissions
@@ -70,6 +75,7 @@ import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.BmTheme
 import dev.joely.bmsmon.ui.theme.ThemeTransitionMillis
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 
 @Composable
 fun App(vm: BatteryViewModel) {
@@ -166,6 +172,55 @@ fun App(vm: BatteryViewModel) {
     // some other way (the lock screen after an unpin for an install, the system's unpin gesture)
     // stayed ended on a mere resume. Re-pin on every resume while locked and unpinned.
     val lockedNow by rememberUpdatedState(state.locked)
+    // Agent session (agent/AgentSession.kt): adb lifts the pin for a bounded task. While it runs,
+    // no re-pin; when it ends (op end, timeout, Re-pin now) re-pin at once if we're resumed,
+    // else on the next resume via the observer below.
+    val agentDeadline by AgentSession.deadline.collectAsState()
+    val agentNow by rememberUpdatedState(agentActive(agentDeadline, SystemClock.elapsedRealtime()))
+    val topResumed by ((activity as? MainActivity)?.isTopResumed ?: remember { MutableStateFlow(true) })
+        .collectAsState()
+    LaunchedEffect(activity, agentDeadline, topResumed) {
+        val act = activity ?: return@LaunchedEffect
+        val mode = runCatching {
+            (act.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).lockTaskModeState
+        }.getOrNull() ?: return@LaunchedEffect
+        val deadline = agentDeadline
+        if (deadline != null) {
+            if (shouldUnpinForAgent(lockedNow, mode, agentActive(deadline, SystemClock.elapsedRealtime()))) {
+                runCatching { act.stopLockTask() }
+            }
+            delay((deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0))
+            AgentSession.expire(deadline)
+        } else {
+            // Re-pin once the session has ended and we hold top focus. While the agent's app on the
+            // hidden display holds it, Android refuses the pin; touching our screen or the hidden
+            // display closing hands focus back and this runs again.
+            if (topResumed && shouldRepin(lockedNow, mode)) startLockTaskCompat(act)
+        }
+    }
+    // Review #1: after a session (a timeout with the PC gone, say) the pin can stay lifted until we
+    // regain top focus. Poll the lock-task mode while locked so the stage can say so until it's back.
+    val pinMode by produceState(LOCK_TASK_MODE_NONE, activity, state.locked) {
+        val act = activity ?: return@produceState
+        if (!state.locked) return@produceState
+        val am = act.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        while (true) {
+            runCatching { am.lockTaskModeState }.getOrNull()?.let { value = it }
+            delay(1_000)
+        }
+    }
+    val pinLifted = shouldRepin(state.locked, pinMode, agentDeadline != null)
+    // The banner's countdown: ticks once a second only while a session runs.
+    val agentRemainingMs by produceState<Long?>(null, agentDeadline) {
+        val d = agentDeadline
+        if (d == null) { value = null; return@produceState }
+        while (true) {
+            val left = d - SystemClock.elapsedRealtime()
+            value = left.coerceAtLeast(0)
+            if (left <= 0) break
+            delay(1_000)
+        }
+    }
     DisposableEffect(activity) {
         val act = activity
         val owner = act as? LifecycleOwner
@@ -174,7 +229,7 @@ fun App(vm: BatteryViewModel) {
             val mode = runCatching {
                 (act.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).lockTaskModeState
             }.getOrNull() ?: return@LifecycleEventObserver
-            if (shouldRepin(lockedNow, mode)) startLockTaskCompat(act)
+            if (shouldRepin(lockedNow, mode, agentNow)) startLockTaskCompat(act)
         }
         owner?.lifecycle?.addObserver(observer)
         onDispose { owner?.lifecycle?.removeObserver(observer) }
@@ -398,6 +453,10 @@ fun App(vm: BatteryViewModel) {
                                 rosterEdit = rosterActions,
                                 onHomePageChanged = vm::setHomePage,
                                 locked = state.locked,
+                                agentRemainingMs = agentRemainingMs,
+                                onAgentEnd = AgentSession::end,
+                                pinLifted = pinLifted,
+                                onPinNow = { activity?.let(::startLockTaskCompat) },
                             )
                             // The loaders are main-safe (IO/Default inside — DATA-15); produceState itself
                             // runs on Main, so loadHistory turns any failure into a rendered state rather
