@@ -83,6 +83,8 @@ fun HomeScreen(
     locked: Boolean,
     agentRemainingMs: Long? = null,
     onAgentEnd: () -> Unit = {},
+    pinLifted: Boolean = false,
+    onPinNow: () -> Unit = {},
 ) {
     val c = Bm.colors
     // Page 0 = stage (main); page 1 = all batteries — swipe LEFT from the stage to reach it.
@@ -106,6 +108,7 @@ fun HomeScreen(
                 locked = locked,
             )
             agentRemainingMs?.let { AgentBanner(it, onAgentEnd) }
+            if (pinLifted) PinLiftedBanner(onPinNow)
             // UI-28: user-disconnected packs no longer alert; keep that visible on the stage.
             run {
                 disconnectedChipText(userDisconnectedCount(state.roster, state.disabled))?.let { text ->

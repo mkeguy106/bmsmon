@@ -186,7 +186,7 @@ fun App(vm: BatteryViewModel) {
         }.getOrNull() ?: return@LaunchedEffect
         val deadline = agentDeadline
         if (deadline != null) {
-            if (shouldUnpinForAgent(mode, agentActive(deadline, SystemClock.elapsedRealtime()))) {
+            if (shouldUnpinForAgent(lockedNow, mode, agentActive(deadline, SystemClock.elapsedRealtime()))) {
                 runCatching { act.stopLockTask() }
             }
             delay((deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0))
@@ -198,6 +198,18 @@ fun App(vm: BatteryViewModel) {
             if (topResumed && shouldRepin(lockedNow, mode)) startLockTaskCompat(act)
         }
     }
+    // Review #1: after a session (a timeout with the PC gone, say) the pin can stay lifted until we
+    // regain top focus. Poll the lock-task mode while locked so the stage can say so until it's back.
+    val pinMode by produceState(LOCK_TASK_MODE_NONE, activity, state.locked) {
+        val act = activity ?: return@produceState
+        if (!state.locked) return@produceState
+        val am = act.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        while (true) {
+            runCatching { am.lockTaskModeState }.getOrNull()?.let { value = it }
+            delay(1_000)
+        }
+    }
+    val pinLifted = shouldRepin(state.locked, pinMode, agentDeadline != null)
     // The banner's countdown: ticks once a second only while a session runs.
     val agentRemainingMs by produceState<Long?>(null, agentDeadline) {
         val d = agentDeadline
@@ -443,6 +455,8 @@ fun App(vm: BatteryViewModel) {
                                 locked = state.locked,
                                 agentRemainingMs = agentRemainingMs,
                                 onAgentEnd = AgentSession::end,
+                                pinLifted = pinLifted,
+                                onPinNow = { activity?.let(::startLockTaskCompat) },
                             )
                             // The loaders are main-safe (IO/Default inside — DATA-15); produceState itself
                             // runs on Main, so loadHistory turns any failure into a rendered state rather

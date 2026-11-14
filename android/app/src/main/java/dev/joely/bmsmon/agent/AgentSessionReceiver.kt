@@ -9,7 +9,8 @@ import android.util.Log
 /**
  * `adb shell am broadcast -n dev.joely.bmsmon/.agent.AgentSessionReceiver --es op start --ei minutes 15`
  * (`--es op end` ends it). The manifest guards it with android.permission.DUMP, which adb's shell
- * uid holds and no installed app can be granted, so only adb can start a session.
+ * holds. An installed app could hold it only via a privileged system image or an explicit
+ * `adb shell pm grant`, so a session can only be started from inside the adb trust boundary.
  */
 class AgentSessionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {

@@ -15,6 +15,10 @@ const val LOCK_TASK_MODE_NONE = 0
 fun shouldRepin(locked: Boolean, lockTaskModeState: Int, agentActive: Boolean = false): Boolean =
     locked && lockTaskModeState == LOCK_TASK_MODE_NONE && !agentActive
 
-/** Whether a running agent session should lift the pin now: only while something is pinned. */
-fun shouldUnpinForAgent(lockTaskModeState: Int, agentActive: Boolean): Boolean =
-    agentActive && lockTaskModeState != LOCK_TASK_MODE_NONE
+/**
+ * Whether a running agent session should lift the pin now: only a pin that locked mode set, and
+ * only while something is pinned. A pin set by hand with locked mode off is left alone, because
+ * [shouldRepin] would never restore it.
+ */
+fun shouldUnpinForAgent(locked: Boolean, lockTaskModeState: Int, agentActive: Boolean): Boolean =
+    locked && agentActive && lockTaskModeState != LOCK_TASK_MODE_NONE

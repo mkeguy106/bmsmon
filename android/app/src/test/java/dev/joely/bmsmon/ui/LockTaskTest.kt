@@ -26,9 +26,28 @@ class LockTaskTest {
     }
 
     @Test fun unpinsOnlyWhenPinnedAndActive() {
-        assertTrue(shouldUnpinForAgent(lockTaskModeState = 2, agentActive = true))
-        assertFalse(shouldUnpinForAgent(lockTaskModeState = LOCK_TASK_MODE_NONE, agentActive = true))
-        assertFalse(shouldUnpinForAgent(lockTaskModeState = 2, agentActive = false))
+        assertTrue(shouldUnpinForAgent(locked = true, lockTaskModeState = 2, agentActive = true))
+        assertFalse(shouldUnpinForAgent(locked = true, lockTaskModeState = LOCK_TASK_MODE_NONE, agentActive = true))
+        assertFalse(shouldUnpinForAgent(locked = true, lockTaskModeState = 2, agentActive = false))
+    }
+
+    /** A pin the owner set by hand with locked mode off is never lifted: nothing would restore it. */
+    @Test fun agentNeverLiftsAPinLockedModeDidNotSet() {
+        assertFalse(shouldUnpinForAgent(locked = false, lockTaskModeState = 2, agentActive = true))
+    }
+
+    /** After a session, a lifted pin stays visible on the stage until it is back (review #1). */
+    @Test fun theStageSaysWhenThePinIsLifted() {
+        val home = listOf("src/main/java", "app/src/main/java")
+            .map { File(it, "dev/joely/bmsmon/ui/home/HomeScreen.kt") }.first { it.isFile }.readText()
+        assertTrue(home.contains("if (pinLifted) PinLiftedBanner(onPinNow)"))
+        val app = listOf("src/main/java", "app/src/main/java")
+            .map { File(it, "dev/joely/bmsmon/ui/App.kt") }.first { it.isFile }.readText()
+        assertTrue(app.contains("val pinLifted = shouldRepin(state.locked, pinMode, agentDeadline != null)"))
+        // Chair-mounted screen, disabled owner: both banner buttons meet the 48dp minimum (review #6).
+        val banner = listOf("src/main/java", "app/src/main/java")
+            .map { File(it, "dev/joely/bmsmon/ui/home/AgentBanner.kt") }.first { it.isFile }.readText()
+        assertTrue(Regex("minimumInteractiveComponentSize\\(\\)").findAll(banner).count() >= 2)
     }
 
     /** The decision is pure; the part only a device can run is that App.kt asks on every
