@@ -19,6 +19,9 @@ const val AGENT_MAX_MIN = 60
 sealed interface AgentOp {
     data class Start(val minutes: Int) : AgentOp
     data object End : AgentOp
+
+    /** Give up device ownership (the undo for `dpm set-device-owner`); see [AgentSessionReceiver]. */
+    data object ReleaseOwner : AgentOp
 }
 
 /** `start` with missing or < 1 minutes means [AGENT_DEFAULT_MIN]; more than [AGENT_MAX_MIN] clamps. Anything else is ignored (null). */
@@ -30,6 +33,7 @@ fun parseAgentOp(op: String?, minutes: Int?): AgentOp? = when (op) {
         },
     )
     "end" -> AgentOp.End
+    "release-owner" -> AgentOp.ReleaseOwner
     else -> null
 }
 

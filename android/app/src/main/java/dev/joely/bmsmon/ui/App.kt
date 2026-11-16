@@ -569,12 +569,24 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
     else -> null
 }
 
-/** Enter lock-task mode; if we're the device owner, allowlist ourselves first for true kiosk. */
+/**
+ * Enter lock-task mode. As device owner, allowlist ourselves first: the pin then takes effect with
+ * no "App is pinned" prompt and no escape gesture. The features keep what screen pinning showed:
+ * status-bar info, the power menu, and the lock screen (lock-task mode disables it by default).
+ */
 private fun startLockTaskCompat(activity: Activity) {
     val dpm = activity.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
     if (dpm.isDeviceOwnerApp(activity.packageName)) {
         val admin = ComponentName(activity, BmsDeviceAdminReceiver::class.java)
-        runCatching { dpm.setLockTaskPackages(admin, arrayOf(activity.packageName)) }
+        runCatching {
+            dpm.setLockTaskPackages(admin, arrayOf(activity.packageName))
+            dpm.setLockTaskFeatures(
+                admin,
+                DevicePolicyManager.LOCK_TASK_FEATURE_SYSTEM_INFO or
+                    DevicePolicyManager.LOCK_TASK_FEATURE_GLOBAL_ACTIONS or
+                    DevicePolicyManager.LOCK_TASK_FEATURE_KEYGUARD,
+            )
+        }
     }
     // startLockTask throws if another task already holds lock-task mode — never crash the app.
     runCatching { activity.startLockTask() }
