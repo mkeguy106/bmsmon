@@ -1996,8 +1996,37 @@ files pin all of this:
 On the measured month that was 673 ms / 90 k buffers before and 160 ms / 4.1 k after
 (index-only). `days` is capped at 90; the History view asks for 30.
 
+**Raw retention (2026-11, design `docs/superpowers/specs/2026-07-22-db-retention-strategy-design.md`).**
+The cloud DB grows about 1 GB a month, all of it raw `samples`. `samples_rollup` is the
+permanent battery-health archive: per pack and 30-min bucket it keeps SOC, SOH, cell spread,
+temperature, and, since this change, absolute capacity (`cap_sum`/`cap_n`, Ah) and cycle count
+(`cycles_max`), all as sums/counts or maxes that re-aggregate exactly. The hourly maintenance
+pass (`app/db/retention.py`) DROPs each monthly `samples_YYYY_MM` partition whose whole month is
+older than `BMSMON_RAW_RETENTION_MONTHS` (default 12; ≤ 0 keeps raw forever). Raw data starts
+June 2026, so the first drop is due around July 2027. Guards:
+- **Archived first.** A partition goes only when its month ends at or below the rollup's
+  high-water mark *and* `rollup_schema_ver` is current.
+- **Schema versions.** Bumping `rollup.ROLLUP_SCHEMA_VER` (when adding a rollup column) makes
+  the next rollup pass re-roll every bucket below the mark from raw, then stamp the version. The
+  mark never moves back, so the health check's rollup lag stays green. Retention waits for the
+  stamp. Once raw is pruned, a new column can only be backfilled for the months still in raw:
+  add a long-term signal to the rollup *before* its raw goes.
+- **Lock-bounded.** Each DROP takes the partition `IN SHARE MODE`, counts it, drops it and
+  writes `samples_retention_log` (partition, rows), all in one transaction under the 0.5 s
+  `PARTITION_LOCK_TIMEOUT`. Behind a long reader (the nightly `pg_dump`) it gives up and the
+  next pass retries.
+- **Backup floor.** The NAS backup refuses a dump when the rows `samples` has ever held
+  shrink. It reads that as `count(samples) + sum(samples_retention_log.row_count)` in one
+  statement and keeps it in each manifest as `samples_total` (`~/qnap-nas-docker/bmsmon/CLAUDE.md`).
+  Never delete `samples_retention_log` rows: the next dump would be held back.
+- A very late sample for a dropped month re-creates its partition (the process cache forgets
+  dropped months), and the next pass drops it again with a second log row.
+After a drop, Journey trails, charge sessions and efficiency for that month are empty by
+design. History and Fleet Health trends come from the rollup and stay.
+
 **GPS retention (SEC-12).** `BMSMON_GPS_RETENTION_DAYS` (default 1095; ≤ 0 disables). The
-daily scrub NULLs `lat`/`lon`/`gps_accuracy_m` and never deletes rows. It walks only
+daily scrub NULLs `lat`/`lon`/`gps_accuracy_m` and never deletes rows. At the defaults raw
+retention drops rows long before 1095 days, so the scrub has nothing left to do. It walks only
 `[watermark, cutoff)` (`gps_scrub_state`), per pack, one day per statement, so the daily cost
 is one day and a retention change becomes many small transactions. A sample that arrives
 *already* past retention (a late outbox drain, a history import) is stored and broadcast
@@ -2321,7 +2350,11 @@ Origin check.
 On startup the new container re-runs `schema.sql`, so additive columns/tables land
 automatically. A boot against an up-to-date database takes no table lock. Only a deploy that
 actually adds a column can wait on a dump in progress (retrying for up to ~5 min, then the
-container restarts). A newly declared `samples` index is built in the background after boot
+container restarts). A deploy that bumps `rollup.ROLLUP_SCHEMA_VER` (the first is the raw-retention
+deploy, which adds capacity/cycles) re-rolls the rollup's whole history in the background
+about 20 s after boot, one month per transaction: `docker logs bmsmon-api 2>&1 | grep -i rollup`,
+then `SELECT rollup_schema_ver FROM samples_rollup_state` reads the new version. Charts and the
+health check are unaffected meanwhile. A newly declared `samples` index is built in the background after boot
 by the maintenance pass: `docker logs bmsmon-api 2>&1 | grep maintenance`, then
 `SELECT indisvalid FROM pg_index WHERE indexrelid = '<name>'::regclass` reads `t`.
 Changes to the **stack** itself (`bmsmon/docker-compose.yml` or the shared `.env`) deploy

@@ -1,7 +1,7 @@
 # DB Retention Strategy — keep the cloud DB under 25 GB while preserving a decade of battery health
 
 **Date:** 2026-07-22
-**Status:** Approved design, pre-implementation
+**Status:** Implemented 2026-11-16 (see "As built" at the end: three changes from this design)
 **Goal:** Bound the production Postgres DB at a comfortable steady state (~10 GB, hard budget 25 GB)
 without ever losing the long-term battery-health record.
 
@@ -145,3 +145,26 @@ and rollup loops: one pass shortly after startup, then every 24 h).
   partition" statement, the schema/rollup section, and the Cloud Server section.
 - **`~/GoogleDrive/obsidian/notes/Bmsmon.md`** — reflect the new retention/archive posture.
 - **Deploy runbook** note (in CLAUDE.md): the one-time re-roll on this deploy and how to watch it.
+
+## As built (2026-11-16)
+
+The July branch was never merged; it was re-implemented on November's `main`. Three changes:
+
+1. **No high-water reset for the backfill.** Resetting the mark to 0 would have failed the
+   `/api/v1/health/detail` rollup-lag check (and paged) for the minutes the re-roll takes, and
+   sent every chart to raw meanwhile. Instead `rollup.reroll_if_schema_stale` re-rolls every
+   bucket below the unchanged mark, month by month, then stamps `rollup_schema_ver`; retention
+   also requires that stamp (`rollup_schema_current`), which replaces the reset as the
+   interlock.
+2. **Retention is a step of the hourly maintenance pass**, not its own daily loop, and each
+   DROP runs under the 0.5 s `PARTITION_LOCK_TIMEOUT` (SRV-24), so it never queues ingest behind
+   the nightly `pg_dump`; a pass that gives up retries an hour later.
+3. **Drops are logged** in `samples_retention_log` (partition, row count), in the DROP's own
+   transaction. The NAS backup's content floor (`~/qnap-nas-docker/bmsmon-backup/backup.sh`)
+   treated any shrink of `samples` as a lost database and would have held back every dump after
+   a drop; it now compares `count(samples) + sum(row_count)`, recorded per dump as
+   `samples_total`.
+
+Column adds go through `schema.sql`'s `pg_temp.add_column_if_missing`, so a boot against an
+up-to-date database still takes no table lock.
+
