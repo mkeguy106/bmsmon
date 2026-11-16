@@ -24,6 +24,15 @@ Late data handling:
   UPDATE samples_rollup_state SET high_water_ms = 0 — the next pass re-backfills
   everything from raw, chunked by UTC month so no giant transaction is held.
 
+Capacity + cycles (DB retention, 2026-07-22 design): the rollup is the permanent battery-
+health archive, because raw partitions are dropped after BMSMON_RAW_RETENTION_MONTHS
+(app/db/retention.py). So it also keeps cap_sum/cap_n (absolute full-charge Ah) and
+cycles_max. ROLLUP_SCHEMA_VER versions the columns: when it is above the stored version,
+the next pass first re-rolls every bucket already below the mark (still in raw), then stamps
+the version. The mark itself never moves back, so queries keep their rollup path and the
+health check's rollup lag stays green during the backfill. Retention drops nothing while
+the stamp is behind (rollup_schema_current).
+
 Ingest NEVER writes this table synchronously — only the background task in app.main
 (mirroring the GPS scrub loop) calls run_rollup_pass().
 """
@@ -37,6 +46,7 @@ from app.db.pool import MAINTENANCE_TIMEOUT_S
 ROLLUP_BUCKET_MS = 1_800_000            # 30 min — must match queries.HISTORY_BUCKET_MS
 ROLLUP_SAFETY_LAG_MS = 5 * 60_000       # only roll buckets whose end is >= this far past
 ROLLUP_REROLL_MS = 48 * 3_600_000       # trailing window re-upserted every pass
+ROLLUP_SCHEMA_VER = 1                   # bump when rollup columns change: forces one full re-roll
 
 # Full-replace upsert of every 30-min bucket in [$1, $2): the GROUP BY recomputes the
 # whole bucket from raw, so re-rolling is idempotent and folds in late arrivals.
@@ -49,9 +59,11 @@ ROLLUP_REROLL_MS = 48 * 3_600_000       # trailing window re-upserted every pass
 _UPSERT = f"""
 INSERT INTO samples_rollup AS r
   (address, bucket_ms, n, soc_sum, soc_n, soh_sum, soh_n,
-   spread_sum, spread_n, temp_sum, temp_n, temp_min, temp_max)
+   spread_sum, spread_n, temp_sum, temp_n, temp_min, temp_max,
+   cap_sum, cap_n, cycles_max)
 SELECT b.address, s.bucket_ms, s.n, s.soc_sum, s.soc_n, s.soh_sum, s.soh_n,
-       s.spread_sum, s.spread_n, s.temp_sum, s.temp_n, s.temp_min, s.temp_max
+       s.spread_sum, s.spread_n, s.temp_sum, s.temp_n, s.temp_min, s.temp_max,
+       s.cap_sum, s.cap_n, s.cycles_max
   FROM batteries b
   CROSS JOIN LATERAL (
     SELECT (ts_ms / {ROLLUP_BUCKET_MS}) * {ROLLUP_BUCKET_MS} AS bucket_ms,
@@ -61,7 +73,9 @@ SELECT b.address, s.bucket_ms, s.n, s.soc_sum, s.soc_n, s.soh_sum, s.soh_n,
            sum(((cell_max_v - cell_min_v) * 1000)::float8) AS spread_sum,
            count(cell_max_v - cell_min_v)::int AS spread_n,
            sum(temp_c::float8) AS temp_sum, count(temp_c)::int AS temp_n,
-           min(temp_c) AS temp_min, max(temp_c) AS temp_max
+           min(temp_c) AS temp_min, max(temp_c) AS temp_max,
+           sum(full_charge_ah::float8) AS cap_sum, count(full_charge_ah)::int AS cap_n,
+           max(cycles) AS cycles_max
       FROM samples s
      WHERE s.address = b.address
        AND s.ts >= to_timestamp($1::double precision / 1000.0)
@@ -75,7 +89,8 @@ ON CONFLICT (address, bucket_ms) DO UPDATE SET
   soh_sum = EXCLUDED.soh_sum, soh_n = EXCLUDED.soh_n,
   spread_sum = EXCLUDED.spread_sum, spread_n = EXCLUDED.spread_n,
   temp_sum = EXCLUDED.temp_sum, temp_n = EXCLUDED.temp_n,
-  temp_min = EXCLUDED.temp_min, temp_max = EXCLUDED.temp_max
+  temp_min = EXCLUDED.temp_min, temp_max = EXCLUDED.temp_max,
+  cap_sum = EXCLUDED.cap_sum, cap_n = EXCLUDED.cap_n, cycles_max = EXCLUDED.cycles_max
 """
 
 
@@ -93,6 +108,38 @@ async def _set_high_water_ms(conn: asyncpg.Connection, ms: int) -> None:
            ON CONFLICT (id) DO UPDATE SET
              high_water_ms = GREATEST(samples_rollup_state.high_water_ms, EXCLUDED.high_water_ms)""",
         ms)
+
+
+async def rollup_schema_current(conn: asyncpg.Connection) -> bool:
+    """Whether every bucket below the mark carries the current rollup columns."""
+    v = await conn.fetchval("SELECT rollup_schema_ver FROM samples_rollup_state WHERE id = 1")
+    return v is not None and int(v) >= ROLLUP_SCHEMA_VER
+
+
+async def reroll_if_schema_stale(conn: asyncpg.Connection) -> int:
+    """If the stored rollup_schema_ver is below ROLLUP_SCHEMA_VER, re-roll every bucket
+    below the high-water mark from raw, one UTC month per transaction, then stamp the
+    version. The mark is not moved. An interrupted re-roll starts over on the next pass
+    (the upsert is idempotent). Returns bucket rows upserted; 0 when already current."""
+    if await rollup_schema_current(conn):
+        return 0
+    hw = await get_high_water_ms(conn)
+    total = 0
+    if hw > 0:
+        first = await conn.fetchval("SELECT min(ts_ms) FROM samples WHERE link_event IS NULL",
+                                    timeout=MAINTENANCE_TIMEOUT_S)
+        if first is not None:
+            lo = (int(first) // ROLLUP_BUCKET_MS) * ROLLUP_BUCKET_MS
+            for a, c in _month_chunks(lo, hw):
+                async with conn.transaction():
+                    status = await conn.execute(_UPSERT, a, c, timeout=MAINTENANCE_TIMEOUT_S)
+                    total += int(status.rsplit(" ", 1)[-1])
+    await conn.execute(
+        """INSERT INTO samples_rollup_state (id, high_water_ms, rollup_schema_ver)
+           VALUES (1, $1, $2)
+           ON CONFLICT (id) DO UPDATE SET rollup_schema_ver = EXCLUDED.rollup_schema_ver""",
+        hw, ROLLUP_SCHEMA_VER)
+    return total
 
 
 def _month_chunks(lo_ms: int, hi_ms: int) -> list[tuple[int, int]]:
@@ -119,6 +166,7 @@ async def run_rollup_pass(conn: asyncpg.Connection, now_ms: int | None = None) -
     upserted."""
     if now_ms is None:
         now_ms = int(time.time() * 1000)
+    rerolled = await reroll_if_schema_stale(conn)
     b = ROLLUP_BUCKET_MS
     target = ((now_ms - ROLLUP_SAFETY_LAG_MS) // b) * b  # buckets < target are closed
     hw = await get_high_water_ms(conn)
@@ -129,13 +177,13 @@ async def run_rollup_pass(conn: asyncpg.Connection, now_ms: int | None = None) -
         first = await conn.fetchval("SELECT min(ts_ms) FROM samples WHERE link_event IS NULL",
                                     timeout=MAINTENANCE_TIMEOUT_S)
         if first is None:
-            return 0
+            return rerolled
         lo = (int(first) // b) * b
     else:
         lo = max(0, min(hw, target - ROLLUP_REROLL_MS))
     if target <= lo:
-        return 0
-    total = 0
+        return rerolled
+    total = rerolled
     for a, c in _month_chunks(lo, target):
         async with conn.transaction():
             status = await conn.execute(_UPSERT, a, c, timeout=MAINTENANCE_TIMEOUT_S)

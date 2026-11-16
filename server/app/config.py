@@ -99,10 +99,16 @@ class Settings:
         "BMSMON_INGEST_TS_MAX_FUTURE_MS", str(48 * 3600 * 1000)  # server now + 48h
     ))
     # GPS retention (SEC-12): samples older than this many days get their location columns
-    # (lat/lon/gps_accuracy_m) set to NULL by a daily background scrub. Telemetry rows are
-    # NEVER deleted — battery history is kept forever; only location data expires. Default
-    # 1095 days (3 years). Set <= 0 to disable scrubbing entirely (keep GPS forever).
+    # (lat/lon/gps_accuracy_m) set to NULL by a daily background scrub. Default 1095 days
+    # (3 years). Set <= 0 to disable scrubbing entirely (keep GPS forever). Raw retention
+    # below drops whole rows sooner, so at the defaults the scrub finds nothing to do.
     gps_retention_days: int = int(os.environ.get("BMSMON_GPS_RETENTION_DAYS", "1095"))
+    # Raw retention (2026-07-22 design): the hourly maintenance pass DROPs samples monthly
+    # partitions whose whole month is older than this many months, once the rollup has
+    # archived them (app/db/retention.py). Battery history stays forever at 30-min resolution
+    # in samples_rollup; fine-grained raw (GPS trails, charge sessions, efficiency) expires.
+    # Default 12. Set <= 0 to disable (keep raw forever).
+    raw_retention_months: int = int(os.environ.get("BMSMON_RAW_RETENTION_MONTHS", "12"))
     # SEC-23/SRV-17: GET /api/v1/health/detail fails its "ingest" check (503 -> the uptime
     # monitor pages) once no non-revoked device has uploaded for this many seconds. The
     # phone uploads every ~15 s while monitoring; 30 min rides out a deploy or a short

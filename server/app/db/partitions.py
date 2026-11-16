@@ -29,9 +29,11 @@ def _months_in_range(min_ms: int, max_ms: int) -> set[tuple[int, int]]:
 # state, so the 99.99%-case ingest batch skips the CREATE TABLE IF NOT EXISTS + savepoint
 # round trip entirely. Grows by one entry per month for the process lifetime — bounded in
 # practice (a year of uptime = 12 tuples). PROCESS-LOCAL is fine (single worker, SRV-8),
-# and safe across test apps: entries are only added for verified-committed partitions,
-# and the app never drops a partition (test TRUNCATEs keep them; a test that drops one
-# calls reset_ensured_months()).
+# and safe across test apps: entries are only added for verified-committed partitions.
+# The retention pass (app/db/retention.py) drops partitions past the raw window and evicts
+# each from this cache with discard_ensured_month, so a very late sample for that month
+# re-creates its partition instead of failing on a stale entry (a test that drops one by
+# hand calls reset_ensured_months()).
 #
 # ROLLBACK SAFETY: a month is NEVER added right after a CREATE that ran inside an outer
 # (ingest) transaction — that CREATE is a savepoint and rolls back with the batch, and a
@@ -61,6 +63,11 @@ def next_month_partition_name(now_ms: int) -> str:
 def reset_ensured_months() -> None:
     """Test hook: forget which partitions this process has verified."""
     _ensured.clear()
+
+
+def discard_ensured_month(year: int, month: int) -> None:
+    """Forget one month's partition after the retention pass dropped it."""
+    _ensured.discard((year, month))
 
 
 async def _create_partition(conn: asyncpg.Connection, name: str, start: str, end: str) -> bool:

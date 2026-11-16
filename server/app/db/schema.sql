@@ -153,6 +153,30 @@ CREATE TABLE IF NOT EXISTS samples_rollup_state (
   high_water_ms bigint NOT NULL
 );
 
+-- DB retention (2026-07-22 design): samples_rollup is the permanent (5-10 year) battery-health
+-- archive, so it also keeps the two long-term fade signals raw carries: absolute full-charge
+-- capacity (cap_sum/cap_n, sum + count so coarser buckets re-aggregate exactly) and the cycle
+-- count (monotonic, so max of maxes is exact). rollup_schema_ver: when the code's
+-- rollup.ROLLUP_SCHEMA_VER is higher, the next rollup pass resets the high-water mark once,
+-- re-rolling every bucket from raw so new columns are backfilled.
+SELECT pg_temp.add_column_if_missing('samples_rollup', 'cap_sum', 'double precision');
+SELECT pg_temp.add_column_if_missing('samples_rollup', 'cap_n', 'int NOT NULL DEFAULT 0');
+SELECT pg_temp.add_column_if_missing('samples_rollup', 'cycles_max', 'int');
+SELECT pg_temp.add_column_if_missing('samples_rollup_state', 'rollup_schema_ver',
+                                     'smallint NOT NULL DEFAULT 0');
+
+-- One row per raw samples partition the retention pass dropped (app/db/retention.py), with
+-- the rows it held. The DROP and this row commit together. The NAS backup's content floor
+-- reads count(samples) + sum(row_count), which only ever grows, so a deliberate drop is
+-- never mistaken for an emptied database. A month can appear twice: a very late sample can
+-- re-create a dropped partition, and the next pass drops it again.
+CREATE TABLE IF NOT EXISTS samples_retention_log (
+  id bigserial PRIMARY KEY,
+  partition_name text NOT NULL,
+  row_count bigint NOT NULL,
+  dropped_at timestamptz NOT NULL DEFAULT now()
+);
+
 -- SEC-12/SRV-22: GPS retention scrub watermark (single row). The daily scrub walks only
 -- [scrubbed_before_ms, cutoff) and then advances the mark to the cutoff. Samples that
 -- arrive already past retention have their coordinates stripped at ingest
