@@ -21,6 +21,9 @@ class AgentSessionTest {
 
     @Test fun endParses() = assertEquals(AgentOp.End, parseAgentOp("end", null))
 
+    @Test fun releaseOwnerParses() =
+        assertEquals(AgentOp.ReleaseOwner, parseAgentOp("release-owner", null))
+
     @Test fun unknownOpIsIgnored() {
         assertNull(parseAgentOp("stop", 5))
         assertNull(parseAgentOp(null, 5))

@@ -10,5 +10,6 @@ import android.app.admin.DeviceAdminReceiver
  *   adb shell dpm set-device-owner dev.joely.bmsmon/.BmsDeviceAdminReceiver
  *
  * With no provisioning this receiver does nothing and lock-task mode falls back to screen pinning.
+ * Provisioned on the chair Pixel 2026-11-16. Undo: the agent receiver's `op release-owner`.
  */
 class BmsDeviceAdminReceiver : DeviceAdminReceiver()
