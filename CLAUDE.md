@@ -737,12 +737,14 @@ The system replaces an updating app's activity with SystemUI's `PackageUpdateAct
 lock-task mode is on ("Skip applying hierarchy operation setPackageUpdateHandled while in lock
 task mode"). The chair-mounted screen then shows "Updating…" instead of the batteries, and
 `am start` is delivered to the placeholder. Monitoring and uploads keep running underneath.
-Seen 2026-10-04. So when `dumpsys activity activities | grep mLockTaskModeState` reads `PINNED`:
+Seen 2026-10-04. So when `dumpsys activity activities | grep mLockTaskModeState` reads `LOCKED`
+(or `PINNED`):
 
-1. `adb shell am task lock stop` (unpin) **before** `adb install -r`.
+1. Lift the pin with an agent session (`op start`, below) **before** `adb install -r`. Since bmsmon
+   is the device owner (2026-11-16), this is the way that worked: the app unpins itself, with no
+   trip to the lock screen. The install restarts the process, which ends the session.
 2. After the install, `adb shell am start -n dev.joely.bmsmon/.MainActivity`.
-3. The app's lock mode re-pins itself; confirm the "App is pinned" prompt with **Got it**, which
-   restores the user's chosen state.
+3. The app's lock mode re-pins itself as `LOCKED`, with no prompt.
 
 Unpinning can drop this phone to the **lock screen** (screen pinning asks for the unlock before
 unpinning), so install while the user can unlock it. Locked mode re-pins on every resume while
@@ -785,12 +787,28 @@ adb shell am start -n dev.joely.bmsmon/.MainActivity   # always, after every tas
   - While locked mode is on, nothing is pinned and no session runs, the stage shows
     "● NOT PINNED · TAP TO PIN" (`PinLiftedBanner`, mode polled once a second), so a lifted pin
     is never silent.
-  - The owner then taps **Got it** on the system's pin prompt.
+  - As device owner the re-pin takes effect at once; before that, the owner tapped **Got it**.
 - A session lifts only a pin that locked mode set (`shouldUnpinForAgent` requires `locked`).
 - `op start` takes effect when bmsmon is started. If the phone's screen is off, wake it or
   `am start` bmsmon first.
 - The owner's rule: when a phonedriver task is done, bmsmon goes back up pinned (`op end` +
-  `am start`, then confirm `mLockTaskModeState=PINNED`).
+  `am start`, then confirm `mLockTaskModeState=LOCKED`).
+
+**Device owner (2026-11-16).** bmsmon is the phone's device owner
+(`dpm set-device-owner dev.joely.bmsmon/.BmsDeviceAdminReceiver`), so `startLockTaskCompat`
+(`ui/App.kt`) allowlists it and its pin is lock-task `LOCKED`, not screen pinning: no "App is
+pinned · Got it" prompt, and no swipe-up-and-hold escape. The way out is turning locked mode off
+inside bmsmon. `setLockTaskFeatures` keeps status-bar info, the power menu and the lock screen
+(policy flags 49), as screen pinning had them.
+- **Undo:** Settings cannot remove a device owner and `dpm remove-active-admin` refuses a
+  non-testOnly app, so the app does it itself, behind the agent receiver's DUMP guard:
+  `adb shell am broadcast -n dev.joely.bmsmon/.agent.AgentSessionReceiver --es op release-owner`
+  (verified on device 2026-11-16; it also clears the lock-task policy, so the next pin is screen
+  pinning with the prompt again).
+- **Setting it again** needs no accounts on the phone: `dpm set-device-owner` refuses while any
+  exist (Google, Reddit…). Remove them in Settings › Passwords & accounts (Google's removal asks
+  for the owner's fingerprint/PIN on the real screen), run the command, then the owner signs back in.
+- A device-owner app cannot be uninstalled, which matches the never-uninstall rule.
 
 **ADB authorization lapses after ~7 days unused.** Android revokes the debug authorization; USB then
 shows "unauthorized" and wireless TLS fails with `CERTIFICATE_UNKNOWN`. Recover with Developer
