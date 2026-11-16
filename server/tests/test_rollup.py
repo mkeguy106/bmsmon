@@ -247,6 +247,78 @@ async def test_main_run_rollup_wrapper(app):
     assert await run_rollup(app.state.pool) == 0
 
 
+async def test_rollup_captures_capacity_and_cycles_exactly(app):
+    """cap_sum/cap_n/cycles_max match a raw GROUP BY per bucket and re-aggregate exactly
+    (sum of sums / sum of counts for capacity, max of maxes for cycles)."""
+    pool = app.state.pool
+    async with pool.acquire() as conn:
+        await _seed_registry(conn)
+        now = int(time.time() * 1000)
+        base = ((now - 8 * 3_600_000) // B) * B
+        rows = [q.sample_row(DEV, A, {"ts_ms": base + i * 60_000,
+                                      "full_charge_ah": 100.0 - i * 0.01,
+                                      "cycles": 10 + i // 40}) for i in range(120)]
+        rows.append(q.sample_row(DEV, A, {"ts_ms": base + 5_000, "link_event": "Connected",
+                                          "full_charge_ah": 1.0, "cycles": 999}))  # excluded
+        await q.insert_samples(conn, rows)
+        await ru.run_rollup_pass(conn, now_ms=now)
+
+        rolled = await conn.fetch(
+            "SELECT bucket_ms, cap_sum, cap_n, cycles_max FROM samples_rollup "
+            "WHERE address = $1 ORDER BY bucket_ms", A)
+        assert len(rolled) == 4
+        for r in rolled:
+            raw = await conn.fetchrow(
+                f"""SELECT sum(full_charge_ah::float8) s, count(full_charge_ah) n, max(cycles) mx
+                      FROM samples WHERE address = $1 AND link_event IS NULL
+                       AND (ts_ms / {B}) * {B} = $2""", A, r["bucket_ms"])
+            _eq(r["cap_sum"], raw["s"])
+            assert r["cap_n"] == raw["n"]
+            assert r["cycles_max"] == raw["mx"]
+        agg = await conn.fetchrow(
+            "SELECT sum(cap_sum) s, sum(cap_n) n, max(cycles_max) mx FROM samples_rollup "
+            "WHERE address = $1", A)
+        overall = await conn.fetchrow(
+            "SELECT sum(full_charge_ah::float8) s, count(full_charge_ah) n, max(cycles) mx "
+            "FROM samples WHERE address = $1 AND link_event IS NULL", A)
+        _eq(agg["s"] / agg["n"], overall["s"] / overall["n"])
+        assert agg["mx"] == overall["mx"] == 12
+
+
+async def test_schema_version_bump_backfills_below_the_mark_without_moving_it(app):
+    """A stored version below ROLLUP_SCHEMA_VER re-rolls every bucket under the mark once,
+    so rows rolled before the new columns existed get them. The mark never moves back (the
+    health check's rollup lag and the routed queries depend on it)."""
+    pool = app.state.pool
+    async with pool.acquire() as conn:
+        await _seed_registry(conn)
+        now = int(time.time() * 1000)
+        start = ((now - 10 * 3_600_000) // B) * B
+        await q.insert_samples(conn, [q.sample_row(DEV, A, {"ts_ms": start + i * 600_000,
+                                                            "soc": 50.0, "full_charge_ah": 99.0,
+                                                            "cycles": 7}) for i in range(30)])
+        await ru.run_rollup_pass(conn, now_ms=now)
+        hw = await ru.get_high_water_ms(conn)
+        assert await ru.rollup_schema_current(conn)
+        # As rolled by the old code: no capacity/cycles, an old schema version.
+        await conn.execute("UPDATE samples_rollup SET cap_sum = NULL, cap_n = 0, cycles_max = NULL")
+        await conn.execute("UPDATE samples_rollup_state SET rollup_schema_ver = 0")
+        assert not await ru.rollup_schema_current(conn)
+        assert await ru.reroll_if_schema_stale(conn) > 0
+        assert await ru.get_high_water_ms(conn) == hw
+        assert await conn.fetchval(
+            "SELECT count(*) FROM samples_rollup WHERE cap_n = 0 OR cycles_max IS NULL") == 0
+        assert await ru.rollup_schema_current(conn)
+        assert await ru.reroll_if_schema_stale(conn) == 0   # once only
+
+
+async def test_fresh_db_stamps_the_schema_version(app):
+    async with app.state.pool.acquire() as conn:
+        assert await ru.run_rollup_pass(conn) == 0
+        assert await ru.rollup_schema_current(conn)
+        assert await ru.get_high_water_ms(conn) == 0
+
+
 async def test_web_routes_shapes_span_high_water(app, client):
     """Route sanity: history/trends/charge-sessions shapes unchanged with data
     spanning the high-water mark (rollup + raw tail)."""
