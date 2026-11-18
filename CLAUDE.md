@@ -950,8 +950,10 @@ kept on screen, muted. Two failures it exists for, both seen on this fleet: **(1
 (2012-B)** — the 24 V charger ends on taper, so the lower pack of a drifting pair can miss its BMS
 full-detect; its coulomb counter then pins at the 120 Ah ceiling instead of clamping to
 `full_charge_ah` (105) and reads ~15 Ah high until a charge that does hit full-detect (the
-2026-11-10 and 11-16 charges; on 11-18 2012-B read 99 % / 111.84 Ah beside its partner's 92 % /
-97.03 Ah); **(2) sub-deadband self-drain (spares)** — the counter ignores current under the BMS's
+overnight charges that ended 2026-11-11 08:38Z and 2026-11-17 07:38Z, UTC; they started the local
+evenings before, so the spec calls them the 11-10 and 11-16 charges and `docs/checkins/NEXT.md` the
+2026-11-11 and 2026-11-16 charges; on 2026-11-18 2012-B read 99 % / 111.84 Ah beside its partner's
+92 % / 97.03 Ah); **(2) sub-deadband self-drain (spares)** — the counter ignores current under the BMS's
 ~1.04 A deadband, so the spares read 99 % since July at a rest voltage worth ~55–65 %. Pure,
 JVM-tested module `model/SocEstimate.kt` (no Android imports, no clock); the engine only feeds it.
 - **Shape.** Per pack, a held `SocCorrection(correctionAh, source COUNTER|VOLTAGE|null, setAtMs)`
@@ -993,17 +995,34 @@ JVM-tested module `model/SocEstimate.kt` (no Android imports, no clock); the eng
 - **Held, persisted, cleared.** The correction is held through driving and charging, which is what
   makes the swap case right (a spare corrected to ~60 % at home counts down from ~60 on the chair, not
   from 99) and is changed only by the rules above; the next real full-detect clears it. Persisted per
-  address in `SettingsStore` (`soc_corrections_by_address`, `addr=correctionAh|SOURCE|setAtMs` joined by
-  `;`, malformed entries dropped individually); rest tracking is memory-only. The settings load installs
-  the map and the engine skips estimating until it has (`estLoaded`): that window, and a whole session if
-  the load throws, shows the raw BMS reading (pre-feature behaviour, never above the BMS).
+  address in `SettingsStore` (`soc_corrections_by_address`, `PersistedEst`:
+  `addr=correctionAh|SOURCE|setAtMs|lastRawAh` joined by `;`; a three-part entry from before the last
+  raw was kept decodes with none, a bad last raw costs only the last raw, other malformed entries are
+  dropped individually). The **last raw remaining Ah** is persisted so the unseen-charge rule survives
+  a restart: without it a spare charged to a clamped full while the app was down kept its ~39 Ah
+  VOLTAGE correction and read ~60 % when full. Rest and taper tracking are memory-only. The engine
+  writes on a correction change or a charge end (`estPersistWorthy`), and once more in `stop()`;
+  each snapshot is taken at the change under `estState`'s lock, numbered, and an older one never
+  lands after a newer one; the next `start()`'s load waits for `stop()`'s write. The settings load
+  installs the map and the engine skips estimating until it has (`estLoaded`): that window, and a
+  whole session if the load throws, shows the raw BMS reading (pre-feature behaviour, never above the
+  BMS); nothing is written in that window either, so a restart race can never wipe the store.
+  `onPoll` judges session, `seeding` and `estLoaded` together inside the lock.
 - **One-time replay (`model/SocReplay.kt`).** The moments that set 2012-B's correction had already
   passed, so the first start of this version replays the phone's 14 days of Room `samples` through the
   same `stepEstimate` (`seedEstimator()`: replay every roster pack, install all at once, only then
-  persist and set `soc_estimator_seeded`; any failure logs, installs and marks nothing, and retries next
-  start). It runs when `soc_estimator_seeded` is false (first install, Clear data), off-main, in
-  `(tsMs, id)` keyset pages (`ESTIMATE_PAGE_SQL`, `TelemetryRepository.forEachEstimateRow`, never a list),
-  telemetry rows only, rest tracking on the rows' own timestamps; live frames wait on `seeding`. Test
+  persist and set `soc_estimator_seeded`). A failure while replaying logs and installs and marks
+  nothing; a failure writing the flag comes after the install, so the replayed states stay in force
+  (and may already be written) but the flag is not; either way the next start replays again. A
+  cancellation (Stop) is rethrown, not logged. It runs when `soc_estimator_seeded` is false (first
+  install of this version, or app storage cleared; the in-app Clear data resets neither the flag nor
+  the corrections), off-main, in `(tsMs, id)` keyset pages (`ESTIMATE_PAGE_SQL`,
+  `TelemetryRepository.forEachEstimateRow`, never a list), telemetry rows only, rest tracking on the
+  rows' own timestamps, starting from each pack's persisted correction but not its last raw. While it
+  runs (`seeding`) live frames are shown raw and **not stepped** (they do not wait), so a frame that
+  arrives after a pack's page walk and before the install is never folded in. A late start from an
+  ended session neither starts a replay nor cancels the current one, and `seeding` ends from the job's
+  `invokeOnCompletion`, session-checked. Test
   fixture `app/src/test/resources/soc/2012b-2026-11-16-charge-end.csv` (real prod rows) yields 15.0 Ah
   COUNTER for 2012-B. No Room schema change.
 - **The swap is at `BatteryStatus`.** `MonitorEngine.onPoll` applies `Telemetry.withEstimate(est)` to the
@@ -1025,7 +1044,7 @@ JVM-tested module `model/SocEstimate.kt` (no Android imports, no clock); the eng
   VOLTAGE (coarser) and none for COUNTER (exact); a muted `BMS 99%` line under the pack name and a muted
   `BMS 113 Ah` sub-line in the Capacity tile (`BMS —` when disconnected). All Batteries: header % is
   ours, the capacity row ends with a fixed 96 dp muted `bms 99% · 113` (`ui/EstimateText.kt`
-  `bmsListTail`/`bmsSocLine`/`bmsCapLine`). Detail: `92 %  (BMS 99 %)`. Severity colour/LOW/CRIT follow
+  `bmsListTail`/`bmsSocLine`/`bmsCapLine`). Detail: `92%  (BMS 99%)` (`detailSocText`). Severity colour/LOW/CRIT follow
   the estimate. Debug `TempPreviewActivity` takes `est` = `counter|voltage|off` for emulator shots.
 - **Calibration debt.** The table is fitted only from 40–100 %; the owner will run base 2012 to ~20 % to
   supply the rest (`docs/checkins/NEXT.md`, "Re-calibrate the rest-voltage → SOC table below 40 %").
@@ -1478,16 +1497,20 @@ them, and it is not in the rollup, trends, charge sessions or the share feed. Wi
 and `_clip_est_source` nulls anything but `counter`/`voltage` instead of rejecting the batch). They
 ride `_COLS`/`sample_row()`, `fleet_snapshot` (`/web/fleet`) and the `/ws` broadcast (which publishes
 the validated sample verbatim) like `eta_full_min`. `/api/v1/groups` added the three names to
-`PACK_FIELDS` (its `soc` stays raw; the widget chooses `est_soc ?? soc`), and the server-side status
+`PACK_FIELDS` (its `soc` stays raw; the widget shows `min(est_soc, soc)`, else `soc`), and the server-side status
 ladder `_status()` (`routers/api_widget.py`) reads `est_soc` when present, else `soc`, so a spare the
 BMS calls 99 % but the phone estimates at 60 % is not a ready backup. **The WebUI swaps once at
 decode:** `web/src/estimate.ts` `applyEstimate` (called from `decodeSample`/`decodeFleetItem` in
-`decode.ts`) sets `soc`/`remaining_ah` to `est_* ?? raw` and keeps the raw pair as
-`bms_soc`/`bms_remaining_ah` (a `bms_*` on the wire is ignored), so every v1/v2 consumer (stage seize,
+`decode.ts`) sets `soc`/`remaining_ah` to `min(est_*, raw)` (raw when there is no estimate; the
+client enforces only-lowers itself) and keeps the raw pair as `bms_soc`/`bms_remaining_ah` (a `bms_*`
+on the wire is ignored); a telemetry sample with no `soc` gets `bms_*`/`est_*` as explicit nulls, so
+the store never keeps a stale BMS line beside the "—". So every v1/v2 consumer (stage seize,
 alerts, health tiles, recharge, dock, efficiency, `baseView`) follows the estimate unchanged; the muted
 `BMS NN%` / `BMS NN.N Ah` / `bms NN` lines and the `~` prefix for `est_source = voltage` are v2 only
 (`socLabel`/`bmsLabel`/`bmsShort`). **The share guest dock stays raw** (`pick_guest_status()` reads
-`soc`): a guest can see a spare's raw 99 % during a spare outing, accepted as low stakes. **Deploy
+`soc`): a guest can see a spare's raw 99 % during a spare outing, accepted as low stakes. Journey's
+per-bucket SOC (`/web/track`) and the Fleet Health 24 h sparkline (`/web/history`) also stay raw.
+**Deploy
 order: server first, then the APK**; an old server ignores the unknown keys (`SampleIn` has no
 `extra="forbid"`), so the wrong order only loses the fields.
 

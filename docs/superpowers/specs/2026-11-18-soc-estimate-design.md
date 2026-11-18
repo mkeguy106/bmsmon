@@ -11,8 +11,9 @@ relies on the app (not the chair's gauge) to avoid being stranded.
    the lower pack can miss its BMS full-detect. Its coulomb counter then pins at the 120 Ah
    ceiling instead of clamping to `full_charge_ah` (105), and reads high by the difference
    (≈15 Ah) until the next charge that does hit full-detect. It happened on the 2026-11-10 and
-   2026-11-16 charges. On 2026-11-18 18:13Z 2012-B read 99 % / 111.84 Ah while its partner 2012-A
-   read 92 % / 97.03 Ah; 111.84 − 15 = 96.84, matching A.
+   2026-11-16 charges (local start dates; they ended 2026-11-11 08:38Z and 2026-11-17 07:38Z).
+   On 2026-11-18 18:13Z 2012-B read 99 % / 111.84 Ah while its partner 2012-A read 92 % /
+   97.03 Ah; 111.84 − 15 = 96.84, matching A.
 2. **Silent self-drain (spares).** The counter does not integrate current below the BMS's
    ~1.04 A deadband. The spares (2016-A/B, 2023-A/B) have read 99 % since July with no charge,
    while their rest voltage fell to 13.10–13.14 V, roughly 55–65 %. If the owner swaps onto a
@@ -157,8 +158,9 @@ passed, so the estimator seeds itself once from the phone's Room `samples` (14 d
 is on). Owner chose this over starting fresh, so 2012-B is right from the first minute after the
 install.
 
-- Runs once, when no persisted estimator state exists (first install of this version, or after
-  Clear data). A persisted "seeded" flag stops it running again.
+- Runs once, when no persisted estimator state exists (first install of this version, or after the
+  app's storage is cleared; the in-app Clear data keeps it). A persisted "seeded" flag stops it
+  running again.
 - Streams each pack's rows in `(tsMs, id)` keyset pages (the `forEachRangeRow` pattern; never a
   list) through the same pure estimator the live path uses, in time order, telemetry rows only
   (`linkEvent IS NULL`). Room has every column the rules need: `state`, `currentA`, `voltageV`,
