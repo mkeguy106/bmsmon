@@ -944,6 +944,93 @@ pack's notification mid-drive and re-alarms it once the charge latch expires.
 - **Roster.** Only roster members can seize, and a memberless target falls back to the daily driver, then the first populated base, instead of a blank stage (UI-29).
 - `Settings › Alerts` carries the **"Pull low packs to stage"** toggle (default ON, phone-only) and the "Pull to stage at" level chips; fleet-wide notifications fire regardless.
 
+**Estimated SOC ("our estimate", 2026-11-18; spec `docs/superpowers/specs/2026-11-18-soc-estimate-design.md`).**
+Every display and decision shows the phone's own per-pack SOC/remaining Ah, with the BMS's reading
+kept on screen, muted. Two failures it exists for, both seen on this fleet: **(1) missed full-detect
+(2012-B)** — the 24 V charger ends on taper, so the lower pack of a drifting pair can miss its BMS
+full-detect; its coulomb counter then pins at the 120 Ah ceiling instead of clamping to
+`full_charge_ah` (105) and reads ~15 Ah high until a charge that does hit full-detect (the
+2026-11-10 and 11-16 charges; on 11-18 2012-B read 99 % / 111.84 Ah beside its partner's 92 % /
+97.03 Ah); **(2) sub-deadband self-drain (spares)** — the counter ignores current under the BMS's
+~1.04 A deadband, so the spares read 99 % since July at a rest voltage worth ~55–65 %. Pure,
+JVM-tested module `model/SocEstimate.kt` (no Android imports, no clock); the engine only feeds it.
+- **Shape.** Per pack, a held `SocCorrection(correctionAh, source COUNTER|VOLTAGE|null, setAtMs)`
+  with `estimateAh = rawRemainingAh − correctionAh`, clamped to [0, full]. `stepEstimate()` folds one
+  `EstReading` into `EstPackState`; `estimateOf()` returns `SocEstimate(soc, remainingAh, source)`.
+  **Only lowers:** `estimateOf` takes `min` with the BMS's own SOC and Ah, so the estimate can never
+  read above the BMS. No correction means the estimate IS the BMS reading. A non-positive full charge
+  or a non-finite input leaves the state alone.
+- **Rule 1, counter overshoot (exact, `COUNTER`).** A **full charge** is a charge end (first non-Charging
+  reading after Charging; regen is not Charging) preceded, within `TAPER_WINDOW_MS` 15 min, by taper:
+  voltage ≥ `TAPER_MIN_V` 13.90 V with current < `TAPER_MAX_A` 3 A. At a full charge's end: remaining
+  within `CLAMP_TOL_AH` 0.1 Ah of full (the BMS clamp) **clears** the correction; remaining above full
+  + `OVERSHOOT_AH` 0.5 **replaces** it with `remaining − full`. A partial charge only raises it to
+  that lower bound (the counter legitimately reaches 111–113 Ah mid-tail, so the correction survives
+  a half charge — replacing it at every charge end would show a half-charged spare as full). A
+  non-charging reading above full + 0.5 always raises the correction to at least `remaining − full`
+  (a lower bound: after driving, 2012-B at 111.84 shows 6.84 against a real 15). A raw counter rise of
+  more than `UNSEEN_CHARGE_RISE_AH` 2 Ah between sightings with no Charging seen means a charge
+  happened unseen: clamped to full clears, otherwise lower bound. A rested-voltage clear was
+  rejected: a pack that missed full-detect also rests at ~13.35 V, so voltage cannot tell a full pack
+  from 2012-B.
+- **Rule 2, rest voltage (coarse, `VOLTAGE`).** **Rested** = zero current (idle reads exactly 0.000 A)
+  for `REST_MIN_MS` 30 min, tracked in memory; any nonzero reading or a gap over `REST_GAP_MS` 10 min
+  restarts it (spares poll every 10 s, so a spare is rested 30 min after the phone first sees it).
+  `voltageSoc()` interpolates linearly in integer mV between these points (rested ≥ 30 min after
+  discharge, 2012 packs, 2026-11-18), 28 % below 12.90 V (a ceiling; the knee is uncalibrated, lower
+  only means a lower estimate), and **null at or above `VOLTAGE_PLATEAU_V` 13.30 V** (the top plateau,
+  ~78–95 %; 2012-A read 92 % at 13.325 V where the table would say ~83):
+
+  | V | 12.90 | 12.98 | 13.00 | 13.04 | 13.10 | 13.14 | 13.18 | 13.20 | 13.28 |
+  |---|---|---|---|---|---|---|---|---|---|
+  | % | 28 | 48 | 51 | 56 | 58 | 66 | 72 | 76 | 80 |
+
+  Measured at rest: MAE 3.6 pts, p90 7.5, **40–100 % only**. First correction only when `voltageSoc <
+  currentEst − FIRST_VOLTAGE_MARGIN_PTS` (10, above the p90 error so a daily driver's noise never moves
+  it); once VOLTAGE-sourced it **follows down** on each rested reading whenever voltage is more than
+  `FOLLOW_DOWN_MARGIN_PTS` (3) below the estimate, so a draining spare tracks its voltage. Voltage only
+  ever raises the correction; post-charge surface charge reads high, so it cannot fire falsely.
+- **Held, persisted, cleared.** The correction is held through driving and charging, which is what
+  makes the swap case right (a spare corrected to ~60 % at home counts down from ~60 on the chair, not
+  from 99) and is changed only by the rules above; the next real full-detect clears it. Persisted per
+  address in `SettingsStore` (`soc_corrections_by_address`, `addr=correctionAh|SOURCE|setAtMs` joined by
+  `;`, malformed entries dropped individually); rest tracking is memory-only. The settings load installs
+  the map and the engine skips estimating until it has (`estLoaded`): that window, and a whole session if
+  the load throws, shows the raw BMS reading (pre-feature behaviour, never above the BMS).
+- **One-time replay (`model/SocReplay.kt`).** The moments that set 2012-B's correction had already
+  passed, so the first start of this version replays the phone's 14 days of Room `samples` through the
+  same `stepEstimate` (`seedEstimator()`: replay every roster pack, install all at once, only then
+  persist and set `soc_estimator_seeded`; any failure logs, installs and marks nothing, and retries next
+  start). It runs when `soc_estimator_seeded` is false (first install, Clear data), off-main, in
+  `(tsMs, id)` keyset pages (`ESTIMATE_PAGE_SQL`, `TelemetryRepository.forEachEstimateRow`, never a list),
+  telemetry rows only, rest tracking on the rows' own timestamps; live frames wait on `seeding`. Test
+  fixture `app/src/test/resources/soc/2012b-2026-11-16-charge-end.csv` (real prod rows) yields 15.0 Ah
+  COUNTER for 2012-B. No Room schema change.
+- **The swap is at `BatteryStatus`.** `MonitorEngine.onPoll` applies `Telemetry.withEstimate(est)` to the
+  raw frame ONCE (never twice): `Telemetry.soc`/`capacityAh` become the estimate, the BMS's own values
+  ride in `bmsSoc`/`bmsCapacityAh`, `estSource` names the rule. So every existing `.soc` read (stage,
+  `Alerts`/`reconcileFleetNotifications`, `seizeCandidate`, `stageAlert`, `socSeverityFor`,
+  `RangeEstimate`, the notification's "lowest") follows the estimate untouched. `rawSoc` /
+  `rawCapacityAh` give the BMS value either way. **`eta_full_min` is now computed from the estimate**
+  (`estimateChargeMinutes` takes the effective telemetry), so the uploaded and displayed ETA match.
+- **What stays raw.** Room `samples` (`repository.ingest` gets the raw frame), the upload's
+  `soc`/`remaining_ah`, `ChargeTailLearn` (reads Room; the engine's tail trigger reads `prevTel.rawSoc`),
+  `RangeLearn` (Room, energy-based), session rollups and History. The last-known seed keeps the BMS
+  fields too (`encodeTelemetry`), so a restart shows the real BMS line and the tail trigger stays raw.
+- **Upload.** Live batches carry `est_soc`, `est_remaining_ah`, `est_source` (`counter`|`voltage`) via
+  `estWire()` (`cloud/CloudJson.kt`) **only when a correction is active** (null otherwise, omitted on the
+  wire); non-finite values are dropped. Re-sync from Room does not carry them.
+- **Display (BMS line always present, muted, fixed position, so nothing jumps when the two agree).**
+  Stage: ring and big number are ours, a `~` prefix (26 sp span, digits stay 40 sp) when the source is
+  VOLTAGE (coarser) and none for COUNTER (exact); a muted `BMS 99%` line under the pack name and a muted
+  `BMS 113 Ah` sub-line in the Capacity tile (`BMS —` when disconnected). All Batteries: header % is
+  ours, the capacity row ends with a fixed 96 dp muted `bms 99% · 113` (`ui/EstimateText.kt`
+  `bmsListTail`/`bmsSocLine`/`bmsCapLine`). Detail: `92 %  (BMS 99 %)`. Severity colour/LOW/CRIT follow
+  the estimate. Debug `TempPreviewActivity` takes `est` = `counter|voltage|off` for emulator shots.
+- **Calibration debt.** The table is fitted only from 40–100 %; the owner will run base 2012 to ~20 % to
+  supply the rest (`docs/checkins/NEXT.md`, "Re-calibrate the rest-voltage → SOC table below 40 %").
+  Table, 12.90 V floor, 13.30 V cutoff and the 10/3 margins all live in `SocEstimate.kt`.
+
 **Temperature monitoring:** a vertical temperature gauge (`ui/gauge/TempGauge.kt`) sits beside the
 SOC ring on the stage (toggle + L/R position in settings), plus a `TEMP` stat tile. Thresholds are
 **per battery profile** (`BatteryProfile.tempEnvelope`; Redodo defaults cold-caution 5 / hot-caution
@@ -1381,6 +1468,28 @@ recent samples carry coordinates) and a browser-local **light/dark toggle** (sun
 header; default dark; persisted in `localStorage["bmsmon-theme"]`; light mode is a
 `:root[data-theme="light"]` CSS-variable override in `web/src/theme.css`). The page declares
 `<meta name="darkreader-lock">` so the Dark Reader extension never alters it in either mode.
+
+`samples` also carries the phone's **estimated SOC** (see "Estimated SOC" in the Android section):
+`est_soc` (`real`), `est_remaining_ah` (`real`) and `est_source` (`text`: `counter` | `voltage`), all
+nullable, added with `pg_temp.add_column_if_missing` and sent only while a correction is active. The
+raw `soc`/`remaining_ah` columns stay the BMS's own numbers; the estimate is **never** written over
+them, and it is not in the rollup, trends, charge sessions or the share feed. Wire/storage twins:
+`SampleJson` (`cloud/CloudJson.kt`) and `SampleIn` (`server/app/models.py`; `RealOrNone`/`TextOrNone`,
+and `_clip_est_source` nulls anything but `counter`/`voltage` instead of rejecting the batch). They
+ride `_COLS`/`sample_row()`, `fleet_snapshot` (`/web/fleet`) and the `/ws` broadcast (which publishes
+the validated sample verbatim) like `eta_full_min`. `/api/v1/groups` added the three names to
+`PACK_FIELDS` (its `soc` stays raw; the widget chooses `est_soc ?? soc`), and the server-side status
+ladder `_status()` (`routers/api_widget.py`) reads `est_soc` when present, else `soc`, so a spare the
+BMS calls 99 % but the phone estimates at 60 % is not a ready backup. **The WebUI swaps once at
+decode:** `web/src/estimate.ts` `applyEstimate` (called from `decodeSample`/`decodeFleetItem` in
+`decode.ts`) sets `soc`/`remaining_ah` to `est_* ?? raw` and keeps the raw pair as
+`bms_soc`/`bms_remaining_ah` (a `bms_*` on the wire is ignored), so every v1/v2 consumer (stage seize,
+alerts, health tiles, recharge, dock, efficiency, `baseView`) follows the estimate unchanged; the muted
+`BMS NN%` / `BMS NN.N Ah` / `bms NN` lines and the `~` prefix for `est_source = voltage` are v2 only
+(`socLabel`/`bmsLabel`/`bmsShort`). **The share guest dock stays raw** (`pick_guest_status()` reads
+`soc`): a guest can see a spare's raw 99 % during a spare outing, accepted as low stakes. **Deploy
+order: server first, then the APK**; an old server ignores the unknown keys (`SampleIn` has no
+`extra="forbid"`), so the wrong order only loses the fields.
 
 `samples` also carries **motion state** (deployed 2026-08-08 19:55): `motion_activity` (text —
 the phone's Activity Recognition reading, e.g. `STILL`/`IN_VEHICLE`/`UNKNOWN`),
