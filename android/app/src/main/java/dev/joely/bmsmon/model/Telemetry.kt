@@ -25,4 +25,9 @@ data class Telemetry(
     val mosfetTemp: Int = 0,
     val cells: List<Float> = emptyList(),
     val protections: List<String> = emptyList(),
+    /** The BMS's own SOC / remaining Ah, set only when [soc]/[capacityAh] carry an estimate
+     *  (see [withEstimate]); null on raw frames. */
+    val bmsSoc: Float? = null,
+    val bmsCapacityAh: Float? = null,
+    val estSource: EstSource? = null,
 )

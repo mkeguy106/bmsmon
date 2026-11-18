@@ -75,6 +75,7 @@ private val VOLTAGE_TABLE = arrayOf(
  */
 fun voltageSoc(voltageV: Float): Float? {
     // The BMS reports whole millivolts; integer mV keeps the interpolation exact at table points.
+    if (!voltageV.isFinite()) return null
     val mv = (voltageV * 1000f).roundToInt()
     if (mv >= (VOLTAGE_PLATEAU_V * 1000f).roundToInt()) return null
     if (mv <= VOLTAGE_TABLE.first().first) return VOLTAGE_TABLE.first().second.toFloat()
@@ -189,3 +190,19 @@ fun estimateOf(state: EstPackState, r: EstReading): SocEstimate {
     val soc = min(r.soc, (ah / r.fullChargeAh * 100f).roundToInt().toFloat())
     return SocEstimate(soc, min(ah, r.remainingAh), state.correction.source)
 }
+
+/** This telemetry with the estimate in [Telemetry.soc]/[Telemetry.capacityAh] and the BMS's own
+ *  values kept beside it. Apply to a raw frame, once. */
+fun Telemetry.withEstimate(e: SocEstimate): Telemetry = copy(
+    soc = e.soc,
+    capacityAh = e.remainingAh,
+    bmsSoc = soc,
+    bmsCapacityAh = capacityAh,
+    estSource = e.source,
+)
+
+/** The BMS's SOC, whether or not this telemetry carries an estimate. */
+val Telemetry.rawSoc: Float get() = bmsSoc ?: soc
+
+/** The BMS's remaining Ah, whether or not this telemetry carries an estimate. */
+val Telemetry.rawCapacityAh: Float get() = bmsCapacityAh ?: capacityAh

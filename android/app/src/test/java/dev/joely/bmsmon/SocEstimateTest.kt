@@ -5,6 +5,11 @@ import dev.joely.bmsmon.model.EstPackState
 import dev.joely.bmsmon.model.EstReading
 import dev.joely.bmsmon.model.EstSource
 import dev.joely.bmsmon.model.SocCorrection
+import dev.joely.bmsmon.model.SocEstimate
+import dev.joely.bmsmon.model.Telemetry
+import dev.joely.bmsmon.model.rawCapacityAh
+import dev.joely.bmsmon.model.rawSoc
+import dev.joely.bmsmon.model.withEstimate
 import dev.joely.bmsmon.model.estimateOf
 import dev.joely.bmsmon.model.stepEstimate
 import dev.joely.bmsmon.model.voltageSoc
@@ -251,5 +256,23 @@ class SocEstimateTest {
         assertEquals(28f, voltageSoc(12.5f)!!, 0f)
         assertNull(voltageSoc(13.30f))
         assertNull(voltageSoc(13.325f))
+        assertNull(voltageSoc(Float.NaN))
+    }
+
+    @Test fun withEstimateKeepsRaw() {
+        val raw = Telemetry(
+            name = "p", soc = 99f, powerW = 0f, current = 0f, voltage = 13.2f,
+            capacityAh = 111.84f, cellV = 3.3f, temp = 20f,
+        )
+        val t = raw.withEstimate(SocEstimate(92f, 96.84f, EstSource.COUNTER))
+        assertEquals(92f, t.soc, 0f)
+        assertEquals(96.84f, t.capacityAh, 0f)
+        assertEquals(99f, t.bmsSoc!!, 0f)
+        assertEquals(111.84f, t.bmsCapacityAh!!, 0f)
+        assertEquals(EstSource.COUNTER, t.estSource)
+        assertEquals(99f, t.rawSoc, 0f)
+        assertEquals(111.84f, t.rawCapacityAh, 0f)
+        assertEquals(99f, raw.rawSoc, 0f)
+        assertEquals(111.84f, raw.rawCapacityAh, 0f)
     }
 }
