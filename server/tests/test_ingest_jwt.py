@@ -457,3 +457,55 @@ async def test_ingest_clamps_out_of_range_motion_at_ms(app, client):
         row = await conn.fetchrow("SELECT motion_activity, motion_at_ms FROM samples")
     assert row["motion_activity"] == "STILL"
     assert row["motion_at_ms"] is None
+
+
+async def _ingest_one(app, client, sample: dict, seq: int):
+    priv, spki = _keypair()
+    device_id = await _enroll_device(app, spki)
+    body = json.dumps({"batch_seq": seq, "samples": [sample]}).encode()
+    r = await client.post("/api/v1/ingest", content=body,
+                          headers={"Authorization": f"Bearer {_token(priv, device_id, body)}"})
+    assert r.status_code == 200
+    assert counts(r.json()) == {"accepted": 1, "dropped": 0, "last_seq": seq}
+
+
+async def test_ingest_persists_est_fields_and_fleet_returns_them(app, client):
+    await _ingest_one(app, client, {
+        "ts_ms": int(time.time() * 1000), "address": A, "soc": 99.0, "remaining_ah": 113.1,
+        "est_soc": 93.4, "est_remaining_ah": 98.1, "est_source": "counter"}, 31)
+    async with app.state.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT soc, remaining_ah, est_soc, est_remaining_ah, est_source FROM samples")
+    assert abs(row["est_soc"] - 93.4) < 0.01
+    assert abs(row["est_remaining_ah"] - 98.1) < 0.01
+    assert row["est_source"] == "counter"
+    # the raw BMS values are untouched
+    assert abs(row["soc"] - 99.0) < 0.01
+    assert abs(row["remaining_ah"] - 113.1) < 0.01
+    async with app.state.pool.acquire() as conn:
+        fleet = await q.fleet_snapshot(conn)
+    f = next(x for x in fleet if x["address"] == A)
+    assert abs(f["est_soc"] - 93.4) < 0.01
+    assert abs(f["est_remaining_ah"] - 98.1) < 0.01
+    assert f["est_source"] == "counter"
+    assert abs(f["soc"] - 99.0) < 0.01
+
+
+async def test_ingest_bogus_est_source_stores_null_and_batch_is_accepted(app, client):
+    await _ingest_one(app, client, {
+        "ts_ms": int(time.time() * 1000), "address": A, "soc": 99.0,
+        "est_soc": 60.0, "est_source": "bogus"}, 32)
+    async with app.state.pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT est_soc, est_source FROM samples")
+    assert abs(row["est_soc"] - 60.0) < 0.01
+    assert row["est_source"] is None
+
+
+async def test_ingest_without_est_fields_stores_nulls(app, client):
+    await _ingest_one(app, client, {
+        "ts_ms": int(time.time() * 1000), "address": A, "soc": 99.0}, 33)
+    async with app.state.pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT est_soc, est_remaining_ah, est_source FROM samples")
+    assert row["est_soc"] is None
+    assert row["est_remaining_ah"] is None
+    assert row["est_source"] is None

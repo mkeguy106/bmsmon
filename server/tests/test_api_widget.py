@@ -133,3 +133,41 @@ async def test_last_used_at_is_recorded(app, client):
     await client.get("/api/v1/groups", headers={HDR: key})
     async with app.state.pool.acquire() as conn:
         assert (await q.list_api_keys(conn))[0]["last_used_at"] is not None
+
+
+async def test_groups_packs_carry_est_fields_and_raw_soc(app, client):
+    now_ms = int(time.time() * 1000)
+    async with app.state.pool.acquire() as conn:
+        key = await _mint(conn)
+        await _device(conn)
+        await q.upsert_battery(conn, A, "R-12100", "2012 · A", "2012", now_ms)
+        await q.insert_samples(conn, [q.sample_row(DEV, A, {
+            "ts_ms": now_ms - 1_000, "soc": 99.0, "current_a": 0.0, "remaining_ah": 113.0,
+            "est_soc": 60.0, "est_remaining_ah": 63.0, "est_source": "voltage"})])
+    body = (await client.get("/api/v1/groups", headers={HDR: key})).json()
+    pack = body["groups"][0]["packs"][0]
+    assert pack["soc"] == 99.0            # raw stays raw; the widget chooses
+    assert pack["est_soc"] == 60.0
+    assert pack["est_remaining_ah"] == 63.0
+    assert pack["est_source"] == "voltage"
+
+
+async def _status_for(app, client, sample: dict) -> str:
+    now_ms = int(time.time() * 1000)
+    async with app.state.pool.acquire() as conn:
+        key = await _mint(conn)
+        await _device(conn)
+        await q.upsert_battery(conn, A, "R-12100", "2012 · A", "2012", now_ms)
+        await q.insert_samples(conn, [q.sample_row(
+            DEV, A, {"ts_ms": now_ms - 1_000, "current_a": 0.0, **sample})])
+    body = (await client.get("/api/v1/groups", headers={HDR: key})).json()
+    return body["groups"][0]["status"]
+
+
+async def test_status_uses_est_soc_over_raw_soc(app, client):
+    # raw 99 would read "backup"; the corrected 60 says it is only a spare
+    assert await _status_for(app, client, {"soc": 99.0, "est_soc": 60.0}) == "spares"
+
+
+async def test_status_falls_back_to_raw_soc_without_estimate(app, client):
+    assert await _status_for(app, client, {"soc": 99.0}) == "backup"

@@ -127,6 +127,9 @@ class SampleIn(BaseModel):
     motion_confidence: int | None = None
     motion_still: bool | None = None
     motion_at_ms: int | None = None
+    est_soc: RealOrNone = None
+    est_remaining_ah: RealOrNone = None
+    est_source: TextOrNone = None
 
     @field_validator("cells")
     @classmethod
@@ -156,6 +159,13 @@ class SampleIn(BaseModel):
         # `$N::bigint[]` would 500 the whole batch, which the phone drops as Poison. Bound is
         # "plausible epoch ms": positive and before 2100-01-01 UTC.
         return v if v is not None and 0 < v < 4_102_444_800_000 else None
+
+    @field_validator("est_source")
+    @classmethod
+    def _clip_est_source(cls, v: str | None) -> str | None:
+        # Clamp rather than reject, same rationale as _clip_conf: an unknown source name
+        # must cost only this field, never the batch.
+        return v if v in ("counter", "voltage") else None
 
 
 class IngestEnvelope(BaseModel):
