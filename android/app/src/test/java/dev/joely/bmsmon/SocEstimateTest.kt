@@ -13,6 +13,7 @@ import dev.joely.bmsmon.model.withEstimate
 import dev.joely.bmsmon.model.estimateOf
 import dev.joely.bmsmon.model.stepEstimate
 import dev.joely.bmsmon.model.voltageSoc
+import dev.joely.bmsmon.model.estPersistWorthy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -148,6 +149,18 @@ class SocEstimateTest {
         )
         assertEquals(0f, s.correction.correctionAh, 0f)
         assertNull(s.correction.source)
+    }
+
+    // What makes the engine write the per-pack state: a changed correction, or a charge end (the
+    // raw counter has just risen, so the persisted last raw would otherwise be stale-low and a
+    // restart could read a later clamp as an unseen charge). Not every frame: lastRawAh moves on
+    // every frame and is written along with those.
+    @Test fun persistOnCorrectionChangeOrChargeEnd() {
+        val base = EstPackState(correction = SocCorrection(15f, EstSource.COUNTER, 0), lastRawAh = 60f)
+        assertFalse(estPersistWorthy(base, base.copy(lastRawAh = 59f, lastTsMs = 5L)))
+        assertTrue(estPersistWorthy(base, base.copy(correction = SocCorrection(16f, EstSource.COUNTER, 5L))))
+        assertTrue(estPersistWorthy(base.copy(wasCharging = true), base.copy(lastRawAh = 90f)))
+        assertFalse(estPersistWorthy(base, base.copy(wasCharging = true)))
     }
 
     @Test fun lowerBoundAfterDriving() {

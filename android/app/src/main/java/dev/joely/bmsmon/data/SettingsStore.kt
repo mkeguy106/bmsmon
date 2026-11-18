@@ -19,6 +19,7 @@ import dev.joely.bmsmon.model.Group
 import dev.joely.bmsmon.model.RangeParams
 import dev.joely.bmsmon.model.EstSource
 import dev.joely.bmsmon.model.Roster
+import dev.joely.bmsmon.model.PersistedEst
 import dev.joely.bmsmon.model.SocCorrection
 import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.Telemetry
@@ -92,8 +93,8 @@ data class Persisted(
     val chargeTailMinByAddress: Map<String, Float> = emptyMap(),
     val chargeTailRunEndByAddress: Map<String, Long> = emptyMap(),
     val rangeParamsByAddress: Map<String, RangeParams> = emptyMap(),
-    /** Held per-pack SOC-estimate corrections; see model/SocEstimate.kt. */
-    val socCorrections: Map<String, SocCorrection> = emptyMap(),
+    /** Held per-pack SOC-estimate corrections and last raw Ah; see model/SocEstimate.kt. */
+    val socCorrections: Map<String, PersistedEst> = emptyMap(),
     /** True once the estimator has been replayed over local history (so it runs once). */
     val socEstimatorSeeded: Boolean = false,
     val tempAlertsEnabled: Boolean,
@@ -317,7 +318,7 @@ class SettingsStore(private val context: Context) {
             val ends = prefs[K.CHARGE_TAIL_RUN_END]?.let(::decodeChargeTailRunEnd) ?: emptyMap()
             prefs[K.CHARGE_TAIL_RUN_END] = encodeChargeTailRunEnd(ends + (address to runEndMs))
         }.let {}
-    suspend fun setSocCorrections(map: Map<String, SocCorrection>) =
+    suspend fun setSocCorrections(map: Map<String, PersistedEst>) =
         context.dataStore.edit { it[K.SOC_CORRECTIONS] = encodeSocCorrections(map) }.let {}
     suspend fun setSocEstimatorSeeded(done: Boolean) =
         context.dataStore.edit { it[K.SOC_ESTIMATOR_SEEDED] = done }.let {}
@@ -481,24 +482,29 @@ private fun decodeChargeTailRunEnd(json: String): Map<String, Long> = runCatchin
     }
 }.getOrDefault(emptyMap())
 
-/** Per-pack held SOC corrections: `addr=correctionAh|SOURCE|setAtMs` entries joined by `;`
- *  (SOURCE empty for none). A malformed entry is dropped, never fatal. */
-internal fun encodeSocCorrections(map: Map<String, SocCorrection>): String =
-    map.entries.joinToString(";") { (addr, c) ->
-        "$addr=${if (c.correctionAh.isFinite()) c.correctionAh else 0f}|${c.source?.name ?: ""}|${c.setAtMs}"
+/** Per-pack held SOC corrections: `addr=correctionAh|SOURCE|setAtMs|lastRawAh` entries joined by
+ *  `;` (SOURCE empty for none, lastRawAh empty for none). A three-part entry (written before the last
+ *  raw was kept) decodes with no last raw. A malformed entry is dropped, never fatal; a bad last raw
+ *  costs only the last raw, never the correction. */
+internal fun encodeSocCorrections(map: Map<String, PersistedEst>): String =
+    map.entries.joinToString(";") { (addr, p) ->
+        val c = p.correction
+        val raw = p.lastRawAh?.takeIf { it.isFinite() }?.toString() ?: ""
+        "$addr=${if (c.correctionAh.isFinite()) c.correctionAh else 0f}|${c.source?.name ?: ""}|${c.setAtMs}|$raw"
     }
 
-internal fun decodeSocCorrections(s: String): Map<String, SocCorrection> = buildMap {
+internal fun decodeSocCorrections(s: String): Map<String, PersistedEst> = buildMap {
     s.split(';').forEach { entry ->
         runCatching {
             val eq = entry.lastIndexOf('=')
             require(eq > 0)
             val parts = entry.substring(eq + 1).split('|')
-            require(parts.size == 3)
+            require(parts.size == 3 || parts.size == 4)
             val ah = parts[0].toFloat()
             require(ah.isFinite())
             val src = if (parts[1].isEmpty()) null else EstSource.valueOf(parts[1])
-            put(entry.substring(0, eq), SocCorrection(ah, src, parts[2].toLong()))
+            val raw = parts.getOrNull(3)?.toFloatOrNull()?.takeIf { it.isFinite() }
+            put(entry.substring(0, eq), PersistedEst(SocCorrection(ah, src, parts[2].toLong()), raw))
         }
     }
 }

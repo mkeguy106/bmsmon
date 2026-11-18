@@ -62,6 +62,27 @@ data class EstPackState(
 
 data class SocEstimate(val soc: Float, val remainingAh: Float, val source: EstSource?)
 
+/**
+ * What is persisted per pack: the held correction and the last raw remaining Ah seen. The last raw
+ * is what the unseen-charge rule compares against, so keeping it lets a charge that happened while
+ * the phone was off (or the app restarting) still clear a correction on the first reading after.
+ */
+data class PersistedEst(val correction: SocCorrection = SocCorrection(), val lastRawAh: Float? = null)
+
+fun EstPackState.toPersisted(): PersistedEst = PersistedEst(correction, lastRawAh)
+
+/** A pack's state at the start of a session: the persisted part, the rest tracked afresh. */
+fun PersistedEst.toPackState(): EstPackState = EstPackState(correction = correction, lastRawAh = lastRawAh)
+
+/**
+ * Whether stepping [prev] to [next] should write the per-pack state: when the correction changed,
+ * or at a charge end (the raw counter has just risen while a held correction may be unchanged, and
+ * a stale-low persisted last raw could later read a clamp as an unseen charge). Not on every frame:
+ * the last raw moves on every frame and rides along with these writes (and stop()'s final one).
+ */
+fun estPersistWorthy(prev: EstPackState, next: EstPackState): Boolean =
+    next.correction != prev.correction || (prev.wasCharging && !next.wasCharging)
+
 /** (millivolts, percent), ascending. Rested >= 30 min after discharge, 2012 packs, 2026-11-18. */
 private val VOLTAGE_TABLE = arrayOf(
     12900 to 28, 12980 to 48, 13000 to 51, 13040 to 56, 13100 to 58,

@@ -1,6 +1,7 @@
 package dev.joely.bmsmon.model
 
 import dev.joely.bmsmon.data.db.EstRowColumns
+import kotlin.coroutines.cancellation.CancellationException
 
 // One-time seeding of the SOC estimator from the phone's local history (Task 4, 2026-11-18). The
 // moments that set today's corrections (a charge end, a long rest) have already passed when this
@@ -33,10 +34,13 @@ fun replayEstimate(rows: Sequence<EstReading>, start: EstPackState = EstPackStat
 
 /**
  * Seeds the estimator: [replay]s every address, then [install]s all results at once, then
- * [markSeeded]. All or nothing: any Throwable (a failed read, a cancelled replay, a dying process's
- * cancellation) is passed to [onFailure] and nothing is installed or marked, so the next start
- * replays again. [install] returns false to refuse (the engine's session ended); then nothing is
- * marked either. Returns true only when every step succeeded.
+ * [markSeeded]. A failure (any Throwable but a cancellation) while replaying is passed to
+ * [onFailure] and nothing is installed or marked, so the next start replays again. [install]
+ * returns false to refuse (the engine's session ended); then nothing is marked either. A failure in
+ * [markSeeded] comes after the install: the replayed states stay installed (and may already be
+ * written), but the seeded flag is not, so the next start replays again; it is passed to
+ * [onFailure] too. A cancellation (stop() cancelling the job) is rethrown, never reported: nothing
+ * is installed, or marked, after it. Returns true only when every step succeeded.
  */
 suspend fun seedEstimator(
     addresses: Collection<String>,
@@ -48,6 +52,8 @@ suspend fun seedEstimator(
     val result = LinkedHashMap<String, EstPackState>()
     try {
         for (a in addresses) result[a] = replay(a)
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Throwable) {
         onFailure(e)
         return false
@@ -56,6 +62,8 @@ suspend fun seedEstimator(
     return try {
         markSeeded()
         true
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Throwable) {
         onFailure(e)
         false

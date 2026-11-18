@@ -261,25 +261,47 @@ class EngineWiringTest {
     }
 
     // Task 4's replay runs with `seeding` set: live frames then show the raw BMS reading (never
-    // higher than the BMS) and never step a state the replay is building.
+    // higher than the BMS) and never step a state the replay is building. Final review, Important 1:
+    // the whole gate — session, seeding, loaded — is judged inside estState's lock, so a stop()+start()
+    // between the check and the step can't let an old-session frame step the new session's cleared map.
     @Test fun seedingSkipsTheStepAndShowsTheRawReading() {
         assertTrue(Regex("@Volatile\\s+private var seeding = false").containsMatchIn(src))
         val onPoll = onPollBody
-        assertTrue(onPoll.contains("if (seeding || !estLoaded) null else synchronized(estState) {"))
+        assertTrue(onPoll.contains(
+            "val est: SocEstimate? = synchronized(estState) { " +
+                "if (session != currentSession || seeding || !estLoaded) null else {"))
+        assertFalse("no gate read outside the lock", onPoll.contains("if (seeding || !estLoaded) null else synchronized"))
         assertTrue(onPoll.contains("val eff = if (est == null) t else t.withEstimate(est)"))
     }
 
-    @Test fun correctionsArePersistedOnlyWhenTheyChange() {
+    // The snapshot is taken at the change, under estState's lock, and only while this session's
+    // corrections are loaded: between start()'s clear and the load, estState holds nothing worth
+    // writing, and writing it would wipe the store (Important 1, path 2).
+    @Test fun correctionsArePersistedOnlyWhenWorthIt() {
         val onPoll = onPollBody
-        assertTrue(onPoll.contains("next.correction != prev.correction"))
-        assertTrue(onPoll.contains("persistSocCorrections()"))
-        val persist = flat.substringAfter("private fun persistSocCorrections() {").substringBefore("private fun ")
-        assertTrue(persist.contains("runCatching { settings.setSocCorrections("))
+        assertTrue(onPoll.contains("if (estPersistWorthy(prev, next)) persistSocCorrections(estSnapshotLocked())"))
+        val snap = flat.substringAfter("private fun estSnapshotLocked(): EstSnapshot? =").substringBefore("private fun ")
+        assertTrue(snap.contains("if (!estLoaded) null else EstSnapshot(++estSnapSeq, estState.mapValues { it.value.toPersisted() })"))
+        val persist = flat.substringAfter("private fun persistSocCorrections(snap: EstSnapshot?): Job? {").substringBefore("private fun ")
+        assertTrue("an older snapshot never lands after a newer one", persist.contains("if (snap.seq <= estWrittenSeq) return@withLock"))
+        assertTrue(persist.contains("runCatching { settings.setSocCorrections(snap.packs) }"))
+    }
+
+    // stop() writes the session's final state (the newest last raw per pack too, Important 2) after
+    // ending the session, and the next start()'s load waits for that write before reading.
+    @Test fun stopWritesTheFinalStateAndStartWaitsForIt() {
+        val stop = flat.substringAfter("fun stop() {").substringBefore("fun ")
+        val ended = stop.indexOf("currentSession = 0L")
+        val write = stop.indexOf("estFinalWrite = persistSocCorrections(synchronized(estState) { estSnapshotLocked() })")
+        assertTrue("final write after the session ends", ended in 0 until write)
+        val start = flat.substringAfter("fun start(roster: Roster,").substringBefore("suspend fun restoreFromPersisted(")
+        val join = start.indexOf("estFinalWrite?.join()")
+        assertTrue("the load waits for the final write", join in 0 until start.indexOf("val saved = settings.load()"))
     }
 
     @Test fun startLoadsThePersistedCorrections() {
         val start = flat.substringAfter("fun start(roster: Roster,").substringBefore("suspend fun restoreFromPersisted(")
-        assertTrue(start.contains("saved.socCorrections"))
+        assertTrue(start.contains("saved.socCorrections.forEach { (a, p) -> estState[a.uppercase()] = p.toPackState() }"))
         assertTrue("estimates wait for the load", start.contains("estLoaded = true"))
     }
 }

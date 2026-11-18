@@ -37,7 +37,10 @@ import dev.joely.bmsmon.model.RangeRow
 import dev.joely.bmsmon.model.SEED_RANGE_PARAMS
 import dev.joely.bmsmon.model.SEED_TAIL_MIN
 import dev.joely.bmsmon.model.SLOW_POLL_MS
-import dev.joely.bmsmon.model.SocCorrection
+import dev.joely.bmsmon.model.PersistedEst
+import dev.joely.bmsmon.model.estPersistWorthy
+import dev.joely.bmsmon.model.toPackState
+import dev.joely.bmsmon.model.toPersisted
 import dev.joely.bmsmon.model.SocEstimate
 import dev.joely.bmsmon.model.replayRow
 import dev.joely.bmsmon.model.seedEstimator
@@ -261,8 +264,15 @@ class MonitorEngine(
      *  overwritten by its install. Written under estState's lock, session-checked. */
     @Volatile private var seeding = false
     @Volatile private var socReplayJob: Job? = null
-    /** Serializes correction writes, so an older snapshot can never land after a newer one. */
+    /** Serializes estimator-state writes. Each snapshot is numbered when taken ([estSnapSeq], under
+     *  estState's lock) and a writer skips one older than the newest already written
+     *  ([estWrittenSeq], under this lock), so an older snapshot can never land after a newer one. */
     private val estPersistLock = Mutex()
+    private var estSnapSeq = 0L
+    private var estWrittenSeq = 0L
+    /** stop()'s final write of the session's estimator state; the next start()'s load waits for it,
+     *  so it never reads the store from before that session's last change. */
+    @Volatile private var estFinalWrite: Job? = null
     // BLE-21: the monitoring session BLE callbacks belong to. start() mints one and captures it in
     // the callbacks it hands to BLE; stop() clears it FIRST, so a callback already running on the
     // control loop when the session ended (cancellation can't interrupt one) changes nothing.
@@ -388,6 +398,7 @@ class MonitorEngine(
         startPowerLoop()  // phone power → screen-hold + GPS priority policy
         scope.launch {
             runCatching {
+                estFinalWrite?.join()
                 val saved = settings.load()
                 if (saved.chargeTailMinByAddress.isNotEmpty())
                     _state.update { it.copy(tailMinByAddress = saved.chargeTailMinByAddress) }
@@ -404,7 +415,7 @@ class MonitorEngine(
                 val replay = synchronized(estState) {
                     if (session == currentSession) {
                         estState.clear()
-                        saved.socCorrections.forEach { (a, c) -> estState[a.uppercase()] = EstPackState(correction = c) }
+                        saved.socCorrections.forEach { (a, p) -> estState[a.uppercase()] = p.toPackState() }
                         estLoaded = true
                         seeding = !saved.socEstimatorSeeded
                         seeding
@@ -516,8 +527,13 @@ class MonitorEngine(
         stopPowerLoop()
         rangeJob?.cancel()
         rangeJob = null
-        socReplayJob?.cancel()
-        socReplayJob = null
+        synchronized(estState) {
+            socReplayJob?.cancel()
+            socReplayJob = null
+        }
+        // The session's final estimator state, written once more (with every pack's newest last raw
+        // Ah). currentSession is already 0, so no frame of this session can step after this snapshot.
+        estFinalWrite = persistSocCorrections(synchronized(estState) { estSnapshotLocked() })
         stageTickJob?.cancel()
         stageTickJob = null
         ble.stop()
@@ -1041,13 +1057,23 @@ class MonitorEngine(
     /** A user-disconnected pack ([setDisabled]); [disabledAddrs] is stored uppercased. */
     private fun isDisabled(addr: String) = addr.uppercase() in disabledAddrs
 
-    /** Write every pack's held correction. Launched on each change; the lock plus a snapshot taken
-     *  inside it means the last write to land always carries the newest state. */
-    private fun persistSocCorrections() {
-        scope.launch {
+    private class EstSnapshot(val seq: Long, val packs: Map<String, PersistedEst>)
+
+    /** The per-pack estimator state to persist, numbered; null while this session's corrections are
+     *  not loaded: between start()'s clear and the load estState holds nothing worth writing, and
+     *  writing it would wipe the store. Caller holds estState's lock. */
+    private fun estSnapshotLocked(): EstSnapshot? =
+        if (!estLoaded) null else EstSnapshot(++estSnapSeq, estState.mapValues { it.value.toPersisted() })
+
+    /** Writes [snap] (taken at the change, under estState's lock) unless a newer one has already
+     *  been written. Returns the write's job, or null when there is nothing to write. */
+    private fun persistSocCorrections(snap: EstSnapshot?): Job? {
+        if (snap == null) return null
+        return scope.launch {
             estPersistLock.withLock {
-                val snapshot = synchronized(estState) { estState.mapValues { it.value.correction } }
-                runCatching { settings.setSocCorrections(snapshot) }
+                if (snap.seq <= estWrittenSeq) return@withLock
+                runCatching { settings.setSocCorrections(snap.packs) }
+                    .onSuccess { estWrittenSeq = snap.seq }
                     .onFailure { Log.w(TAG, "persisting SOC corrections failed", it) }
             }
         }
@@ -1057,19 +1083,24 @@ class MonitorEngine(
      * The one-time history replay (2026-11-18 estimate spec, "First start"): every roster pack's
      * last [SAMPLE_RETENTION_DAYS] of Room rows, oldest first, through [stepEstimate], starting from
      * its persisted correction (normally none; one exists only if an earlier replay failed and live
-     * stepping carried on). All packs are installed at once under estState's lock, only if
-     * [session] is still current — a replay finishing after stop() changes nothing — then the
-     * corrections are written and only after them the seeded flag, so a process death in between
-     * just replays again. Any failure leaves the store unseeded (retried next start) and the
-     * session on the corrections it loaded. [seeding] ends either way.
+     * stepping carried on) but not its persisted last raw, which belongs to the newest frame and
+     * would make the oldest row look like a jump. All packs are installed at once under estState's
+     * lock, only if [session] is still current — a replay finishing after stop() changes nothing —
+     * then the states are written and only after them the seeded flag, so a process death in
+     * between just replays again. A replay failure leaves the store unseeded (retried next start)
+     * and the session on the corrections it loaded. A late call from an ended session neither
+     * starts a replay nor cancels the current session's. [seeding] ends when the job completes,
+     * however it ends (even cancelled before its body ran), for its own session only.
      */
-    private fun startSocReplay(session: Long, loaded: Map<String, SocCorrection>) {
+    private fun startSocReplay(session: Long, loaded: Map<String, PersistedEst>) {
         val addrs = roster.batteries.map { it.address }
         val sinceMs = now() - SAMPLE_RETENTION_DAYS * 24L * 3_600_000L
-        val start = loaded.mapKeys { it.key.uppercase() }
-        socReplayJob?.cancel()
-        socReplayJob = scope.launch(Dispatchers.IO) {
-            try {
+        val start = loaded.entries.associate { (a, p) -> a.uppercase() to p.correction }
+        // Under estState's lock, like the session's end (stop() cancels the job under it too).
+        synchronized(estState) {
+            if (session != currentSession) return
+            socReplayJob?.cancel()
+            val job = scope.launch(Dispatchers.IO) {
                 seedEstimator(
                     addresses = addrs,
                     replay = { addr ->
@@ -1085,16 +1116,20 @@ class MonitorEngine(
                     },
                     markSeeded = {
                         estPersistLock.withLock {
-                            val snapshot = synchronized(estState) { estState.mapValues { it.value.correction } }
-                            settings.setSocCorrections(snapshot)
+                            val snap = synchronized(estState) {
+                                if (session == currentSession) estSnapshotLocked() else null
+                            } ?: throw CancellationException("monitoring stopped before the replay was marked done")
+                            settings.setSocCorrections(snap.packs)
+                            estWrittenSeq = snap.seq
                         }
                         settings.setSocEstimatorSeeded(true)
                     },
                     onFailure = { Log.w(TAG, "SOC history replay failed; it retries on the next start", it) },
                 )
-            } finally {
-                synchronized(estState) { if (session == currentSession) seeding = false }
             }
+            socReplayJob = job
+            // Not in the job body: a job cancelled before its body starts never runs any of it.
+            job.invokeOnCompletion { synchronized(estState) { if (session == currentSession) seeding = false } }
         }
     }
 
@@ -1135,13 +1170,15 @@ class MonitorEngine(
             tsMs = now, state = t.state, regen = regen, currentA = t.current,
             voltageV = t.voltage, remainingAh = t.capacityAh, fullChargeAh = t.fullChargeAh, soc = t.soc,
         )
-        val est: SocEstimate? = if (seeding || !estLoaded) null else synchronized(estState) {
-            val key = addr.uppercase()
-            val prev = estState[key] ?: EstPackState()
-            val next = stepEstimate(prev, estReading)
-            estState[key] = next
-            if (next.correction != prev.correction) persistSocCorrections()
-            estimateOf(next, estReading)
+        val est: SocEstimate? = synchronized(estState) {
+            if (session != currentSession || seeding || !estLoaded) null else {
+                val key = addr.uppercase()
+                val prev = estState[key] ?: EstPackState()
+                val next = stepEstimate(prev, estReading)
+                estState[key] = next
+                if (estPersistWorthy(prev, next)) persistSocCorrections(estSnapshotLocked())
+                estimateOf(next, estReading)
+            }
         }
         val eff = if (est == null) t else t.withEstimate(est)
         // Charge ETA is computed ONCE per pack per poll and carried on BatteryStatus — the same

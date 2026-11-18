@@ -5,13 +5,16 @@ import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.EstPackState
 import dev.joely.bmsmon.model.EstReading
 import dev.joely.bmsmon.model.EstSource
+import dev.joely.bmsmon.model.PersistedEst
 import dev.joely.bmsmon.model.SocCorrection
+import dev.joely.bmsmon.model.toPersisted
 import dev.joely.bmsmon.model.replayEstimate
 import dev.joely.bmsmon.model.replayRow
 import dev.joely.bmsmon.model.seedEstimator
 import dev.joely.bmsmon.model.toReading
 import java.io.File
 import kotlinx.coroutines.runBlocking
+import kotlin.coroutines.cancellation.CancellationException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -47,6 +50,10 @@ class SocReplayTest {
         assertTrue("correction ${s.correction.correctionAh}", s.correction.correctionAh in 14.5f..15.5f)
         // Set at the charge end (the first non-Charging row after the taper), not later.
         assertTrue(s.correction.setAtMs in 1_794_901_087_954L..1_794_901_087_954L + 60_000L)
+        // The replay ends on the last row's raw counter, and that is what gets persisted, so the
+        // unseen-charge rule has a last raw to compare against from the first live frame on.
+        assertEquals(rows.last().remainingAh, s.lastRawAh!!, 0f)
+        assertEquals(PersistedEst(s.correction, rows.last().remainingAh), s.toPersisted())
     }
 
     private fun cols(
@@ -97,6 +104,39 @@ class SocReplayTest {
         assertTrue(failure is IllegalStateException)
     }
 
+    // A cancelled replay (stop() cancels the job) is not a failure: nothing is installed or marked,
+    // nothing is reported to onFailure (which logs), and the cancellation propagates.
+    @Test fun aCancelledReplayIsRethrownNotReported() = runBlocking {
+        var installed: Map<String, EstPackState>? = null
+        var marked = false
+        var failure: Throwable? = null
+        val thrown = runCatching {
+            seedEstimator(
+                addresses = listOf("A", "B"),
+                replay = { a -> if (a == "B") throw CancellationException("stopped") else EstPackState() },
+                install = { installed = it; true },
+                markSeeded = { marked = true },
+                onFailure = { failure = it },
+            )
+        }.exceptionOrNull()
+        assertTrue(thrown is CancellationException)
+        assertNull(installed)
+        assertFalse(marked)
+        assertNull("a cancellation is not reported as a failure", failure)
+        // Cancelled while marking: rethrown too, not reported.
+        val thrown2 = runCatching {
+            seedEstimator(
+                addresses = listOf("A"),
+                replay = { EstPackState() },
+                install = { true },
+                markSeeded = { throw CancellationException("stopped") },
+                onFailure = { failure = it },
+            )
+        }.exceptionOrNull()
+        assertTrue(thrown2 is CancellationException)
+        assertNull(failure)
+    }
+
     @Test fun aReplayFinishingAfterStopChangesNothing() = runBlocking {
         var marked = false
         val ok = seedEstimator(
@@ -137,7 +177,10 @@ class SocReplayTest {
     }
 
     // Engine wiring: the replay runs through seedEstimator, only for an unseeded store, inside the
-    // session-checked load, with live stepping held off until it is done.
+    // session-checked load, with live stepping held off until it is done. Final review, Important 3:
+    // a late call from an ended session neither cancels the current session's job nor starts one,
+    // and `seeding` ends from invokeOnCompletion (which runs even for a job cancelled before its
+    // body started, where a finally block never would).
     @Test fun engineSeedsOnlyWhenUnseededAndSessionChecked() {
         val src = listOf("src/main/java", "app/src/main/java")
             .map { File(it, "dev/joely/bmsmon/monitor/MonitorEngine.kt") }
@@ -149,6 +192,12 @@ class SocReplayTest {
         assertTrue("install is session-checked", seed.contains("if (session != currentSession) false"))
         assertTrue("corrections are written before the seeded flag",
             seed.indexOf("settings.setSocCorrections(") in 0 until seed.indexOf("settings.setSocEstimatorSeeded(true)"))
-        assertTrue("seeding always ends", seed.contains("finally"))
+        val guard = seed.indexOf("synchronized(estState) { if (session != currentSession) return")
+        assertTrue("session checked under the lock before any cancel", guard in 0 until seed.indexOf("socReplayJob?.cancel()"))
+        assertTrue("seeding ends on completion, session-checked",
+            seed.contains("job.invokeOnCompletion { synchronized(estState) { if (session == currentSession) seeding = false } }"))
+        assertFalse("not from a finally block", seed.contains("finally"))
+        assertTrue("the seeded write is session-checked too",
+            seed.contains("if (session == currentSession) estSnapshotLocked() else null"))
     }
 }
