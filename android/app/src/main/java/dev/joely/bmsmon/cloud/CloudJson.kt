@@ -2,6 +2,7 @@ package dev.joely.bmsmon.cloud
 
 import dev.joely.bmsmon.model.PhoneAlertLocal
 import dev.joely.bmsmon.model.RangeParams
+import dev.joely.bmsmon.model.SocEstimate
 import dev.joely.bmsmon.model.TempEnvelope
 import dev.joely.bmsmon.model.TempThresholds
 import kotlinx.serialization.Serializable
@@ -40,8 +41,26 @@ data class SampleJson(
     val motion_confidence: Int? = null,
     val motion_still: Boolean? = null,
     val motion_at_ms: Long? = null,
+    // SOC estimate (2026-11-18): our estimate beside the raw soc/remaining_ah above, which stay the
+    // BMS's own values. Live batches only, and only when a correction is held (see [estWire]).
+    val est_soc: Float? = null,
+    val est_remaining_ah: Float? = null,
+    /** "counter" | "voltage". */
+    val est_source: String? = null,
     val cells: List<Float>? = null,
 )
+
+/** The three est_* wire values for one sample. */
+data class EstWire(val soc: Float, val remainingAh: Float, val source: String)
+
+/**
+ * The estimate as it goes on the wire: null (all three fields omitted) unless a correction is held.
+ * With no correction ([SocEstimate.source] null) the estimate is the BMS reading itself.
+ */
+fun estWire(est: SocEstimate?): EstWire? {
+    val source = est?.source ?: return null
+    return EstWire(est.soc, est.remainingAh, source.name.lowercase())
+}
 
 /**
  * The phone's own power snapshot, riding live ingest batches only (never re-sync or import).
@@ -84,6 +103,7 @@ object CloudJson {
         lat: Double? = null, lon: Double? = null, gpsAccuracyM: Float? = null,
         etaFullMin: Float? = null,
         motionActivity: String? = null, motionConfidence: Int? = null, motionStill: Boolean? = null, motionAtMs: Long? = null,
+        estSoc: Float? = null, estRemainingAh: Float? = null, estSource: String? = null,
         cells: List<Float>? = null,
     ): String = json.encodeToString(
         SampleJson.serializer(),
@@ -96,6 +116,7 @@ object CloudJson {
             gpsAccuracyM.finiteOrNull()?.let { roundAccuracy(it) },
             etaFullMin.finiteOrNull(),
             motionActivity, motionConfidence, motionStill, motionAtMs,
+            estSoc.finiteOrNull(), estRemainingAh.finiteOrNull(), estSource,
             cells?.filter { it.isFinite() }?.takeIf { it.isNotEmpty() }),
     )
 

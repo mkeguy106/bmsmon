@@ -27,6 +27,8 @@ import dev.joely.bmsmon.model.BatteryStatus
 import dev.joely.bmsmon.model.DEFAULT_GROUP_ID
 import dev.joely.bmsmon.model.DEFAULT_ROSTER
 import dev.joely.bmsmon.model.EngineDecision
+import dev.joely.bmsmon.model.EstPackState
+import dev.joely.bmsmon.model.EstReading
 import dev.joely.bmsmon.model.PackRange
 import dev.joely.bmsmon.model.RangeAccumulator
 import dev.joely.bmsmon.model.RangeParams
@@ -34,6 +36,7 @@ import dev.joely.bmsmon.model.RangeRow
 import dev.joely.bmsmon.model.SEED_RANGE_PARAMS
 import dev.joely.bmsmon.model.SEED_TAIL_MIN
 import dev.joely.bmsmon.model.SLOW_POLL_MS
+import dev.joely.bmsmon.model.SocEstimate
 import dev.joely.bmsmon.model.StageConfig
 import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.TodayUsage
@@ -47,6 +50,10 @@ import dev.joely.bmsmon.model.decisionView
 import dev.joely.bmsmon.model.engineDecision
 import dev.joely.bmsmon.model.estimateChargeMinutes
 import dev.joely.bmsmon.model.estimatePackRange
+import dev.joely.bmsmon.model.estimateOf
+import dev.joely.bmsmon.model.rawSoc
+import dev.joely.bmsmon.model.stepEstimate
+import dev.joely.bmsmon.model.withEstimate
 import dev.joely.bmsmon.model.learnRangeParams
 import dev.joely.bmsmon.model.learnTailFold
 import dev.joely.bmsmon.model.formatDelta
@@ -90,6 +97,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Upload-path GPS dedup (bandwidth): attach lat/lon to a pack's uploaded sample only when the
@@ -233,6 +242,20 @@ class MonitorEngine(
     private val lastGpsFixUploaded = HashMap<String, Long>()
     private var rangeJob: Job? = null
     @Volatile private var lastRangeLearnAt = 0L
+
+    // --- SOC estimate (2026-11-18). Per-pack estimator state, keyed by UPPERCASED address. Unlike
+    // lastTailLearnAt/lastGpsFixUploaded (plain maps touched only on the BLE control loop), this one
+    // is also written by start()'s settings load (Dispatchers.Default) and read by the persist
+    // coroutine, so every access holds its own monitor: synchronized(estState).
+    private val estState: MutableMap<String, EstPackState> = HashMap()
+    /** False until this session's settings load has put the persisted corrections in [estState]:
+     *  until then onPoll shows the raw BMS reading and steps nothing, so a pre-load step can neither
+     *  be wiped by the load nor persist over corrections not yet read. Written under estState's lock. */
+    @Volatile private var estLoaded = false
+    /** Set by Task 4's history replay while it runs: live frames show the raw reading, step nothing. */
+    @Volatile private var seeding = false
+    /** Serializes correction writes, so an older snapshot can never land after a newer one. */
+    private val estPersistLock = Mutex()
     // BLE-21: the monitoring session BLE callbacks belong to. start() mints one and captures it in
     // the callbacks it hands to BLE; stop() clears it FIRST, so a callback already running on the
     // control loop when the session ended (cancellation can't interrupt one) changes nothing.
@@ -309,6 +332,12 @@ class MonitorEngine(
         this.roster = roster
         logging = loggingEnabled
         disabledAddrs = disabled.map { it.uppercase() }.toSet()
+        // SOC estimate: in-memory tracking starts empty each session; the held corrections come
+        // back with the settings load below, and nothing is estimated until they have.
+        synchronized(estState) {
+            estState.clear()
+            estLoaded = false
+        }
         _state.update { st ->
             st.copy(
                 monitoring = true,
@@ -358,7 +387,17 @@ class MonitorEngine(
                     _state.update { it.copy(tailRunEndByAddress = saved.chargeTailRunEndByAddress) }
                 if (saved.rangeParamsByAddress.isNotEmpty())
                     _state.update { it.copy(rangeParamsByAddress = saved.rangeParamsByAddress) }
-            }
+                // Only this session's load installs corrections, so a late load from a session
+                // that has since stopped can't wipe what this one has stepped. A failed load leaves
+                // estLoaded false: the session shows the raw BMS reading, as before the estimator.
+                synchronized(estState) {
+                    if (session == currentSession) {
+                        estState.clear()
+                        saved.socCorrections.forEach { (a, c) -> estState[a.uppercase()] = EstPackState(correction = c) }
+                        estLoaded = true
+                    }
+                }
+            }.onFailure { Log.w(TAG, "loading persisted learner state failed", it) }
             // Started only after the persisted-params load completes, so the first learn pass
             // can never race a stale load and get clobbered by it. Guarded by monitoring in case
             // stop() ran while the load was in flight.
@@ -986,6 +1025,18 @@ class MonitorEngine(
     /** A user-disconnected pack ([setDisabled]); [disabledAddrs] is stored uppercased. */
     private fun isDisabled(addr: String) = addr.uppercase() in disabledAddrs
 
+    /** Write every pack's held correction. Launched on each change; the lock plus a snapshot taken
+     *  inside it means the last write to land always carries the newest state. */
+    private fun persistSocCorrections() {
+        scope.launch {
+            estPersistLock.withLock {
+                val snapshot = synchronized(estState) { estState.mapValues { it.value.correction } }
+                runCatching { settings.setSocCorrections(snapshot) }
+                    .onFailure { Log.w(TAG, "persisting SOC corrections failed", it) }
+            }
+        }
+    }
+
     private fun onPoll(session: Long, addr: String, raw: ByteArray, t: Telemetry?) {
         // BLE-21: a frame from an ended session — stop() ran while this callback was already in
         // flight on the control loop — changes nothing: no pack marked live under MONITORING OFF,
@@ -1014,16 +1065,35 @@ class MonitorEngine(
         val group = roster.groupOf(addr)
         // Regen is judged against the group's last-discharge time BEFORE this sample updates it.
         val regen = isRegen(t, group?.let { st0.lastDischargeAt[it.id] }, now)
+        // SOC estimate (2026-11-18): stepped from the RAW frame. `eff` (estimate in soc/capacityAh,
+        // the BMS's own values kept beside it) is what the fleet carries, so every display and
+        // decision reads it; Room logging, the upload's soc/remaining_ah and the learners stay on
+        // raw `t`. While Task 4's replay runs, or before the corrections have loaded, eff is the
+        // raw reading — never higher than the BMS.
+        val estReading = EstReading(
+            tsMs = now, state = t.state, regen = regen, currentA = t.current,
+            voltageV = t.voltage, remainingAh = t.capacityAh, fullChargeAh = t.fullChargeAh, soc = t.soc,
+        )
+        val est: SocEstimate? = if (seeding || !estLoaded) null else synchronized(estState) {
+            val key = addr.uppercase()
+            val prev = estState[key] ?: EstPackState()
+            val next = stepEstimate(prev, estReading)
+            estState[key] = next
+            if (next.correction != prev.correction) persistSocCorrections()
+            estimateOf(next, estReading)
+        }
+        val eff = if (est == null) t else t.withEstimate(est)
         // Charge ETA is computed ONCE per pack per poll and carried on BatteryStatus — the same
         // value is uploaded (eta_full_min) and displayed on the stage, so they can never diverge.
+        // From the estimate: time to full is the estimated Ah still to go.
         val tailMin = st0.tailMinByAddress[addr] ?: SEED_TAIL_MIN
         val etaFullMin = estimateChargeMinutes(
-            t.state, t.soc, t.current, t.fullChargeAh, t.capacityAh, regen, tailMin,
+            eff.state, eff.soc, eff.current, eff.fullChargeAh, eff.capacityAh, regen, tailMin,
         )
         // Discharge-range estimate — same single-writer pattern as the charge ETA: computed once
-        // per poll here, carried on BatteryStatus, only displayed by the UI.
+        // per poll here, carried on BatteryStatus, only displayed by the UI. From the estimated Ah.
         val range = estimatePackRange(
-            t.state, t.capacityAh,
+            eff.state, eff.capacityAh,
             st0.rangeParamsByAddress[addr] ?: SEED_RANGE_PARAMS,
             st0.todayUsageByAddress[addr],
         )
@@ -1042,7 +1112,7 @@ class MonitorEngine(
             if (session != currentSession || !st.monitoring) return@update st
             accepted = true
             val fleet = st.fleet + (addr to (st.fleet[addr] ?: BatteryStatus()).copy(
-                telemetry = t, reachable = true, etaFullMin = etaFullMin, range = range,
+                telemetry = eff, reachable = true, etaFullMin = etaFullMin, range = range,
                 lastFrameAtElapsedMs = frameAt, frameIntervalMs = cadence,
             ))
             var peakP = st.peakPowerW
@@ -1076,6 +1146,7 @@ class MonitorEngine(
             addr, roster.batteryAt(addr)?.advertisedName, roster.batteryAt(addr)?.alias,
             group?.id, t, now, regen, uploadFix?.lat, uploadFix?.lon, uploadFix?.accuracyM, etaFullMin,
             motion?.activity, motion?.confidence, gate.still, motion?.atMs,
+            est = est,
         )
         if (logging) {
             val header = profile.responseHeader
@@ -1089,9 +1160,10 @@ class MonitorEngine(
         // correctness (never folding the same run twice — a regen blip hours later, or an
         // engine restart, re-finds the same run in the 6-h lookback) comes from the persisted
         // run-identity dedup inside learnTail (shouldFoldTail on tailRunEndByAddress).
+        // The fleet carries the estimate; the learner's trigger reads the BMS's own SOC.
         val prevTel = st0.fleet[addr]?.telemetry
         if (prevTel?.state == BatteryState.Charging && t.state != BatteryState.Charging &&
-            prevTel.soc >= TAIL_START_SOC &&
+            prevTel.rawSoc >= TAIL_START_SOC &&
             now - (lastTailLearnAt[addr] ?: 0L) > 30 * 60_000L
         ) {
             lastTailLearnAt[addr] = now

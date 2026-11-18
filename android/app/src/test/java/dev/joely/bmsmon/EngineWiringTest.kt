@@ -223,4 +223,63 @@ class EngineWiringTest {
         assertTrue(powerLoop.contains("if (ps.atElapsedMs <= 0L) return@collect"))
         assertTrue(powerLoop.contains("if (ps.atElapsedMs < lastFoldedAt) return@collect"))
     }
+
+    // SOC estimate (2026-11-18): display and decisions read the estimate; logging, upload and the
+    // learners keep the BMS's own values.
+    private val onPollBody get() = flat.substringAfter("private fun onPoll(").substringBefore("private fun onReachable(")
+
+    @Test fun theFleetCarriesTheEstimateWhileLoggingAndUploadStayRaw() {
+        val onPoll = onPollBody
+        assertTrue("the estimate is applied to the raw frame once", onPoll.contains("t.withEstimate(est)"))
+        assertTrue("BatteryStatus carries the effective telemetry", onPoll.contains("telemetry = eff, reachable = true"))
+        assertTrue("Room logs the raw frame", onPoll.contains("repository.ingest(addr, t, raw,"))
+        assertTrue("the upload's soc/remaining_ah stay raw, the estimate rides beside them",
+            onPoll.contains("group?.id, t, now, regen,") && onPoll.contains("est = est"))
+        assertFalse("nothing logs or uploads the effective telemetry",
+            onPoll.contains("repository.ingest(addr, eff") || onPoll.contains("group?.id, eff,"))
+    }
+
+    @Test fun chargeEtaAndRangeUseTheEstimate() {
+        val onPoll = onPollBody
+        assertTrue(onPoll.contains("estimateChargeMinutes( eff.state, eff.soc, eff.current, eff.fullChargeAh, eff.capacityAh,"))
+        assertTrue(onPoll.contains("estimatePackRange( eff.state, eff.capacityAh,"))
+    }
+
+    @Test fun theTailLearnerTriggerReadsTheRawSoc() {
+        val onPoll = onPollBody
+        assertTrue(onPoll.contains("prevTel.rawSoc >= TAIL_START_SOC"))
+        assertFalse(onPoll.contains("prevTel.soc >= TAIL_START_SOC"))
+    }
+
+    @Test fun theEstimatorStepsFromTheRawFrameWithTheEngineRegen() {
+        val onPoll = onPollBody
+        val regenAt = onPoll.indexOf("val regen = isRegen(t,")
+        val step = onPoll.indexOf("stepEstimate(")
+        assertTrue("regen is known before the estimator steps", regenAt in 0 until step)
+        assertTrue(onPoll.contains("EstReading( tsMs = now, state = t.state, regen = regen, currentA = t.current, " +
+            "voltageV = t.voltage, remainingAh = t.capacityAh, fullChargeAh = t.fullChargeAh, soc = t.soc, )"))
+    }
+
+    // Task 4's replay runs with `seeding` set: live frames then show the raw BMS reading (never
+    // higher than the BMS) and never step a state the replay is building.
+    @Test fun seedingSkipsTheStepAndShowsTheRawReading() {
+        assertTrue(Regex("@Volatile\\s+private var seeding = false").containsMatchIn(src))
+        val onPoll = onPollBody
+        assertTrue(onPoll.contains("if (seeding || !estLoaded) null else synchronized(estState) {"))
+        assertTrue(onPoll.contains("val eff = if (est == null) t else t.withEstimate(est)"))
+    }
+
+    @Test fun correctionsArePersistedOnlyWhenTheyChange() {
+        val onPoll = onPollBody
+        assertTrue(onPoll.contains("next.correction != prev.correction"))
+        assertTrue(onPoll.contains("persistSocCorrections()"))
+        val persist = flat.substringAfter("private fun persistSocCorrections() {").substringBefore("private fun ")
+        assertTrue(persist.contains("runCatching { settings.setSocCorrections("))
+    }
+
+    @Test fun startLoadsThePersistedCorrections() {
+        val start = flat.substringAfter("fun start(roster: Roster,").substringBefore("suspend fun restoreFromPersisted(")
+        assertTrue(start.contains("saved.socCorrections"))
+        assertTrue("estimates wait for the load", start.contains("estLoaded = true"))
+    }
 }

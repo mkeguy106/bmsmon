@@ -13,6 +13,7 @@ import dev.joely.bmsmon.data.Persisted
 import dev.joely.bmsmon.data.SettingsStore
 import dev.joely.bmsmon.data.db.BmsDatabase
 import dev.joely.bmsmon.data.db.OutboxEntity
+import dev.joely.bmsmon.model.SocEstimate
 import dev.joely.bmsmon.model.Telemetry
 import dev.joely.bmsmon.model.sentPhoneAlert
 import kotlinx.coroutines.CancellationException
@@ -236,8 +237,11 @@ class TelemetryReporter(
         motionConfidence: Int?,
         motionStill: Boolean?,
         motionAtMs: Long?,
+        /** Our SOC estimate; [t] stays the raw BMS frame. Rides only when a correction is held. */
+        est: SocEstimate? = null,
     ) {
         if (!reportingEnabled) return
+        val e = estWire(est)
         val payload = CloudJson.sampleJson(
             tsMs, addr, advertisedName, alias, groupId,
             t.state.name, t.soc, t.current, t.powerW, t.voltage, t.temp, t.mosfetTemp,
@@ -245,6 +249,7 @@ class TelemetryReporter(
             t.cells.minOrNull(), t.cells.maxOrNull(), regen, null,
             lat, lon, gpsAccuracyM, etaFullMin,
             motionActivity, motionConfidence, motionStill, motionAtMs,
+            estSoc = e?.soc, estRemainingAh = e?.remainingAh, estSource = e?.source,
             cells = t.cells.takeIf { it.isNotEmpty() },
         )
         enqueueChannel.trySend(OutboxEntity(payload = payload, enqueuedAt = tsMs))

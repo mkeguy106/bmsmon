@@ -2,8 +2,11 @@ package dev.joely.bmsmon.cloud
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import dev.joely.bmsmon.model.EstSource
+import dev.joely.bmsmon.model.SocEstimate
 
 class CloudJsonTest {
     @Test fun config_builds_endpoints_trimming_slash() {
@@ -71,6 +74,37 @@ class CloudJsonTest {
         assertTrue(s.contains("\"lat\":41.8781"))
         assertTrue(s.contains("\"lon\":-87.6298"))
         assertTrue(s.contains("\"gps_accuracy_m\":7.5"))
+    }
+
+    @Test fun sampleJsonCarriesEstimate() {
+        fun row(estSoc: Float? = null, estAh: Float? = null, estSource: String? = null) = CloudJson.sampleJson(
+            tsMs = 1L, address = "A", advertisedName = null, alias = null, groupId = null,
+            state = "Idle", soc = 99f, currentA = 0f, powerW = 0f, voltageV = 13.3f, tempC = 20f,
+            mosfetTempC = null, soh = null, fullChargeAh = 105f, remainingAh = 113.1f, cycles = null,
+            cellMinV = null, cellMaxV = null, regen = false, linkEvent = null,
+            estSoc = estSoc, estRemainingAh = estAh, estSource = estSource)
+        val s = row(92f, 96.84f, "counter")
+        assertTrue(s, s.contains("\"est_soc\":92.0"))
+        assertTrue(s, s.contains("\"est_remaining_ah\":96.84"))
+        assertTrue(s, s.contains("\"est_source\":\"counter\""))
+        // The raw BMS values ride beside it, untouched.
+        assertTrue(s, s.contains("\"soc\":99.0"))
+        assertTrue(s, s.contains("\"remaining_ah\":113.1"))
+        // Not passed: omitted entirely (explicitNulls = false).
+        val none = row()
+        assertFalse(none, none.contains("est_"))
+        // A non-finite estimate is dropped like any other non-finite float, never thrown.
+        val nan = row(Float.NaN, Float.POSITIVE_INFINITY, "voltage")
+        assertFalse(nan, nan.contains("est_soc") || nan.contains("est_remaining_ah"))
+    }
+
+    @Test fun estWireCarriesOnlyARealCorrection() {
+        val counter = estWire(SocEstimate(92f, 96.84f, EstSource.COUNTER))
+        assertEquals(EstWire(92f, 96.84f, "counter"), counter)
+        assertEquals("voltage", estWire(SocEstimate(60f, 63f, EstSource.VOLTAGE))?.source)
+        // No correction (source null) means the estimate IS the BMS reading: nothing on the wire.
+        assertNull(estWire(SocEstimate(99f, 113.1f, null)))
+        assertNull(estWire(null))
     }
 
     @Test fun sampleJson_sanitizes_non_finite_floats_without_throwing() {
