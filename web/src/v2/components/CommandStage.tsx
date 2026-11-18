@@ -10,6 +10,7 @@ import { StatTile, CellTiles, Chip, LastKnownNote } from "./Atoms";
 import { sohColor } from "../colors";
 import { fmtDist, type DistUnit } from "../../units";
 import { floorBand } from "../../range";
+import { bmsLabel, socLabel } from "../../estimate";
 
 const STATUS_COLOR: Record<BaseStatus, string> = {
   "in-use": "var(--ok)", charging: "var(--warn)", backup: "var(--ok)",
@@ -58,7 +59,7 @@ function PackCard({ pack, tempF }: { pack: PackView; tempF: boolean }) {
           title={item.soh != null ? `SOH ${Math.round(item.soh)}%` : "SOH —"} />
       </div>
       <div style={{ display: "flex", justifyContent: "center" }}>
-        <Ring soc={item.soc} power={item.power_w} current={item.current_a} connected={live} size={132} />
+        <Ring soc={item.soc} socText={socLabel(item)} power={item.power_w} current={item.current_a} connected={live} size={132} />
       </div>
       <div className="mono" style={{ fontSize: 12, textAlign: "center",
         color: live ? "var(--text-3)" : "var(--text-4)" }}>
@@ -66,8 +67,15 @@ function PackCard({ pack, tempF }: { pack: PackView; tempF: boolean }) {
           ? `${num(item.power_w)} W · ${num(item.current_a, 1)} A`
           : <>DISCONNECTED · last seen <Ago tsMs={item.ts_ms} /></>}
       </div>
+      {/* Always rendered, muted, in a fixed spot: the BMS's own reading never appears or
+          disappears depending on whether it agrees with our estimate. */}
+      <div className="mono" style={{ fontSize: 10, textAlign: "center", marginTop: -8,
+        color: "var(--text-4)" }}>
+        {bmsLabel(item)}
+      </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-        <StatTile label="Capacity" value={`${num(item.remaining_ah, 1)}/${num(item.full_charge_ah, 0)} Ah`} />
+        <StatTile label="Capacity" value={`${num(item.remaining_ah, 1)}/${num(item.full_charge_ah, 0)} Ah`}
+          sub={`BMS ${num(item.bms_remaining_ah ?? item.remaining_ah, 1)} Ah`} />
         <StatTile label="Temp" value={fmtTemp(item.temp_c, tempF)} />
         <StatTile label="Health" value={`${num(item.soh)}%`} />
         <StatTile label="Cycles" value={num(item.cycles)} />

@@ -3,6 +3,12 @@ import type { FleetItem, Sample } from "./types";
 import type { ProbeResult, Session } from "./liveLink";
 import { connectLive, STABLE_MS } from "./ws";
 
+// decodeSample / decodeFleetItem swap in our estimate once (estimate.ts): a sample with no
+// est_* decodes to the BMS reading plus explicit nulls for the estimate fields.
+const swapped = (soc: number) =>
+  ({ bms_soc: soc, bms_remaining_ah: null, est_soc: null, est_remaining_ah: null, est_source: null });
+
+
 const STALE_MS = 60_000;
 /** reconnectDelayMs(0, 1): the first backoff step, with the jitter pinned at its top. */
 const RECONNECT_MS = 1_500;
@@ -107,12 +113,12 @@ describe("connectLive", () => {
 
     sockets()[0].fireMessage(SNAPSHOT);
     expect(statuses).toEqual([true]);
-    expect(snapshots).toEqual([[{ address: "A", ts_ms: 1, soc: 50 }]]);
+    expect(snapshots).toEqual([[{ address: "A", ts_ms: 1, soc: 50, ...swapped(50) }]]);
     sockets()[0].fireMessage(SNAPSHOT);
     expect(statuses).toEqual([true]); // once per connection
 
     sockets()[0].fireMessage({ type: "sample", address: "A", ts_ms: 2, soc: 51 });
-    expect(samples).toEqual([{ address: "A", ts_ms: 2, soc: 51 }]); // "type" stripped
+    expect(samples).toEqual([{ address: "A", ts_ms: 2, soc: 51, ...swapped(51) }]); // "type" stripped
 
     sockets()[0].fireMessage({ type: "ping" }); // keepalive: no dispatch
     expect(snapshots).toHaveLength(2);
@@ -134,7 +140,7 @@ describe("connectLive", () => {
     expect(statuses).toEqual([true, false, true]);
 
     sockets()[1].fireMessage({ type: "sample", address: "A", ts_ms: 3, soc: 49 });
-    expect(samples).toEqual([{ address: "A", ts_ms: 3, soc: 49 }]);
+    expect(samples).toEqual([{ address: "A", ts_ms: 3, soc: 49, ...swapped(49) }]);
     stop();
   });
 
@@ -319,7 +325,7 @@ describe("connectLive", () => {
 
     // The fresh socket is still the live one and keeps dispatching.
     fresh.fireMessage({ type: "sample", address: "A", ts_ms: 10, soc: 80 });
-    expect(samples).toEqual([{ address: "A", ts_ms: 10, soc: 80 }]);
+    expect(samples).toEqual([{ address: "A", ts_ms: 10, soc: 80, ...swapped(80) }]);
 
     // And the stale socket's in-flight onmessage must not dispatch.
     oldMessage?.({ data: JSON.stringify({ type: "sample", address: "A", ts_ms: 11, soc: 1 }) });
@@ -342,7 +348,7 @@ describe("connectLive", () => {
     second.goLive();
 
     second.fireMessage({ type: "sample", address: "A", ts_ms: 20, soc: 70 });
-    expect(samples).toEqual([{ address: "A", ts_ms: 20, soc: 70 }]);
+    expect(samples).toEqual([{ address: "A", ts_ms: 20, soc: 70, ...swapped(70) }]);
 
     // A late message on the replaced socket must be ignored, not double-fed.
     firstMessage?.({ data: JSON.stringify({ type: "sample", address: "A", ts_ms: 21, soc: 2 }) });
@@ -366,9 +372,9 @@ describe("connectLive", () => {
 
     // The socket survived and still dispatches good frames (unknown keys stripped).
     sock.fireMessage({ type: "sample", address: "A", ts_ms: 2, soc: 51, bogus: 1 });
-    expect(samples).toEqual([{ address: "A", ts_ms: 2, soc: 51 }]);
+    expect(samples).toEqual([{ address: "A", ts_ms: 2, soc: 51, ...swapped(51) }]);
     sock.fireMessage({ type: "snapshot", fleet: [{ address: "A", ts_ms: 3, soc: 52, alias: "2012 · A" }] });
-    expect(snapshots).toEqual([[{ address: "A", ts_ms: 3, soc: 52, alias: "2012 · A" }]]);
+    expect(snapshots).toEqual([[{ address: "A", ts_ms: 3, soc: 52, ...swapped(52), alias: "2012 · A" }]]);
 
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();

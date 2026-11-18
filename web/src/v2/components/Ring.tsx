@@ -1,8 +1,10 @@
 // Per-pack inner-ring full scale (W) — matches the app's POWER_RING_FULL_W.
 const POWER_FULL_W = 300;
 
-export function Ring({ soc, power, current, connected, size = 132 }: {
+export function Ring({ soc, power, current, connected, size = 132, socText }: {
   soc?: number | null; power?: number | null; current?: number | null; connected: boolean; size?: number;
+  /** The centre text when it is not the plain rounded soc (e.g. "~58%" for a voltage estimate). */
+  socText?: string;
 }) {
   const c = size / 2;
   const swOuter = 9;
@@ -40,7 +42,7 @@ export function Ring({ soc, power, current, connected, size = 132 }: {
       )}
       <text x="50%" y="50%" textAnchor="middle" dy="0.35em" className="mono"
         fill={connected ? "var(--text)" : "var(--text-4)"} fontSize={size * 0.2} fontWeight={700}>
-        {soc != null ? `${Math.round(soc)}%` : "—"}
+        {socText ?? (soc != null ? `${Math.round(soc)}%` : "—")}
       </text>
     </svg>
   );
