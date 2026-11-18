@@ -11,6 +11,7 @@ import { Bar, StatTile, Chip } from "../components/Atoms";
 import { Ago } from "../../components/Ago";
 import { Sparkline } from "../components/Sparkline";
 import { socColor, sohColor } from "../colors";
+import { bmsShort, socLabel } from "../../estimate";
 
 const STATUS_COLOR: Record<PackStatus, string> = {
   "in-use": "var(--ok)", charging: "var(--warn)", low: "var(--live)",
@@ -70,7 +71,7 @@ function HeroPackCard({ pack }: { pack: BasePack }) {
         </div>
       )}
       <HeroBarRow label="SOC" frac={soc != null ? soc / 100 : 0}
-        text={soc != null ? `${Math.round(soc)}%` : "—"} color={socColor(soc, connected)} />
+        text={socLabel(item)} color={socColor(soc, connected)} />
       <HeroBarRow label="CAPACITY" frac={capFrac ?? 0}
         text={capFrac != null ? `${Math.round(capFrac * 100)}%` : "—"} color="var(--text-3)" />
       <HeroBarRow label="HEALTH" frac={soh != null ? soh / 100 : 0}
@@ -114,9 +115,12 @@ function BoardRow({ item, connected, points, unit }: {
         <span style={{ flex: 1 }}>
           <Bar frac={soc != null ? soc / 100 : 0} color={socColor(soc, connected)} />
         </span>
-        <span className="mono" style={{ fontSize: 11, width: 34, textAlign: "right",
+        <span className="mono" style={{ fontSize: 11, width: 38, textAlign: "right",
           color: connected ? "var(--text-2)" : "var(--text-4)" }}>
-          {soc != null ? `${Math.round(soc)}%` : "—"}
+          {socLabel(item)}
+        </span>
+        <span className="mono" style={{ fontSize: 10, color: "var(--text-4)", whiteSpace: "nowrap" }}>
+          {bmsShort(item)}
         </span>
       </div>
       <span className="mono" style={{ fontSize: 11, color: sohColor(soh) }}>

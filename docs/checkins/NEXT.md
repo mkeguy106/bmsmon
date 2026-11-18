@@ -48,8 +48,44 @@ two packs: each BMS balances only its own cells.
   deadband, so it can't read as discharge. Status 2026-11-12: a technician install guide for a
   Victron Battery Balancer on 2012's existing bolted harness exists (owner's Claude Docs); the
   owner hasn't decided whether to buy it.
+- **2026-11-16 charge: the act trigger is MET.** 2012-B missed full-detect a second time in a
+  row (peak 13.969 V; counter pinned at 120 Ah, SOC 99 % at Idle; 2012-A cleared to 105 Ah /
+  100 %). Lag 154 s (flat vs 152 s). 2012-A cell max 3.625 V. Between misses B's counter runs
+  ~15 Ah high: on 11-16 before the charge, A read 80 % / 84.4 Ah and B 94 % / 98.9 Ah. Through
+  11-10 the two packs had read within 1 %. The base range figure is bounded by the weaker pack,
+  so it follows A and is unaffected. B's own SOC reads high.
 - **Query:** `min(ts) filter (where voltage_v >= 13.7)` per address per charge night, over
   `state = 'Charging'` rows (worked example in the 2026-11-12 session).
+
+**Spare packs self-drain where the BMS counter can't see it.** Found 2026-11-18. 2016-A/B and
+2023-A/B have read 99 % since July with no charge or use, while their rest voltage fell from
+~13.32 V to 13.11–13.14 V. 2016-A's counter moved 100.44 → 100.40 Ah over the whole period. On
+the daily drivers' rest-voltage curve that is roughly 55–65 %. 2024-A already rested at 13.13 V in
+July while reading 99 %. The drain is sub-deadband (estimated 10–17 mA, ~0.3 Ah/day). The phone's
+persistent BLE links to the spares might add to it, but that hasn't been tested. The spares are
+evidently not on live chargers, though `share.py` and the stage logic assume they are.
+- **Voltage → SOC (measured 2026-11-18, 2012 packs, held-out days):** rest MAE 3.6 pts (p90 7.5),
+  driving with current+temp MAE 4.1 (p90 8.2), against 8.4/10.5 for guessing the median. It holds
+  only from 40 to 100 %: just 2 days ever went below 40 %, so the low knee is uncalibrated.
+- **App-side decision: DONE 2026-11-18** — built as the estimated-SOC feature
+  (`docs/superpowers/specs/2026-11-18-soc-estimate-design.md`; "Estimated SOC" in `CLAUDE.md`): the
+  phone shows rest-voltage-corrected SOC (`~58 %`-style) with the BMS reading muted beside it, so the
+  spares no longer promise 99 %.
+- **Still open — the spares need charging** (or their chargers checking). The estimate makes the
+  shortfall visible; it does not fix the packs, and the drain continues until they are charged.
+- **Done when:** the spares are recharged or their chargers checked (the cross-check decision is made).
+
+**Re-calibrate the rest-voltage → SOC table below 40 %.** Added 2026-11-18. The estimated-SOC
+feature (`docs/superpowers/specs/2026-11-18-soc-estimate-design.md`) uses a table calibrated only
+from 40 to 100 %, with a guessed 28 % ceiling below 12.90 V. The owner will run base 2012 down to
+about 20 % a few times to supply the missing data.
+- **Where it lives:** `VOLTAGE_TABLE`, `VOLTAGE_PLATEAU_V` (13.30 V), `FIRST_VOLTAGE_MARGIN_PTS` (10) and
+  `FOLLOW_DOWN_MARGIN_PTS` (3) in `android/app/src/main/java/dev/joely/bmsmon/model/SocEstimate.kt`
+  (tests in `SocEstimateTest.kt`; the table is also in `CLAUDE.md`'s "Estimated SOC").
+- **Done when:** those runs are in the cloud data, the table is re-fit (rest ≥ 30 min after
+  discharge, per-0.02 V median of `remaining_ah / full_charge_ah`, excluding 2012-B while its
+  counter is offset), and the table, the 12.90 V floor, the 13.30 V cutoff and the 10/3-point
+  margins are confirmed or updated in the estimator and CLAUDE.md.
 
 ## Opportunistic — next time the code is touched
 

@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { decodeHistory, decodeRangeConfigs, decodeSample, decodeSnapshot, decodeTempConfigs, decodeTrends, decodeChargeSessions, decodeNotes, decodeTrack } from "./decode";
 
+// decodeSample / decodeFleetItem swap in our estimate once (estimate.ts): a sample with no
+// est_* decodes to the BMS reading plus explicit nulls for the estimate fields.
+const swapped = (soc: number) =>
+  ({ bms_soc: soc, bms_remaining_ah: null, est_soc: null, est_remaining_ah: null, est_source: null });
+
+
 let warn: MockInstance;
 beforeEach(() => { warn = vi.spyOn(console, "warn").mockImplementation(() => {}); });
 afterEach(() => { warn.mockRestore(); });
@@ -11,12 +17,14 @@ describe("decodeSample", () => {
       type: "sample", address: "A", ts_ms: 5, soc: 50, current_a: -1.2,
       bogus: 1, batch_seq: 7,
     });
-    expect(s).toEqual({ address: "A", ts_ms: 5, soc: 50, current_a: -1.2 });
+    expect(s).toEqual({ address: "A", ts_ms: 5, soc: 50, ...swapped(50), current_a: -1.2 });
   });
 
   it("tolerates null optionals without coercing them", () => {
     expect(decodeSample({ address: "A", ts_ms: 5, soc: null, eta_full_min: null, link_event: null }))
-      .toEqual({ address: "A", ts_ms: 5, soc: null, eta_full_min: null, link_event: null });
+      .toEqual({ address: "A", ts_ms: 5, soc: null, eta_full_min: null, link_event: null,
+        // A telemetry sample without a soc clears the BMS line and the estimate (applyEstimate).
+        bms_soc: null, bms_remaining_ah: null, est_soc: null, est_remaining_ah: null, est_source: null });
   });
 
   it("rejects missing or invalid identity fields (no coercion)", () => {
@@ -53,7 +61,7 @@ describe("decodeSnapshot", () => {
       { address: "A", ts_ms: 1, soc: 50, alias: "2012 · A", group_id: "2012", junk: true },
       { address: 9, ts_ms: 2 }, // bad item — dropped, not fatal
     ]);
-    expect(out).toEqual([{ address: "A", ts_ms: 1, soc: 50, alias: "2012 · A", group_id: "2012" }]);
+    expect(out).toEqual([{ address: "A", ts_ms: 1, soc: 50, ...swapped(50), alias: "2012 · A", group_id: "2012" }]);
   });
 
   it("malformed snapshot (not an array) → null", () => {

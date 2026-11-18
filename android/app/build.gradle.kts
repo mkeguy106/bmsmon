@@ -111,4 +111,6 @@ dependencies {
     // JVM SQLite for executing DAO SQL in unit tests (SqlTestDb). Same artifact/version Room's
     // compile-time query verifier already pulls, so it resolves from the offline Gradle cache.
     testImplementation("org.xerial:sqlite-jdbc:3.41.2.2")
+    // Real org.json for JVM tests of the SettingsStore JSON codecs (android.jar's is a stub).
+    testImplementation("org.json:json:20240303")
 }

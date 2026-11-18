@@ -11,3 +11,7 @@ screenshots/
 # Agent/session scratch (never committed)
 .claude/
 scratchpad/
+
+# Brainstorm mockups and subagent-driven-development workspaces
+.superpowers/brainstorm/
+.superpowers/sdd/

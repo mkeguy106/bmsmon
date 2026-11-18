@@ -4,6 +4,7 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.room.withTransaction
 import dev.joely.bmsmon.data.db.BmsDatabase
+import dev.joely.bmsmon.data.db.EstRowColumns
 import dev.joely.bmsmon.data.db.RangeRowColumns
 import dev.joely.bmsmon.data.db.RawFrameEntity
 import dev.joely.bmsmon.data.db.SampleEntity
@@ -276,6 +277,17 @@ class TelemetryRepository(private val db: BmsDatabase) {
                 ensureActive()   // a plain blocking pager: stop as soon as the caller is cancelled
                 db.samples().rangePage(address, afterTs, afterId, limit)
             }, RangeRowColumns::tsMs, RangeRowColumns::id, consume)
+        }
+
+    /** The SOC estimator's replay rows for one pack since [sinceMs] (link rows excluded), oldest
+     *  first, streamed in [RANGE_PAGE]-row (tsMs, id) keyset pages on IO like [forEachRangeRow] —
+     *  never the whole window at once. [consume] runs on the IO thread. */
+    suspend fun forEachEstimateRow(address: String, sinceMs: Long, consume: (EstRowColumns) -> Unit): Unit =
+        withContext(Dispatchers.IO) {
+            forEachTsKeysetPage(RANGE_PAGE, sinceMs, { afterTs, afterId, limit ->
+                ensureActive()   // a plain blocking pager: stop as soon as the caller is cancelled
+                db.samples().estimatePage(address, afterTs, afterId, limit)
+            }, EstRowColumns::tsMs, EstRowColumns::id, consume)
         }
 
     /** One session's peak-pooled timeline, streamed in bounded pages on IO (DATA-15) — replaces the

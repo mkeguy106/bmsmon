@@ -17,7 +17,10 @@ import dev.joely.bmsmon.model.DEFAULT_DIM_LEVEL
 import dev.joely.bmsmon.model.DEFAULT_SEIZE_SOC
 import dev.joely.bmsmon.model.Group
 import dev.joely.bmsmon.model.RangeParams
+import dev.joely.bmsmon.model.EstSource
 import dev.joely.bmsmon.model.Roster
+import dev.joely.bmsmon.model.PersistedEst
+import dev.joely.bmsmon.model.SocCorrection
 import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.Telemetry
 import dev.joely.bmsmon.model.TempThresholds
@@ -90,6 +93,10 @@ data class Persisted(
     val chargeTailMinByAddress: Map<String, Float> = emptyMap(),
     val chargeTailRunEndByAddress: Map<String, Long> = emptyMap(),
     val rangeParamsByAddress: Map<String, RangeParams> = emptyMap(),
+    /** Held per-pack SOC-estimate corrections and last raw Ah; see model/SocEstimate.kt. */
+    val socCorrections: Map<String, PersistedEst> = emptyMap(),
+    /** True once the estimator has been replayed over local history (so it runs once). */
+    val socEstimatorSeeded: Boolean = false,
     val tempAlertsEnabled: Boolean,
     val showTempGauge: Boolean,
     val tempGaugeSide: String?,
@@ -153,6 +160,8 @@ class SettingsStore(private val context: Context) {
         val TEMP_THRESHOLDS = stringPreferencesKey("temp_thresholds_by_profile")
         val CHARGE_TAIL_MIN = stringPreferencesKey("charge_tail_min_by_address")
         val CHARGE_TAIL_RUN_END = stringPreferencesKey("charge_tail_run_end_by_address")
+        val SOC_CORRECTIONS = stringPreferencesKey("soc_corrections_by_address")
+        val SOC_ESTIMATOR_SEEDED = booleanPreferencesKey("soc_estimator_seeded")
         val RANGE_PARAMS = stringPreferencesKey("range_params_by_address")
         val TEMP_ALERTS_ENABLED = booleanPreferencesKey("temp_alerts_enabled")
         val SHOW_TEMP_GAUGE = booleanPreferencesKey("show_temp_gauge")
@@ -239,6 +248,8 @@ class SettingsStore(private val context: Context) {
             tempThresholdsByProfile = p[K.TEMP_THRESHOLDS]?.let(::decodeTempThresholds) ?: emptyMap(),
             chargeTailMinByAddress = p[K.CHARGE_TAIL_MIN]?.let(::decodeChargeTail) ?: emptyMap(),
             chargeTailRunEndByAddress = p[K.CHARGE_TAIL_RUN_END]?.let(::decodeChargeTailRunEnd) ?: emptyMap(),
+            socCorrections = p[K.SOC_CORRECTIONS]?.let(::decodeSocCorrections) ?: emptyMap(),
+            socEstimatorSeeded = p[K.SOC_ESTIMATOR_SEEDED] ?: false,
             rangeParamsByAddress = p[K.RANGE_PARAMS]?.let(::decodeRangeParams) ?: emptyMap(),
             tempAlertsEnabled = p[K.TEMP_ALERTS_ENABLED] ?: true,
             showTempGauge = p[K.SHOW_TEMP_GAUGE] ?: true,
@@ -307,6 +318,10 @@ class SettingsStore(private val context: Context) {
             val ends = prefs[K.CHARGE_TAIL_RUN_END]?.let(::decodeChargeTailRunEnd) ?: emptyMap()
             prefs[K.CHARGE_TAIL_RUN_END] = encodeChargeTailRunEnd(ends + (address to runEndMs))
         }.let {}
+    suspend fun setSocCorrections(map: Map<String, PersistedEst>) =
+        context.dataStore.edit { it[K.SOC_CORRECTIONS] = encodeSocCorrections(map) }.let {}
+    suspend fun setSocEstimatorSeeded(done: Boolean) =
+        context.dataStore.edit { it[K.SOC_ESTIMATOR_SEEDED] = done }.let {}
     suspend fun setRangeParams(map: Map<String, RangeParams>) =
         context.dataStore.edit { it[K.RANGE_PARAMS] = encodeRangeParams(map) }.let {}
     suspend fun setTempAlertsEnabled(on: Boolean) = context.dataStore.edit { it[K.TEMP_ALERTS_ENABLED] = on }.let {}
@@ -467,6 +482,33 @@ private fun decodeChargeTailRunEnd(json: String): Map<String, Long> = runCatchin
     }
 }.getOrDefault(emptyMap())
 
+/** Per-pack held SOC corrections: `addr=correctionAh|SOURCE|setAtMs|lastRawAh` entries joined by
+ *  `;` (SOURCE empty for none, lastRawAh empty for none). A three-part entry (written before the last
+ *  raw was kept) decodes with no last raw. A malformed entry is dropped, never fatal; a bad last raw
+ *  costs only the last raw, never the correction. */
+internal fun encodeSocCorrections(map: Map<String, PersistedEst>): String =
+    map.entries.joinToString(";") { (addr, p) ->
+        val c = p.correction
+        val raw = p.lastRawAh?.takeIf { it.isFinite() }?.toString() ?: ""
+        "$addr=${if (c.correctionAh.isFinite()) c.correctionAh else 0f}|${c.source?.name ?: ""}|${c.setAtMs}|$raw"
+    }
+
+internal fun decodeSocCorrections(s: String): Map<String, PersistedEst> = buildMap {
+    s.split(';').forEach { entry ->
+        runCatching {
+            val eq = entry.lastIndexOf('=')
+            require(eq > 0)
+            val parts = entry.substring(eq + 1).split('|')
+            require(parts.size == 3 || parts.size == 4)
+            val ah = parts[0].toFloat()
+            require(ah.isFinite())
+            val src = if (parts[1].isEmpty()) null else EstSource.valueOf(parts[1])
+            val raw = parts.getOrNull(3)?.toFloatOrNull()?.takeIf { it.isFinite() }
+            put(entry.substring(0, eq), PersistedEst(SocCorrection(ah, src, parts[2].toLong()), raw))
+        }
+    }
+}
+
 /** Per-pack learned range bands (address -> the six band edges + provenance). */
 private fun encodeRangeParams(map: Map<String, RangeParams>): String {
     val root = JSONObject()
@@ -499,8 +541,13 @@ private fun decodeRangeParams(json: String): Map<String, RangeParams> = runCatch
 /** JSON forbids NaN/Infinity; coerce any non-finite reading to 0 before writing. */
 private fun Float.jsonSafe(): Double = if (isFinite()) toDouble() else 0.0
 
-/** Compact JSON for the last-known per-battery telemetry (address -> the row's display fields). */
-private fun encodeTelemetry(map: Map<String, Telemetry>): String {
+/**
+ * Compact JSON for the last-known per-battery telemetry (address -> the row's display fields).
+ * The seed is the fleet's effective telemetry, so with an estimate in soc/capacityAh the BMS's own
+ * values and the estimate's source ride along (optional keys, written only when set); without them
+ * a restart would show the estimate labelled as the BMS reading.
+ */
+internal fun encodeTelemetry(map: Map<String, Telemetry>): String {
     val root = JSONObject()
     map.forEach { (addr, t) ->
         root.put(addr, JSONObject().apply {
@@ -516,6 +563,9 @@ private fun encodeTelemetry(map: Map<String, Telemetry>): String {
             put("soh", t.soh)
             put("cycles", t.cycles)
             put("state", t.state.name)
+            t.bmsSoc?.let { put("bmsSoc", it.jsonSafe()) }
+            t.bmsCapacityAh?.let { put("bmsCapacityAh", it.jsonSafe()) }
+            t.estSource?.let { put("estSource", it.name) }
         })
     }
     return root.toString()
@@ -556,7 +606,11 @@ private fun decodeRoster(json: String): Roster? = runCatching {
     Roster(batteries, groups)
 }.getOrNull()
 
-private fun decodeTelemetry(json: String): Map<String, Telemetry> = runCatching {
+/** An optional numeric key as a finite Float, else null (absent, null, non-numeric, NaN/inf). */
+private fun JSONObject.optFiniteFloat(key: String): Float? =
+    optDouble(key, Double.NaN).toFloat().takeIf { it.isFinite() }
+
+internal fun decodeTelemetry(json: String): Map<String, Telemetry> = runCatching {
     val root = JSONObject(json)
     buildMap {
         root.keys().forEach { addr ->
@@ -577,6 +631,11 @@ private fun decodeTelemetry(json: String): Map<String, Telemetry> = runCatching 
                 cycles = o.optInt("cycles", 0),
                 state = runCatching { BatteryState.valueOf(o.optString("state")) }
                     .getOrDefault(BatteryState.Idle),
+                // Optional (older seeds have none): absent, non-numeric or non-finite -> null;
+                // an unknown source name -> null. Never throws.
+                bmsSoc = o.optFiniteFloat("bmsSoc"),
+                bmsCapacityAh = o.optFiniteFloat("bmsCapacityAh"),
+                estSource = EstSource.values().firstOrNull { it.name == o.optString("estSource") },
             ))
         }
     }

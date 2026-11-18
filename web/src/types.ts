@@ -8,6 +8,12 @@ export interface Sample {
   eta_full_min?: number | null;
   cell_min_v?: number | null; cell_max_v?: number | null; mosfet_temp_c?: number | null;
   cells?: number[] | null;
+  /** Our estimated state of charge, from the server (null/absent: no correction applies). */
+  est_soc?: number | null; est_remaining_ah?: number | null;
+  est_source?: "counter" | "voltage" | null;
+  /** Decode-internal (applyEstimate), never on the wire: the BMS's own reading, which `soc` /
+   *  `remaining_ah` no longer carry once the estimate is swapped in. */
+  bms_soc?: number | null; bms_remaining_ah?: number | null;
 }
 export type FleetItem = Sample & {
   alias?: string | null; group_id?: string | null;

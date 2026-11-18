@@ -5,6 +5,7 @@
 // tolerate null/undefined optionals. Garbage returns null (with a
 // console.warn) so callers can drop a frame or throw without crashing.
 import type { FleetItem, Sample } from "./types";
+import { applyEstimate } from "./estimate";
 import type { TempConfig } from "./temp";
 import type { RangeConfigRow } from "./range";
 import type { HistSeries } from "./v2/history";
@@ -18,6 +19,7 @@ const SAMPLE_KEYS = [
   "temp_c", "soh", "cycles", "full_charge_ah", "remaining_ah", "regen", "link_event",
   "lat", "lon", "gps_accuracy_m", "eta_full_min",
   "cell_min_v", "cell_max_v", "mosfet_temp_c", "cells",
+  "est_soc", "est_remaining_ah", "est_source",
 ] as const;
 const FLEET_KEYS = [...SAMPLE_KEYS, "alias", "group_id"] as const;
 // WEB-6: envelope fields are optional (older rows/servers omit them) and may
@@ -63,13 +65,13 @@ const normCells = <T extends { cells?: unknown }>(s: T): T => {
 /** A sample is only usable with a string address and a finite ts_ms. */
 export function decodeSample(x: unknown): Sample | null {
   if (!hasIdentity(x)) return warn("sample", x);
-  return normCells(pick<Sample>(x, SAMPLE_KEYS));
+  return applyEstimate(normCells(pick<Sample>(x, SAMPLE_KEYS)));
 }
 
 /** Snapshot items additionally carry alias/group_id meta. */
 export function decodeFleetItem(x: unknown): FleetItem | null {
   if (!hasIdentity(x)) return warn("fleet item", x);
-  return normCells(pick<FleetItem>(x, FLEET_KEYS));
+  return applyEstimate(normCells(pick<FleetItem>(x, FLEET_KEYS)));
 }
 
 /** null when the snapshot itself is malformed; individually bad items are dropped. */

@@ -48,6 +48,7 @@ PACK_FIELDS = (
     "soc", "voltage_v", "current_a", "power_w", "temp_c", "mosfet_temp_c",
     "soh", "cycles", "state", "remaining_ah", "full_charge_ah",
     "cell_min_v", "cell_max_v",
+    "est_soc", "est_remaining_ah", "est_source",
 )
 
 
@@ -60,7 +61,12 @@ def _status(packs: list[dict]) -> str:
         return "in-use"
     if any((p.get("current_a") or 0) > CHARGE_EPS for p in live):
         return "charging"
-    if any((p.get("soc") or 0) >= 99 for p in live):
+    # A corrected estimate, when the phone sent one, outranks the BMS's raw SOC: a pack
+    # reading 99 whose rest voltage says ~60 is a spare, not a ready backup.
+    def _soc(p: dict) -> float:
+        est = p.get("est_soc")
+        return (est if est is not None else p.get("soc")) or 0
+    if any(_soc(p) >= 99 for p in live):
         return "backup"
     return "spares"
 

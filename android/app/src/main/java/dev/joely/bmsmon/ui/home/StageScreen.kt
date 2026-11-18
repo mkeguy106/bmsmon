@@ -26,11 +26,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.joely.bmsmon.DEFAULT_CRITICAL_THRESHOLD
 import dev.joely.bmsmon.DEFAULT_THRESHOLDS
+import dev.joely.bmsmon.ui.bmsCapLine
+import dev.joely.bmsmon.ui.bmsSocLine
+import dev.joely.bmsmon.ui.socText
 import dev.joely.bmsmon.model.AlertConfig
 import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.GaugeSide
@@ -176,6 +182,15 @@ private fun BatteryBlock(
             letterSpacing = 2.2.sp,
             modifier = Modifier.padding(top = 10.dp),
         )
+        // The BMS's own reading, ALWAYS in this spot (same text, same height whether it agrees with
+        // ours or not, and "BMS —" while disconnected), so nothing on the stage ever shifts.
+        Text(
+            if (item.connected) bmsSocLine(b) else "BMS —",
+            color = c.text3,
+            fontSize = 11.sp,
+            letterSpacing = 0.9.sp,
+            modifier = Modifier.padding(top = 2.dp),
+        )
         StatGrid(
             b = b, tempInF = tempInF, connected = item.connected, muted = item.staleAgeMs != null,
             tempCritical = tempCritical, modifier = Modifier.padding(top = 12.dp),
@@ -220,8 +235,17 @@ private fun StageRingBox(item: StageItem, c: dev.joely.bmsmon.ui.theme.BmColors,
             val severity = if (live) socSeverityFor(b.soc, alertConfig) else null
             val numberColor = severity?.textColor() ?: c.text2
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                // A leading "~" (voltage estimate) is a smaller span; the digits and % stay at 40 sp.
+                val socLabel = socText(b)
                 Text(
-                    "${b.soc.roundToInt()}%",
+                    buildAnnotatedString {
+                        if (socLabel.startsWith("~")) {
+                            withStyle(SpanStyle(fontSize = 26.sp)) { append("~") }
+                            append(socLabel.substring(1))
+                        } else {
+                            append(socLabel)
+                        }
+                    },
                     // Stale stays legible in both themes (text2, not text3): readability is a safety
                     // property on this chair-mounted display.
                     color = numberColor,
@@ -312,7 +336,14 @@ private fun ChargingBoltIcon() {
     )
 }
 
-private data class Stat(val label: String, val value: String, val unit: String, val critical: Boolean = false)
+private data class Stat(
+    val label: String,
+    val value: String,
+    val unit: String,
+    val critical: Boolean = false,
+    /** Muted line under the value; null renders an empty line so cells in a row stay aligned. */
+    val sub: String? = null,
+)
 
 @Composable
 private fun StatGrid(
@@ -330,21 +361,24 @@ private fun StatGrid(
         Stat("Power", v("%.1f".format(b.powerW)), "W"),
         Stat("Current", v("%.2f".format(b.current)), "A"),
         Stat("Voltage", v("%.1f".format(b.voltage)), "V"),
-        Stat("Capacity", v(b.capacityAh.roundToInt().toString()), "Ah"),
+        // The sub-line is never null for Capacity, so its row always reserves the line.
+        Stat("Capacity", v(b.capacityAh.roundToInt().toString()), "Ah",
+            sub = if (connected) bmsCapLine(b) else "BMS —"),
         Stat("Cell V", v("%.2f".format(b.cellV)), "V"),
         Stat("Temp", v(tempValue), if (tempInF) "°F" else "°C", critical = connected && tempCritical),
     )
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         for (row in stats.chunked(3)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                for (s in row) StatCell(s, connected, muted, Modifier.weight(1f))
+                val reserveSub = row.any { it.sub != null }
+                for (s in row) StatCell(s, connected, muted, reserveSub, Modifier.weight(1f))
             }
         }
     }
 }
 
 @Composable
-private fun StatCell(s: Stat, connected: Boolean, muted: Boolean, modifier: Modifier = Modifier) {
+private fun StatCell(s: Stat, connected: Boolean, muted: Boolean, reserveSub: Boolean, modifier: Modifier = Modifier) {
     val c = Bm.colors
     // UI-21: every value and label reads at >= 4.5:1 in both themes. A muted (stale) value is text2
     // like the stale SOC number — grey, never the live accent; a disconnected one is a text3 dash.
@@ -374,6 +408,10 @@ private fun StatCell(s: Stat, connected: Boolean, muted: Boolean, modifier: Modi
             if (connected) {
                 Text(s.unit, color = c.text2, fontSize = 11.sp, modifier = Modifier.padding(start = 3.dp))
             }
+        }
+        if (reserveSub) {
+            // Muted, like the BMS line under the pack name; a blank cell keeps the same line height.
+            Text(s.sub ?: " ", color = c.text3, fontSize = 10.sp, fontFamily = MonoFont, maxLines = 1)
         }
     }
 }

@@ -40,7 +40,7 @@ class TempPreviewActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val dark = intent.getBooleanExtra("dark", true)
         val overlay = intent.getBooleanExtra("overlay", false)
-        setContent { TempPreview(dark = dark, showOverlay = overlay) }
+        setContent { TempPreview(dark = dark, showOverlay = overlay, est = intent.getStringExtra("est")) }
     }
 }
 
@@ -49,12 +49,21 @@ private fun tel(name: String, soc: Float, tempC: Float, state: BatteryState = Ba
         capacityAh = 100f, cellV = 3.3f, temp = tempC, state = state)
 
 @Composable
-private fun TempPreview(dark: Boolean, showOverlay: Boolean) {
+private fun TempPreview(dark: Boolean, showOverlay: Boolean, est: String?) {
     BmTheme(dark = dark, accent = Color(0xFFE67E22), power = Color(0xFFC85A1A)) {
         val items = remember {
+            // est = "counter" | "voltage" | "off": SOC-estimate preview (BMS line + capacity sub-line);
+            // absent = the original temperature preview.
+            fun withEst(t: Telemetry) = when (est) {
+                "counter" -> t.copy(soc = 92f, capacityAh = 96.8f, bmsSoc = 99f, bmsCapacityAh = 111.8f,
+                    estSource = dev.joely.bmsmon.model.EstSource.COUNTER)
+                "voltage" -> t.copy(soc = 58f, capacityAh = 58.3f, bmsSoc = 99f, bmsCapacityAh = 111.8f,
+                    estSource = dev.joely.bmsmon.model.EstSource.VOLTAGE)
+                else -> t
+            }
             listOf(
-                StageItem(tel("2012 · A", 78f, -14f), regen = false, connected = true),  // cold-critical
-                StageItem(tel("2012 · B", 80f, 24f), regen = false, connected = true),    // safe
+                StageItem(withEst(tel("2012 · A", 78f, -14f)), regen = false, connected = est != "off"),  // cold-critical
+                StageItem(withEst(tel("2012 · B", 80f, 24f)), regen = false, connected = est != "off"),    // safe
             )
         }
         Box(Modifier.fillMaxSize().background(Bm.colors.bg)) {

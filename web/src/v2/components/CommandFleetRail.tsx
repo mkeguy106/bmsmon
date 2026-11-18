@@ -3,6 +3,7 @@ import { Ago } from "../../components/Ago";
 import { baseLastSeenMs } from "../fleet";
 import { Bar, Chip } from "./Atoms";
 import { socColor, sohColor } from "../colors";
+import { bmsShort, socLabel } from "../../estimate";
 
 const STATUS_DOT: Record<BaseStatus, string> = {
   "in-use": "var(--ok)",
@@ -41,9 +42,12 @@ function PackRow({ pack, onStage }: { pack: BasePack; onStage: () => void }) {
       <span style={{ flex: 1 }}>
         <Bar frac={soc != null ? soc / 100 : 0} color={socColor(soc, connected)} />
       </span>
-      <span className="mono" style={{ fontSize: 11, width: 34, textAlign: "right",
+      <span className="mono" style={{ fontSize: 11, width: 38, textAlign: "right",
         color: connected ? "var(--text-2)" : "var(--text-4)" }}>
-        {soc != null ? `${Math.round(soc)}%` : "—"}
+        {socLabel(item)}
+      </span>
+      <span className="mono" style={{ fontSize: 10, color: "var(--text-4)", whiteSpace: "nowrap" }}>
+        {bmsShort(item)}
       </span>
       <span style={{ width: 8, height: 8, borderRadius: "50%", background: sohColor(item.soh) }}
         title={item.soh != null ? `SOH ${Math.round(item.soh)}%` : "SOH —"} />

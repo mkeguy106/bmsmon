@@ -84,7 +84,9 @@ import dev.joely.bmsmon.model.groupViews
 import dev.joely.bmsmon.ui.ChargingBolt
 import dev.joely.bmsmon.ui.FleetActions
 import dev.joely.bmsmon.ui.RosterActions
+import dev.joely.bmsmon.ui.bmsListTail
 import dev.joely.bmsmon.ui.rememberBoltAlpha
+import dev.joely.bmsmon.ui.socText
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
 import dev.joely.bmsmon.ui.theme.readableInkOnWash
@@ -489,7 +491,7 @@ private fun BatteryRow(
                     Modifier.padding(start = 8.dp).size(width = 11.dp, height = 16.dp),
                     tint = Bm.accent.copy(alpha = rememberBoltAlpha(0.35f, 1f)))
             }
-            Text(if (t != null) "${t.soc.roundToInt()}%" else "—",
+            Text(if (t != null) socText(t) else "—",
                 color = socColor, fontFamily = MonoFont, fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.alpha(if (dim) 0.5f else 1f).padding(start = 8.dp))
             // The non-colour cue: on a light theme LOW amber and normal orange differ by hue alone.
@@ -530,6 +532,9 @@ private fun BatteryRow(
                 }
                 Text("${t.capacityAh.roundToInt()} Ah", color = c.text2, fontFamily = MonoFont, fontSize = 11.sp,
                     modifier = Modifier.width(48.dp), textAlign = androidx.compose.ui.text.style.TextAlign.End)
+                // The BMS's own reading, always here; fixed width so every row's text lines up.
+                Text(bmsListTail(t), color = c.text3, fontFamily = MonoFont, fontSize = 10.5.sp, maxLines = 1,
+                    modifier = Modifier.width(96.dp), textAlign = androidx.compose.ui.text.style.TextAlign.End)
             }
         }
     }

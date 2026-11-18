@@ -37,9 +37,10 @@ import dev.joely.bmsmon.model.batteryAt
 import dev.joely.bmsmon.model.freshness
 import dev.joely.bmsmon.model.freshnessLabel
 import dev.joely.bmsmon.model.groupOf
+import dev.joely.bmsmon.model.rawCapacityAh
+import dev.joely.bmsmon.ui.detailSocText
 import dev.joely.bmsmon.ui.theme.Bm
 import dev.joely.bmsmon.ui.theme.MonoFont
-import kotlin.math.roundToInt
 
 @Composable
 fun BatteryDetailScreen(state: UiState, sessions: List<SessionEntity>, onBack: () -> Unit, onOpenReview: () -> Unit) {
@@ -118,10 +119,10 @@ fun BatteryDetailScreen(state: UiState, sessions: List<SessionEntity>, onBack: (
                             else -> freshnessLabel(fresh, state.monitoring) ?: "live"
                         },
                     ) {
-                        KeyVal("SOC", "${tele.soc.roundToInt()} %", mono = true)
+                        KeyVal("SOC", detailSocText(tele), mono = true)
                         KeyVal("SOH", "${tele.soh} %", mono = true)
                         KeyVal("Cycles", tele.cycles.toString(), mono = true)
-                        KeyVal("Capacity", "%.1f / %.1f Ah".format(tele.capacityAh, tele.fullChargeAh), mono = true)
+                        KeyVal("Capacity", "%.1f / %.1f Ah  (BMS %.1f)".format(tele.capacityAh, tele.fullChargeAh, tele.rawCapacityAh), mono = true)
                         KeyVal("Voltage", "%.2f V".format(tele.voltage), mono = true)
                         KeyVal("Current", "%.2f A".format(tele.current), mono = true)
                         KeyVal("Power", "%.1f W".format(tele.powerW), mono = true)

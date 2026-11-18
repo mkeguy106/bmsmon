@@ -11,7 +11,8 @@ from app.db.rollup import ROLLUP_BUCKET_MS, get_high_water_ms
 _COLS = ["state", "soc", "current_a", "power_w", "voltage_v", "temp_c", "mosfet_temp_c",
          "soh", "full_charge_ah", "remaining_ah", "cycles", "cell_min_v", "cell_max_v",
          "link_event", "lat", "lon", "gps_accuracy_m", "eta_full_min",
-         "motion_activity", "motion_confidence", "motion_still", "motion_at_ms"]
+         "motion_activity", "motion_confidence", "motion_still", "motion_at_ms",
+         "est_soc", "est_remaining_ah", "est_source"]
 
 # Fixes with a larger claimed accuracy radius than this are coarse network/cell fallbacks
 # (fused provider without GNSS lock, e.g. right after a phone reboot — observed 363-636 m
@@ -42,7 +43,8 @@ WITH ins AS (
     (device_id,address,ts_ms,ts,state,soc,current_a,power_w,voltage_v,temp_c,
      mosfet_temp_c,soh,full_charge_ah,remaining_ah,cycles,cell_min_v,cell_max_v,regen,link_event,
      lat,lon,gps_accuracy_m,eta_full_min,cell1_v,cell2_v,cell3_v,cell4_v,
-     motion_activity,motion_confidence,motion_still,motion_at_ms)
+     motion_activity,motion_confidence,motion_still,motion_at_ms,
+     est_soc,est_remaining_ah,est_source)
   SELECT * FROM unnest(
     $1::uuid[], $2::text[], $3::bigint[], $4::timestamptz[], $5::text[],
     $6::real[], $7::real[], $8::real[], $9::real[], $10::real[],
@@ -50,7 +52,8 @@ WITH ins AS (
     $16::real[], $17::real[], $18::boolean[], $19::text[],
     $20::float8[], $21::float8[], $22::real[], $23::real[],
     $24::real[], $25::real[], $26::real[], $27::real[],
-    $28::text[], $29::smallint[], $30::boolean[], $31::bigint[])
+    $28::text[], $29::smallint[], $30::boolean[], $31::bigint[],
+    $32::real[], $33::real[], $34::text[])
   ON CONFLICT DO NOTHING
   RETURNING 1
 )
@@ -62,7 +65,8 @@ _INSERT_FIELDS = ["device_id", "address", "ts_ms", "ts", "state", "soc", "curren
                   "full_charge_ah", "remaining_ah", "cycles", "cell_min_v", "cell_max_v",
                   "regen", "link_event", "lat", "lon", "gps_accuracy_m",
                   "eta_full_min", "cell1_v", "cell2_v", "cell3_v", "cell4_v",
-                  "motion_activity", "motion_confidence", "motion_still", "motion_at_ms"]
+                  "motion_activity", "motion_confidence", "motion_still", "motion_at_ms",
+                  "est_soc", "est_remaining_ah", "est_source"]
 
 
 # Fleet-wide reads (share trail, history, rollup, GPS scrub) are driven per pack from the
@@ -293,7 +297,8 @@ async def fleet_snapshot(conn) -> list[dict]:
               s.device_id, s.address, s.ts_ms, s.ts, s.state, s.soc, s.current_a, s.power_w,
               s.voltage_v, s.temp_c, s.mosfet_temp_c, s.soh, s.full_charge_ah, s.remaining_ah,
               s.cycles, s.cell_min_v, s.cell_max_v, s.regen, s.link_event,
-              s.lat, s.lon, s.gps_accuracy_m, s.eta_full_min, s.received_at,
+              s.lat, s.lon, s.gps_accuracy_m, s.eta_full_min,
+              s.est_soc, s.est_remaining_ah, s.est_source, s.received_at,
               CASE WHEN s.cell1_v IS NULL THEN NULL
                    ELSE ARRAY[s.cell1_v, s.cell2_v, s.cell3_v, s.cell4_v] END AS cells,
               b.alias, b.group_id, b.advertised_name
