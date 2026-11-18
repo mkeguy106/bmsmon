@@ -16,6 +16,9 @@ fun socText(t: Telemetry): String =
 /** The BMS's SOC under the pack name: "BMS 99%". */
 fun bmsSocLine(t: Telemetry): String = "BMS ${t.rawSoc.roundToInt()}%"
 
+/** The Detail screen's SOC row: "92%  (BMS 99%)". */
+fun detailSocText(t: Telemetry): String = "${socText(t)}  (${bmsSocLine(t)})"
+
 /** The BMS's remaining capacity under the Capacity tile: "BMS 112 Ah". */
 fun bmsCapLine(t: Telemetry): String = "BMS ${t.rawCapacityAh.roundToInt()} Ah"
 

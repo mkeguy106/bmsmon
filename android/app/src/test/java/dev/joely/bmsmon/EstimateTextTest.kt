@@ -5,6 +5,7 @@ import dev.joely.bmsmon.model.Telemetry
 import dev.joely.bmsmon.ui.bmsCapLine
 import dev.joely.bmsmon.ui.bmsListTail
 import dev.joely.bmsmon.ui.bmsSocLine
+import dev.joely.bmsmon.ui.detailSocText
 import dev.joely.bmsmon.ui.socText
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -29,6 +30,14 @@ class EstimateTextTest {
         assertEquals("BMS 99%", bmsSocLine(raw))
         assertEquals("BMS 99%", bmsSocLine(counter))
         assertEquals("BMS 99%", bmsSocLine(voltage))
+    }
+
+    // The Detail screen's SOC row: ours, then the BMS's in brackets, the same "NN%" spelling as the
+    // stage and the list (final review: it read "(BMS 99 %)").
+    @Test fun detailSocTextShowsBothTheSameWay() {
+        assertEquals("92%  (BMS 99%)", detailSocText(counter))
+        assertEquals("~58%  (BMS 99%)", detailSocText(voltage))
+        assertEquals("99%  (BMS 99%)", detailSocText(raw))
     }
 
     @Test fun bmsCapLineRoundsToInteger() {
