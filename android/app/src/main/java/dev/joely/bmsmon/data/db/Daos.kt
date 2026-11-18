@@ -22,6 +22,21 @@ data class RangeRowColumns(
     val regen: Boolean,
 )
 
+/** Lean projection the SOC estimator's one-time history replay streams over (Task 4, 2026-11-18):
+ *  exactly the columns [dev.joely.bmsmon.model.EstReading] needs, plus [id] as the keyset
+ *  tie-break for [ESTIMATE_PAGE_SQL]. */
+data class EstRowColumns(
+    val id: Long,
+    val tsMs: Long,
+    val state: String?,
+    val regen: Boolean,
+    val currentA: Float?,
+    val voltageV: Float?,
+    val remainingAh: Float?,
+    val fullChargeAh: Float?,
+    val soc: Float?,
+)
+
 /** Lean projection the session rollup streams over (DATA-16) — telemetry rows only (the page query
  *  excludes link events). 11 columns instead of 22, and only one page is ever held. */
 data class RollupRow(
@@ -129,6 +144,14 @@ internal const val RANGE_PAGE_SQL =
         "WHERE address = :address AND tsMs >= :afterTs AND (tsMs > :afterTs OR id > :afterId) " +
         "AND linkEvent IS NULL ORDER BY tsMs ASC, id ASC LIMIT :limit"
 
+/** One keyset page of a pack's telemetry rows for the SOC replay — [RANGE_PAGE_SQL]'s WHERE/ORDER
+ *  (so the same index range seek with no sort; EstimateSqlTest pins the plan) with the
+ *  estimator's columns. */
+internal const val ESTIMATE_PAGE_SQL =
+    "SELECT id, tsMs, state, regen, currentA, voltageV, remainingAh, fullChargeAh, soc FROM samples " +
+        "WHERE address = :address AND tsMs >= :afterTs AND (tsMs > :afterTs OR id > :afterId) " +
+        "AND linkEvent IS NULL ORDER BY tsMs ASC, id ASC LIMIT :limit"
+
 /** One keyset page of local samples inside a re-sync window, oldest first (DATA-19). (tsMs, id) is
  *  index_samples_tsMs order (the index carries the rowid), so this is a range seek with no sort —
  *  ResyncSqlTest pins the plan. One page per POST, the cursor persisted in the window between them.
@@ -170,6 +193,10 @@ interface SampleDao {
     /** Blocking — the range pager calls it in a loop on IO (BLE-25); never call on Main. */
     @Query(RANGE_PAGE_SQL)
     fun rangePage(address: String, afterTs: Long, afterId: Long, limit: Int): List<RangeRowColumns>
+
+    /** Blocking — the SOC replay pager calls it in a loop on IO; never call on Main. */
+    @Query(ESTIMATE_PAGE_SQL)
+    fun estimatePage(address: String, afterTs: Long, afterId: Long, limit: Int): List<EstRowColumns>
 
     @Query("DELETE FROM samples WHERE tsMs < :cutoffMs")
     suspend fun deleteOlderThan(cutoffMs: Long): Int

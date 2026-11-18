@@ -16,6 +16,7 @@ import dev.joely.bmsmon.ble.profile.ProfileRegistry
 import dev.joely.bmsmon.ble.profile.RedodoBekenProfile
 import dev.joely.bmsmon.cloud.PhonePowerJson
 import dev.joely.bmsmon.cloud.TelemetryReporter
+import dev.joely.bmsmon.data.SAMPLE_RETENTION_DAYS
 import dev.joely.bmsmon.data.FailureLogThrottle
 import dev.joely.bmsmon.data.SettingsStore
 import dev.joely.bmsmon.data.TelemetryRepository
@@ -36,7 +37,10 @@ import dev.joely.bmsmon.model.RangeRow
 import dev.joely.bmsmon.model.SEED_RANGE_PARAMS
 import dev.joely.bmsmon.model.SEED_TAIL_MIN
 import dev.joely.bmsmon.model.SLOW_POLL_MS
+import dev.joely.bmsmon.model.SocCorrection
 import dev.joely.bmsmon.model.SocEstimate
+import dev.joely.bmsmon.model.replayRow
+import dev.joely.bmsmon.model.seedEstimator
 import dev.joely.bmsmon.model.StageConfig
 import dev.joely.bmsmon.model.StageTarget
 import dev.joely.bmsmon.model.TodayUsage
@@ -252,8 +256,11 @@ class MonitorEngine(
      *  until then onPoll shows the raw BMS reading and steps nothing, so a pre-load step can neither
      *  be wiped by the load nor persist over corrections not yet read. Written under estState's lock. */
     @Volatile private var estLoaded = false
-    /** Set by Task 4's history replay while it runs: live frames show the raw reading, step nothing. */
+    /** True while the one-time history replay ([startSocReplay]) runs: live frames show the raw
+     *  reading and step nothing, so they can neither change a state the replay is building nor be
+     *  overwritten by its install. Written under estState's lock, session-checked. */
     @Volatile private var seeding = false
+    @Volatile private var socReplayJob: Job? = null
     /** Serializes correction writes, so an older snapshot can never land after a newer one. */
     private val estPersistLock = Mutex()
     // BLE-21: the monitoring session BLE callbacks belong to. start() mints one and captures it in
@@ -337,6 +344,7 @@ class MonitorEngine(
         synchronized(estState) {
             estState.clear()
             estLoaded = false
+            seeding = false
         }
         _state.update { st ->
             st.copy(
@@ -390,13 +398,19 @@ class MonitorEngine(
                 // Only this session's load installs corrections, so a late load from a session
                 // that has since stopped can't wipe what this one has stepped. A failed load leaves
                 // estLoaded false: the session shows the raw BMS reading, as before the estimator.
-                synchronized(estState) {
+                // An unseeded store (first start of this version, or after Clear data) replays the
+                // local history first; seeding is set in the same locked step as estLoaded, so no
+                // live frame can step in between.
+                val replay = synchronized(estState) {
                     if (session == currentSession) {
                         estState.clear()
                         saved.socCorrections.forEach { (a, c) -> estState[a.uppercase()] = EstPackState(correction = c) }
                         estLoaded = true
-                    }
+                        seeding = !saved.socEstimatorSeeded
+                        seeding
+                    } else false
                 }
+                if (replay) startSocReplay(session, saved.socCorrections)
             }.onFailure { Log.w(TAG, "loading persisted learner state failed", it) }
             // Started only after the persisted-params load completes, so the first learn pass
             // can never race a stale load and get clobbered by it. Guarded by monitoring in case
@@ -502,6 +516,8 @@ class MonitorEngine(
         stopPowerLoop()
         rangeJob?.cancel()
         rangeJob = null
+        socReplayJob?.cancel()
+        socReplayJob = null
         stageTickJob?.cancel()
         stageTickJob = null
         ble.stop()
@@ -1033,6 +1049,51 @@ class MonitorEngine(
                 val snapshot = synchronized(estState) { estState.mapValues { it.value.correction } }
                 runCatching { settings.setSocCorrections(snapshot) }
                     .onFailure { Log.w(TAG, "persisting SOC corrections failed", it) }
+            }
+        }
+    }
+
+    /**
+     * The one-time history replay (2026-11-18 estimate spec, "First start"): every roster pack's
+     * last [SAMPLE_RETENTION_DAYS] of Room rows, oldest first, through [stepEstimate], starting from
+     * its persisted correction (normally none; one exists only if an earlier replay failed and live
+     * stepping carried on). All packs are installed at once under estState's lock, only if
+     * [session] is still current — a replay finishing after stop() changes nothing — then the
+     * corrections are written and only after them the seeded flag, so a process death in between
+     * just replays again. Any failure leaves the store unseeded (retried next start) and the
+     * session on the corrections it loaded. [seeding] ends either way.
+     */
+    private fun startSocReplay(session: Long, loaded: Map<String, SocCorrection>) {
+        val addrs = roster.batteries.map { it.address }
+        val sinceMs = now() - SAMPLE_RETENTION_DAYS * 24L * 3_600_000L
+        val start = loaded.mapKeys { it.key.uppercase() }
+        socReplayJob?.cancel()
+        socReplayJob = scope.launch(Dispatchers.IO) {
+            try {
+                seedEstimator(
+                    addresses = addrs,
+                    replay = { addr ->
+                        var s = start[addr.uppercase()]?.let { EstPackState(correction = it) } ?: EstPackState()
+                        repository.forEachEstimateRow(addr, sinceMs) { s = s.replayRow(it) }
+                        s
+                    },
+                    install = { result ->
+                        synchronized(estState) {
+                            if (session != currentSession) false
+                            else { result.forEach { (a, s) -> estState[a.uppercase()] = s }; true }
+                        }
+                    },
+                    markSeeded = {
+                        estPersistLock.withLock {
+                            val snapshot = synchronized(estState) { estState.mapValues { it.value.correction } }
+                            settings.setSocCorrections(snapshot)
+                        }
+                        settings.setSocEstimatorSeeded(true)
+                    },
+                    onFailure = { Log.w(TAG, "SOC history replay failed; it retries on the next start", it) },
+                )
+            } finally {
+                synchronized(estState) { if (session == currentSession) seeding = false }
             }
         }
     }
