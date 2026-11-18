@@ -22,7 +22,9 @@ describe("decodeSample", () => {
 
   it("tolerates null optionals without coercing them", () => {
     expect(decodeSample({ address: "A", ts_ms: 5, soc: null, eta_full_min: null, link_event: null }))
-      .toEqual({ address: "A", ts_ms: 5, soc: null, eta_full_min: null, link_event: null });
+      .toEqual({ address: "A", ts_ms: 5, soc: null, eta_full_min: null, link_event: null,
+        // A telemetry sample without a soc clears the BMS line and the estimate (applyEstimate).
+        bms_soc: null, bms_remaining_ah: null, est_soc: null, est_remaining_ah: null, est_source: null });
   });
 
   it("rejects missing or invalid identity fields (no coercion)", () => {

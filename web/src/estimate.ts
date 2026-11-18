@@ -11,11 +11,21 @@ const finite = (v: unknown): v is number => typeof v === "number" && Number.isFi
 /**
  * Swap in the estimate. A telemetry sample (finite soc) always gets bms_soc /
  * bms_remaining_ah, and est_* are normalised to null when absent so a merge in the store can
- * never inherit a stale estimate or source from an earlier sample. Link events (no soc) are
- * returned unchanged.
+ * never inherit a stale estimate or source from an earlier sample. The estimate only ever
+ * lowers: `soc`/`remaining_ah` are capped at the BMS's own values, whatever the wire says.
+ * A telemetry sample with no soc gets bms_* and est_* as explicit nulls, so the store cannot
+ * keep a stale BMS line or estimate beside the "—". Link events (no telemetry) are returned
+ * unchanged.
  */
 export function applyEstimate<T extends Sample>(s: T): T {
-  if (!finite(s.soc)) return s;
+  if (!finite(s.soc)) {
+    if (s.link_event != null) return s;
+    return {
+      ...s,
+      bms_soc: null, bms_remaining_ah: null,
+      est_soc: null, est_remaining_ah: null, est_source: null,
+    };
+  }
   const bmsSoc = s.soc;
   const bmsAh = s.remaining_ah ?? null;
   const estSoc = finite(s.est_soc) ? s.est_soc : null;
@@ -26,8 +36,8 @@ export function applyEstimate<T extends Sample>(s: T): T {
     ...s,
     bms_soc: bmsSoc,
     bms_remaining_ah: bmsAh,
-    soc: estSoc ?? bmsSoc,
-    ...(estAh != null ? { remaining_ah: estAh } : null),
+    soc: estSoc != null ? Math.min(estSoc, bmsSoc) : bmsSoc,
+    ...(estAh != null ? { remaining_ah: finite(bmsAh) ? Math.min(estAh, bmsAh) : estAh } : null),
     est_soc: estSoc,
     est_remaining_ah: estAh,
     est_source: src,
