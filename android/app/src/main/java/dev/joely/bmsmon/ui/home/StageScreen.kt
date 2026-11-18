@@ -26,12 +26,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.joely.bmsmon.DEFAULT_CRITICAL_THRESHOLD
 import dev.joely.bmsmon.DEFAULT_THRESHOLDS
-import dev.joely.bmsmon.model.EstSource
 import dev.joely.bmsmon.ui.bmsCapLine
 import dev.joely.bmsmon.ui.bmsSocLine
 import dev.joely.bmsmon.ui.socText
@@ -233,14 +235,22 @@ private fun StageRingBox(item: StageItem, c: dev.joely.bmsmon.ui.theme.BmColors,
             val severity = if (live) socSeverityFor(b.soc, alertConfig) else null
             val numberColor = severity?.textColor() ?: c.text2
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                // A leading "~" (voltage estimate) is a smaller span; the digits and % stay at 40 sp.
+                val socLabel = socText(b)
                 Text(
-                    socText(b),
+                    buildAnnotatedString {
+                        if (socLabel.startsWith("~")) {
+                            withStyle(SpanStyle(fontSize = 26.sp)) { append("~") }
+                            append(socLabel.substring(1))
+                        } else {
+                            append(socLabel)
+                        }
+                    },
                     // Stale stays legible in both themes (text2, not text3): readability is a safety
                     // property on this chair-mounted display.
                     color = numberColor,
                     fontFamily = MonoFont,
-                    // The "~" of a voltage estimate widens the number; 36 sp keeps it off the power arc.
-                    fontSize = if (b.estSource == EstSource.VOLTAGE) 36.sp else 40.sp,
+                    fontSize = 40.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
                 // Its own line under the number, so it can never overlap or squeeze it: at most ~60 dp
