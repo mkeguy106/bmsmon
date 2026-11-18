@@ -535,8 +535,13 @@ private fun decodeRangeParams(json: String): Map<String, RangeParams> = runCatch
 /** JSON forbids NaN/Infinity; coerce any non-finite reading to 0 before writing. */
 private fun Float.jsonSafe(): Double = if (isFinite()) toDouble() else 0.0
 
-/** Compact JSON for the last-known per-battery telemetry (address -> the row's display fields). */
-private fun encodeTelemetry(map: Map<String, Telemetry>): String {
+/**
+ * Compact JSON for the last-known per-battery telemetry (address -> the row's display fields).
+ * The seed is the fleet's effective telemetry, so with an estimate in soc/capacityAh the BMS's own
+ * values and the estimate's source ride along (optional keys, written only when set); without them
+ * a restart would show the estimate labelled as the BMS reading.
+ */
+internal fun encodeTelemetry(map: Map<String, Telemetry>): String {
     val root = JSONObject()
     map.forEach { (addr, t) ->
         root.put(addr, JSONObject().apply {
@@ -552,6 +557,9 @@ private fun encodeTelemetry(map: Map<String, Telemetry>): String {
             put("soh", t.soh)
             put("cycles", t.cycles)
             put("state", t.state.name)
+            t.bmsSoc?.let { put("bmsSoc", it.jsonSafe()) }
+            t.bmsCapacityAh?.let { put("bmsCapacityAh", it.jsonSafe()) }
+            t.estSource?.let { put("estSource", it.name) }
         })
     }
     return root.toString()
@@ -592,7 +600,11 @@ private fun decodeRoster(json: String): Roster? = runCatching {
     Roster(batteries, groups)
 }.getOrNull()
 
-private fun decodeTelemetry(json: String): Map<String, Telemetry> = runCatching {
+/** An optional numeric key as a finite Float, else null (absent, null, non-numeric, NaN/inf). */
+private fun JSONObject.optFiniteFloat(key: String): Float? =
+    optDouble(key, Double.NaN).toFloat().takeIf { it.isFinite() }
+
+internal fun decodeTelemetry(json: String): Map<String, Telemetry> = runCatching {
     val root = JSONObject(json)
     buildMap {
         root.keys().forEach { addr ->
@@ -613,6 +625,11 @@ private fun decodeTelemetry(json: String): Map<String, Telemetry> = runCatching 
                 cycles = o.optInt("cycles", 0),
                 state = runCatching { BatteryState.valueOf(o.optString("state")) }
                     .getOrDefault(BatteryState.Idle),
+                // Optional (older seeds have none): absent, non-numeric or non-finite -> null;
+                // an unknown source name -> null. Never throws.
+                bmsSoc = o.optFiniteFloat("bmsSoc"),
+                bmsCapacityAh = o.optFiniteFloat("bmsCapacityAh"),
+                estSource = EstSource.values().firstOrNull { it.name == o.optString("estSource") },
             ))
         }
     }
