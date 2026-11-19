@@ -174,23 +174,39 @@ private fun BatteryBlock(
                 TempGauge(b.temp, gaugeColor, formatTemp(b.temp, unit), tempCritical)
             }
         }
-        Text(
-            b.name.uppercase(),
-            color = if (item.connected) c.name else c.text3,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Medium,
-            letterSpacing = 2.2.sp,
-            modifier = Modifier.padding(top = 10.dp),
-        )
-        // The BMS's own reading, ALWAYS in this spot (same text, same height whether it agrees with
-        // ours or not, and "BMS —" while disconnected), so nothing on the stage ever shifts.
-        Text(
-            if (item.connected) bmsSocLine(b) else "BMS —",
-            color = c.text3,
-            fontSize = 11.sp,
-            letterSpacing = 0.9.sp,
-            modifier = Modifier.padding(top = 2.dp),
-        )
+        // The BMS's own reading sits on the pack-name line, ALWAYS (same text whether it agrees with
+        // ours or not, and "BMS —" while disconnected), so nothing on the stage ever shifts. Styled
+        // like a stat tile's value (the Voltage reading): the theme's accent at 16 sp mono, with the
+        // "BMS" label smaller in the same colour. Stale and disconnected mute the same way.
+        // On the name's line rather than under it: a 16 sp line of its own pushed the bottom tile
+        // row out of the pack's half of the screen on the Pixel 6.
+        val bmsValueColor = when {
+            !item.connected -> c.text3
+            item.staleAgeMs != null -> c.text2
+            else -> Bm.accentText
+        }
+        // Every text on one shared baseline: the three differ in font and size, so bottom-aligning
+        // their boxes left "BMS" sitting visibly below the number.
+        Row(modifier = Modifier.padding(top = 10.dp)) {
+            Text(
+                b.name.uppercase(),
+                color = if (item.connected) c.name else c.text3,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                letterSpacing = 2.2.sp,
+                modifier = Modifier.alignByBaseline().padding(end = 14.dp),
+            )
+            Text("BMS", color = bmsValueColor, fontSize = 11.sp, letterSpacing = 0.9.sp,
+                modifier = Modifier.alignByBaseline().padding(end = 4.dp))
+            Text(
+                if (item.connected) bmsSocLine(b).removePrefix("BMS ") else "—",
+                color = bmsValueColor,
+                fontFamily = MonoFont,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.alignByBaseline(),
+            )
+        }
         StatGrid(
             b = b, tempInF = tempInF, connected = item.connected, muted = item.staleAgeMs != null,
             tempCritical = tempCritical, modifier = Modifier.padding(top = 12.dp),
