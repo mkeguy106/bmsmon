@@ -1041,7 +1041,9 @@ JVM-tested module `model/SocEstimate.kt` (no Android imports, no clock); the eng
   wire); non-finite values are dropped. Re-sync from Room does not carry them.
 - **Display (BMS line always present, muted, fixed position, so nothing jumps when the two agree).**
   Stage: ring and big number are ours, a `~` prefix (26 sp span, digits stay 40 sp) when the source is
-  VOLTAGE (coarser) and none for COUNTER (exact); a muted `BMS 99%` line under the pack name and a muted
+  VOLTAGE (coarser) and none for COUNTER (exact); `BMS 99%` on the pack-name line, the value styled like
+  a stat tile's (16 sp mono, the theme's `accentText`, with the "BMS" word in the same colour at 11 sp; text2 when stale, text3 `BMS —` when disconnected;
+  on its own line it pushed the bottom tile row out of the pack's half of a Pixel 6), and a muted
   `BMS 113 Ah` sub-line in the Capacity tile (`BMS —` when disconnected). All Batteries: header % is
   ours, the capacity row ends with a fixed 96 dp muted `bms 99% · 113` (`ui/EstimateText.kt`
   `bmsListTail`/`bmsSocLine`/`bmsCapLine`). Detail: `92%  (BMS 99%)` (`detailSocText`). Severity colour/LOW/CRIT follow
