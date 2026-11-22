@@ -1,6 +1,7 @@
 package dev.joely.bmsmon.ui
 
 import java.io.File
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -73,5 +74,14 @@ class LockTaskTest {
             .readText()
         assertTrue(main.contains("override fun onTopResumedActivityChanged(isTopResumedActivity: Boolean)"))
         assertTrue(src.contains("owner?.lifecycle?.addObserver(observer)"))
+    }
+
+    // Surface.ROTATION_0..270 on this natural-portrait phone → ActivityInfo.SCREEN_ORIENTATION_*:
+    // PORTRAIT = 1, LANDSCAPE = 0, REVERSE_PORTRAIT = 9, REVERSE_LANDSCAPE = 8.
+    @Test fun eachRotationMapsToTheFixedOrientationThatShowsIt() {
+        assertEquals(1, orientationForRotation(0))
+        assertEquals(0, orientationForRotation(1))
+        assertEquals(9, orientationForRotation(2))
+        assertEquals(8, orientationForRotation(3))
     }
 }

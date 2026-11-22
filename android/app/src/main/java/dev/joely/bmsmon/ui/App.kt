@@ -156,7 +156,8 @@ fun App(vm: BatteryViewModel) {
     // an ordinary install gets screen pinning (escapable via the system gesture); a
     // provisioned device owner gets a true kiosk with no escape gesture. Locking also
     // freezes the orientation (SCREEN_ORIENTATION_LOCKED pins whatever is current at
-    // lock time); unlocking reverts to the app/sensor default.
+    // lock time); unlocking reverts to the app/sensor default. After an agent session the
+    // re-pin below swaps LOCKED for the fixed orientation the screen had before the session.
     LaunchedEffect(activity, state.locked) {
         val act = activity ?: return@LaunchedEffect
         if (state.locked) {
@@ -192,6 +193,12 @@ fun App(vm: BatteryViewModel) {
             delay((deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0))
             AgentSession.expire(deadline)
         } else {
+            // The session is over: first turn the screen back to the rotation it had when the
+            // session started (an app the agent opened can rotate it, and SCREEN_ORIENTATION_LOCKED
+            // would freeze whatever it is now). A fixed orientation holds it from here on.
+            AgentSession.takeRotation()?.let { r ->
+                if (lockedNow) act.requestedOrientation = orientationForRotation(r)
+            }
             // Re-pin once the session has ended and we hold top focus. While the agent's app on the
             // hidden display holds it, Android refuses the pin; touching our screen or the hidden
             // display closing hands focus back and this runs again.

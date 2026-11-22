@@ -22,3 +22,16 @@ fun shouldRepin(locked: Boolean, lockTaskModeState: Int, agentActive: Boolean = 
  */
 fun shouldUnpinForAgent(locked: Boolean, lockTaskModeState: Int, agentActive: Boolean): Boolean =
     locked && agentActive && lockTaskModeState != LOCK_TASK_MODE_NONE
+
+/**
+ * The fixed ActivityInfo.SCREEN_ORIENTATION_* that shows the screen at this Surface.ROTATION_*,
+ * on a phone whose natural orientation is portrait (the Pixel 6). Values kept local so this stays
+ * JVM-testable: PORTRAIT = 1, LANDSCAPE = 0, REVERSE_PORTRAIT = 9, REVERSE_LANDSCAPE = 8.
+ * Used to put the screen back as it was before an agent session (see agent/AgentSession.kt).
+ */
+fun orientationForRotation(rotation: Int): Int = when (rotation) {
+    1 -> 0
+    2 -> 9
+    3 -> 8
+    else -> 1
+}

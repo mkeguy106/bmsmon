@@ -789,6 +789,14 @@ adb shell am start -n dev.joely.bmsmon/.MainActivity   # always, after every tas
     is never silent.
   - As device owner the re-pin takes effect at once; before that, the owner tapped **Got it**.
 - A session lifts only a pin that locked mode set (`shouldUnpinForAgent` requires `locked`).
+- **The screen comes back in the orientation it had before the session (2026-11-21).** `op start`
+  notes the real display's rotation (an extend keeps the first one); at the re-pin `App.kt`
+  replaces `SCREEN_ORIENTATION_LOCKED` with the fixed orientation for that rotation
+  (`orientationForRotation`, `ui/LockTask.kt`, natural-portrait phone). Without it, LOCKED kept
+  whatever rotation an app the agent opened had left. A process restart during the session (an
+  install) loses the note, and LOCKED applies as before. Verified on device: rotation forced to 90°
+  mid-session (`cmd window fixed-to-user-rotation enabled`, then `default`), and the re-pin turned
+  it back to 0° (`requestedOrientation=SCREEN_ORIENTATION_PORTRAIT`, `LOCKED`).
 - `op start` takes effect when bmsmon is started. If the phone's screen is off, wake it or
   `am start` bmsmon first.
 - The owner's rule: when a phonedriver task is done, bmsmon goes back up pinned (`op end` +
