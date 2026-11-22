@@ -52,10 +52,21 @@ object AgentSession {
     /** The running session's deadline on the elapsedRealtime clock, or null when none runs. */
     val deadline: StateFlow<Long?> = _deadline.asStateFlow()
 
-    /** Starts a session, or restarts the timer of the running one (extend). */
-    fun start(minutes: Int, nowMs: Long) {
+    // The phone screen's rotation (Surface.ROTATION_*) just before the session lifted the pin.
+    // The agent's apps can turn the screen while the pin is down, so the re-pin puts this back.
+    @Volatile private var rotation: Int? = null
+
+    /**
+     * Starts a session, or restarts the timer of the running one (extend). A new session notes
+     * [displayRotation]; an extend keeps the rotation from before the first start.
+     */
+    fun start(minutes: Int, nowMs: Long, displayRotation: Int? = null) {
+        if (_deadline.value == null) rotation = displayRotation
         _deadline.value = nowMs + minutes * 60_000L
     }
+
+    /** The rotation noted when the last session started, handed out once (to the re-pin). */
+    fun takeRotation(): Int? = rotation.also { rotation = null }
 
     fun end() {
         _deadline.value = null

@@ -4,8 +4,10 @@ import android.app.admin.DevicePolicyManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.hardware.display.DisplayManager
 import android.os.SystemClock
 import android.util.Log
+import android.view.Display
 
 /**
  * `adb shell am broadcast -n dev.joely.bmsmon/.agent.AgentSessionReceiver --es op start --ei minutes 15`
@@ -22,8 +24,13 @@ class AgentSessionReceiver : BroadcastReceiver() {
         val minutes = if (intent.hasExtra("minutes")) intent.getIntExtra("minutes", 0) else null
         when (val op = parseAgentOp(intent.getStringExtra("op"), minutes)) {
             is AgentOp.Start -> {
-                AgentSession.start(op.minutes, SystemClock.elapsedRealtime())
-                Log.i(TAG, "session start: ${op.minutes} min")
+                // Note the screen's rotation before the pin lifts; the re-pin restores it.
+                val rotation = runCatching {
+                    context.getSystemService(DisplayManager::class.java)
+                        ?.getDisplay(Display.DEFAULT_DISPLAY)?.rotation
+                }.getOrNull()
+                AgentSession.start(op.minutes, SystemClock.elapsedRealtime(), rotation)
+                Log.i(TAG, "session start: ${op.minutes} min, rotation $rotation")
             }
             AgentOp.End -> {
                 AgentSession.end()

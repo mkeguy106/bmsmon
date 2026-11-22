@@ -9,7 +9,10 @@ import org.junit.Test
 
 class AgentSessionTest {
 
-    @Before fun reset() = AgentSession.end()
+    @Before fun reset() {
+        AgentSession.end()
+        AgentSession.takeRotation()
+    }
 
     @Test fun minutesClamp() {
         assertEquals(AgentOp.Start(15), parseAgentOp("start", null))
@@ -63,5 +66,36 @@ class AgentSessionTest {
         assertEquals("00:00", formatAgentRemaining(-5))
         assertEquals("01:01", formatAgentRemaining(61_999))
         assertEquals("15:00", formatAgentRemaining(900_000))
+    }
+
+    /** The screen's rotation when a session starts comes back once, at the re-pin after it ends. */
+    @Test fun rotationAtStartIsHandedBackOnce() {
+        AgentSession.start(15, 0, displayRotation = 1)
+        AgentSession.end()
+        assertEquals(1, AgentSession.takeRotation())
+        assertNull(AgentSession.takeRotation())
+    }
+
+    /** An extend keeps the rotation from before the session; the agent may have turned the screen since. */
+    @Test fun extendKeepsTheFirstRotation() {
+        AgentSession.start(15, 0, displayRotation = 1)
+        AgentSession.start(15, 60_000, displayRotation = 0)
+        AgentSession.end()
+        assertEquals(1, AgentSession.takeRotation())
+    }
+
+    /** A new session after one whose rotation was never taken notes the screen afresh. */
+    @Test fun aNewSessionReplacesAnUntakenRotation() {
+        AgentSession.start(15, 0, displayRotation = 1)
+        AgentSession.end()
+        AgentSession.start(15, 0, displayRotation = 3)
+        AgentSession.end()
+        assertEquals(3, AgentSession.takeRotation())
+    }
+
+    @Test fun unknownRotationIsNotNoted() {
+        AgentSession.start(15, 0, displayRotation = null)
+        AgentSession.end()
+        assertNull(AgentSession.takeRotation())
     }
 }
