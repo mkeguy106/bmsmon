@@ -75,17 +75,45 @@ evidently not on live chargers, though `share.py` and the stage logic assume the
   shortfall visible; it does not fix the packs, and the drain continues until they are charged.
 - **Done when:** the spares are recharged or their chargers checked (the cross-check decision is made).
 
-**Re-calibrate the rest-voltage → SOC table below 40 %.** Added 2026-11-18. The estimated-SOC
-feature (`docs/superpowers/specs/2026-11-18-soc-estimate-design.md`) uses a table calibrated only
-from 40 to 100 %, with a guessed 28 % ceiling below 12.90 V. The owner will run base 2012 down to
-about 20 % a few times to supply the missing data.
+**Rest-voltage → SOC table: measure below 12.97 V.** Added 2026-11-18, re-scoped 2026-11-25. The
+table was refit on 2026-11-25 against charger-delivered Ah (`docs/calibration-checkin-2026-11-25.md`);
+the first fit used the BMS counter and read ~15–20 points high. What is still not measured is the
+low knee: the 12.90 V → 21 % point is extrapolated, and 12.97–13.11 V rests on a handful of rest
+episodes. The owner will run base 2012 down to about 20 % a few times to supply the data.
 - **Where it lives:** `VOLTAGE_TABLE`, `VOLTAGE_PLATEAU_V` (13.30 V), `FIRST_VOLTAGE_MARGIN_PTS` (10) and
   `FOLLOW_DOWN_MARGIN_PTS` (3) in `android/app/src/main/java/dev/joely/bmsmon/model/SocEstimate.kt`
   (tests in `SocEstimateTest.kt`; the table is also in `CLAUDE.md`'s "Estimated SOC").
-- **Done when:** those runs are in the cloud data, the table is re-fit (rest ≥ 30 min after
-  discharge, per-0.02 V median of `remaining_ah / full_charge_ah`, excluding 2012-B while its
-  counter is offset), and the table, the 12.90 V floor, the 13.30 V cutoff and the 10/3-point
-  margins are confirmed or updated in the estimator and CLAUDE.md.
+- **Method (do not use `remaining_ah / full_charge_ah` as truth):** between two full charges, true
+  remaining = counter − drift, with the drift fixed at the next charge start by the Ah the charger
+  delivers and spread linearly in time. Skip intervals where the BMS re-anchored (`pendingAh`).
+- **Done when:** rests below 12.97 V are in the cloud data and the table's low end is re-fit.
+
+**Repair the full-charge-capacity rows the parser bug wrote.** Added 2026-11-25. Until the fix, the
+phone read full-charge capacity as 4 bytes; whenever the BMS was re-anchoring it uploaded ~40 million
+Ah. Prod `samples` holds ~147 000 such rows (`full_charge_ah > 1000`: 2024-A 2026-10-20…22, both 2012
+packs 2026-10-23…24 and 2026-11-25), and `samples_rollup.cap_sum` averages them in, so the History
+capacity chart spikes on those days. The phone's Room `samples` has the same rows for 14 days.
+- **Fix:** set those rows to the pack's neighbouring good value (105.00 for the 2012 packs), then
+  re-roll the affected rollup buckets. A write to prod: needs the owner's go-ahead.
+- **Also decide:** upload `pendingAh` (a new nullable `samples` column, server first). After the fix
+  a re-anchor is visible in prod only as `est_remaining_ah − remaining_ah`.
+- **Done when:** no `full_charge_ah > 1000` rows remain and the rollup's capacity reads ~105 on those days.
+
+**Standby-drain estimate: confirm it in the field.** Added 2026-11-25 (`DrainModel`, "Estimated
+SOC" in `CLAUDE.md`). Installed while both 2012 packs were mid BMS re-anchor, so it has no anchor yet.
+- **First full charge after install:** both packs should anchor (`est_soc` = BMS reading right
+  after, then falling ~2.5 Ah/day below the counter). 2012-B is only "full" to the estimator while
+  its taper reaches `TAPER_MIN_V` 13.90 V under 3 A; it read 13.95–13.96 V on 2026-11-17 and has been
+  falling ~10 mV a charge. If B stops anchoring, lower the threshold or anchor B off its partner.
+- **Second full charge:** the first learned rate. Check it against the SQL figure (counter at charge
+  start − (105 − Ah delivered), over the days between).
+- **The BMS's re-anchor overshoot:** the first full charge after 2026-11-25 is the second
+  measurement (October's was 7–11 Ah low). If it agrees, decide whether the estimate may read above
+  a freshly re-anchored BMS.
+- **Charge ETA:** runs ~45 min long on a drain-corrected pack. Relearn the tail on the estimate's
+  SOC (expected ~25 min with little spread) instead of the raw SOC.
+- **Done when:** two full charges are in, the learned rate matches SQL within 0.5 Ah/day, and the
+  ETA decision is made.
 
 ## Opportunistic — next time the code is touched
 
