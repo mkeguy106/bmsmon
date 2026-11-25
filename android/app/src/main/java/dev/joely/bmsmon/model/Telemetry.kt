@@ -22,6 +22,10 @@ data class Telemetry(
     val cycles: Int = 0,
     val state: BatteryState = BatteryState.Idle,
     val fullChargeAh: Float = 0f,
+    /** The BMS's pending correction to its own remaining-Ah counter. 0 normally; negative while it
+     *  lowers the counter toward its rest-voltage estimate (about 2 h after the last current), so
+     *  `capacityAh + pendingAh` is the value it is converging on. */
+    val pendingAh: Float = 0f,
     val mosfetTemp: Int = 0,
     val cells: List<Float> = emptyList(),
     val protections: List<String> = emptyList(),

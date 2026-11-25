@@ -167,7 +167,10 @@ object BmsProtocol {
         val cellTemp = i16(d, layout.cellTempOff)
         val mosfetTemp = i16(d, layout.mosfetTempOff)
         val remainingAh = u16(d, layout.remainingAhOff) / 100f
-        val fullAh = u32(d, layout.fullAhOff) / 100f
+        // uint16, not uint32: the int16 at +2 is the BMS's pending counter correction (Ah x 100),
+        // nonzero while it re-anchors after a long rest. Read as one uint32 it gave ~41 million Ah.
+        val fullAh = u16(d, layout.fullAhOff) / 100f
+        val pendingAh = i16(d, layout.pendingAhOff) / 100f
         val stateRaw = u16(d, layout.stateOff)
         val soc = u16(d, layout.socOff).toFloat()
         val soh = u32(d, layout.sohOff).toInt()
@@ -200,6 +203,7 @@ object BmsProtocol {
             cycles = cycles,
             state = state,
             fullChargeAh = fullAh,
+            pendingAh = pendingAh,
             mosfetTemp = mosfetTemp,
             cells = cells,
             protections = protections,
