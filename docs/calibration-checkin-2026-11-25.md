@@ -90,7 +90,16 @@ against `105 − Ah delivered`:
 Negative is the estimate reading low. The largest errors are the last three charges, as the rate
 fell from ~3.3 to ~2.4 Ah/day faster than a 0.5 EMA follows.
 
-## Implications not acted on
+## Implication
 
 - Spares now read by this table come out at ~37–47 % (13.06–13.13 V), not 57–66 %.
-- Prod still holds ~147 000 rows with the garbage capacity; see `docs/checkins/NEXT.md`.
+
+## Prod repair (done 2026-11-25)
+
+151 300 `samples` rows carried the garbage capacity (2024-A 2026-10-20…22; 2012-A and 2012-B
+2026-10-23…24 and 2026-11-25 04:35…13:49 UTC). Each episode had the same good value on both sides
+(103.45 Ah for 2024-A, 105.00 for the 2012 packs), so the rows were set to it in one transaction
+that aborted unless every count matched. The 220 `samples_rollup` buckets whose capacity averaged
+over 1000 Ah were re-rolled with the app's own upsert; none remain. The pending-correction values
+the bad rows encoded are kept in `docs/data/bms-reanchor-episodes-2026-10-11.csv`. The phone's own
+Room database still holds the bad rows for 2026-11-25 until they age out after 14 days.

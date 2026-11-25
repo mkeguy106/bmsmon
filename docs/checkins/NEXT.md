@@ -88,16 +88,14 @@ episodes. The owner will run base 2012 down to about 20 % a few times to supply 
   delivers and spread linearly in time. Skip intervals where the BMS re-anchored (`pendingAh`).
 - **Done when:** rests below 12.97 V are in the cloud data and the table's low end is re-fit.
 
-**Repair the full-charge-capacity rows the parser bug wrote.** Added 2026-11-25. Until the fix, the
-phone read full-charge capacity as 4 bytes; whenever the BMS was re-anchoring it uploaded ~40 million
-Ah. Prod `samples` holds ~147 000 such rows (`full_charge_ah > 1000`: 2024-A 2026-10-20…22, both 2012
-packs 2026-10-23…24 and 2026-11-25), and `samples_rollup.cap_sum` averages them in, so the History
-capacity chart spikes on those days. The phone's Room `samples` has the same rows for 14 days.
-- **Fix:** set those rows to the pack's neighbouring good value (105.00 for the 2012 packs), then
-  re-roll the affected rollup buckets. A write to prod: needs the owner's go-ahead.
-- **Also decide:** upload `pendingAh` (a new nullable `samples` column, server first). After the fix
-  a re-anchor is visible in prod only as `est_remaining_ah − remaining_ah`.
-- **Done when:** no `full_charge_ah > 1000` rows remain and the rollup's capacity reads ~105 on those days.
+**Decide whether to upload `pendingAh`.** Added 2026-11-25. The BMS's pending counter correction
+is parsed on the phone but is not in Room or the upload, so a re-anchor shows in prod only as
+`est_remaining_ah − remaining_ah`. Until the parser fix the value leaked into `full_charge_ah` (as
+~40 million Ah); those 151 300 rows were repaired on 2026-11-25 and what they encoded is kept in
+`docs/data/bms-reanchor-episodes-2026-10-11.csv` (10-minute buckets, five episodes).
+- **If yes:** a nullable `samples` column (server first, `add_column_if_missing`), `SampleJson` /
+  `SampleIn`, and a Room column so the one-time replay can see a re-anchor.
+- **Done when:** decided, and built if yes.
 
 **Standby-drain estimate: confirm it in the field.** Added 2026-11-25 (`DrainModel`, "Estimated
 SOC" in `CLAUDE.md`). Installed while both 2012 packs were mid BMS re-anchor, so it has no anchor yet.
