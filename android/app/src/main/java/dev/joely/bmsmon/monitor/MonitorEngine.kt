@@ -1169,6 +1169,7 @@ class MonitorEngine(
         val estReading = EstReading(
             tsMs = now, state = t.state, regen = regen, currentA = t.current,
             voltageV = t.voltage, remainingAh = t.capacityAh, fullChargeAh = t.fullChargeAh, soc = t.soc,
+            pendingAh = t.pendingAh,
         )
         val est: SocEstimate? = synchronized(estState) {
             if (session != currentSession || seeding || !estLoaded) null else {

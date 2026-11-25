@@ -56,6 +56,24 @@ class BmsProtocolTest {
         assertEquals(0f, t.powerW, 0.001f) // 13.324 * |0|
     }
 
+    /**
+     * Full-charge capacity is the uint16 at offset 64. The int16 at offset 66 is a separate field:
+     * while the BMS re-anchors its coulomb counter after a long rest it holds the correction still
+     * to be applied (Ah x 100, negative = counter being lowered). Reading the two as one uint32
+     * gave ~41 million Ah (prod, 2012-B, 2026-11-25: remaining 53.23, full 105.00, pending -28.25).
+     */
+    @Test
+    fun fullChargeCapacityIsSixteenBitsWhileTheBmsIsRecalibrating() {
+        val d = hex(realStatus)
+        val bytes = intArrayOf(0xCB, 0x14, 0x04, 0x29, 0xF7, 0xF4) // 5323, 10500, -2825
+        for (i in bytes.indices) d[62 + i] = bytes[i].toByte()
+        val t = BmsProtocol.parseTelemetry(d, "test")!!
+        assertEquals(53.23f, t.capacityAh, 0.001f)
+        assertEquals(105f, t.fullChargeAh, 0.001f)
+        assertEquals(-28.25f, t.pendingAh, 0.001f)
+        assertEquals(0f, BmsProtocol.parseTelemetry(hex(realStatus), "test")!!.pendingAh, 0f)
+    }
+
     @Test
     fun shortPacketReturnsNull() {
         assertEquals(null, BmsProtocol.parseTelemetry(ByteArray(40), "x"))

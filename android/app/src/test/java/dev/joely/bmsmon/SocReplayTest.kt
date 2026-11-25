@@ -53,7 +53,11 @@ class SocReplayTest {
         // The replay ends on the last row's raw counter, and that is what gets persisted, so the
         // unseen-charge rule has a last raw to compare against from the first live frame on.
         assertEquals(rows.last().remainingAh, s.lastRawAh!!, 0f)
-        assertEquals(PersistedEst(s.correction, rows.last().remainingAh), s.toPersisted())
+        // The full charge also anchors the standby drain at its end. The slice starts mid-charge,
+        // so the Ah delivered were not all seen and no rate is learned from it.
+        assertEquals(s.correction.setAtMs, s.drain.anchorAtMs)
+        assertNull(s.drain.ahPerDay)
+        assertEquals(PersistedEst(s.correction, rows.last().remainingAh, s.drain), s.toPersisted())
     }
 
     private fun cols(

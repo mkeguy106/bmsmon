@@ -114,7 +114,8 @@ All multi-byte values are **little-endian**.
 | Cell temperature | 52 | 2 bytes | int16 | direct → °C |
 | MOSFET temperature | 54 | 2 bytes | int16 | direct → °C |
 | Remaining capacity | 62 | 2 bytes | uint16 | / 100 → Ah |
-| Full charge capacity | 64 | 4 bytes | uint32 | / 100 → Ah |
+| Full charge capacity | 64 | 2 bytes | uint16 | / 100 → Ah |
+| Pending counter correction | 66 | 2 bytes | int16 | / 100 → Ah. 0 normally; nonzero while the BMS re-anchors its coulomb counter after ~2 h at rest (negative = lowering). `remaining + this` is the value it is converging on. Seen 2026-10-20…24 and 2026-11-25 |
 | Battery state | 88 | 2 bytes | uint16 | 0x0000=Idle, 0x0001=Charging, 0x0002=Discharging, 0x0004=Disabled |
 | SOC | 90 | 2 bytes | uint16 | direct → % |
 | SOH | 92 | 4 bytes | uint32 | direct → % |
@@ -987,25 +988,76 @@ JVM-tested module `model/SocEstimate.kt` (no Android imports, no clock); the eng
   for `REST_MIN_MS` 30 min, tracked in memory; any nonzero reading or a gap over `REST_GAP_MS` 10 min
   restarts it (spares poll every 10 s, so a spare is rested 30 min after the phone first sees it).
   `voltageSoc()` interpolates linearly in integer mV between these points (rested ≥ 30 min after
-  discharge, 2012 packs, 2026-11-18), 28 % below 12.90 V (a ceiling; the knee is uncalibrated, lower
+  discharge, 2012 packs), 21 % at or below 12.90 V (a ceiling; below 12.97 V is extrapolated, lower
   only means a lower estimate), and **null at or above `VOLTAGE_PLATEAU_V` 13.30 V** (the top plateau,
-  ~78–95 %; 2012-A read 92 % at 13.325 V where the table would say ~83):
+  ~72–95 %):
 
-  | V | 12.90 | 12.98 | 13.00 | 13.04 | 13.10 | 13.14 | 13.18 | 13.20 | 13.28 |
-  |---|---|---|---|---|---|---|---|---|---|
-  | % | 28 | 48 | 51 | 56 | 58 | 66 | 72 | 76 | 80 |
+  | V | 12.90 | 12.97 | 13.01 | 13.05 | 13.11 | 13.13 | 13.15 | 13.17 | 13.19 | 13.21 | 13.23 | 13.29 |
+  |---|---|---|---|---|---|---|---|---|---|---|---|---|
+  | % | 21 | 30 | 34 | 37 | 38 | 46 | 51 | 57 | 64 | 68 | 70 | 71 |
 
-  Measured at rest: MAE 3.6 pts, p90 7.5, **40–100 % only**. First correction only when `voltageSoc <
-  currentEst − FIRST_VOLTAGE_MARGIN_PTS` (10, above the p90 error so a daily driver's noise never moves
-  it); once VOLTAGE-sourced it **follows down** on each rested reading whenever voltage is more than
-  `FOLLOW_DOWN_MARGIN_PTS` (3) below the estimate, so a draining spare tracks its voltage. Voltage only
-  ever raises the correction; post-charge surface charge reads high, so it cannot fire falsely.
+  **Refit 2026-11-25 against charger-delivered Ah** (`docs/calibration-checkin-2026-11-25.md`). The
+  first table (2026-11-18) was fitted to the BMS counter, which is the thing that drifts: it read
+  13.02 V as 53 % where the truth is ~35 %. **Never fit this table to `remaining_ah`.** Tight (±2) below
+  13.12 V and from 13.20 V; 13.12–13.18 V is the steep middle (20 mV ≈ 10 points, p10–p90 about ±8).
+  First correction only when `voltageSoc < currentEst − FIRST_VOLTAGE_MARGIN_PTS` (10, so a daily
+  driver's noise never moves it); once VOLTAGE-sourced it **follows down** on each rested reading
+  whenever voltage is more than `FOLLOW_DOWN_MARGIN_PTS` (3) below the estimate, so a draining spare
+  tracks its voltage. Voltage only ever raises the correction; post-charge surface charge reads high,
+  so it cannot fire falsely.
+- **The counter drifts high on the daily drivers too, ~3 Ah/day** (measured over 66 inter-charge
+  intervals, 2026-07…11: counter at charge start minus `full − Ah the charger then delivered`; 1.2–2.5
+  Ah/day until mid-July, mostly 2–4.5 since, proportional to time, not to Ah driven). It is load under
+  the ~1.04 A deadband: the chair's standby electronics and the phone's charger. A week after a full
+  charge the BMS reads ~20 points high. The counter's 111–120 Ah "overshoot" at the end of a charge is
+  mostly this drift coming back (a charge 17 h after the last one overshoots only ~3 Ah).
+- **Standby drain (`DrainModel`, 2026-11-25).** The estimate subtracts the drain the counter cannot
+  see: `estimate = raw − correction − rate × days since the last full charge`. Every full charge end
+  (taper seen) **anchors** it (`anchorAtMs`, `anchorRawAh`), so the estimate is the counter again and
+  the drain restarts from zero. The rate (`ahPerDay`, per pack) is **learned at each full charge**
+  from the Ah the charger delivers: full to full the pack lost exactly what went back in, the counter
+  only fell `anchorRawAh − counter at charge start`, and the difference over the days between is the
+  rate (`DRAIN_EMA_ALPHA` 0.5 against the old one). No held correction enters into it, so 2012-B,
+  whose counter is never clamped, learns the same way. Seed `SEED_DRAIN_AH_PER_DAY` 2.5 until the
+  first learn. A drain-only estimate reports source `COUNTER` (no `~`) and uploads as `est_*`.
+  - Not learned (the anchor still moves): a charge first seen already charging, or with two frames
+    more than `CHARGE_GAP_MS` (2 min) apart; an interval under 1 day or over 14; a rate outside
+    0–8 Ah/day; after an unseen charge that did not clamp. A pause inside a charge keeps counting;
+    any discharge starts the count again. The charge's Ah are `current × time between frames`,
+    held in memory (`ChargeSeg`), so an app restart mid-charge costs that charge's lesson.
+  - The drain stops growing `MAX_DRAIN_DAYS` (14) after the anchor. **A pack shelved after a full
+    charge is therefore under-read by up to ~35 Ah** (it no longer has the chair's load); accepted,
+    it is the safe direction, and only the next full charge clears it.
+  - The rest-voltage rule holds only what the drain does not (`wanted − drainAh`), so the two are
+    never counted twice. A BMS re-anchor drops the anchor: no drain term until the next full charge.
+  - Backtest on the 24 full charges of both 2012 packs since 2026-09: error at charge start mean
+    −0.9 Ah, mean |error| 1.1, worst −3.4 (low), against +15…+17 mean and +27 worst for the counter.
+  - **Charge ETA side effect:** `eta_full_min` uses the estimate, so its bulk now includes the
+    drifted Ah the old "tail" stood in for, while the learned tail (~70 min, measured on raw SOC) is
+    still added. Expect the ETA ~45 min long on a drain-corrected pack until the tail is relearned
+    on the estimate (`docs/checkins/NEXT.md`).
+- **Rule 3, the BMS's own re-anchor (`pendingAh`, 2026-11-25).** About 2 h after the last measured
+  current, with cells near 3.26 V or lower (seen only at ≤ 13.04 V pack voltage), the BMS firmware
+  looks up its own rest-voltage SOC and eases its counter down to it over ~2 days (exponential, τ ≈
+  16 h, with zero current flowing). While it does, the int16 at frame offset 66 holds the correction
+  still to apply (`Telemetry.pendingAh`, Ah, negative), and `remaining + pendingAh` is its target:
+  25.00 Ah at 13.02–13.04 V, 23 at 13.00, 22 at 12.98. Seen on 2024-A 2026-10-20…22 and on both 2012
+  packs 2026-10-23…24 and from 2026-11-25. While `pendingAh < 0` the estimator **drops its held
+  correction** (it was measured against the old counter; kept, it is subtracted a second time as the
+  counter comes down, ending near 10 % on 2012-B), skips its other rules, and `estimateOf` shows the BMS's target
+  at once, source `VOLTAGE` (so `~`, and it uploads as `est_*`): the lower of `raw − correction` and
+  `raw + pendingAh`, never both. A positive `pendingAh` (never seen) changes nothing. **The BMS's
+  target is itself ~7–11 Ah low**: the full charge after October's re-anchor delivered 74–76 Ah into
+  packs it had put at 22–24 Ah, ending at 95.6/99.4 Ah on the counter instead of 105. The estimate
+  never reads above the BMS, so after a re-anchor it under-reads by about 10 points until the next
+  full charge. `pendingAh` is not in Room or the upload, so a one-time replay cannot see a re-anchor.
 - **Held, persisted, cleared.** The correction is held through driving and charging, which is what
   makes the swap case right (a spare corrected to ~60 % at home counts down from ~60 on the chair, not
   from 99) and is changed only by the rules above; the next real full-detect clears it. Persisted per
   address in `SettingsStore` (`soc_corrections_by_address`, `PersistedEst`:
-  `addr=correctionAh|SOURCE|setAtMs|lastRawAh` joined by `;`; a three-part entry from before the last
-  raw was kept decodes with none, a bad last raw costs only the last raw, other malformed entries are
+  `addr=correctionAh|SOURCE|setAtMs|lastRawAh|anchorAtMs|ahPerDay|anchorRawAh` joined by `;`; a
+  three-part entry from before the last raw was kept and a four-part one from before the drain model
+  decode without them, a bad last raw or drain field costs only itself, other malformed entries are
   dropped individually). The **last raw remaining Ah** is persisted so the unseen-charge rule survives
   a restart: without it a spare charged to a clamped full while the app was down kept its ~39 Ah
   VOLTAGE correction and read ~60 % when full. Rest and taper tracking are memory-only. The engine

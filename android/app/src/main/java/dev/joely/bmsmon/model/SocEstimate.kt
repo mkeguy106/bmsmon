@@ -28,6 +28,17 @@ const val REST_GAP_MS = 10 * 60_000L
 const val VOLTAGE_PLATEAU_V = 13.30f
 const val FIRST_VOLTAGE_MARGIN_PTS = 10f
 const val FOLLOW_DOWN_MARGIN_PTS = 3f
+/** Standby drain before a pack has learned its own (2012 packs ran 2.1-2.9 Ah/day in 2026-11). */
+const val SEED_DRAIN_AH_PER_DAY = 2.5f
+/** The drain stops growing this long after the anchor (longest real gap between full charges: 9 days). */
+const val MAX_DRAIN_DAYS = 14f
+const val DRAIN_EMA_ALPHA = 0.5f
+/** A shorter interval gives too noisy a rate to learn from. */
+const val MIN_DRAIN_LEARN_DAYS = 1f
+/** A measured rate outside 0..this is not a standby drain; it is not learned. */
+const val MAX_DRAIN_AH_PER_DAY = 8f
+/** Charging frames further apart than this leave Ah unseen: that charge teaches nothing. */
+const val CHARGE_GAP_MS = 2 * 60_000L
 
 enum class EstSource { COUNTER, VOLTAGE }
 
@@ -48,11 +59,36 @@ data class EstReading(
     val remainingAh: Float,
     val fullChargeAh: Float,
     val soc: Float,
+    /** The BMS's pending correction to its own counter (Ah); negative while it is lowering it. */
+    val pendingAh: Float = 0f,
 )
 
-/** Per-pack state. [correction] is persisted; the rest is in-memory tracking. */
+/**
+ * The standby-drain model. The BMS counter is right at a full charge and then misses every load
+ * under its ~1.04 A deadband (the chair's electronics, the phone's charger): ~2-4 Ah a day,
+ * proportional to elapsed time. [anchorAtMs] is the end of the last full charge seen (wall clock);
+ * null means no drain is subtracted. [ahPerDay] is the learned rate; null means the seed.
+ * [anchorRawAh] is the raw counter at the anchor, kept only to learn the next rate from how far
+ * the counter then falls; null when that fall is no longer known.
+ */
+data class DrainModel(val anchorAtMs: Long? = null, val ahPerDay: Float? = null, val anchorRawAh: Float? = null)
+
+/** One wall charge being followed, to learn the drain rate from the Ah it delivers. In memory only. */
+data class ChargeSeg(
+    /** The raw counter just before the charge began. */
+    val startRawAh: Float,
+    val startMs: Long,
+    /** Ah delivered so far (current x time between frames). */
+    val ahIn: Float,
+    /** False once any of it went unseen (a gap, or first seen already charging). */
+    val valid: Boolean,
+)
+
+/** Per-pack state. [correction] and [drain] are persisted; the rest is in-memory tracking. */
 data class EstPackState(
     val correction: SocCorrection = SocCorrection(),
+    val drain: DrainModel = DrainModel(),
+    val charge: ChargeSeg? = null,
     val wasCharging: Boolean = false,
     val taperAtMs: Long? = null,
     val restSinceMs: Long? = null,
@@ -67,12 +103,17 @@ data class SocEstimate(val soc: Float, val remainingAh: Float, val source: EstSo
  * is what the unseen-charge rule compares against, so keeping it lets a charge that happened while
  * the phone was off (or the app restarting) still clear a correction on the first reading after.
  */
-data class PersistedEst(val correction: SocCorrection = SocCorrection(), val lastRawAh: Float? = null)
+data class PersistedEst(
+    val correction: SocCorrection = SocCorrection(),
+    val lastRawAh: Float? = null,
+    val drain: DrainModel = DrainModel(),
+)
 
-fun EstPackState.toPersisted(): PersistedEst = PersistedEst(correction, lastRawAh)
+fun EstPackState.toPersisted(): PersistedEst = PersistedEst(correction, lastRawAh, drain)
 
 /** A pack's state at the start of a session: the persisted part, the rest tracked afresh. */
-fun PersistedEst.toPackState(): EstPackState = EstPackState(correction = correction, lastRawAh = lastRawAh)
+fun PersistedEst.toPackState(): EstPackState =
+    EstPackState(correction = correction, lastRawAh = lastRawAh, drain = drain)
 
 /**
  * Whether stepping [prev] to [next] should write the per-pack state: when the correction changed,
@@ -81,18 +122,86 @@ fun PersistedEst.toPackState(): EstPackState = EstPackState(correction = correct
  * the last raw moves on every frame and rides along with these writes (and stop()'s final one).
  */
 fun estPersistWorthy(prev: EstPackState, next: EstPackState): Boolean =
-    next.correction != prev.correction || (prev.wasCharging && !next.wasCharging)
+    next.correction != prev.correction || next.drain != prev.drain || (prev.wasCharging && !next.wasCharging)
 
-/** (millivolts, percent), ascending. Rested >= 30 min after discharge, 2012 packs, 2026-11-18. */
+private const val DAY_MS = 86_400_000f
+
+/** Ah of standby drain the counter has missed since the anchor, at [tsMs]. 0 with no anchor. */
+fun drainAh(d: DrainModel, tsMs: Long): Float {
+    val anchor = d.anchorAtMs ?: return 0f
+    val days = ((tsMs - anchor) / DAY_MS).coerceIn(0f, MAX_DRAIN_DAYS)
+    return (d.ahPerDay ?: SEED_DRAIN_AH_PER_DAY) * days
+}
+
+/**
+ * The drain model after a full charge ending at [endMs] with the raw counter at [endRawAh]:
+ * anchored there, and with the rate learned from [seg] when the whole charge was seen. Full to
+ * full, the pack really lost exactly what the charger put back ([ChargeSeg.ahIn]); the counter
+ * only fell from [anchorRawAh] to [ChargeSeg.startRawAh]. The difference is the drain it missed.
+ * No held correction enters into it, so a pack whose counter is never clamped to full learns the
+ * same rate. Not learned from a charge with unseen Ah, without a previous anchor and its counter
+ * value, over under a day, or when the rate comes out implausible.
+ */
+private fun DrainModel.afterFullCharge(seg: ChargeSeg?, endRawAh: Float, endMs: Long): DrainModel {
+    val anchor = anchorAtMs
+    val anchorRaw = anchorRawAh
+    var rate = ahPerDay
+    if (seg != null && seg.valid && anchor != null && anchorRaw != null) {
+        val days = (seg.startMs - anchor) / DAY_MS
+        if (days >= MIN_DRAIN_LEARN_DAYS && days <= MAX_DRAIN_DAYS) {
+            val drift = seg.ahIn - (anchorRaw - seg.startRawAh)
+            val measured = drift / days
+            if (measured.isFinite() && measured >= 0f && measured <= MAX_DRAIN_AH_PER_DAY) {
+                rate = rate?.let { it + DRAIN_EMA_ALPHA * (measured - it) } ?: measured
+            }
+        }
+    }
+    return DrainModel(anchorAtMs = endMs, ahPerDay = rate, anchorRawAh = endRawAh)
+}
+
+/**
+ * Follows a wall charge so its Ah can be counted. A segment opens on the first charging frame and
+ * stays open across a pause; any discharge closes it. It is invalid if it was first seen already
+ * charging or any two frames around charging are more than [CHARGE_GAP_MS] apart.
+ */
+private fun followCharge(prev: EstPackState, r: EstReading, charging: Boolean): ChargeSeg? {
+    if (r.currentA < 0f) return null
+    val seg = prev.charge
+    if (!charging) return seg
+    val prevTs = prev.lastTsMs
+    val dt = if (prevTs == null) null else r.tsMs - prevTs
+    val seen = dt != null && dt >= 0L && dt <= CHARGE_GAP_MS
+    val ah = if (seen) r.currentA * dt!! / 3_600_000f else 0f
+    if (seg != null) return seg.copy(ahIn = seg.ahIn + ah, valid = seg.valid && seen)
+    val startRaw = prev.lastRawAh
+    return if (seen && startRaw != null && !prev.wasCharging) {
+        ChargeSeg(startRaw, prevTs!!, ah, valid = true)
+    } else {
+        ChargeSeg(startRaw ?: r.remainingAh, r.tsMs, 0f, valid = false)
+    }
+}
+
+/**
+ * (millivolts, percent), ascending. Rested >= 30 min after discharge, 2012 packs.
+ *
+ * Refit 2026-11-25. The truth is charger-delivered Ah, not the BMS counter: between two full
+ * charges, true remaining = counter - drift, where the drift at the next charge start is
+ * `counter - (full - Ah the charger then delivers)` and accrues linearly in time. Basis: 66
+ * inter-charge intervals, 2026-07..11, 27 k rested 5-min buckets; the drift ran a steady
+ * ~2-4 Ah/day (current under the BMS's ~1.04 A deadband is never counted). The first table
+ * (2026-11-18) was fitted to the counter itself and so read ~15-20 points high below 13.2 V.
+ * Spread: tight (+-2) below 13.12 V and from 13.20 V; 13.12-13.18 V is the steep middle, where
+ * 20 mV spans ~10 points (p10-p90 about +-8). Below 12.97 V is extrapolated, not measured.
+ */
 private val VOLTAGE_TABLE = arrayOf(
-    12900 to 28, 12980 to 48, 13000 to 51, 13040 to 56, 13100 to 58,
-    13140 to 66, 13180 to 72, 13200 to 76, 13280 to 80,
+    12900 to 21, 12970 to 30, 13010 to 34, 13050 to 37, 13110 to 38, 13130 to 46,
+    13150 to 51, 13170 to 57, 13190 to 64, 13210 to 68, 13230 to 70, 13290 to 71,
 )
 
 /**
- * Rested pack voltage -> SOC %, linear between table points. 28 below 12.90 V (a ceiling:
+ * Rested pack voltage -> SOC %, linear between table points. 21 at or below 12.90 V (a ceiling:
  * the knee is uncalibrated and lower only means a lower estimate). Null at or above 13.30 V,
- * the plateau where a rested pack can be anywhere from ~78 to ~95 %.
+ * the plateau where a rested pack can be anywhere from ~72 to ~95 %.
  */
 fun voltageSoc(voltageV: Float): Float? {
     // The BMS reports whole millivolts; integer mV keeps the interpolation exact at table points.
@@ -107,14 +216,17 @@ fun voltageSoc(voltageV: Float): Float? {
             return loPct + (hiPct - loPct) * ((mv - loMv).toFloat() / (hiMv - loMv))
         }
     }
-    // Between the last table point (13.28 V) and the plateau cutoff: hold the last value.
+    // Between the last table point (13.29 V) and the plateau cutoff: hold the last value.
     return VOLTAGE_TABLE.last().second.toFloat()
 }
 
 private fun usable(r: EstReading): Boolean =
     r.fullChargeAh > 0f &&
         r.currentA.isFinite() && r.voltageV.isFinite() && r.remainingAh.isFinite() &&
-        r.fullChargeAh.isFinite() && r.soc.isFinite()
+        r.fullChargeAh.isFinite() && r.soc.isFinite() && r.pendingAh.isFinite()
+
+/** The BMS is lowering its own counter toward its rest-voltage estimate (see [EstReading.pendingAh]). */
+private fun bmsLowering(r: EstReading): Boolean = r.pendingAh < 0f
 
 /** Sets the correction outright; setAtMs moves only when the amount actually changes. */
 private fun EstPackState.withCorrection(ah: Float, source: EstSource?, tsMs: Long): EstPackState =
@@ -144,6 +256,15 @@ private fun clampedToFull(r: EstReading): Boolean = abs(r.remainingAh - r.fullCh
  * 6. the rested-voltage rule, only ever lowering the estimate.
  * "Charging" excludes regen. A non-positive full charge or a non-finite input leaves the state
  * alone except [EstPackState.lastTsMs].
+ *
+ * While the BMS is lowering its own counter ([EstReading.pendingAh] < 0) rules 2-4 and 6 are
+ * skipped and the held correction and the drain anchor are dropped: the BMS has re-anchored the
+ * counter to its own rest-voltage estimate, so a correction or a drain measured against the old
+ * counter no longer applies (kept, it would be subtracted a second time as the counter comes
+ * down). Tracking (1 and 5) continues.
+ *
+ * Standby drain ([DrainModel]): every full charge end anchors it there (the estimate is the counter
+ * again) and, when the whole charge was seen, learns the rate from the Ah delivered.
  */
 fun stepEstimate(prev: EstPackState, r: EstReading): EstPackState {
     if (!usable(r)) return prev.copy(lastTsMs = r.tsMs)
@@ -153,7 +274,25 @@ fun stepEstimate(prev: EstPackState, r: EstReading): EstPackState {
     // 1. Taper tracking.
     var taper = if (!prev.wasCharging && charging) null else prev.taperAtMs
     if (charging && r.voltageV >= TAPER_MIN_V && r.currentA < TAPER_MAX_A) taper = r.tsMs
-    var s = prev.copy(taperAtMs = taper)
+    val seg = followCharge(prev, r, charging)
+    var s = prev.copy(taperAtMs = taper, charge = seg)
+
+    // 5 (computed here, applied below). Rest tracking.
+    val prevTs = prev.lastTsMs
+    val gap = prevTs != null && r.tsMs - prevTs > REST_GAP_MS
+    val restSince = when {
+        r.currentA != 0f -> null
+        gap || prev.restSinceMs == null -> r.tsMs
+        else -> prev.restSinceMs
+    }
+    fun EstPackState.tracked() =
+        copy(restSinceMs = restSince, wasCharging = charging, lastTsMs = r.tsMs, lastRawAh = r.remainingAh)
+
+    // The BMS is re-anchoring its own counter: drop ours, hold nothing new.
+    if (bmsLowering(r)) {
+        return s.withCorrection(0f, null, r.tsMs)
+            .copy(drain = s.drain.copy(anchorAtMs = null, anchorRawAh = null), charge = null).tracked()
+    }
 
     // 2. Charge end.
     if (prev.wasCharging && !charging) {
@@ -164,26 +303,25 @@ fun stepEstimate(prev: EstPackState, r: EstReading): EstPackState {
                 s.withCorrection(r.remainingAh - r.fullChargeAh, EstSource.COUNTER, r.tsMs)
             else -> s.lowerBounded(r)
         }
+        if (full) s = s.copy(drain = s.drain.afterFullCharge(seg, r.remainingAh, r.tsMs), charge = null)
     }
 
     // 3. Unseen charge.
     val last = prev.lastRawAh
     if (!prev.wasCharging && !charging && last != null && r.remainingAh - last > UNSEEN_CHARGE_RISE_AH) {
-        s = if (clampedToFull(r)) s.withCorrection(0f, null, r.tsMs) else s.lowerBounded(r)
+        // Clamped to full by a charge nobody saw: the counter is right as of now.
+        // Otherwise the counter rose by an unknown amount: its fall since the anchor is lost.
+        s = if (clampedToFull(r)) {
+            s.withCorrection(0f, null, r.tsMs)
+                .copy(drain = s.drain.copy(anchorAtMs = r.tsMs, anchorRawAh = r.remainingAh), charge = null)
+        } else s.lowerBounded(r).copy(drain = s.drain.copy(anchorRawAh = null))
     }
 
     // 4. Lower bound after driving past a missed full-detect.
     if (!charging) s = s.lowerBounded(r)
 
     // 5. Rest tracking.
-    val prevTs = prev.lastTsMs
-    val gap = prevTs != null && r.tsMs - prevTs > REST_GAP_MS
-    val restSince = when {
-        r.currentA != 0f -> null
-        gap || prev.restSinceMs == null -> r.tsMs
-        else -> prev.restSinceMs
-    }
-    s = s.copy(restSinceMs = restSince, wasCharging = charging, lastTsMs = r.tsMs, lastRawAh = r.remainingAh)
+    s = s.tracked()
 
     // 6. Rested voltage.
     val rested = restSince != null && r.tsMs - restSince >= REST_MIN_MS
@@ -192,7 +330,11 @@ fun stepEstimate(prev: EstPackState, r: EstReading): EstPackState {
         val est = estimateOf(s, r).soc
         val margin = if (s.correction.source == EstSource.VOLTAGE) FOLLOW_DOWN_MARGIN_PTS else FIRST_VOLTAGE_MARGIN_PTS
         if (vSoc < est - margin) {
-            val wanted = max(s.correction.correctionAh, r.remainingAh - vSoc / 100f * r.fullChargeAh)
+            // The correction sits beside the drain term, so it holds only what the drain does not.
+            val wanted = max(
+                s.correction.correctionAh,
+                r.remainingAh - vSoc / 100f * r.fullChargeAh - drainAh(s.drain, r.tsMs),
+            )
             s = s.withCorrection(wanted, EstSource.VOLTAGE, r.tsMs)
         }
     }
@@ -200,16 +342,27 @@ fun stepEstimate(prev: EstPackState, r: EstReading): EstPackState {
 }
 
 /**
- * The estimate for [r] under [state]. With no correction it is the BMS reading. Otherwise
- * remaining is `raw - correction` clamped to [0, full], and SOC is that over full as an integer %;
- * neither ever exceeds the BMS's own SOC or remaining Ah.
+ * The estimate for [r] under [state]. With no correction, no drain and the BMS not re-anchoring it
+ * is the BMS reading. Otherwise remaining is the lower of `raw - correction - drain` (see
+ * [drainAh]) and, while the BMS is lowering its counter, the value it is converging on
+ * (`raw + pendingAh`), clamped to [0, full]; the two are never subtracted together. SOC is that
+ * over full as an integer %; neither ever exceeds the BMS's own SOC or remaining Ah. The BMS's own
+ * target is a rest-voltage estimate, so it reports [EstSource.VOLTAGE]; a drain-only estimate
+ * reports [EstSource.COUNTER].
  */
 fun estimateOf(state: EstPackState, r: EstReading): SocEstimate {
-    val corr = state.correction.correctionAh
-    if (corr <= 0f || !usable(r)) return SocEstimate(r.soc, r.remainingAh, null)
-    val ah = (r.remainingAh - corr).coerceIn(0f, r.fullChargeAh)
+    val corr = max(state.correction.correctionAh, 0f)
+    if (!usable(r)) return SocEstimate(r.soc, r.remainingAh, null)
+    val lowering = bmsLowering(r)
+    val drain = drainAh(state.drain, r.tsMs)
+    if (corr <= 0f && drain <= 0f && !lowering) return SocEstimate(r.soc, r.remainingAh, null)
+    val byCorrection = r.remainingAh - corr - drain
+    val byBms = if (lowering) r.remainingAh + r.pendingAh else r.remainingAh
+    val ah = min(byCorrection, byBms).coerceIn(0f, r.fullChargeAh)
     val soc = min(r.soc, (ah / r.fullChargeAh * 100f).roundToInt().toFloat())
-    return SocEstimate(soc, min(ah, r.remainingAh), state.correction.source)
+    val source = if (lowering && byBms <= byCorrection) EstSource.VOLTAGE
+    else state.correction.source ?: EstSource.COUNTER
+    return SocEstimate(soc, min(ah, r.remainingAh), source)
 }
 
 /** This telemetry with the estimate in [Telemetry.soc]/[Telemetry.capacityAh] and the BMS's own

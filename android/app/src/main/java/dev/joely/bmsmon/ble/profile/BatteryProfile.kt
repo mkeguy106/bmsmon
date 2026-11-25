@@ -12,6 +12,7 @@ data class TelemetryLayout(
     val mosfetTempOff: Int = 54,
     val remainingAhOff: Int = 62,
     val fullAhOff: Int = 64,
+    val pendingAhOff: Int = 66,
     val protOff: Int = 76,
     val stateOff: Int = 88,
     val socOff: Int = 90,

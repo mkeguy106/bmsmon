@@ -257,7 +257,8 @@ class EngineWiringTest {
         val step = onPoll.indexOf("stepEstimate(")
         assertTrue("regen is known before the estimator steps", regenAt in 0 until step)
         assertTrue(onPoll.contains("EstReading( tsMs = now, state = t.state, regen = regen, currentA = t.current, " +
-            "voltageV = t.voltage, remainingAh = t.capacityAh, fullChargeAh = t.fullChargeAh, soc = t.soc, )"))
+            "voltageV = t.voltage, remainingAh = t.capacityAh, fullChargeAh = t.fullChargeAh, soc = t.soc, " +
+            "pendingAh = t.pendingAh, )"))
     }
 
     // Task 4's replay runs with `seeding` set: live frames then show the raw BMS reading (never
