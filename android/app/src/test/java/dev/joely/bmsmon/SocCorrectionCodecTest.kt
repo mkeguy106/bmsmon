@@ -6,6 +6,7 @@ import dev.joely.bmsmon.model.BatteryState
 import dev.joely.bmsmon.model.EstPackState
 import dev.joely.bmsmon.model.EstReading
 import dev.joely.bmsmon.model.EstSource
+import dev.joely.bmsmon.model.DrainModel
 import dev.joely.bmsmon.model.PersistedEst
 import dev.joely.bmsmon.model.SocCorrection
 import dev.joely.bmsmon.model.stepEstimate
@@ -24,6 +25,39 @@ class SocCorrectionCodecTest {
             "C8:47:80:15:62:1B" to PersistedEst(SocCorrection(6.5f, EstSource.COUNTER, 42L), null),
         )
         assertEquals(m, decodeSocCorrections(encodeSocCorrections(m)))
+    }
+
+    @Test fun drainModelRoundTrips() {
+        val m = mapOf(
+            "A" to PersistedEst(SocCorrection(15f, EstSource.COUNTER, 5L), 120f, DrainModel(1_700_000_000_123L, 2.35f, 120f)),
+            "B" to PersistedEst(SocCorrection(0f, null, 0L), 80f, DrainModel(anchorAtMs = 7L)),
+            "C" to PersistedEst(SocCorrection(0f, null, 0L), null, DrainModel(ahPerDay = 3f)),
+        )
+        assertEquals(m, decodeSocCorrections(encodeSocCorrections(m)))
+    }
+
+    // Entries written before the drain model existed (four parts) decode with none.
+    @Test fun fourPartEntriesDecodeWithNoDrainModel() {
+        assertEquals(
+            mapOf("A" to PersistedEst(SocCorrection(15f, EstSource.COUNTER, 5L), 120f)),
+            decodeSocCorrections("A=15.0|COUNTER|5|120.0"),
+        )
+    }
+
+    // A bad anchor or rate costs only itself, never the correction.
+    @Test fun aBadDrainFieldKeepsTheRest() {
+        assertEquals(
+            mapOf("A" to PersistedEst(SocCorrection(15f, EstSource.COUNTER, 5L), 120f, DrainModel(ahPerDay = 2f))),
+            decodeSocCorrections("A=15.0|COUNTER|5|120.0|x|2.0|"),
+        )
+        assertEquals(
+            mapOf("A" to PersistedEst(SocCorrection(15f, EstSource.COUNTER, 5L), 120f, DrainModel(anchorAtMs = 9L))),
+            decodeSocCorrections("A=15.0|COUNTER|5|120.0|9|NaN|x"),
+        )
+        assertEquals(
+            mapOf("A" to PersistedEst(SocCorrection(15f, EstSource.COUNTER, 5L), 120f, DrainModel(anchorAtMs = 9L))),
+            decodeSocCorrections("A=15.0|COUNTER|5|120.0|9|-1.0|NaN"),
+        )
     }
 
     @Test fun nullSourceAndEmptyRoundTrip() {
@@ -57,6 +91,8 @@ class SocCorrectionCodecTest {
         assertTrue(decodeSocCorrections("A=1.0|BOGUS|1").isEmpty())
         assertTrue(decodeSocCorrections("A=NaN|COUNTER|1").isEmpty())
         assertTrue(decodeSocCorrections("A=1.0|COUNTER|1|2|3").isEmpty())
+        assertTrue(decodeSocCorrections("A=1.0|COUNTER|1|2|3|4").isEmpty())
+        assertTrue(decodeSocCorrections("A=1.0|COUNTER|1|2|3|4|5|6").isEmpty())
         // One bad entry does not take the good ones with it.
         assertEquals(
             mapOf("B" to PersistedEst(SocCorrection(2f, EstSource.COUNTER, 5L), null)),

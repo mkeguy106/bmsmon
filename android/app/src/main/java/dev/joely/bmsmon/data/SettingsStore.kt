@@ -19,6 +19,7 @@ import dev.joely.bmsmon.model.Group
 import dev.joely.bmsmon.model.RangeParams
 import dev.joely.bmsmon.model.EstSource
 import dev.joely.bmsmon.model.Roster
+import dev.joely.bmsmon.model.DrainModel
 import dev.joely.bmsmon.model.PersistedEst
 import dev.joely.bmsmon.model.SocCorrection
 import dev.joely.bmsmon.model.StageTarget
@@ -482,15 +483,20 @@ private fun decodeChargeTailRunEnd(json: String): Map<String, Long> = runCatchin
     }
 }.getOrDefault(emptyMap())
 
-/** Per-pack held SOC corrections: `addr=correctionAh|SOURCE|setAtMs|lastRawAh` entries joined by
- *  `;` (SOURCE empty for none, lastRawAh empty for none). A three-part entry (written before the last
- *  raw was kept) decodes with no last raw. A malformed entry is dropped, never fatal; a bad last raw
- *  costs only the last raw, never the correction. */
+/** Per-pack held SOC corrections:
+ *  `addr=correctionAh|SOURCE|setAtMs|lastRawAh|anchorAtMs|ahPerDay|anchorRawAh` entries joined by `;`
+ *  (every field after correctionAh may be empty for none; the last three are the standby-drain
+ *  model). A three-part entry (written before the last raw was kept) decodes
+ *  with no last raw, a four-part one (before the drain model) with no drain model. A malformed entry
+ *  is dropped, never fatal; a bad last raw, anchor or rate costs only itself, never the correction. */
 internal fun encodeSocCorrections(map: Map<String, PersistedEst>): String =
     map.entries.joinToString(";") { (addr, p) ->
         val c = p.correction
         val raw = p.lastRawAh?.takeIf { it.isFinite() }?.toString() ?: ""
-        "$addr=${if (c.correctionAh.isFinite()) c.correctionAh else 0f}|${c.source?.name ?: ""}|${c.setAtMs}|$raw"
+        val rate = p.drain.ahPerDay?.takeIf { it.isFinite() && it >= 0f }?.toString() ?: ""
+        val anchorRaw = p.drain.anchorRawAh?.takeIf { it.isFinite() }?.toString() ?: ""
+        "$addr=${if (c.correctionAh.isFinite()) c.correctionAh else 0f}|${c.source?.name ?: ""}|${c.setAtMs}|$raw" +
+            "|${p.drain.anchorAtMs ?: ""}|$rate|$anchorRaw"
     }
 
 internal fun decodeSocCorrections(s: String): Map<String, PersistedEst> = buildMap {
@@ -499,12 +505,17 @@ internal fun decodeSocCorrections(s: String): Map<String, PersistedEst> = buildM
             val eq = entry.lastIndexOf('=')
             require(eq > 0)
             val parts = entry.substring(eq + 1).split('|')
-            require(parts.size == 3 || parts.size == 4)
+            require(parts.size == 3 || parts.size == 4 || parts.size == 7)
             val ah = parts[0].toFloat()
             require(ah.isFinite())
             val src = if (parts[1].isEmpty()) null else EstSource.valueOf(parts[1])
             val raw = parts.getOrNull(3)?.toFloatOrNull()?.takeIf { it.isFinite() }
-            put(entry.substring(0, eq), PersistedEst(SocCorrection(ah, src, parts[2].toLong()), raw))
+            val drain = DrainModel(
+                anchorAtMs = parts.getOrNull(4)?.toLongOrNull(),
+                ahPerDay = parts.getOrNull(5)?.toFloatOrNull()?.takeIf { it.isFinite() && it >= 0f },
+                anchorRawAh = parts.getOrNull(6)?.toFloatOrNull()?.takeIf { it.isFinite() },
+            )
+            put(entry.substring(0, eq), PersistedEst(SocCorrection(ah, src, parts[2].toLong()), raw, drain))
         }
     }
 }
