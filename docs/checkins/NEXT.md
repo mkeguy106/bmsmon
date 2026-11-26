@@ -54,6 +54,11 @@ two packs: each BMS balances only its own cells.
   ~15 Ah high: on 11-16 before the charge, A read 80 % / 84.4 Ah and B 94 % / 98.9 Ah. Through
   11-10 the two packs had read within 1 %. The base range figure is bounded by the weaker pack,
   so it follows A and is unaffected. B's own SOC reads high.
+- **2026-11-26 charge: a third miss in a row.** 2012-B peaked at 13.996 V (cell max 3.524 V) and
+  its counter stopped at 94.76 Ah; 2012-A peaked at 14.380 V (cell max 3.621 V) and clamped to 105.
+  Lag 154 s / 0.34 Ah, flat against 11-16. B's counter ended below 105 instead of at the 120 Ah
+  ceiling only because the BMS had re-anchored it the day before
+  (`docs/calibration-checkin-2026-11-26.md`).
 - **Query:** `min(ts) filter (where voltage_v >= 13.7)` per address per charge night, over
   `state = 'Charging'` rows (worked example in the 2026-11-12 session).
 
@@ -86,7 +91,12 @@ episodes. The owner will run base 2012 down to about 20 % a few times to supply 
 - **Method (do not use `remaining_ah / full_charge_ah` as truth):** between two full charges, true
   remaining = counter − drift, with the drift fixed at the next charge start by the Ah the charger
   delivers and spread linearly in time. Skip intervals where the BMS re-anchored (`pendingAh`).
-- **Done when:** rests below 12.97 V are in the cloud data and the table's low end is re-fit.
+- **First low run, 2026-11-26** (`docs/calibration-checkin-2026-11-26.md`): 2012-A rested 61 min at
+  12.889 V with a true 25.8 Ah (24.6 %); the table said 21 %. October's post-re-anchor charge had
+  the table 3–4 points high at 12.97–12.99 V, so nothing was changed. The owner is running the
+  base down again (about 20 %, one hour of rest, then a full charge).
+- **Done when:** at least two clean rests below 12.97 V are in the cloud data and the table's low
+  end is re-fit or confirmed.
 
 **Decide whether to upload `pendingAh`.** Added 2026-11-25. The BMS's pending counter correction
 is parsed on the phone but is not in Room or the upload, so a re-anchor shows in prod only as
@@ -110,6 +120,13 @@ SOC" in `CLAUDE.md`). Installed while both 2012 packs were mid BMS re-anchor, so
   a freshly re-anchored BMS.
 - **Charge ETA:** runs ~45 min long on a drain-corrected pack. Relearn the tail on the estimate's
   SOC (expected ~25 min with little spread) instead of the raw SOC.
+- **2026-11-26, first full charge after install:** both packs anchored (B's taper reached
+  13.97–14.00 V under 3 A). Second re-anchor measurement: the BMS target was 7.8 Ah low on 2012-A
+  (18.0 against a true 25.8), in line with October. Decision: the estimate still never reads above
+  the BMS; a third low run decides (`docs/calibration-checkin-2026-11-26.md`).
+- **Watch 2012-B after that charge:** its counter ended at 94.76 Ah on a full pack, so the base
+  reads about 10 points low. It should recover within one or two full charges. If it does not,
+  decide whether a taper-ended charge may set the lower pack to full.
 - **Done when:** two full charges are in, the learned rate matches SQL within 0.5 Ah/day, and the
   ETA decision is made.
 

@@ -989,7 +989,8 @@ JVM-tested module `model/SocEstimate.kt` (no Android imports, no clock); the eng
   restarts it (spares poll every 10 s, so a spare is rested 30 min after the phone first sees it).
   `voltageSoc()` interpolates linearly in integer mV between these points (rested ≥ 30 min after
   discharge, 2012 packs), 21 % at or below 12.90 V (a ceiling; below 12.97 V is extrapolated, lower
-  only means a lower estimate), and **null at or above `VOLTAGE_PLATEAU_V` 13.30 V** (the top plateau,
+  only means a lower estimate; the one measured point, 2026-11-26, is 12.889 V after a 61 min rest
+  at a true 24.6 %), and **null at or above `VOLTAGE_PLATEAU_V` 13.30 V** (the top plateau,
   ~72–95 %):
 
   | V | 12.90 | 12.97 | 13.01 | 13.05 | 13.11 | 13.13 | 13.15 | 13.17 | 13.19 | 13.21 | 13.23 | 13.29 |
@@ -1050,7 +1051,10 @@ JVM-tested module `model/SocEstimate.kt` (no Android imports, no clock); the eng
   target is itself ~7–11 Ah low**: the full charge after October's re-anchor delivered 74–76 Ah into
   packs it had put at 22–24 Ah, ending at 95.6/99.4 Ah on the counter instead of 105. The estimate
   never reads above the BMS, so after a re-anchor it under-reads by about 10 points until the next
-  full charge. `pendingAh` is not in Room or the upload, so a one-time replay cannot see a re-anchor.
+  full charge. Second measurement, 2026-11-26: target 18.0 Ah on 2012-A against a true 25.8 (7.8 low),
+  while the voltage table read 3.7 Ah low; in October the table read 3–4 points high, so the rule
+  stands until a third run (`docs/calibration-checkin-2026-11-26.md`). `pendingAh` is not in Room or
+  the upload, so a one-time replay cannot see a re-anchor.
 - **Held, persisted, cleared.** The correction is held through driving and charging, which is what
   makes the swap case right (a spare corrected to ~60 % at home counts down from ~60 on the chair, not
   from 99) and is changed only by the rules above; the next real full-detect clears it. Persisted per
@@ -1108,8 +1112,8 @@ JVM-tested module `model/SocEstimate.kt` (no Android imports, no clock); the eng
   ours, the capacity row ends with a fixed 96 dp muted `bms 99% · 113` (`ui/EstimateText.kt`
   `bmsListTail`/`bmsSocLine`/`bmsCapLine`). Detail: `92%  (BMS 99%)` (`detailSocText`). Severity colour/LOW/CRIT follow
   the estimate. Debug `TempPreviewActivity` takes `est` = `counter|voltage|off` for emulator shots.
-- **Calibration debt.** The table is fitted only from 40–100 %; the owner will run base 2012 to ~20 % to
-  supply the rest (`docs/checkins/NEXT.md`, "Re-calibrate the rest-voltage → SOC table below 40 %").
+- **Calibration debt.** Below 12.97 V the table rests on one low run (2026-11-26, base 2012 to ~25 %);
+  the owner is repeating it (`docs/checkins/NEXT.md`, "Rest-voltage → SOC table: measure below 12.97 V").
   Table, 12.90 V floor, 13.30 V cutoff and the 10/3 margins all live in `SocEstimate.kt`.
 
 **Temperature monitoring:** a vertical temperature gauge (`ui/gauge/TempGauge.kt`) sits beside the
