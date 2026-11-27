@@ -4,6 +4,8 @@ import { baseLastSeenMs } from "../fleet";
 import { Bar, Chip } from "./Atoms";
 import { socColor, sohColor } from "../colors";
 import { bmsShort, socLabel } from "../../estimate";
+import { baseReadyAtMs } from "../model/recharge";
+import { ChargeLeft } from "./ChargeLeft";
 
 const STATUS_DOT: Record<BaseStatus, string> = {
   "in-use": "var(--ok)",
@@ -64,6 +66,7 @@ export function CommandFleetRail({ bases, stageBaseId, onStage }: {
       <div className="eyebrow" style={{ padding: "0 4px" }}>Fleet</div>
       {bases.map((base) => {
         const staged = base.id === stageBaseId;
+        const readyAtMs = baseReadyAtMs(base);
         return (
           <div key={base.id} className="card" style={{ padding: 12,
             border: staged ? "1px solid var(--border-strong)" : "1px solid var(--border)" }}>
@@ -86,6 +89,11 @@ export function CommandFleetRail({ bases, stageBaseId, onStage }: {
                 <PackRow key={p.item.address} pack={p} onStage={() => onStage(base.id)} />
               ))}
             </div>
+            {readyAtMs != null && (
+              <div className="mono" style={{ fontSize: 10, color: "var(--text-3)", marginTop: 6 }}>
+                <ChargeLeft readyAtMs={readyAtMs} />
+              </div>
+            )}
             {base.status === "offline" && baseLastSeenMs(base) != null && (
               <div className="mono" style={{ fontSize: 10, color: "var(--text-4)", marginTop: 6 }}>
                 last seen <Ago tsMs={baseLastSeenMs(base)!} />

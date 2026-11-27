@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { FleetItem } from "../../types";
 import { groupBases } from "../fleet";
-import { minutesLeft, rechargePhase, rechargePlan, type RechargeRow } from "./recharge";
+import {
+  baseReadyAtMs, clockTime, fmtLeft, minutesLeft, packReadyAtMs, rechargePhase, rechargePlan,
+  type RechargeRow,
+} from "./recharge";
 
 const NOW = 50_000_000;
 const MIN = 60_000;
@@ -64,5 +67,58 @@ describe("minutesLeft", () => {
     expect(minutesLeft(row({ readyAtMs: NOW + 90 * MIN }), NOW)).toBe(90);
     expect(minutesLeft(row({ readyAtMs: NOW + 90 * MIN }), NOW + 30 * MIN)).toBe(60);
     expect(minutesLeft(row({ readyAtMs: NOW - MIN }), NOW)).toBe(0);
+  });
+});
+
+describe("packReadyAtMs / baseReadyAtMs", () => {
+  const bases = (items: FleetItem[], stale: string[] = []) => groupBases(items, new Set(stale));
+
+  it("a charging base is ready when its slower live pack is", () => {
+    const [b] = bases([
+      pack("16A", "2016", { eta_full_min: 187 }),
+      pack("16B", "2016", { ts_ms: NOW - 20_000, eta_full_min: 201 }),
+    ]);
+    expect(b.packs.map(packReadyAtMs)).toEqual([NOW - 10_000 + 187 * MIN, NOW - 20_000 + 201 * MIN]);
+    expect(baseReadyAtMs(b)).toBe(NOW - 20_000 + 201 * MIN);
+  });
+
+  it("leaves out a pack that stopped reporting: its figure is no longer counting down", () => {
+    const [b] = bases([
+      pack("16A", "2016", { eta_full_min: 187 }),
+      pack("16B", "2016", { eta_full_min: 400 }),
+    ], ["16B"]);
+    expect(packReadyAtMs(b.packs[1])).toBeNull();
+    expect(baseReadyAtMs(b)).toBe(NOW - 10_000 + 187 * MIN);
+  });
+
+  it("is null for a base that is not charging, whatever a pack still carries", () => {
+    const [inUse] = bases([
+      pack("12A", "2012", { current_a: -4, eta_full_min: null }),
+      pack("12B", "2012", { current_a: 0, eta_full_min: 30 }),
+    ]);
+    expect(inUse.status).toBe("in-use");
+    expect(baseReadyAtMs(inUse)).toBeNull();
+  });
+
+  it("is null while no live pack carries a usable estimate", () => {
+    for (const eta of [null, 0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const [b] = bases([pack("16A", "2016", { eta_full_min: eta })]);
+      expect(b.status).toBe("charging");
+      expect(baseReadyAtMs(b)).toBeNull();
+    }
+  });
+});
+
+describe("fmtLeft / clockTime", () => {
+  it("minutes under an hour, hours and zero-padded minutes above", () => {
+    expect(fmtLeft(0.4)).toBe("0 min");
+    expect(fmtLeft(45)).toBe("45 min");
+    expect(fmtLeft(59.6)).toBe("1h 00m");
+    expect(fmtLeft(192)).toBe("3h 12m");
+  });
+  it("adds the weekday only when the time is not today", () => {
+    const noon = new Date(2026, 10, 26, 12, 0).getTime();
+    expect(clockTime(noon + 3 * 3_600_000, noon)).not.toMatch(/Thu|Fri/);
+    expect(clockTime(noon + 20 * 3_600_000, noon)).toMatch(/Fri/);
   });
 });

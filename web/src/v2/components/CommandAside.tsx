@@ -7,23 +7,9 @@ import { RouteSketch } from "./RouteSketch";
 import type { TrackPoint } from "../track";
 import { socColor } from "../colors";
 import { Ago } from "../../components/Ago";
-import { minutesLeft, rechargePhase, rechargePlan, type RechargeRow } from "../model/recharge";
-
-function fmtEta(min: number): string {
-  const m = Math.round(min);
-  if (m < 60) return `${m} min`;
-  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
-}
-/** A clock time, with the weekday when it is not today ("Tue 5:00 PM"). */
-function when(ms: number, nowMs: number): string {
-  const d = new Date(ms);
-  const n = new Date(nowMs);
-  const today = d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth()
-    && d.getDate() === n.getDate();
-  return today
-    ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
-    : d.toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
-}
+import {
+  clockTime, fmtLeft, minutesLeft, rechargePhase, rechargePlan, type RechargeRow,
+} from "../model/recharge";
 
 /** One recharge-plan row: live rows count down to their anchored ready time; a pack that is
  *  not live is muted and says when it was last seen and when it was estimated full (WEB-18).
@@ -41,8 +27,8 @@ function RechargeLine({ row, now }: { row: RechargeRow; now: number }) {
       <Bar frac={(row.soc ?? 0) / 100} color={socColor(row.soc, row.live)} />
       <div className="mono" style={{ fontSize: 11, color: "var(--text-4)" }}>
         {phase === "charging"
-          ? <>≈ {fmtEta(minutesLeft(row, now))} to full · ready by {when(row.readyAtMs, now)}</>
-          : <>last seen <Ago tsMs={row.tsMs} /> · est. full {when(row.readyAtMs, now)}</>}
+          ? <>≈ {fmtLeft(minutesLeft(row, now))} to full · ready by {clockTime(row.readyAtMs, now)}</>
+          : <>last seen <Ago tsMs={row.tsMs} /> · est. full {clockTime(row.readyAtMs, now)}</>}
       </div>
     </div>
   );

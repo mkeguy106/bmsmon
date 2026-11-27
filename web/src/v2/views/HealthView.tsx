@@ -12,6 +12,8 @@ import { Ago } from "../../components/Ago";
 import { Sparkline } from "../components/Sparkline";
 import { socColor, sohColor } from "../colors";
 import { bmsShort, socLabel } from "../../estimate";
+import { baseReadyAtMs, packReadyAtMs } from "../model/recharge";
+import { ChargeLeft } from "../components/ChargeLeft";
 
 const STATUS_COLOR: Record<PackStatus, string> = {
   "in-use": "var(--ok)", charging: "var(--warn)", low: "var(--live)",
@@ -103,6 +105,7 @@ function BoardRow({ item, connected, points, unit }: {
   // it to var(--text-4) so a stale bar never reads as a live one.
   const soc = item.soc;
   const soh = item.soh;
+  const readyAtMs = status === "charging" ? packReadyAtMs({ item, connected }) : null;
   return (
     <div style={{ display: "grid", gridTemplateColumns: BOARD_COLUMNS, gap: 10,
       alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)",
@@ -135,6 +138,11 @@ function BoardRow({ item, connected, points, unit }: {
       <Sparkline points={points} />
       <span style={{ display: "flex", flexDirection: "column", gap: 3, alignItems: "flex-start" }}>
         <Chip tone={STATUS_COLOR[status]}>{STATUS_TAG[status]}</Chip>
+        {readyAtMs != null && (
+          <span className="mono" style={{ fontSize: 10, color: "var(--text-3)", whiteSpace: "nowrap" }}>
+            <ChargeLeft readyAtMs={readyAtMs} short />
+          </span>
+        )}
         {!connected && (
           <span className="mono" style={{ fontSize: 10, color: "var(--text-4)" }}>
             <Ago tsMs={item.ts_ms} />
@@ -159,6 +167,8 @@ export function HealthView({ data, heroBase, unit, mobile }: {
     () => healthSummary(data.items, data.staleAddrs), [data.items, data.staleAddrs]);
   const board = useMemo(
     () => healthBoardOrder(data.items, data.staleAddrs), [data.items, data.staleAddrs]);
+
+  const heroReadyAtMs = heroBase ? baseReadyAtMs(heroBase) : null;
 
   const boardTable = (
     <div>
@@ -187,6 +197,7 @@ export function HealthView({ data, heroBase, unit, mobile }: {
         <div className="card">
           <div className="eyebrow" style={{ marginBottom: 12 }}>
             {HERO_HEADING[heroBase.status]} · Base {heroBase.id}
+            {heroReadyAtMs != null && <> · <ChargeLeft readyAtMs={heroReadyAtMs} /></>}
           </div>
           <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
             {heroBase.packs.map((p) => <HeroPackCard key={p.item.address} pack={p} />)}
