@@ -242,6 +242,8 @@ class EngineWiringTest {
     @Test fun chargeEtaAndRangeUseTheEstimate() {
         val onPoll = onPollBody
         assertTrue(onPoll.contains("estimateChargeMinutes( eff.state, eff.soc, eff.current, eff.fullChargeAh, eff.capacityAh,"))
+        assertTrue("an estimated pack's ETA is counted in Ah to full, taper included",
+            onPoll.contains("estimated = eff.estSource != null, voltageV = eff.voltage,"))
         assertTrue(onPoll.contains("estimatePackRange( eff.state, eff.capacityAh,"))
     }
 
