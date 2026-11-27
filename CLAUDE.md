@@ -1032,10 +1032,32 @@ JVM-tested module `model/SocEstimate.kt` (no Android imports, no clock); the eng
     never counted twice. A BMS re-anchor drops the anchor: no drain term until the next full charge.
   - Backtest on the 24 full charges of both 2012 packs since 2026-09: error at charge start mean
     −0.9 Ah, mean |error| 1.1, worst −3.4 (low), against +15…+17 mean and +27 worst for the counter.
-  - **Charge ETA side effect:** `eta_full_min` uses the estimate, so its bulk now includes the
-    drifted Ah the old "tail" stood in for, while the learned tail (~70 min, measured on raw SOC) is
-    still added. Expect the ETA ~45 min long on a drain-corrected pack until the tail is relearned
-    on the estimate (`docs/checkins/NEXT.md`).
+  - **Charge ETA on an estimated pack (2026-11-26):** `eta_full_min` uses the estimate, which is in
+    real Ah and reaches full when a taper-ended charge ends. So for a pack that carries an estimate
+    (`estSource != null`) `estimateChargeMinutes(estimated = true)` is
+    `(full − estimated Ah) / live current + TAPER_EXTRA_MIN` (2.5 min), with **no learned tail**, and
+    at most `TAPER_CAP_MIN` (5) once the charger is on its taper (≥ 13.90 V under 3 A, where a
+    falling current would stretch it). Basis, 30 full charges of both 2012 packs 2026-09…11: the
+    last 10.5 Ah took 80.2–84.3 min against 78.3–80.8 at the bulk current, the last 2.1 Ah 17.6–20.0
+    against 15.6–16.2. The learned tail (~70 min) is the time the raw counter spends above 98 %
+    while the charger puts the drift back; added to an estimate that already counts the drift it
+    read ~45 min long. It still applies to a pack shown on the BMS's own counter (no estimate), and
+    the tail learner is unchanged.
+- **The counter's 120 Ah ceiling (`ChargeSeg.uncountedAh`, 2026-11-26).** The BMS counter stops at
+  120 Ah. A spare's counter starts near 100 Ah at a real ~35 %, reaches the ceiling 20 Ah into a
+  charge, and `counter − correction` then stood still: on base 2016's first charge the display and
+  the ETA froze at 57 % / ~6 h for the last six hours. While a wall charge is followed, each seen
+  frame adds `current × dt − (counter rise, never below 0)` to `uncountedAh` (signed, so rounding
+  cancels; the counter's rise matches current × time within 0.02 Ah in 50 while it is counting).
+  Above `UNCOUNTED_MIN_AH` (0.1) that sum is added to the estimate **while charging**, so the
+  estimate is what the pack held at plug-in plus what the charger has delivered. At a charge end
+  that is not full it is moved into the correction (`creditedFor`: the correction is lowered by it,
+  the one place other than a full charge that lowers one), so the estimate keeps it through a pause,
+  after unplugging and into a drive. A full charge end replaces or clears the correction as before.
+  Not credited: a gap over `CHARGE_GAP_MS`, the frame after a restart (a stale last raw adds at most
+  that frame's own Ah), regen, and anything while the BMS is re-anchoring. The estimate still never
+  reads above the BMS or above full. In memory only: **an app restart mid-charge loses the uncounted
+  Ah of that charge** (the estimate drops back to `counter − correction` until the charge ends).
 - **Rule 3, the BMS's own re-anchor (`pendingAh`, 2026-11-25).** About 2 h after the last measured
   current, with cells near 3.26 V or lower (seen only at ≤ 13.04 V pack voltage), the BMS firmware
   looks up its own rest-voltage SOC and eases its counter down to it over ~2 days (exponential, τ ≈
@@ -1866,6 +1888,12 @@ range card and the Journey efficiency card show about the staged base:
 - Range, runtime and mileage figures are floored everywhere (`floorFixed`/`floorBand` in
   `web/src/range.ts`), never rounded up: 37.6 mi reads "37", 0.6 h of use "0.6h". The phone's
   formatter still rounds to nearest.
+- Time to full is shown wherever a charging base is: the stage's TIME TO FULL tile, the aside's
+  recharge plan, each charging base's card in the fleet rail ("≈ 3h 12m to full · ready by 6:40 PM")
+  and, on Fleet Health, each charging pack's row and the hero card's heading (`ChargeLeft`, counting
+  down to `packReadyAtMs` / `baseReadyAtMs` in `model/recharge.ts`: a live pack's sample time plus
+  its `eta_full_min`; a base is ready when its slower live pack is, and only while its status is
+  charging).
 - The recharge plan (`model/recharge.ts`) anchors each "ready by" to its sample's `ts_ms`. It keeps
   a charging spare that went out of range, muted, as "last seen … · est. full …", never implying it
   is full.
@@ -2041,7 +2069,7 @@ Returns every battery pair with its packs' latest telemetry:
 ```jsonc
 {"now_ms":…, "stale_ms":90000, "power_full_w":300,
  "groups":[{"id":"2012","label":"Base 2012","status":"in-use","connected":true,
-            "last_seen_ms":…,
+            "eta_full_min":null,"last_seen_ms":…,
             "packs":[{"letter":"A","alias":"2012 · A","address":"C8:…","ts_ms":…,
                       "age_ms":1200,"connected":true,"soc":72.0,"voltage_v":13.2,
                       "current_a":-4.1,"power_w":-54.0,"temp_c":22,"soh":100, …}]}]}
@@ -2067,6 +2095,12 @@ Security model (`server/app/auth/api_key.py`), mirroring the share-token one:
   is a deliberate act rather than an accident. `test_gps_is_never_exposed` greps the raw
   response body for those names.
 - `Cache-Control: no-store` on every response.
+
+**Time to full (2026-11-26).** Each pack carries the phone's `eta_full_min` (minutes, null unless it
+is charging), and each group an `eta_full_min` of its own: the largest among its live packs, and
+null unless the group's status is `charging` (`_eta_full_min()`, the same rule as the WebUI's
+`baseReadyAtMs`). The desktop widget prints it after the status ("CHARGING · 3h 12m"). A pack that
+stopped reporting keeps its own last figure but is left out of the group's.
 
 **Staleness and the status ladder are evaluated server-side** (`STALE_MS = 90_000`,
 `_status()`), mirroring `web/src/freshness.ts` and `fleet.ts` `baseStatus` on the 90 s age rule. Keep the
