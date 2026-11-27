@@ -171,3 +171,55 @@ async def test_status_uses_est_soc_over_raw_soc(app, client):
 
 async def test_status_falls_back_to_raw_soc_without_estimate(app, client):
     assert await _status_for(app, client, {"soc": 99.0}) == "backup"
+
+
+async def _charging_base(app, a: dict, b: dict, b_age_ms: int = 1_000) -> str:
+    """Base 2012 with pack A's and pack B's latest samples; returns an API key."""
+    now_ms = int(time.time() * 1000)
+    async with app.state.pool.acquire() as conn:
+        key = await _mint(conn)
+        await _device(conn)
+        await q.upsert_battery(conn, A, "R-12100", "2012 · A", "2012", now_ms)
+        await q.upsert_battery(conn, B, "R-12100", "2012 · B", "2012", now_ms)
+        await q.insert_samples(conn, [
+            q.sample_row(DEV, A, {"ts_ms": now_ms - 1_000, "soc": 99.0, **a}),
+            q.sample_row(DEV, B, {"ts_ms": now_ms - b_age_ms, "soc": 99.0, **b}),
+        ])
+    return key
+
+
+async def test_charging_base_carries_time_to_full(app, client):
+    key = await _charging_base(
+        app, {"current_a": 8.3, "eta_full_min": 187.5}, {"current_a": 7.9, "eta_full_min": 201.0})
+    g = (await client.get("/api/v1/groups", headers={HDR: key})).json()["groups"][0]
+    assert g["status"] == "charging"
+    assert [p["eta_full_min"] for p in g["packs"]] == [187.5, 201.0]
+    # The pair is done when its slower pack is.
+    assert g["eta_full_min"] == 201.0
+
+
+async def test_time_to_full_ignores_a_pack_that_stopped_reporting(app, client):
+    key = await _charging_base(
+        app, {"current_a": 8.3, "eta_full_min": 187.5},
+        {"current_a": 7.9, "eta_full_min": 400.0}, b_age_ms=600_000)
+    g = (await client.get("/api/v1/groups", headers={HDR: key})).json()["groups"][0]
+    assert g["eta_full_min"] == 187.5
+    # The stale pack keeps its own last figure, flagged offline like the rest of its telemetry.
+    assert g["packs"][1]["connected"] is False
+    assert g["packs"][1]["eta_full_min"] == 400.0
+
+
+async def test_no_time_to_full_unless_the_base_is_charging(app, client):
+    # In use: one pack still carries an old ETA, but the base is discharging.
+    key = await _charging_base(
+        app, {"current_a": -4.0}, {"current_a": 0.0, "eta_full_min": 30.0})
+    g = (await client.get("/api/v1/groups", headers={HDR: key})).json()["groups"][0]
+    assert g["status"] == "in-use"
+    assert g["eta_full_min"] is None
+
+
+async def test_charging_with_no_estimate_yet_has_null_time_to_full(app, client):
+    key = await _charging_base(app, {"current_a": 8.3}, {"current_a": 7.9})
+    g = (await client.get("/api/v1/groups", headers={HDR: key})).json()["groups"][0]
+    assert g["status"] == "charging"
+    assert g["eta_full_min"] is None

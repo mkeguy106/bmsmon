@@ -1184,10 +1184,12 @@ class MonitorEngine(
         val eff = if (est == null) t else t.withEstimate(est)
         // Charge ETA is computed ONCE per pack per poll and carried on BatteryStatus — the same
         // value is uploaded (eta_full_min) and displayed on the stage, so they can never diverge.
-        // From the estimate: time to full is the estimated Ah still to go.
+        // From the estimate: time to full is the estimated Ah still to go. The learned tail is
+        // only for a pack shown on the BMS's own counter.
         val tailMin = st0.tailMinByAddress[addr] ?: SEED_TAIL_MIN
         val etaFullMin = estimateChargeMinutes(
             eff.state, eff.soc, eff.current, eff.fullChargeAh, eff.capacityAh, regen, tailMin,
+            estimated = eff.estSource != null, voltageV = eff.voltage,
         )
         // Discharge-range estimate — same single-writer pattern as the charge ETA: computed once
         // per poll here, carried on BatteryStatus, only displayed by the UI. From the estimated Ah.

@@ -23,11 +23,26 @@ const val TARGET_SOC = 100f
 const val SEED_TAIL_MIN = 70f
 const val TAIL_EMA_ALPHA = 0.3f
 private const val MIN_CHARGE_CURRENT_A = 0.2f
+/**
+ * What the charger's taper adds to a charge counted in real Ah. Measured on 30 full charges (both
+ * 2012 packs, 2026-09..11): the last 10.5 Ah took 80.2-84.3 min against 78.3-80.8 at the bulk
+ * current, the last 2.1 Ah 17.6-20.0 against 15.6-16.2.
+ */
+const val TAPER_EXTRA_MIN = 2.5f
+/** Once the charger is on its taper ([TAPER_MIN_V], under [TAPER_MAX_A]) the end is this close at most. */
+const val TAPER_CAP_MIN = 5f
 
 /**
  * Estimated minutes to reach [TARGET_SOC] (100%), or null when no estimate applies (not steadily
  * charging, regen burst, already full, or implausible/unknown inputs). [remainingAh] is the BMS
  * remaining capacity, [tailMin] the learned per-pack 98->100 duration.
+ *
+ * [estimated]: [soc] and [remainingAh] are our estimate, not the BMS's counter. The estimate is in
+ * real Ah and a taper-ended charge ends at full, so the time left is the Ah still missing at the
+ * live current plus [TAPER_EXTRA_MIN], with no learned tail: that tail is the time the raw counter
+ * spends above 98 % while the charger puts back the drift the counter never saw, and adding it to
+ * an estimate that already counts the drift read ~45 min long. On the taper itself ([voltageV])
+ * a falling current would stretch the figure, so it is capped at [TAPER_CAP_MIN].
  */
 fun estimateChargeMinutes(
     state: BatteryState,
@@ -37,8 +52,18 @@ fun estimateChargeMinutes(
     remainingAh: Float,
     regen: Boolean,
     tailMin: Float,
+    estimated: Boolean = false,
+    voltageV: Float? = null,
 ): Float? {
     if (state != BatteryState.Charging || regen) return null
+    if (estimated) {
+        // By Ah, not by the rounded SOC: 99.6 % shows as 100 with minutes still to go.
+        val toGoAh = fullChargeAh - remainingAh
+        if (fullChargeAh <= 0f || soc < 0f || toGoAh <= 0f || currentA < MIN_CHARGE_CURRENT_A) return null
+        val minutes = toGoAh / currentA * 60f + TAPER_EXTRA_MIN
+        val onTaper = voltageV != null && voltageV >= TAPER_MIN_V && currentA < TAPER_MAX_A
+        return if (onTaper) minOf(minutes, TAPER_CAP_MIN) else minutes
+    }
     if (fullChargeAh <= 0f || soc < 0f || soc >= TARGET_SOC) return null
     val tail = tailMin.coerceAtLeast(0f)
     if (soc >= TAIL_START_SOC) {

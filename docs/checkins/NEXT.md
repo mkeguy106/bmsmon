@@ -108,8 +108,15 @@ SOC" in `CLAUDE.md`). Installed while both 2012 packs were mid BMS re-anchor, so
 - **The BMS's re-anchor overshoot:** the first full charge after 2026-11-25 is the second
   measurement (October's was 7–11 Ah low). If it agrees, decide whether the estimate may read above
   a freshly re-anchored BMS.
-- **Charge ETA:** runs ~45 min long on a drain-corrected pack. Relearn the tail on the estimate's
-  SOC (expected ~25 min with little spread) instead of the raw SOC.
+- **Charge ETA:** decided 2026-11-26. An estimated pack's ETA is now the Ah still missing at the
+  live current plus 2.5 min, with no learned tail (`CLAUDE.md`, "Charge ETA on an estimated pack").
+  **Check at the next full charge of base 2012:** `eta_full_min` against the real time left, hourly
+  and in the last 30 min. Expect within ~10 min and a little long (the estimate ran ~1 Ah low in
+  the backtest). If it is not, look at the estimate's error at charge start before touching the 2.5.
+- **Counter ceiling:** 2026-11-26, base 2016's first charge froze the display at 57 % for six hours
+  (counter pinned at 120 Ah). Fixed the same day (`ChargeSeg.uncountedAh`). **Check at the next
+  charge of a spare** (2023 or 2024, both read 99 % on the BMS at a real ~45 %): `est_soc` keeps
+  rising after `remaining_ah` reaches 120, and ends within a few points of 100 before the taper.
 - **Done when:** two full charges are in, the learned rate matches SQL within 0.5 Ah/day, and the
   ETA decision is made.
 

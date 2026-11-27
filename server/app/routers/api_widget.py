@@ -49,7 +49,20 @@ PACK_FIELDS = (
     "soh", "cycles", "state", "remaining_ah", "full_charge_ah",
     "cell_min_v", "cell_max_v",
     "est_soc", "est_remaining_ah", "est_source",
+    "eta_full_min",
 )
+
+
+def _eta_full_min(packs: list[dict], status: str) -> float | None:
+    """Minutes until a charging base is full: its slowest live pack, as baseView() in
+    web/src/v2/model/baseView.ts. None unless the base is charging, and None while no live
+    pack carries the phone's estimate. A pack that stopped reporting is left out: its last
+    figure is no longer counting down."""
+    if status != "charging":
+        return None
+    etas = [p["eta_full_min"] for p in packs
+            if p["connected"] and p.get("eta_full_min") is not None]
+    return max(etas, default=None)
 
 
 def _status(packs: list[dict]) -> str:
@@ -109,10 +122,12 @@ async def groups(_key=Depends(require_api_key), pool=Depends(get_pool)):
         last_seen = max((p["ts_ms"] for p in packs), default=0)
         # jsonable() takes a list of row dicts, not an envelope — apply it to the
         # packs, which is where any asyncpg scalar would need coercing.
+        status = _status(packs)
         out.append({
             "id": gid,
             "label": f"Base {gid}",
-            "status": _status(packs),
+            "status": status,
+            "eta_full_min": _eta_full_min(packs, status),
             "connected": any(p["connected"] for p in packs),
             "last_seen_ms": last_seen or None,
             "packs": jsonable(packs),

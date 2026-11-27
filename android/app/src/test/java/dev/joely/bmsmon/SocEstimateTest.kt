@@ -565,6 +565,159 @@ class SocEstimateTest {
         assertFalse(estPersistWorthy(a, a.copy(lastTsMs = 9)))
     }
 
+    // --- A counter pinned at its ceiling. Base 2016, prod, 2026-11-26: the spares' counters read
+    // ~100 Ah at a real ~37 %; 20 Ah into the charge they reached the BMS's 120 Ah ceiling and
+    // stopped, so `counter - correction` froze at 57 % for the other five hours. ---
+
+    private val spareFull = 100.44f
+    private val sec = 1_000L
+
+    /** A spare rested at 13.05 V (37 %) with its counter at 100.40 Ah, last seen at [until]. */
+    private fun restedSpare(until: Long): EstPackState {
+        val s = restedFor(EstPackState(), from = until - 40 * min, minutes = 40,
+            v = 13.05f, rem = 100.40f, full = spareFull, soc = 99f)
+        assertEquals(EstSource.VOLTAGE, s.correction.source)
+        assertEquals(37.16f, estimateOf(s, rd(until, v = 13.05f, rem = 100.40f, full = spareFull)).remainingAh, 0.01f)
+        return s
+    }
+
+    private class Charged(val state: EstPackState, val ts: Long, val rem: Float, val ah: Float)
+
+    /** [minutes] of charging in 10 s frames from the reading at [startTs]. The counter follows
+     *  the Ah until it pins at [ceiling]. */
+    private fun chargeFrames(
+        s0: EstPackState, startTs: Long, startRem: Float, minutes: Int,
+        amps: Float = 8.28f, full: Float = spareFull, ceiling: Float = 120f,
+    ): Charged {
+        var s = s0
+        var ah = 0.0
+        var t = startTs
+        repeat(minutes * 6) {
+            t += 10 * sec
+            ah += amps * 10.0 / 3600.0
+            val rem = kotlin.math.min(ceiling.toDouble(), startRem + ah).toFloat()
+            s = stepEstimate(s, rd(t, BatteryState.Charging, i = amps, v = 13.45f, rem = rem, full = full, soc = 99f))
+        }
+        return Charged(s, t, kotlin.math.min(ceiling.toDouble(), startRem + ah).toFloat(), ah.toFloat())
+    }
+
+    private fun chargingAt(c: Charged, amps: Float = 8.28f, full: Float = spareFull) =
+        rd(c.ts, BatteryState.Charging, i = amps, v = 13.45f, rem = c.rem, full = full, soc = 99f)
+
+    @Test fun aCounterPinnedAtItsCeilingStillCountsTheCharge() {
+        val c = chargeFrames(restedSpare(0), startTs = 0, startRem = 100.40f, minutes = 300)
+        assertEquals(120f, c.rem, 0f)
+        assertEquals(41.4f, c.ah, 0.01f)
+        val e = estimateOf(c.state, chargingAt(c))
+        // 37.16 Ah at plug-in plus the 41.4 Ah delivered, not the frozen 120 - 63.24 = 56.76.
+        assertEquals(78.56f, e.remainingAh, 0.05f)
+        assertEquals(78f, e.soc, 0f)
+        assertEquals(EstSource.VOLTAGE, e.source)
+    }
+
+    @Test fun aCounterThatKeepsCountingIsNotCreditedTwice() {
+        val start = EstPackState(correction = SocCorrection(39f, EstSource.VOLTAGE, 0))
+        val s0 = stepEstimate(start, rd(0, v = 13.2f, rem = 60f, soc = 57f))
+        val c = chargeFrames(s0, startTs = 0, startRem = 60f, minutes = 240, amps = 8f, full = 105f)
+        assertEquals(92f, c.rem, 0.01f)
+        val e = estimateOf(c.state, chargingAt(c, amps = 8f, full = 105f))
+        assertEquals(c.rem - 39f, e.remainingAh, 0.02f)
+    }
+
+    @Test fun aPartialChargeKeepsTheAhThePinnedCounterMissed() {
+        val c = chargeFrames(restedSpare(0), startTs = 0, startRem = 100.40f, minutes = 300)
+        // Unplugged with no taper: the counter stays at 120, the estimate stays where the charge left it.
+        val idleAt = c.ts + 10 * sec
+        val idle = stepEstimate(c.state, rd(idleAt, v = 13.45f, rem = 120f, full = spareFull, soc = 99f))
+        assertEquals(EstSource.VOLTAGE, idle.correction.source)
+        assertEquals(41.44f, idle.correction.correctionAh, 0.05f)
+        assertEquals(78.56f, estimateOf(idle, rd(idleAt, v = 13.45f, rem = 120f, full = spareFull)).remainingAh, 0.05f)
+        // ... and driving counts down from there.
+        val driven = stepEstimate(idle, rd(idleAt + min, BatteryState.Discharging, i = -10f, v = 13.2f,
+            rem = 119f, full = spareFull, soc = 99f))
+        val e = estimateOf(driven, rd(idleAt + min, BatteryState.Discharging, i = -10f, v = 13.2f,
+            rem = 119f, full = spareFull, soc = 99f))
+        assertEquals(77.56f, e.remainingAh, 0.05f)
+    }
+
+    @Test fun aChargeCutShortByDrivingKeepsItsAhToo() {
+        val c = chargeFrames(restedSpare(0), startTs = 0, startRem = 100.40f, minutes = 300)
+        // The first frame after the charge is already a discharge.
+        val r = rd(c.ts + 10 * sec, BatteryState.Discharging, i = -10f, v = 13.2f, rem = 119.97f, full = spareFull, soc = 99f)
+        val driven = stepEstimate(c.state, r)
+        assertEquals(78.53f, estimateOf(driven, r).remainingAh, 0.05f)
+    }
+
+    @Test fun resumingAfterAPauseDoesNotCreditTheSameAhAgain() {
+        val c1 = chargeFrames(restedSpare(0), startTs = 0, startRem = 100.40f, minutes = 300)
+        var s = c1.state
+        var t = c1.ts
+        repeat(30) { t += 10 * sec; s = stepEstimate(s, rd(t, v = 13.45f, rem = 120f, full = spareFull, soc = 99f)) }
+        val c2 = chargeFrames(s, startTs = t, startRem = 120f, minutes = 60)
+        // 37.16 + 41.4 + 8.28, once each.
+        assertEquals(86.84f, estimateOf(c2.state, chargingAt(c2)).remainingAh, 0.06f)
+    }
+
+    @Test fun aPinnedCounterStillEndsAtFullOnTheTaper() {
+        val c = chargeFrames(restedSpare(0), startTs = 0, startRem = 100.40f, minutes = 420)
+        val s = feed(
+            c.state,
+            rd(c.ts + 10 * sec, BatteryState.Charging, i = 2f, v = 13.97f, rem = 120f, full = spareFull, soc = 99f),
+            rd(c.ts + 20 * sec, v = 13.6f, rem = 120f, full = spareFull, soc = 99f),
+        )
+        assertEquals(EstSource.COUNTER, s.correction.source)
+        assertEquals(19.56f, s.correction.correctionAh, 1e-3f)
+        assertEquals(spareFull, estimateOf(s, rd(c.ts + 20 * sec, v = 13.6f, rem = 120f, full = spareFull)).remainingAh, 1e-3f)
+        assertNull(s.charge)
+    }
+
+    @Test fun theEstimateWhileChargingNeverPassesFullOrTheBms() {
+        val c = chargeFrames(restedSpare(0), startTs = 0, startRem = 100.40f, minutes = 600)
+        val e = estimateOf(c.state, chargingAt(c))
+        assertEquals(spareFull, e.remainingAh, 1e-3f)
+        assertEquals(99f, e.soc, 0f)
+    }
+
+    @Test fun aGapInAPinnedChargeCreditsNothingForTheGap() {
+        val start = EstPackState(correction = SocCorrection(30f, EstSource.VOLTAGE, 0))
+        var s = stepEstimate(start, rd(0, v = 13.4f, rem = 120f, soc = 99f))
+        fun frame(m: Int) { s = stepEstimate(s, rd(m * min, BatteryState.Charging, i = 8f, v = 13.5f, rem = 120f, soc = 99f)) }
+        for (m in 1..30) frame(m)
+        for (m in 40..70) frame(m)   // ten minutes unseen, then 30 more seen
+        val e = estimateOf(s, rd(70 * min, BatteryState.Charging, i = 8f, v = 13.5f, rem = 120f, soc = 99f))
+        // 90 at the start plus 60 seen minutes at 8 A; the unseen ten would have made it 99.33.
+        assertEquals(98f, e.remainingAh, 0.01f)
+    }
+
+    @Test fun aStaleLastCounterFromBeforeARestartCreditsNoCharge() {
+        // Persisted with the counter at 120; the app comes back mid-charge with it at 80.
+        var s = EstPackState(correction = SocCorrection(39f, EstSource.VOLTAGE, 0), lastRawAh = 120f)
+        var rem = 80f
+        for (m in 0..60) {
+            s = stepEstimate(s, rd(m * min, BatteryState.Charging, i = 8f, v = 13.5f, rem = rem, soc = 76f))
+            if (m < 60) rem += 8f / 60f
+        }
+        val e = estimateOf(s, rd(60 * min, BatteryState.Charging, i = 8f, v = 13.5f, rem = rem, soc = 76f))
+        assertEquals(rem - 39f, e.remainingAh, 0.02f)
+    }
+
+    @Test fun regenOverAPinnedCounterIsNotCredited() {
+        val start = EstPackState(correction = SocCorrection(30f, EstSource.VOLTAGE, 0))
+        var s = stepEstimate(start, rd(0, v = 13.4f, rem = 120f, soc = 99f))
+        for (m in 1..10) s = stepEstimate(s, rd(m * min, BatteryState.Charging, regen = true, i = 20f, v = 13.6f, rem = 120f, soc = 99f))
+        val e = estimateOf(s, rd(10 * min, BatteryState.Charging, regen = true, i = 20f, v = 13.6f, rem = 120f, soc = 99f))
+        assertEquals(90f, e.remainingAh, 1e-3f)
+    }
+
+    @Test fun theVoltageRuleStillLowersTheEstimateAfterAPartialCharge() {
+        val c = chargeFrames(restedSpare(0), startTs = 0, startRem = 100.40f, minutes = 300)
+        // Weeks later the pack has drained on the shelf and rests at 13.05 V again.
+        val later = c.ts + 30 * day
+        val s = restedFor(c.state, from = later, minutes = 40, v = 13.05f, rem = 120f, full = spareFull, soc = 99f)
+        val e = estimateOf(s, rd(later + 40 * min, v = 13.05f, rem = 120f, full = spareFull))
+        assertEquals(37.16f, e.remainingAh, 0.01f)
+    }
+
     @Test fun voltageTable() {
         // Refit 2026-11-25 against charger-delivered Ah (the BMS counter the first table was
         // fitted to runs ~3 Ah/day high): 13.01 V rested is ~34 %, not ~52 %.
